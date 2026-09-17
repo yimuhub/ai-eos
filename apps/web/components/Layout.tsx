@@ -4,106 +4,48 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { api, clearToken } from "@/lib/api";
 import { notify } from "@/components/Toast";
+import { NAV_GROUPS, isNavActive } from "@/lib/nav";
+import { openCommandPalette, pushRecentPage } from "@/components/CommandPalette";
 
-/* 分组导航：按老板使用动线分类 —— 运营主战线 / 组织与人 / 协作生产 / 知识资产 / 成长与治理 */
-const NAV_GROUPS: { title: string; items: { href: string; label: string; icon: string }[] }[] = [
-  {
-    title: "指挥中枢",
-    items: [
-      { href: "/", label: "指挥中心", icon: "◈" },
-      { href: "/projects", label: "项目中心", icon: "▤" },
-      { href: "/warroom", label: "作战室", icon: "🎯" },
-      { href: "/tasks", label: "任务", icon: "◉" },
-      { href: "/autonomous", label: "自治运行", icon: "♾" },
-      { href: "/companies", label: "公司管理", icon: "🏢" },
-    ],
-  },
-  {
-    title: "组织与智能体",
-    items: [
-      { href: "/agents", label: "Agent 团队", icon: "⬡" },
-      { href: "/organization", label: "组织架构", icon: "⌗" },
-      { href: "/factory", label: "Agent 工厂", icon: "✦" },
-      { href: "/agent-offboarding", label: "离职交接", icon: "⇥" },
-      { href: "/models", label: "模型配置", icon: "◈" },
-    ],
-  },
-  {
-    title: "协作执行",
-    items: [
-      { href: "/meetings", label: "会议中心", icon: "◍" },
-      { href: "/workflow-builder", label: "工作流", icon: "⇄" },
-      { href: "/schedules", label: "日程安排", icon: "🗓" },
-      { href: "/automation", label: "自动化规则", icon: "🤖" },
-      { href: "/device-console", label: "设备操作台", icon: "🖥" },
-    ],
-  },
-  {
-    title: "知识与资产",
-    items: [
-      { href: "/knowledge", label: "知识库", icon: "❑" },
-      { href: "/skill-center", label: "技能中心", icon: "⚡" },
-      { href: "/artifacts", label: "成果中心", icon: "▣" },
-      { href: "/delivery", label: "交付中心", icon: "📦" },
-      { href: "/doc-styles", label: "文档风格", icon: "🎨" },
-      { href: "/memory", label: "记忆库", icon: "🧠" },
-      { href: "/templates", label: "模板库", icon: "📋" },
-      { href: "/assets", label: "素材资产", icon: "🖼" },
-    ],
-  },
-  {
-    title: "成长与治理",
-    items: [
-      { href: "/growth-center", label: "成长中心", icon: "🌱" },
-      { href: "/reflection", label: "复盘中心", icon: "🔄" },
-      { href: "/training", label: "培训中心", icon: "🎓" },
-      { href: "/performance", label: "绩效中心", icon: "📊" },
-      { href: "/governance", label: "治理与审计", icon: "⬢" },
-      { href: "/external-agents", label: "外部协作", icon: "🔗" },
-      { href: "/intervention", label: "干预中心", icon: "🛠" },
-      { href: "/skill-growth", label: "技能成长档案", icon: "📈" },
-      { href: "/token-stats", label: "Token统计", icon: "🪙" },
-      { href: "/logs", label: "审计日志", icon: "📜" },
-    ],
-  },
-];
+/* 导航数据来自 `lib/nav.ts`（侧边栏与命令面板共用的单一事实源）。
+   这里只负责呈现，不再自己维护一份页面清单。 */
 
 const COLLAPSED_KEY = "aieos_nav_collapsed";
 
-/** 判断某个导航项是否匹配当前路径。
- *
- * 只用 `pathname === href` 会漏掉所有详情页（`/agents/xxx` 不会高亮
- * "Agent 团队"），用户会失去"我在哪"的感觉。根路径必须精确匹配，
- * 其余用前缀匹配，并避免 `/task` 误匹配 `/tasks`。
- */
-function isActive(pathname: string, href: string): boolean {
-  if (href === "/") return pathname === "/";
-  return pathname === href || pathname.startsWith(href + "/");
-}
-
 function groupHasActive(pathname: string, items: { href: string }[]): boolean {
-  return items.some((it) => isActive(pathname, it.href));
+  return items.some((it) => isNavActive(pathname, it.href));
 }
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
 
-  // 折叠状态：默认全展（老用户习惯），但一旦用户折过就记住。
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  // 折叠状态：
+  //   null = 用户从未手动折过 → 只展开当前所在分组（首次进入侧边栏不会一屏铺满 34 项）
+  //   对象 = 用户已表达过偏好 → 完全按他的来（但当前分组始终展开，避免"找不到自己在哪"）
+  const [collapsed, setCollapsed] = useState<Record<string, boolean> | null>(null);
 
   useEffect(() => {
     try {
       const raw = localStorage.getItem(COLLAPSED_KEY);
       if (raw) setCollapsed(JSON.parse(raw));
     } catch {
-      /* 存储损坏时按"全展"处理即可，不值得打断用户 */
+      /* 存储损坏时按"仅展开当前分组"处理即可，不值得打断用户 */
     }
   }, []);
 
+  // 记录访问轨迹：⌘K 面板的「最近访问」靠它。放在这里而不是逐页埋点，
+  // 是因为任何页面（含详情页）都经过这个 Layout，不会漏。
+  useEffect(() => {
+    if (pathname) pushRecentPage(pathname);
+  }, [pathname]);
+
   const toggleGroup = useCallback((title: string) => {
     setCollapsed((prev) => {
-      const next = { ...prev, [title]: !prev[title] };
+      // 首次手动折叠时，以"当前实际显示状态"为基准，否则第一次点击会出现
+      // "点了反而全展开"的错位。
+      const base = prev ?? Object.fromEntries(NAV_GROUPS.map((g) => [g.title, !groupHasActive(pathname, g.items)]));
+      const next = { ...base, [title]: !base[title] };
       try {
         localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
       } catch {
@@ -111,6 +53,16 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       }
       return next;
     });
+  }, [pathname]);
+
+  const setAll = useCallback((value: boolean) => {
+    const next = Object.fromEntries(NAV_GROUPS.map((g) => [g.title, value]));
+    setCollapsed(next);
+    try {
+      localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
+    } catch {
+      /* 同上 */
+    }
   }, []);
 
   async function logout() {
@@ -123,11 +75,13 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     router.push("/login");
   }
 
+  const allCollapsed = collapsed !== null && NAV_GROUPS.every((g) => collapsed[g.title]);
+
   return (
     <div className="flex h-screen text-gray-100">
       {/* ---------- 侧边栏 ---------- */}
       <aside className="w-60 flex flex-col shrink-0 border-r" style={{ borderColor: "var(--border)", background: "rgba(10,10,16,0.6)" }}>
-        <div className="px-5 pt-5 pb-4">
+        <div className="px-5 pt-5 pb-3">
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white font-bold"
               style={{ background: "linear-gradient(135deg,#6366f1,#22d3ee)" }}>
@@ -140,17 +94,45 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           </div>
         </div>
 
-        <nav className="flex-1 px-3 pb-3 space-y-4 overflow-y-auto">
+        {/* 搜索入口：34 个页面的系统里，"找到"比"列全"更重要 */}
+        <div className="px-3 pb-2">
+          <button
+            type="button"
+            onClick={openCommandPalette}
+            aria-label="搜索页面或操作"
+            className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition-colors hover:bg-white/[0.05]"
+            style={{ border: "1px solid var(--border)", color: "var(--muted)" }}
+          >
+            <span aria-hidden>🔍</span>
+            <span className="flex-1 text-left">搜索页面 / 操作</span>
+            <kbd className="text-[9px] px-1 py-0.5 rounded" style={{ border: "1px solid var(--border)" }}>⌘K</kbd>
+          </button>
+        </div>
+
+        <div className="px-5 pb-1 flex items-center justify-between">
+          <span className="text-[9px] tracking-widest uppercase" style={{ color: "#55555f" }}>导航</span>
+          <button
+            type="button"
+            onClick={() => setAll(!allCollapsed)}
+            className="text-[9px] transition-colors hover:text-gray-300"
+            style={{ color: "#55555f" }}
+          >
+            {allCollapsed ? "全部展开" : "全部收起"}
+          </button>
+        </div>
+
+        <nav className="flex-1 px-3 pb-3 space-y-3.5 overflow-y-auto">
           {NAV_GROUPS.map((group) => {
             const active = groupHasActive(pathname, group.items);
             // 当前所在分组永远展开——否则用户会"找不到自己现在在哪"
-            const isCollapsed = !!collapsed[group.title] && !active;
+            const isCollapsed = (collapsed === null ? !active : !!collapsed[group.title]) && !active;
             return (
               <div key={group.title}>
                 <button
                   type="button"
                   onClick={() => toggleGroup(group.title)}
                   aria-expanded={!isCollapsed}
+                  title={group.hint}
                   className="w-full flex items-center justify-between px-2 mb-1.5 group"
                 >
                   <span className="text-[10px] font-semibold tracking-widest uppercase"
@@ -166,11 +148,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 {!isCollapsed && (
                   <div className="space-y-0.5">
                     {group.items.map((item) => {
-                      const active = isActive(pathname, item.href);
+                      const active = isNavActive(pathname, item.href);
                       return (
                         <Link
                           key={item.href}
                           href={item.href}
+                          title={item.desc}
                           className={`relative flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm transition-all duration-150 ${
                             active ? "text-white font-medium" : "hover:text-gray-200 hover:bg-white/[0.04]"
                           }`}

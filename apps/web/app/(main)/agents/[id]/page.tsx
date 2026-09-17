@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { useRouter } from "next/navigation";
 import { api, describeError } from "@/lib/api";
+import { confirmAction } from "@/components/ConfirmDialog";
 import { notify } from "@/components/Toast";
 import AgentChat from "@/components/AgentChat";
 import InfoEditPanel from "@/components/InfoEditPanel";
@@ -156,7 +157,13 @@ export default function AgentDetailPage() {
   async function acquireAll() {
     const available = nodes.filter((n: any) => !skills.some((s: Skill) => s.skill === n.name));
     if (!available.length) { setMsg("所有技能已学完"); return; }
-    if (!confirm(`确定要学习全部 ${available.length} 个技能？`)) return;
+    // 学习技能是"增加能力"而非破坏，因此不做危险样式，也不要求输入确认词
+    if (!(await confirmAction({
+      title: `确定要学习全部 ${available.length} 个技能？`,
+      description: "学习后会占用额外的模型调用额度，但不会删除任何现有能力。",
+      danger: false,
+      confirmText: "全部学习",
+    }))) return;
     try {
       const result = await api.post(`/skill-growth/agents/${agentId}/acquire-batch`, {
         skill_node_ids: available.map((n: any) => n.id),

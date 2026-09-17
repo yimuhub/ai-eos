@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
+import { notify } from "@/components/Toast";
 
 /* ============================================================
    AI 会议中心：部门化选人 + 自定义会议类型 + 无主题闲聊
@@ -126,7 +127,7 @@ export default function MeetingsPage() {
   async function create() {
     const finalType = mtype === "__custom__" ? customType.trim() : mtype;
     if (!title || !picked.size || !finalType) {
-      alert("请填写标题、选择参会人员" + (mtype === "__custom__" ? "并输入自定义类型名" : ""));
+      notify("warning", "请填写标题、选择参会人员" + (mtype === "__custom__" ? "并输入自定义类型名" : ""));
       return;
     }
     const res: any = await api.post("/meetings", {
@@ -158,7 +159,7 @@ export default function MeetingsPage() {
         setTimeout(() => openDetail(detail!.id), 800);
       }
     } catch (e: any) {
-      alert("❌ " + (e?.message || String(e)));
+      notify("error", `会议操作失败：${e?.message || String(e)}`);
     }
   }
 
@@ -171,7 +172,7 @@ export default function MeetingsPage() {
 
   async function convertItems() {
     const res: any = await api.post(`/meetings/${detail!.id}/action-items/convert`);
-    alert(`已创建 ${res.converted_task_ids.length} 个任务`);
+    notify("success", `已把 ${res.converted_task_ids.length} 条行动项转成任务`);
     openDetail(detail!.id);
   }
 
@@ -275,9 +276,17 @@ export default function MeetingsPage() {
                         headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
                         body: fd });
                     const d = await resp.json();
-                    if (d.ok) { alert(`✅ 已上传 ${f.name}`); openDetail(meetingId); }
-                  } catch {}
-                  e.target.value = "";
+                    // 原来只在成功时提示、失败时静默：用户会以为"传上去了但没生效"
+                    if (d.ok) {
+                      notify("success", `已上传 ${f.name}`);
+                      openDetail(meetingId);
+                    } else {
+                      notify("error", `上传 ${f.name} 失败：${d.detail || d.message || "服务端拒绝"}`);
+                    }
+                  } catch (e: any) {
+                    notify("error", `上传 ${f.name} 失败：${e?.message || String(e)}`);
+                  }
+                  e.target.value = ""; // 允许重新选择同一个文件
                 }} />
               <span className="text-[11px]" style={{ color: "var(--muted)" }}>支持 pdf/docx/txt/md → 自动追加会议材料</span>
             </div>

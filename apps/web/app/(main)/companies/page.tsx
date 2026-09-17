@@ -3,6 +3,8 @@ import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { api, setActiveCompanyId } from "@/lib/api";
+import { confirmAction } from "@/components/ConfirmDialog";
+import { notify } from "@/components/Toast";
 import TeamGenModal from "@/components/TeamGenModal";
 
 /* ============================================================
@@ -72,6 +74,21 @@ export default function CompanyManagePage() {
 
   async function batchDelete() {
     if (!batchSel.size) return;
+    // 原来这里**没有任何二次确认**：勾选若干公司后点一下就全部删除，
+    // 而且是不可恢复的物理删除（连同其下所有项目、员工、成果）。
+    // 这是全站破坏力最大的入口，因此要求逐字输入确认词。
+    const selectedNames = rows.filter((r) => batchSel.has(r.id)).map((r) => r.name);
+    if (!(await confirmAction({
+      title: `确认彻底删除这 ${batchSel.size} 家公司？`,
+      description: "这是全站破坏力最大的操作，选中公司下的所有内容都会一并消失。",
+      bullets: [
+        ...selectedNames.slice(0, 5).map((n) => `「${n}」及其全部项目、员工、成果与日志`),
+        ...(selectedNames.length > 5 ? [`…以及另外 ${selectedNames.length - 5} 家公司`] : []),
+        "此操作不可恢复",
+      ],
+      confirmPhrase: "删除",
+      confirmText: "删除公司",
+    }))) return;
     setBusy(true);
     try {
       const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/company-manage/batch-delete`, {

@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { confirmAction } from "@/components/ConfirmDialog";
 
 /* ============================================================
    文档风格 DIY：公司自定义风格库 + 批量分配给 Agent
@@ -54,7 +55,11 @@ export default function DocStylesPage() {
   }
 
   async function remove(id: string) {
-    if (!confirm("删除该风格？已绑定的员工将自动解除。")) return;
+    if (!(await confirmAction({
+      title: "删除该风格？",
+      description: "已绑定这条风格的员工会自动解除绑定，之后产出的文档将使用默认风格。",
+      confirmText: "删除",
+    }))) return;
     await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/doc-styles/${id}?company_id=${cid}`, {
       method: "DELETE", headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
     });

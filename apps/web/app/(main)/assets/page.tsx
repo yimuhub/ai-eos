@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, getToken } from "@/lib/api";
+import { notify } from "@/components/Toast";
 import { ASSET_TYPE_ZH, zh } from "@/lib/i18n";
 
 type Asset = { id: string; name: string; type: string; size: number; task_id: string | null; agent_id: string | null };
@@ -30,8 +31,14 @@ export default function AssetsPage() {
 
   async function preview(id: string) {
     const d = await api.get(`/assets/${id}`);
-    if (d.content !== undefined) alert(d.content.slice(0, 2000));
-    else window.open(`http://localhost:8000/assets/${id}/download`, "_blank");
+    // 文本类素材用 Toast 展示（原来用 alert：超长内容会被系统弹窗截断且无法复制）
+    // 二进制素材走下载，交给浏览器处理
+    if (d.content !== undefined) {
+      const text = String(d.content);
+      notify("info", text.length > 2000 ? `${text.slice(0, 2000)}…（已截断，共 ${text.length} 字）` : text);
+    } else {
+      window.open(`http://localhost:8000/assets/${id}/download`, "_blank");
+    }
   }
 
   return (

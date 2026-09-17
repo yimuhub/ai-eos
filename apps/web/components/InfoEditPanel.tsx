@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import { confirmAction } from "@/components/ConfirmDialog";
+import { notify } from "@/components/Toast";
 
 /* ============================================================
    员工信息编辑面板（完整复刻列表页编辑弹窗全部字段）
@@ -126,13 +128,20 @@ export default function InfoEditPanel({ agentId, onClose, onSaved }: {
   }
 
   async function deleteAgent() {
-    if (!confirm("确认删除此员工？所有关联数据将同步销毁，不可恢复！")) return;
+    if (!(await confirmAction({
+      title: "确认删除此员工？",
+      description: "该员工的档案会一并销毁，请确认你已不需要它的任何成果。",
+      bullets: ["全部关联数据将同步销毁", "此操作不可恢复"],
+      confirmPhrase: "删除",
+      confirmText: "删除",
+    }))) return;
     setSaving(true);
     try {
       const r = await fetch(`${API}/agents/${agentId}`,
         { method: "DELETE", headers: auth() });
       if (r.status === 204 || r.ok) {
-        alert("已删除");
+        // 原来用 alert()：阻塞式弹窗、浅色系统样式，与产品观感割裂
+        notify("success", "已删除该员工，正在返回列表…");
         window.location.href = "/agents";
       } else {
         setMsg(`❌ 删除失败 HTTP ${r.status}`);

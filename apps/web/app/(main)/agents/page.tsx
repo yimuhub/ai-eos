@@ -3,6 +3,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
+import { confirmAction } from "@/components/ConfirmDialog";
+import Field from "@/components/Field";
+import { useFormValidation } from "@/lib/useFormValidation";
+import { V } from "@/lib/validate";
+import { notify } from "@/components/Toast";
 import { AGENT_STATUS_ZH, zh } from "@/lib/i18n";
 
 type Agent = {
@@ -121,7 +126,18 @@ export default function AgentsPage() {
   }
   async function batchDelete() {
     if (!selected.size) return;
-    if (!confirm(`确认删除选中的 ${selected.size} 个 Agent？此操作不可恢复。`)) return;
+    if (!(await confirmAction({
+      title: `确认删除选中的 ${selected.size} 个 Agent？`,
+      description: "这会一次性销毁多名员工的全部痕迹，请先确认选中的范围。",
+      bullets: [
+        `共 ${selected.size} 名员工及其档案`,
+        "他们的记忆、成果与执行记录一并清除",
+        "此操作不可恢复",
+      ],
+      // 批量删除是"一次点击销毁多人"，用输入确认词把"手滑"和"确认"真正区分开
+      confirmPhrase: "删除",
+      confirmText: "删除",
+    }))) return;
     try {
       const r = await api.post("/agents/batch-delete", { agent_ids: Array.from(selected) });
       setMsg(`✅ 已删除 ${r.deleted_count} 个${r.failed.length ? `，${r.failed.length} 个失败` : ""}`);
@@ -148,23 +164,49 @@ export default function AgentsPage() {
   }
 
   /* ---------- 单个创建 ---------- */
+  //
+  // 校验规则集中在这里声明，避免"每个字段各写一句 if"散落各处。
+  // 关键是**给出原因**：原来的 `if (!form.name) return;` 点了没反应，
+  // 用户只能猜是网络问题还是自己漏填了什么。
+  const agentForm = useFormValidation<{ name: string; role: string; system_prompt: string }>(
+    useMemo(
+      () => ({
+        name: [V.required("姓名"), V.maxLen(50, "姓名")],
+        role: [V.maxLen(50, "岗位")],
+        system_prompt: [V.maxLen(4000, "System Prompt")],
+      }),
+      [],
+    ),
+  );
+
   async function createAgent() {
-    if (!form.name) return;
-    const cs: any[] = await api.get("/companies");
-    const res = await api.post("/agents", {
-      company_id: cs[0].id, name: form.name, role: form.role || null,
-      department_id: form.department_id || null,
-      system_prompt: form.system_prompt || null,
-      capabilities: Array.from(selCaps),
-      backend: form.backend,
-    });
-    if (form.model_id) {
-      await api.post(`/agents/${res.id}/models`, { role: "primary", model_id: form.model_id });
+    const values = { name: form.name, role: form.role, system_prompt: form.system_prompt };
+    if (!agentForm.check(values)) {
+      notify("warning", agentForm.first() || "请检查填写内容");
+      return;
     }
-    setShowForm(false);
-    setForm({ name: "", role: "", department_id: "", system_prompt: "", model_id: "", backend: "native_llm" });
-    setSelCaps(new Set());
-    await load();
+    try {
+      const cs: any[] = await api.get("/companies");
+      const res = await api.post("/agents", {
+        company_id: cs[0].id, name: form.name, role: form.role || null,
+        department_id: form.department_id || null,
+        system_prompt: form.system_prompt || null,
+        capabilities: Array.from(selCaps),
+        backend: form.backend,
+      });
+      if (form.model_id) {
+        await api.post(`/agents/${res.id}/models`, { role: "primary", model_id: form.model_id });
+      }
+      notify("success", `已创建员工「${form.name}」`);
+      setShowForm(false);
+      setForm({ name: "", role: "", department_id: "", system_prompt: "", model_id: "", backend: "native_llm" });
+      setSelCaps(new Set());
+      agentForm.reset();
+      await load();
+    } catch (e: any) {
+      // 原来创建失败时异常会直接冒泡成 unhandled rejection：用户看不到任何提示
+      notify("error", `创建失败：${e.message || e}`);
+    }
   }
 
   /* ---------- 批量创建 ---------- */
@@ -242,7 +284,11 @@ export default function AgentsPage() {
   }
 
   async function deleteOne(a: Agent) {
-    if (!confirm(`确认删除 Agent「${a.name}」？此操作不可恢复。`)) return;
+    if (!(await confirmAction({
+      title: `确认删除 Agent「${a.name}」？`,
+      description: "该员工的档案、记忆、成果与执行记录会一并清除。",
+      confirmText: "删除",
+    }))) return;
     try {
       await api.del(`/agents/${a.id}`);
       setMsg(`✅ ${a.name} 已删除`);
@@ -393,10 +439,16 @@ export default function AgentsPage() {
         <div className="card mb-4 space-y-2.5">
           <h3 className="font-medium text-sm mb-1">创建新 Agent</h3>
           <div className="grid grid-cols-2 gap-2.5">
-            <input placeholder="姓名（如：战略分析师）" value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })} className="input" />
-            <input placeholder="岗位（如：战略规划专家）" value={form.role}
-              onChange={(e) => setForm({ ...form, role: e.target.value })} className="input" />
+            <Field label="姓名" required error={agentForm.errors.name} hint="员工在组织里的称呼" htmlFor="ag-name">
+              <input id="ag-name" placeholder="如：战略分析师" value={form.name}
+                onChange={(e) => { setForm({ ...form, name: e.target.value }); agentForm.clear("name"); }}
+                className="input" aria-invalid={!!agentForm.errors.name} />
+            </Field>
+            <Field label="岗位" error={agentForm.errors.role} hint="决定它的职责范围，可留空" htmlFor="ag-role">
+              <input id="ag-role" placeholder="如：战略规划专家" value={form.role}
+                onChange={(e) => { setForm({ ...form, role: e.target.value }); agentForm.clear("role"); }}
+                className="input" aria-invalid={!!agentForm.errors.role} />
+            </Field>
             <select value={form.department_id} onChange={(e) => setForm({ ...form, department_id: e.target.value })} className="input">
               <option value="">选择部门</option>
               {depts.map((d) => (<option key={d.id} value={d.id}>{d.name}</option>))}
@@ -408,8 +460,13 @@ export default function AgentsPage() {
               ))}
             </select>
           </div>
-          <textarea placeholder="System Prompt（人格与职责，可留空使用默认）" rows={2} value={form.system_prompt}
-            onChange={(e) => setForm({ ...form, system_prompt: e.target.value })} className="input" />
+          <Field label="System Prompt" error={agentForm.errors.system_prompt}
+            hint="人格与职责设定；留空则使用该岗位的默认设定" htmlFor="ag-prompt">
+            <textarea id="ag-prompt" placeholder="例如：你是一位谨慎的战略分析师，先给结论再给论据…" rows={2}
+              value={form.system_prompt}
+              onChange={(e) => { setForm({ ...form, system_prompt: e.target.value }); agentForm.clear("system_prompt"); }}
+              className="input" aria-invalid={!!agentForm.errors.system_prompt} />
+          </Field>
 
           {/* 执行底座 */}
           <div>
@@ -458,7 +515,9 @@ export default function AgentsPage() {
             </div>
           </div>
 
-          <button onClick={createAgent} disabled={!form.name} className="btn-primary disabled:opacity-40">确认创建</button>
+          {/* 不用 disabled：按钮点不动时用户不知道缺什么。
+              保持可点击，点击后由校验给出"请填写姓名"这类明确原因。 */}
+          <button onClick={createAgent} className="btn-primary">确认创建</button>
         </div>
       )}
 

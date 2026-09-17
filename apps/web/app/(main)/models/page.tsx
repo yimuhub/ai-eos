@@ -1,6 +1,11 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
+import { confirmAction } from "@/components/ConfirmDialog";
+import Field from "@/components/Field";
+import { useFormValidation } from "@/lib/useFormValidation";
+import { V } from "@/lib/validate";
+import { notify } from "@/components/Toast";
 
 /* ============================================================
    模型配置中心：管理大模型供应商 + 拉取模型列表 + 勾选启用
@@ -72,18 +77,39 @@ export default function ModelsPage() {
     }).then((r) => r.json()).then((d: any) => setConvertModel(d.convert_model_id || "")).catch(() => {});
   }, []);
   /* ---- 手动添加单个模型配置 ---- */
+  //
+  // 校验规则与后端 `ModelCreate` 保持一致（名称/模型 ID 必填，URL 与变量名有格式要求）。
+  // 放在前端不是"替后端把关"，而是**让用户在提交前就知道问题在哪**——
+  // 之前点击"添加配置"若格式不对，只会收到一句技术性的 422。
+  const modelForm = useFormValidation<{ name: string; url: string; keyEnv: string; modelId: string }>(
+    useMemo(
+      () => ({
+        name: [V.required("显示名"), V.maxLen(60, "显示名")],
+        url: [V.url("Base URL")],
+        keyEnv: [V.envVarName("环境变量名")],
+        modelId: [V.required("模型 ID"), V.identifier("模型 ID"), V.maxLen(120, "模型 ID")],
+      }),
+      [],
+    ),
+  );
+
   async function addModel() {
-    if (!provName || !provModelId) return;
+    const values = { name: provName, url: provUrl, keyEnv: provKeyEnv, modelId: provModelId };
+    if (!modelForm.check(values)) {
+      notify("warning", modelForm.first() || "请检查填写内容");
+      return;
+    }
     try {
       await api.post("/models", {
         name: provName, provider_type: provType,
         base_url: provUrl || null, api_key_env: provKeyEnv || null,
         model_id: provModelId,
       });
-      setMsg(`✅ 已添加 ${provName}`);
+      notify("success", `已添加 ${provName}`);
       setProvName(""); setProvUrl(""); setProvKeyEnv(""); setProvModelId("");
+      modelForm.reset();
       await load();
-    } catch (e: any) { setMsg(e.message || String(e)); }
+    } catch (e: any) { notify("error", `添加失败：${e.message || e}`); }
   }
 
   /* ---- 从供应商拉取模型列表 ---- */
@@ -147,7 +173,11 @@ export default function ModelsPage() {
   }
 
   async function delModel(m: ModelRow) {
-    if (!confirm(`删除配置「${m.name}」？（不影响已绑定它的 Agent 的历史记录）`)) return;
+    if (!(await confirmAction({
+      title: `删除配置「${m.name}」？`,
+      description: "已绑定它的 Agent 的历史记录不受影响，但新任务将无法再选用这个配置。",
+      confirmText: "删除",
+    }))) return;
     await api.del(`/models/${m.id}`).catch((e: any) => setMsg(e.message));
     await load();
   }
@@ -294,22 +324,37 @@ export default function ModelsPage() {
         <summary className="text-sm cursor-pointer select-none" style={{ color: "var(--muted)" }}>
           ➕ 手动添加模型配置（高级）
         </summary>
-        <div className="grid grid-cols-2 gap-2.5 mt-3">
-          <input placeholder="显示名（如 Agnes Flash）" value={provName}
-            onChange={(e) => setProvName(e.target.value)} className="input" />
-          <select value={provType} onChange={(e) => setProvType(e.target.value)} className="input">
-            {Object.entries(PROVIDER_LABELS).map(([k, v]) => (
-              <option key={k} value={k}>{v}</option>
-            ))}
-          </select>
-          <input placeholder="Base URL" value={provUrl}
-            onChange={(e) => setProvUrl(e.target.value)} className="input" />
-          <input placeholder="API Key 环境变量名（如 HERMES_API_KEY）" value={provKeyEnv}
-            onChange={(e) => setProvKeyEnv(e.target.value)} className="input" />
-          <input placeholder="模型 ID（如 agnes-2.5-flash / claude-sonnet-4）" value={provModelId}
-            onChange={(e) => setProvModelId(e.target.value)} className="input" />
-          <button onClick={addModel} disabled={!provName || !provModelId}
-            className="btn-primary disabled:opacity-40">添加配置</button>
+        <div className="grid grid-cols-2 gap-3 mt-3">
+          <Field label="显示名" required error={modelForm.errors.name} hint="在员工配置里看到的名称" htmlFor="pm-name">
+            <input id="pm-name" placeholder="如 Agnes Flash" value={provName}
+              onChange={(e) => { setProvName(e.target.value); modelForm.clear("name"); }}
+              className="input" aria-invalid={!!modelForm.errors.name} />
+          </Field>
+          <Field label="供应商类型" htmlFor="pm-type">
+            <select id="pm-type" value={provType} onChange={(e) => setProvType(e.target.value)} className="input">
+              {Object.entries(PROVIDER_LABELS).map(([k, v]) => (
+                <option key={k} value={k}>{v}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Base URL" error={modelForm.errors.url} hint="留空则使用该供应商的官方地址" htmlFor="pm-url">
+            <input id="pm-url" placeholder="https://api.example.com/v1" value={provUrl}
+              onChange={(e) => { setProvUrl(e.target.value); modelForm.clear("url"); }}
+              className="input" aria-invalid={!!modelForm.errors.url} />
+          </Field>
+          <Field label="API Key 环境变量名" error={modelForm.errors.keyEnv}
+            hint="只填变量名，不要填密钥本身；本地服务可留空" htmlFor="pm-keyenv">
+            <input id="pm-keyenv" placeholder="如 HERMES_API_KEY" value={provKeyEnv}
+              onChange={(e) => { setProvKeyEnv(e.target.value); modelForm.clear("keyEnv"); }}
+              className="input" aria-invalid={!!modelForm.errors.keyEnv} />
+          </Field>
+          <Field label="模型 ID" required error={modelForm.errors.modelId}
+            hint="调用接口时真正传给供应商的标识" htmlFor="pm-modelid" className="col-span-2">
+            <input id="pm-modelid" placeholder="如 agnes-2.5-flash / claude-sonnet-4" value={provModelId}
+              onChange={(e) => { setProvModelId(e.target.value); modelForm.clear("modelId"); }}
+              className="input" aria-invalid={!!modelForm.errors.modelId} />
+          </Field>
+          <button onClick={addModel} className="btn-primary col-span-2">添加配置</button>
         </div>
       </details>
     </div>

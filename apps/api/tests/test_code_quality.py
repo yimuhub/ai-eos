@@ -236,3 +236,134 @@ def test_development_starts_but_warns(monkeypatch):
     warnings = s.security_warnings()
     assert any("JWT_SECRET" in w for w in warnings), f"默认密钥未告警：{warnings}"
     assert any("DEBUG" in w for w in warnings), f"debug 未告警：{warnings}"
+
+
+# ---------------------------------------------------------------------------
+# 前端体验护栏
+#
+# 这一节守的是"用起来顺不顺"这类**不会被编译器和 lint 拦住**的问题。
+# ESLint 不会因为"用了 window.confirm"报错，TypeScript 也不会因为
+# "新页面没进导航"报错，但它们会实实在在地让产品显得不专业：
+#
+#   - 浏览器原生 confirm 可以被用户在设置里关掉，之后恒返回 true，
+#     "二次确认"直接退化成一次点击就执行破坏性操作；
+#   - 原生 alert 会阻塞主线程、样式无法定制，在深色产品里像系统故障；
+#   - 一个没人能点到的新页面 = 白写。
+#
+# 所以把这三条写成测试。规则本身很简单，价值在于**它们不会随时间腐化**。
+# ---------------------------------------------------------------------------
+
+WEB_ROOT = API_ROOT.parent / "web"
+
+
+def _web_sources() -> list[pathlib.Path]:
+    """前端自有源码（排除 node_modules / 构建产物 / 类型声明）。"""
+    roots = [WEB_ROOT / "app", WEB_ROOT / "components", WEB_ROOT / "lib"]
+    files: list[pathlib.Path] = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for p in root.rglob("*"):
+            if p.suffix in (".ts", ".tsx") and "node_modules" not in p.parts and ".next" not in p.parts:
+                files.append(p)
+    return sorted(files)
+
+
+def _strip_comments(src: str) -> str:
+    """去掉注释，避免把"文档里提到 alert() 的说明文字"误判成真实调用。"""
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    src = re.sub(r"(?m)^\s*//.*$", "", src)
+    return src
+
+
+def test_no_native_blocking_dialogs():
+    """禁止 window.confirm / alert / prompt。
+
+    统一走 `confirmAction()`（主题化、可列出影响面、不可逆操作要求输入确认词）
+    与 `notify()`（非阻塞、可堆叠、带 role=alert）。
+    """
+    # (?<![A-Za-z0-9_]) 让 confirmAction( 不会被当成 confirm(
+    pattern = re.compile(r"(?<![A-Za-z0-9_$])(confirm|alert|prompt)\s*\(")
+    hits: list[str] = []
+    for path in _web_sources():
+        body = _strip_comments(path.read_text(encoding="utf-8"))
+        for idx, line in enumerate(body.splitlines(), start=1):
+            if pattern.search(line):
+                hits.append(f"{path.relative_to(WEB_ROOT)}:{idx}  {line.strip()[:90]}")
+    assert not hits, (
+        "前端仍在使用原生阻塞式弹窗（确认框可被用户关闭，等于没有二次确认）：\n  "
+        + "\n  ".join(hits)
+        + "\n\n请改用 components/ConfirmDialog.tsx 的 confirmAction() 与 components/Toast 的 notify()。"
+    )
+
+
+def test_required_frontend_ux_infrastructure_present():
+    """统一确认框 / 全局跳转 / 校验规则 / 字段容器，缺一个都会让体验退回改造前。"""
+    for rel, why in [
+        ("components/ConfirmDialog.tsx", "统一二次确认（替代可被关闭的原生 confirm）"),
+        ("components/CommandPalette.tsx", "⌘K 全局跳转（页面越多越必要）"),
+        ("components/Field.tsx", "字段容器：标签 / 必填 / 内联错误"),
+        ("lib/nav.ts", "导航单一事实源（侧边栏与命令面板共用）"),
+        ("lib/validate.ts", "统一校验规则"),
+        ("lib/useFormValidation.ts", "表单校验状态管理"),
+    ]:
+        assert (WEB_ROOT / rel).is_file(), f"缺少 {rel}（{why}）"
+
+
+def _nav_hrefs() -> set[str]:
+    """从 lib/nav.ts 里取出所有导航目标。"""
+    src = (WEB_ROOT / "lib" / "nav.ts").read_text(encoding="utf-8")
+    return set(re.findall(r'href:\s*"([^"]+)"', src))
+
+
+def _frontend_pages() -> set[str]:
+    """实际存在的可访问页面路由（排除动态路由 `[id]`）。"""
+    routes: set[str] = set()
+    main = WEB_ROOT / "app" / "(main)"
+    for page in main.rglob("page.tsx"):
+        rel = page.parent.relative_to(main)
+        if any(seg.startswith("[") for seg in rel.parts):
+            continue  # 详情页需要具体 id，天然不在导航里
+        routes.add("/" if str(rel) == "." else "/" + str(rel).replace("\\", "/"))
+    return routes
+
+
+def test_navigation_covers_every_page():
+    """每个页面都必须能从导航或 ⌘K 到达。
+
+    这条守的是一个很常见的退化：新加了页面但忘了挂入口，
+    结果功能存在、却没人找得到（改造前 34 个页面平铺在侧边栏，
+    反过来又有页面永远点不到）。
+    """
+    missing = _frontend_pages() - _nav_hrefs()
+    assert not missing, (
+        "以下页面既不在侧边栏、也不在 ⌘K 可搜范围内（等于没有入口）：\n  "
+        + "\n  ".join(sorted(missing))
+        + "\n\n请在 apps/web/lib/nav.ts 中登记（若属内部页面，放入 HIDDEN_ITEMS）。"
+    )
+
+
+def test_navigation_has_no_dead_links():
+    """导航里登记的目标必须真实存在，避免点进去 404。"""
+    dead = _nav_hrefs() - _frontend_pages()
+    assert not dead, (
+        "导航指向了不存在的页面：\n  " + "\n  ".join(sorted(dead))
+        + "\n\n页面被重命名或删除时，请同步更新 apps/web/lib/nav.ts。"
+    )
+
+
+def test_nav_items_have_description_and_keywords():
+    """每一条导航都必须带说明与检索词。
+
+    说明是给新用户的教学材料，检索词决定他能不能用自己习惯的说法找到页面；
+    少了任何一个，⌘K 的价值就只剩"精确知道名字才搜得到"。
+    """
+    src = (WEB_ROOT / "lib" / "nav.ts").read_text(encoding="utf-8")
+    entries = re.findall(r'\{\s*href:\s*"[^"]+",\s*label:\s*"[^"]+",\s*icon:\s*"[^"]*",\s*desc:', src)
+    total = len(re.findall(r'href:\s*"/', src))
+    assert total > 0, "未解析到任何导航项（lib/nav.ts 结构可能已变更）"
+    assert len(entries) == total, (
+        f"有 {total - len(entries)} 条导航缺少 desc（命令面板将无法向用户说明这个页面能做什么）"
+    )
+    assert src.count("keywords:") >= total - 1, "导航项应尽量都带检索关键词"
+

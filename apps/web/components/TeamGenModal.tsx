@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
+import { notify } from "@/components/Toast";
 
 /* ============================================================
    创建新团队向导弹窗（指挥中心 / 公司管理 共用）
@@ -44,7 +45,7 @@ export default function TeamGenModal({ open, onClose, onCreated }: {
       });
       setPreview(d.blueprint);
       setStep(2);
-    } catch (e: any) { alert("❌ " + (e.message || e)); }
+    } catch (e: any) { notify("error", `方案生成失败：${e.message || e}`); }
     setBusy(false);
   }
 
@@ -58,7 +59,7 @@ export default function TeamGenModal({ open, onClose, onCreated }: {
       onClose(); setStep(1); setPreview(null);
       setBlueprint(""); setIndustry(""); setName("");
       onCreated?.(`${d.company_name}（${d.departments} 部门 · ${d.agents.length} Agent）`);
-    } catch (e: any) { alert("❌ " + (e.message || e)); }
+    } catch (e: any) { notify("error", `团队生成失败：${e.message || e}`); }
     setBusy(false);
   }
 

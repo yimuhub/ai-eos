@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { notify } from "@/components/Toast";
 
 type Node = {
   node_key: string; node_type: string; name: string;
@@ -117,7 +118,7 @@ export default function WorkflowBuilderPage() {
       edges,
     });
     setSavedId(res.id);
-    alert(`已保存：${res.name}`);
+    notify("success", `已保存：${res.name}`);
   }
 
   async function run() {

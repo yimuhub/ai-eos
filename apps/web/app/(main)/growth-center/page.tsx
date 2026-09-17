@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
+import { confirmAction } from "@/components/ConfirmDialog";
 
 /* ============================================================
    成长中心：按部门聚合成长档案 + 员工档案弹窗 + 学习计划
@@ -90,7 +91,12 @@ export default function GrowthCenterPage() {
   }
 
   async function delItem(kind: "skills" | "memories" | "plans", id: string) {
-    if (!cid || !confirm("确认删除该项？此操作不可恢复。")) return;
+    if (!cid) return;
+    if (!(await confirmAction({
+      title: "确认删除该项？",
+      description: "删除后该员工将不再拥有这条记录。",
+      confirmText: "删除",
+    }))) return;
     await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/growth-center/${kind}/${id}?company_id=${cid}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });

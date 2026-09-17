@@ -8,6 +8,7 @@ import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker
 import OnboardingWizard from "@/components/OnboardingWizard";
 import { notify } from "@/components/Toast";
 import { TASK_STATUS_ZH, EVENT_TYPE_ZH, zh } from "@/lib/i18n";
+import { confirmAction } from "@/components/ConfirmDialog";
 
 /* ============================================================
    指挥中心 v2：KPI 概览 · 新建任务弹窗（同任务中心）·
@@ -215,7 +216,17 @@ export default function DashboardPage() {
 
   async function deleteSelected() {
     if (!taskSel.size) return;
-    if (!confirm(`确认彻底删除这 ${taskSel.size} 个任务？\n其记忆、成果、执行记录将全部清除，且不可恢复。`)) return;
+    if (!(await confirmAction({
+      title: `确认彻底删除这 ${taskSel.size} 个任务？`,
+      description: "批量删除会一次性清空多个任务的执行痕迹，请先确认选中的范围。",
+      bullets: [
+        "这些任务的记忆、成果、执行记录将全部清除",
+        "若任务仍在执行，会被立即中止",
+        "此操作不可恢复",
+      ],
+      confirmPhrase: "删除",
+      confirmText: "删除",
+    }))) return;
     try {
       await api.post("/task-dispatch/delete", { task_ids: Array.from(taskSel) });
       notify("success", `已彻底删除 ${taskSel.size} 个任务`);
@@ -244,7 +255,12 @@ export default function DashboardPage() {
 
   /* ---------- 单任务彻底删除（原为裸 fetch 且忽略失败） ---------- */
   async function deleteOne(tid: string, title: string) {
-    if (!confirm(`确认彻底删除任务「${title.slice(0, 25)}…」？\n其记忆、成果、执行记录将全部清除！`)) return;
+    if (!(await confirmAction({
+      title: `确认彻底删除任务「${title.slice(0, 25)}」？`,
+      description: "该任务的历史将不再可查，包括它产生的结论与经验。",
+      bullets: ["记忆、成果、执行记录将全部清除", "此操作不可恢复"],
+      confirmText: "删除",
+    }))) return;
     try {
       await api.post("/task-dispatch/delete", { task_ids: [tid] });
       notify("success", "已彻底删除该任务");

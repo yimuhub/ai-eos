@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { api } from "@/lib/api";
+import { confirmAction } from "@/components/ConfirmDialog";
 import { TASK_STATUS_ZH, zh } from "@/lib/i18n";
 import { DeliverablesPanel, ProjectLogsPanel } from "@/components/DeliverablesLogs";
 
@@ -125,7 +126,19 @@ export default function ProjectDetailPage() {
   }
 
   async function deleteProject() {
-    if (!confirm(`⚠️ 彻底删除项目「${d?.name}」？\n所有任务、记忆、成果、记录将全部清除，不可恢复！`)) return;
+    if (!(await confirmAction({
+      title: `彻底删除项目「${d?.name}」？`,
+      description: "这是系统中影响面最大的删除操作，建议先确认项目里的成果已导出。",
+      bullets: [
+        "该项目的全部任务会被删除",
+        "全部相关记忆、成果与执行记录一并清除",
+        "此操作不可恢复",
+      ],
+      // 影响面最大的一处：要求逐字输入项目名，与 GitHub 删仓库的做法一致。
+      // 名字本身就是最后一次"你真的选对了吗"的确认。
+      confirmPhrase: d?.name || "删除",
+      confirmText: "删除项目",
+    }))) return;
     setBusy(true);
     try {
       const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/projects/${id}/lifecycle`, {
@@ -485,7 +498,11 @@ export default function ProjectDetailPage() {
                     {/* 移除成员 */}
                     <button title="移出团队"
                       onClick={async () => {
-                        if (!confirm(`将「${a?.name || mem.member_id.slice(0, 8)}」移出项目团队？`)) return;
+                        if (!(await confirmAction({
+                          title: `将「${a?.name || mem.member_id.slice(0, 8)}」移出项目团队？`,
+                          description: "该员工本人与其记忆、成果都不会被删除，只是不再参与本项目。",
+                          confirmText: "移出",
+                        }))) return;
                         await api.del(`/projects/${id}/members/${mem.member_id}`);
                         if (isManager) {
                           await api.patch(`/projects/${id}`, { manager_agent_id: null });

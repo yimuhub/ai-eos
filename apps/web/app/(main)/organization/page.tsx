@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
+import { confirmAction } from "@/components/ConfirmDialog";
 
 /* ============================================================
    组织架构 v3：卡片排序/置顶 · 部门技能 · 部门专属知识库
@@ -123,7 +124,16 @@ export default function OrganizationPage() {
   }
 
   async function deleteOne(d: Dept) {
-    if (!confirm(`确认删除部门「${d.name}」？\n子部门将上提为顶级，员工变为未分配。`)) return;
+    if (!(await confirmAction({
+      title: `确认删除部门「${d.name}」？`,
+      description: "部门本身会被删除，但下级对象不会消失——它们只是失去归属。",
+      bullets: [
+        "子部门将上提为顶级部门",
+        "部门内的员工变为「未分配」",
+        "员工的档案与记忆不受影响",
+      ],
+      confirmText: "删除部门",
+    }))) return;
     try {
       const r = await api.post("/departments/batch-delete", { department_ids: [d.id], mode: "promote" });
       setMsg(r.deleted_count ? `✅ 已删除「${d.name}」` : "❌ 删除失败");
@@ -651,7 +661,11 @@ export default function OrganizationPage() {
               )}
               {editing.id !== "__new__" && (
                 <button onClick={async () => {
-                  if (!confirm(`确认删除部门「${editing.name}」？`)) return;
+                  if (!(await confirmAction({
+                    title: `确认删除部门「${editing.name}」？`,
+                    description: "子部门将上提为顶级，部门内员工变为「未分配」，员工档案不受影响。",
+                    confirmText: "删除部门",
+                  }))) return;
                   await api.del(`/departments/${editing.id}`).catch((e: any) => setMsg(e.message));
                   setEditing(null);
                   await load();

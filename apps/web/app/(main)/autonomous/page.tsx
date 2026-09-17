@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { confirmAction } from "@/components/ConfirmDialog";
 
 type Agent = { id: string; name: string; role?: string; department_id?: string | null };
 type Dept = { id: string; name: string };
@@ -125,7 +126,12 @@ export default function AutonomousPage() {
   }
 
   async function removeScoped(row: ScopeRow) {
-    if (!confirm(`确定清除「${row.name}」的专属设置？将回落到公司默认等级。`)) return;
+    if (!(await confirmAction({
+      title: `确定清除「${row.name}」的专属设置？`,
+      description: "清除后该对象将回落到公司默认的自治等级，不会停止它当前正在执行的任务。",
+      danger: false,
+      confirmText: "清除",
+    }))) return;
     if (!cid) { flash("未识别到当前公司，请先到「公司管理」选择公司", "err"); return; }
     setBusy(`rm-${row.id}`);
     try {
@@ -138,7 +144,16 @@ export default function AutonomousPage() {
   }
 
   async function emergencyStop() {
-    if (!confirm("🛑 确定全局紧急停止？所有 Agent 的自治行为将被冻结。")) return;
+    if (!(await confirmAction({
+      title: "确定全局紧急停止？",
+      description: "这是整个系统的总闸。所有 Agent 的自治行为会被立刻冻结。",
+      bullets: [
+        "正在执行的自治任务将被中止",
+        "在你手动恢复之前，没有任何 Agent 会自己开工",
+        "已产出的成果与记忆不受影响",
+      ],
+      confirmText: "紧急停止",
+    }))) return;
     setBusy("stop");
     try {
       await api.post("/governance/emergency-stop", {});

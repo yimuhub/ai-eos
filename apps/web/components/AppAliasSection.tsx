@@ -5,6 +5,7 @@
    ============================================================ */
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { notify } from "@/components/Toast";
 
 type AliasRule = {
   id: string; alias: string; app_name: string;
@@ -54,8 +55,8 @@ export default function AppAliasSection({ cid }: { cid: string }) {
         body: JSON.stringify({ text }),
       });
       const d = await r.json();
-      alert(d.message || JSON.stringify(d));
-    } catch (e) { alert(String(e)); }
+      notify(d.ok === false ? "error" : "success", d.message || JSON.stringify(d));
+    } catch (e) { notify("error", `执行失败：${String(e)}`); }
     finally { setRunning(null); }
   };
 
@@ -79,7 +80,7 @@ export default function AppAliasSection({ cid }: { cid: string }) {
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${t}` },
       body: JSON.stringify({ alias: formAlias, app_name: formApp, app_path: formPath || null }),
     });
-    if (r.status >= 400) { alert(await r.text()); return; }
+    if (r.status >= 400) { notify("error", await r.text()); return; }
     setRules(await r.json());
     setFormAlias(""); setFormApp(""); setFormPath("");
   };

@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
+import { confirmAction } from "@/components/ConfirmDialog";
 
 type Pricing = {
   id: string; model_id: string; model_name: string;
@@ -146,7 +147,11 @@ export default function TokenAdminPage() {
   }
 
   async function delPricing(p: Pricing) {
-    if (!confirm(`删除「${p.model_name}」的计费标准？`)) return;
+    if (!(await confirmAction({
+      title: `删除「${p.model_name}」的计费标准？`,
+      description: "删除后该模型将回落到默认计费标准，已产生的历史用量记录不受影响。",
+      confirmText: "删除",
+    }))) return;
     try { await api.del(`/tokens/pricing/${p.id}`); flash("已删除"); loadPricing(); }
     catch (e: any) { flash(e.message || String(e), "err"); }
   }

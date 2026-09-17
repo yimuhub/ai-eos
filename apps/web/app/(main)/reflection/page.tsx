@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, ApiError } from "@/lib/api";
 import { notify } from "@/components/Toast";
+import { confirmAction } from "@/components/ConfirmDialog";
 
 /** 把任意异常转成一句可读的原因，避免界面出现 "[object Object]" */
 function describe(e: unknown, fallback: string): string {
@@ -104,6 +105,13 @@ export default function ReflectionCenterPage() {
 
   async function delLesson(lessonId: string) {
     if (!detail) return;
+    // 原实现点一下就删、没有任何确认。教训是员工用真实任务代价换来的，
+    // 误删后无法重建——这一步必须让用户明确表达意图。
+    if (!(await confirmAction({
+      title: "确认删除这条经验教训？",
+      description: "该员工后续决策将不再参考这条教训，且无法恢复。",
+      confirmText: "删除",
+    }))) return;
     try {
       await api.del(`/reflection/agents/${detail.agent.id}/lessons/${lessonId}`);
       setDetailLessons(prev => prev.filter(l => l.id !== lessonId));

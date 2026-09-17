@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { confirmAction } from "@/components/ConfirmDialog";
 import { createPortal } from "react-dom";
 
 /* ============================================================
@@ -99,7 +100,12 @@ export default function KnowledgePage() {
   }
 
   async function deleteDoc(id: string) {
-    if (!confirm("删除这篇文档？（原始文件副本一并删除，不可恢复）")) return;
+    if (!(await confirmAction({
+      title: "删除这篇文档？",
+      description: "员工将不再引用其中的内容来回答任务。",
+      bullets: ["原始文件副本会一并删除", "此操作不可恢复"],
+      confirmText: "删除",
+    }))) return;
     await api.del(`/kb2/documents/${id}`);
     if (tab === "global") {
       setGlobalDocs((prev) => prev.filter((d) => d.id !== id));

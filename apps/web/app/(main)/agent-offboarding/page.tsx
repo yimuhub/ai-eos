@@ -2,6 +2,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
+import { notify } from "@/components/Toast";
+import { confirmAction } from "@/components/ConfirmDialog";
 
 /* ============================================================
    员工离职中心：多选离职员工 → 选择继承人 → 资产继承 → 执行
@@ -83,11 +85,25 @@ export default function OffboardingPage() {
         }),
       });
       setPreview(await r.json());
-    } catch (e: any) { alert(e.message || String(e)); }
+    } catch (e: any) { notify("error", `交接预演失败：${e.message || String(e)}`); }
   }
 
   async function doExecute() {
     if (!preview) return;
+    // 这一步会真实改写记忆与资产的归属，且不可一键撤销。
+    // 原实现点一下就执行、没有任何确认——属于"看起来有流程、其实没有护栏"。
+    const ok = await confirmAction({
+      title: `确认执行 ${selected.size} 名员工的离职交接？`,
+      description: "交接会真实改写数据归属，无法一键撤销，请先确认预演结果无误。",
+      bullets: [
+        transferSkills ? "技能将转交给接手人" : "技能不转移（将随员工失效）",
+        transferMemories ? "记忆将转交给接手人" : "记忆不转移",
+        transferAssets ? "资产将转交给接手人" : "资产不转移",
+        reassignTasks ? "未完成任务将改派给接手人" : "未完成任务不改派",
+      ],
+      confirmText: "执行交接",
+    });
+    if (!ok) return;
     setExecuting(true);
     try {
       const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/agents/offboarding/execute`, {
@@ -109,7 +125,7 @@ export default function OffboardingPage() {
       setResult(data);
       setPreview(null);
       await load();
-    } catch (e: any) { alert(e.message || String(e)); }
+    } catch (e: any) { notify("error", `交接预演失败：${e.message || String(e)}`); }
     setExecuting(false);
   }
 

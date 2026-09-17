@@ -4,6 +4,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useRef } from "react";
 import { api } from "@/lib/api";
+import { confirmAction } from "@/components/ConfirmDialog";
 import { notify } from "@/components/Toast";
 
 /* ============================================================
@@ -160,7 +161,11 @@ export default function AgentProfilePage() {
   }
 
   async function removeSkill(asnId: string) {
-    if (!confirm("确认移除这项技能？")) return;
+    if (!(await confirmAction({
+      title: "确认移除这项技能？",
+      description: "移除后该员工将无法再执行依赖这项技能的任务，可稍后重新学习。",
+      confirmText: "移除",
+    }))) return;
     try {
       await api.del(`/skill-growth/agents/${agentId}/skills/${asnId}?company_id=${cidRef.current}`);
       setMsg("✅ 已移除技能");
@@ -185,7 +190,11 @@ export default function AgentProfilePage() {
   }
 
   async function removeMemory(memoryId: string) {
-    if (!confirm("确认删除这条记忆？")) return;
+    if (!(await confirmAction({
+      title: "确认删除这条记忆？",
+      description: "员工将不再记得这条事实，后续任务中不会再引用。",
+      confirmText: "删除",
+    }))) return;
     try {
       await api.del(`/growth-center/memories/${memoryId}?company_id=${cidRef.current}`);
       setMsg("✅ 已删除记忆");
@@ -194,7 +203,11 @@ export default function AgentProfilePage() {
   }
 
   async function removeLesson(lessonId: string) {
-    if (!confirm("确认删除这条复盘？")) return;
+    if (!(await confirmAction({
+      title: "确认删除这条复盘？",
+      description: "这条经验教训将不再参与该员工后续的决策。",
+      confirmText: "删除",
+    }))) return;
     try {
       await api.del(`/reflection/agents/${agentId}/lessons/${lessonId}`);
       setLessons(prev => prev.filter(l => l.id !== lessonId));

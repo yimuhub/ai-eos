@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { confirmAction } from "@/components/ConfirmDialog";
+import { notify } from "@/components/Toast";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
 
 type Mem = { id: string; type: string; content: string; importance: number; access_count: number; created_at: string };
@@ -39,7 +41,19 @@ export default function MemoryPage() {
 
   const forget = async (id: string) => {
     const c = await cid();
-    await api.del(`/memory/${agentId}/${id}?company_id=${c}`);
+    // 原实现点一下"忘记"就直接删，没有任何确认和失败反馈。
+    // 记忆是员工的经验积累，误删等于让它重犯同一个错。
+    if (!(await confirmAction({
+      title: "确认让该员工忘记这条记忆？",
+      description: "之后的任务中它不会再引用这条事实，且无法恢复。",
+      confirmText: "忘记",
+    }))) return;
+    try {
+      await api.del(`/memory/${agentId}/${id}?company_id=${c}`);
+      notify("success", "已忘记该条记忆");
+    } catch (e) {
+      notify("error", `删除失败：${(e as Error).message || e}`);
+    }
     load();
   };
 

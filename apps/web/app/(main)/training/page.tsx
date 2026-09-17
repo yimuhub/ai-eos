@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, getCompanies } from "@/lib/api";
 import { notify } from "@/components/Toast";
+import { confirmAction } from "@/components/ConfirmDialog";
 
 // ## 改造说明
 //
@@ -181,7 +182,11 @@ export default function TrainingPage() {
 
   // ---------- 回滚一次已应用的训练 ----------
   async function rollback(appId: string) {
-    if (!window.confirm("撤销这次训练应用？Agent 的档案将恢复到训练前的状态。")) return;
+    if (!(await confirmAction({
+      title: "撤销这次训练应用？",
+      description: "该员工的档案会恢复到训练前的状态，训练期间学到的内容将不再生效。",
+      confirmText: "撤销",
+    }))) return;
     try {
       await api.post(`/training/applications/${appId}/rollback`);
       notify("success", "已撤销该次训练应用");
