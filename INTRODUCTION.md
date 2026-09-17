@@ -2,7 +2,9 @@
 
 > AI Enterprise Operating System —— 人工智能企业操作系统 / 数字员工操作系统
 >
-> 版本：Phase 1 MVP 1.0（2026-08-23 交付）｜位置：`~/Documents/张阗/ai-eos`
+> 版本：实现至 Phase 3（2026-09-17 校正）｜位置：`~/Documents/张阗/ai-eos`
+>
+> 数字口径已按代码实测校正；此前的 Phase 1 估值（38 端点 / 18 表 / 2400 行）已不适用。
 
 ---
 
@@ -68,15 +70,15 @@ CEO 汇总各员成果
 ## 技术架构
 
 ```
-前端 Next.js 14 + TypeScript + Tailwind（8 个页面，全中文界面）
+前端 Next.js 14 + TypeScript + Tailwind（34 个一级业务页面，全中文界面）
         ↕ REST API (JWT 认证)
-后端 FastAPI + SQLAlchemy async（38 个端点）
+后端 FastAPI + SQLAlchemy async（307 条路径 / 354 个端点）
         ↕
-PostgreSQL 16（18 张表）+ Redis（预留）+ 本地文件存储
+PostgreSQL 16（94 张表）+ Redis（预留）+ 本地文件存储
 后台执行：线程池 + 独立数据库引擎，多 Agent asyncio 并行
 ```
 
-代码规模：后端 41 文件约 2400 行，前端 16 文件约 1000 行。
+代码规模：后端 135 个文件约 21,554 行，前端约 17,738 行。
 
 ## 快速使用
 
@@ -84,7 +86,7 @@ PostgreSQL 16（18 张表）+ Redis（预留）+ 本地文件存储
 # 启动基础设施（首次需先启动 colima）
 docker compose -f docker/docker-compose.yml up -d
 
-# 后端
+# 后端（必须先配置 apps/api/.env，见 README 的「快速启动」）
 cd apps/api && uv run alembic upgrade head
 uv run uvicorn app.main:app --port 8000 --reload
 
@@ -92,14 +94,21 @@ uv run uvicorn app.main:app --port 8000 --reload
 cd apps/web && npm run dev   # http://localhost:3000
 ```
 
-测试账号：`boss@aieos.dev` / `Passw0rd!`
+**没有预置账号**，请直接在登录页注册（用户名 ≥ 2 位，密码 ≥ 8 位且需含字母与数字）。
+首次登录后会有三步引导向导：创建 AI 公司 → 配置模型 → 生成团队。
+
+验证环境是否正常：在仓库根目录执行 `./tools/check.sh`（不需要启动服务、不需要模型密钥）。
 
 ## 当前阶段与后续路线
 
 ✅ **Phase 1（已完成）**：让 AI 公司真正"活起来"——组织、员工、任务、协作、执行、成果、管控全链路跑通。
 
-🔜 **Phase 2**：AI 会议系统、可视化工作流引擎、任务依赖 DAG、资产版本控制、全过程回放、WebSocket 实时推送。
+✅ **Phase 2（已完成）**：AI 会议系统、可视化工作流引擎、任务依赖 DAG、资产版本控制、全过程回放、WebSocket 实时推送。
 
-🔮 **Phase 3**：Agent 学习成长体系、绩效评估、技能市场、外部 Agent 接入、Computer Agent 自动化操作。
+✅ **Phase 3（已完成）**：Agent 学习成长体系、绩效评估、技能市场、外部 Agent 接入、Computer Agent 自动化操作。
+
+🚧 **工程质量（进行中）**：可靠性改造已完成一轮——修复 9 处未定义变量、28 处静默吞异常、
+11 处接口契约错配，重建 113 个测试用例与交付前自检门禁。详见 [`UPGRADE_NOTES.md`](UPGRADE_NOTES.md)。
+下一步方向：收敛功能广度做深度、精细化权限模型、建立成功率度量体系。
 
 详细开发文档见 [`DEVELOPMENT.md`](DEVELOPMENT.md)，分阶段设计见 `docs/11_PHASE_2_PLAN.md`。

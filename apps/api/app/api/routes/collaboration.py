@@ -1,6 +1,6 @@
 """P2-05: Agent Collaboration Protocol 2.0 API."""
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,8 +35,8 @@ class CollaborationResponse(BaseModel):
     description: str | None
     created_at: str  # 手动序列化
 
-    class Config:
-        from_attributes = True
+    # Pydantic V2 写法。旧式的 `class Config` 已废弃，V3 会移除。
+    model_config = ConfigDict(from_attributes=True)
 
 
 class MessageCreate(BaseModel):
@@ -63,8 +63,7 @@ class MessageResponse(BaseModel):
     read_by: dict | None
     created_at: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 @router.get("/collaborations", response_model=list[CollaborationResponse])

@@ -28,6 +28,11 @@ logger = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 安全姿态告警：让"能跑"和"安全"之间的差距在启动日志里就被看见。
+    # 生产环境的致命问题已在 Settings 校验时拒绝启动，这里只处理非致命的提醒。
+    for _w in settings.security_warnings():
+        logger.warning("安全提示：%s", _w)
+
     # 便携/SQLite 模式：启动时自动建表（幂等）
     if settings.database_url.startswith("sqlite"):
         from app.db.session import engine
@@ -35,7 +40,7 @@ async def lifespan(app: FastAPI):
         import app.models  # noqa: F401 — 确保所有模型注册到 Base.metadata
         async with engine.begin() as conn:
             await conn.run_sync(lambda c: Base.metadata.create_all(c))
-        print("[startup] sqlite schema ensured")
+        logger.info("[startup] sqlite schema ensured")
     from app.scheduler_engine import start_scheduler, stop_scheduler
     start_scheduler()
     # 启动时恢复卡在 RUNNING 的会议（自愈）
@@ -43,7 +48,8 @@ async def lifespan(app: FastAPI):
         import app.background_jobs as background_jobs
         background_jobs.recover_stuck_meetings()
     except Exception as e:
-        print(f"[startup] recover stuck meetings failed: {e}")
+        # 自愈失败要让运维看得见，但不能阻止服务启动
+        logger.error("[startup] 恢复卡住的会议失败：%s", e, exc_info=True)
     yield
     stop_scheduler()
 

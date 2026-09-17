@@ -18,4 +18,4 @@
 3. asyncio.gather 并行 run_one（每 worker 独立 session/engine）
 4. worker 返回纯 dict {task,agent,status,output}——规避跨 session ORM 缓存问题
 5. SUMMARIZE_PROMPT: CEO 汇总为 Markdown 报告
-6. 失败子任务附于报告尾部，不阻塞整体交付\n
+6. 失败子任务附于报告尾部，不阻塞整体交付

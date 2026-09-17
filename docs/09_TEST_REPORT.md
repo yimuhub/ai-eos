@@ -33,4 +33,4 @@
 1. passlib+bcrypt5 不兼容 -> 锁 bcrypt<4
 2. asyncpg 跨事件循环 -> background_jobs 独立 engine
 3. orchestrator created_by 外键误用 agent id -> 继承父任务用户
-4. worker 结果收集的跨 session ORM 缓存 -> 纯 dict 返回\n
+4. worker 结果收集的跨 session ORM 缓存 -> 纯 dict 返回

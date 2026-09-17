@@ -168,6 +168,22 @@ def has_llm_key() -> bool:
     )
 
 
+def pytest_configure(config):
+    """注册 requires_llm 标记。
+
+    用例侧用的是 `requires_llm` **夹具**（无密钥时自动 skip）；这里额外把同名标记
+    注册上，是为了让命令行筛选也能用：
+
+        pytest tests/ -m "not requires_llm"     # CI 里显式排除需真实模型的用例
+
+    两者并存不冲突：夹具负责"无密钥时跳过"，标记负责"按需筛选"。
+    """
+    config.addinivalue_line(
+        "markers",
+        "requires_llm: 该用例需要真实模型密钥；无密钥时由 requires_llm 夹具自动跳过",
+    )
+
+
 @pytest.fixture
 def requires_llm():
     """声明"本用例需要真实模型"。无密钥时跳过而非失败。"""

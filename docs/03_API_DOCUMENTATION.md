@@ -52,4 +52,4 @@ Base URL: `http://localhost:8000` | 认证: `Authorization: Bearer <JWT>`（除 
 
 ## 日志与看板
 - GET /events?event_type&limit
-- GET /dashboard/{company_id} —— Agent统计/任务统计/活跃任务/最近事件与成果\n
+- GET /dashboard/{company_id} —— Agent统计/任务统计/活跃任务/最近事件与成果

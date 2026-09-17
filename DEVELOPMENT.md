@@ -1,8 +1,12 @@
 # AI-EOS 开发文档
 
-> Phase 1 MVP ｜ 最后更新：2026-08-23
+> 代码实现至 **Phase 3** ｜ 文档校正日期：2026-09-17
 >
 > 本文档面向开发者，覆盖系统架构、目录结构、数据模型、API、核心模块实现与运维指南。
+>
+> **数据口径说明**：本文中的规模数字已于 2026-09-17 按代码实测校正
+> （此前长期停留在 Phase 1 的估值：表数 18 → 94，端点数 38 → 354）。
+> 工程质量改造记录见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
 
 ## 目录
 
@@ -37,10 +41,12 @@ ai-eos/
 ├── apps/
 │   ├── api/                    # FastAPI 后端
 │   │   ├── app/
-│   │   │   ├── main.py         # 入口，挂载 12 个路由组
-│   │   │   ├── core/           # config.py, security.py(JWT/bcrypt)
+│   │   │   ├── main.py         # 入口，挂载全部路由组（12 组仅为 Phase 1 的规模，现约 60 个路由模块）
+│   │   │   ├── core/           # config.py, security.py(JWT/bcrypt),
+│   │   │   │                   # logging_config.py(集中日志), env_loader.py(.env 加载),
+│   │   │   │                   # sandbox.py(文件访问沙箱)
 │   │   │   ├── db/             # base.py(DeclarativeBase), session.py(async engine)
-│   │   │   ├── models/         # 16 张表的 ORM 定义
+│   │   │   ├── models/         # 94 张表的 ORM 定义
 │   │   │   ├── api/
 │   │   │   │   ├── deps.py     # get_current_user 依赖
 │   │   │   │   └── routes/     # auth/companies/agents/models_api/skills/
@@ -57,10 +63,12 @@ ai-eos/
 │       ├── app/(main)/         # 登录守卫布局 + 8 个页面
 │       ├── components/Layout.tsx
 │       └── lib/                # api.ts 客户端, i18n.ts 中文映射
-├── docs/                       # 架构/API/Schema/测试报告等 11 份文档
+├── docs/                       # 架构/API/Schema/测试报告等设计文档
 ├── plugins/                    # models/skills/providers 预留插件目录
 ├── storage/                    # uploads/ + artifacts/(Agent 成果自动归档)
-├── tests/                      # 状态机端到端测试
+├── tools/                      # check.sh(交付前自检门禁) + check_api_contract.py(接口契约校验)
+├── tests/                      # ⚠️ 历史手工脚本，非 pytest 用例（见 tests/LEGACY_SCRIPTS.md）
+├── apps/api/tests/             # ✅ 当前测试套件（113 用例，pytest + httpx.ASGITransport）
 ├── docker/docker-compose.yml   # PG16 + Redis7（国内镜像源）
 └── AI_EOS_DEVELOPMENT_CONSTITUTION.md  # 开发宪法
 ```
@@ -103,7 +111,10 @@ OPENAI_COMPAT_MODEL=agnes-2.5-flash
 
 ## 4. 数据库设计
 
-18 张表，完整定义见 `docs/02_DATABASE_SCHEMA.md`。核心关系：
+**94 张表**（实测，`len(Base.metadata.tables)`），28 个 Alembic 迁移版本。
+
+> 下表为 Phase 1 的核心关系子集，用于理解主干结构；完整定义见
+> `docs/02_DATABASE_SCHEMA.md` 与 `apps/api/app/models/`。
 
 ```
 users ──< companies ──< departments（自引用树）
@@ -192,7 +203,33 @@ DECOMPOSE_PROMPT → CEO LLM 输出 JSON {subtasks:[...]}
 
 ## 6. API 一览
 
-共 38 个端点，全部 Bearer JWT 认证（auth 除外）。交互式文档：http://localhost:8000/docs
+**307 条路径 / 354 个端点 / 52 个分组 / 53 个路由模块**（实测，`app.openapi()["paths"]`）。
+除 `auth` 外全部要求 Bearer JWT 认证。交互式文档：http://localhost:8000/docs
+
+> ⚠️ **不要用 `app.routes` 统计路由**：路由是惰性 `_IncludedRouter`，用
+> `isinstance(r, APIRoute)` 过滤会得到 0。**`app.openapi()["paths"]` 才是权威清单**，
+> `tools/check_api_contract.py` 也是基于它工作的。
+
+下表为 Phase 1 的核心分组（用于理解主干）；当前完整分组按端点数排序如下：
+
+| 分组 | 端点数 | 分组 | 端点数 |
+|------|-------|------|-------|
+| governance | 23 | collaboration | 9 |
+| projects | 16 | skill-growth | 9 |
+| agents | 15 | intervention | 8 |
+| knowledge-p4 | 14 | automations | 8 |
+| war-room | 14 | artifacts | 7 |
+| tokens | 13 | computer-agent | 7 |
+| organization | 11 | app_alias | 7 |
+| tasks | 11 | schedules | 7 |
+| meetings | 11 | training | 7 |
+| models | 10 | factory | 7 |
+| workflows | 10 | external-agents | 7 |
+| career | 10 | doc-styles / knowledge / reflection | 6 |
+| sandbox | 10 | context / learning / task-dispatch | 5 |
+| skills / growth-center | 9 | auth / assets / memory / reviews | 3–4 |
+
+Phase 1 核心分组（历史基线，仍全部可用）：
 
 | 分组 | 端点 |
 |------|------|
@@ -249,15 +286,50 @@ DECOMPOSE_PROMPT → CEO LLM 输出 JSON {subtasks:[...]}
 
 ## 10. 测试
 
+### 推荐：一条命令跑完全部检查
+
 ```bash
-# 状态机端到端（创建→暂停→恢复→取消 + 非法跳转防护）
-python3 tests/test_state_machine_e2e.py
-
-# 后端单元测试
-cd apps/api && uv run pytest
-
-# 前端构建检查
-cd apps/web && npm run build
+# 在仓库根目录执行；不需要启动服务、不需要模型密钥
+./tools/check.sh
 ```
 
-已通过的端到端验收场景（公司→部门→Agent→配置→协同任务→并行执行→汇总→资产入库→全过程查看）详见 `docs/09_TEST_REPORT.md`。
+覆盖：pyflakes（未定义名/语法）→ 应用与 OpenAPI 可生成 → SQLAlchemy mapper 可配置 →
+前后端接口契约（404/405 门禁）→ 前端 TypeScript strict → 前端 ESLint → 测试套件。
+**任一失败即非零退出**，可直接接进 CI。
+
+### 分别运行
+
+```bash
+# 后端测试套件：113 个用例，每个会话独立临时 SQLite，不碰真实库
+cd apps/api && .venv/bin/python -m pytest tests/ -q
+
+# 显式排除需要真实模型的用例（CI 里用；无密钥时它们本来也会自动跳过）
+cd apps/api && .venv/bin/python -m pytest tests/ -q -m "not requires_llm"
+
+# 前端类型检查与 lint
+cd apps/web && npx tsc --noEmit && npx eslint app components lib
+
+# 前后端接口契约（独立运行，便于定位具体错配）
+cd apps/api && .venv/bin/python ../../tools/check_api_contract.py --strict
+```
+
+### 关于历史脚本
+
+仓库根目录的 `tests/` 下是**历史手工脚本**（29 个），其中 28 个依赖 `/tmp/aieos_token`
+临时文件与硬编码的真实数据库 UUID，**无法在 pytest 下运行**。它们已通过
+`tests/conftest.py` 从收集范围中排除，保留作为行为参考；
+可运行性统计与重写指引见 `tests/LEGACY_SCRIPTS.md`。
+
+当前测试套件位于 **`apps/api/tests/`**：
+
+| 文件 | 覆盖 |
+|------|------|
+| `test_health.py` | 应用可启动 / OpenAPI 可生成 / mapper 可配置 |
+| `test_auth.py` | 弱口令拒绝、登录限流、账号枚举防护、伪造/失效/停用令牌 |
+| `test_tenancy.py` | 跨租户读写隔离（含反向对照，避免假阴性） |
+| `test_security_sandbox.py` | 12 种注入载荷 / 9 种白名单外二进制 / 8 条越界路径 |
+| `test_api_contract.py` | 接口契约门禁（复用 `tools/` 同一份逻辑） |
+| `test_code_quality.py` | 未定义名 = 0、`except: pass` = 0、基础设施在位 |
+
+Phase 1 的端到端验收场景（公司→部门→Agent→配置→协同任务→并行执行→汇总→资产入库→
+全过程查看）记录详见 `docs/09_TEST_REPORT.md`。

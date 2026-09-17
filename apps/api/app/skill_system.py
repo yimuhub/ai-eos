@@ -90,7 +90,7 @@ class FileReaderSkill(BaseSkill):
 
 
 class WebSearchSkill(BaseSkill):
-    """真实 Web 搜索：DuckDuckGo，无需 API key。"""""
+    """真实 Web 搜索：Bing 中国（国内可达），无需 API key。"""
 
     id = "web_search"
     name = "Web Search"

@@ -167,3 +167,72 @@ def test_provider_key_resolution_uses_unified_entry():
                                          provider="gemini") == settings.gemini_api_key
     finally:
         os.environ.pop("AIEOS_TEST_KEY_ENV", None)
+
+
+
+# ---------------------------------------------------------------------------
+# 生产环境安全姿态：占位密钥 / debug 未关 → 必须拒绝启动
+#
+# 这几条守的是一个具体事故：部署时忘了配 JWT_SECRET，代码里那个公开的
+# 占位值就成了实际签名密钥 —— 任何人都能伪造任意用户的 token。
+# 目的是把"忘记配置"从"静默失守"变成"显式失败"。
+#
+# 注意：构造时传 `_env_file=None`，否则仓库里的 apps/api/.env 会先一步
+# 填上值，测试就测不到"没配"这条路径了（这正是本文件第一次写错的地方）。
+# ---------------------------------------------------------------------------
+
+_PLACEHOLDER_SECRET = "aieos-portable-secret"
+
+
+def _build_settings(monkeypatch, **env):
+    """在隔离环境下构造 Settings：屏蔽 .env 文件，只认显式给的变量。"""
+    keys = ("AIEOS_ENV", "JWT_SECRET", "DEBUG", "JWT_EXPIRE_MINUTES",
+            "DATABASE_URL", "OPENAI_COMPAT_API_KEY")
+    for k in keys:
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+
+    import app.core.config as cfg
+
+    # _env_file=None 关掉 .env 加载；不这样做，仓库里的 .env 会掩盖测试意图
+    return cfg.Settings(_env_file=None)
+
+
+def test_production_rejects_placeholder_jwt_secret(monkeypatch):
+    """生产环境 + 占位密钥 → 拒绝启动（否则任何人可伪造 token）。"""
+    import pytest
+
+    with pytest.raises(Exception) as exc:
+        _build_settings(monkeypatch, AIEOS_ENV="production",
+                        JWT_SECRET=_PLACEHOLDER_SECRET, DEBUG="false")
+    assert "JWT_SECRET" in str(exc.value)
+
+
+def test_production_rejects_debug_true(monkeypatch):
+    """生产环境 + DEBUG=true → 拒绝启动（暴露堆栈、可能开放测试台）。"""
+    import pytest
+
+    with pytest.raises(Exception) as exc:
+        _build_settings(monkeypatch, AIEOS_ENV="production",
+                        JWT_SECRET="x" * 64, DEBUG="true")
+    assert "DEBUG" in str(exc.value)
+
+
+def test_production_accepts_hardened_config(monkeypatch):
+    """生产环境 + 强密钥 + debug 关闭 → 放行，且不再有告警。"""
+    s = _build_settings(monkeypatch, AIEOS_ENV="production",
+                        JWT_SECRET="a" * 64, DEBUG="false")
+    assert s.is_production is True
+    assert s.using_default_jwt_secret is False
+    assert s.security_warnings() == [], s.security_warnings()
+
+
+def test_development_starts_but_warns(monkeypatch):
+    """开发环境必须放行（否则"克隆下来就能跑"不成立），但要给出告警。"""
+    s = _build_settings(monkeypatch, AIEOS_ENV="development")
+    assert s.is_production is False
+    assert s.using_default_jwt_secret is True
+    warnings = s.security_warnings()
+    assert any("JWT_SECRET" in w for w in warnings), f"默认密钥未告警：{warnings}"
+    assert any("DEBUG" in w for w in warnings), f"debug 未告警：{warnings}"

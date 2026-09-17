@@ -12,4 +12,4 @@
 - P2-07 资产版本控制（asset_versions 表，V1/V2/Final-Approved）
 - P2-08 全过程回放（基于 event_log 的时间轴回放器）
 - 基建：Redis 缓存启用、SSE/WebSocket 实时推送替换前端轮询、
-  web_search 接真实后端、Celery/Temporal 替换内置执行器\n
+  web_search 接真实后端、Celery/Temporal 替换内置执行器

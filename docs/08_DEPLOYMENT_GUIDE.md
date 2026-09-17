@@ -26,4 +26,4 @@ OPENAI_COMPAT_API_KEY / OPENAI_COMPAT_BASE_URL / OPENAI_COMPAT_MODEL
 ## 注意事项
 - 国内网络拉取镜像用 docker.m.daocloud.io 前缀
 - bcrypt 需锁 <4 版本（passlib 兼容）
-- 生产部署: JWT_SECRET 必须更换；前端 CORS allow_origins 收紧\n
+- 生产部署: JWT_SECRET 必须更换；前端 CORS allow_origins 收紧

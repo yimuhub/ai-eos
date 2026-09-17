@@ -16,4 +16,4 @@ class BaseSkill(ABC):
 ## 扩展方式
 plugins/skills/ 目录放新插件文件 -> register_skill(Cls) 注册 ->
 GET /skills 自动同步清单到数据库 -> POST install 绑定给 Agent。
-Runtime 通过 build_context 将已装技能告知 LLM，禁止硬编码（Rule 3/6）。\n
+Runtime 通过 build_context 将已装技能告知 LLM，禁止硬编码（Rule 3/6）。

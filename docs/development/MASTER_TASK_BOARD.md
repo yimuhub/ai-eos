@@ -15,4 +15,4 @@ P1-12  Asset Center                 COMPLETED
 P1-13  Event Log                    COMPLETED
 P1-14  Pause / Resume               COMPLETED
 P1-15  Human Intervention           COMPLETED
-P1-16  Integration Testing          COMPLETED\n
+P1-16  Integration Testing          COMPLETED
