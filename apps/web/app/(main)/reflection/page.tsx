@@ -1,7 +1,15 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
+import { notify } from "@/components/Toast";
+
+/** 把任意异常转成一句可读的原因，避免界面出现 "[object Object]" */
+function describe(e: unknown, fallback: string): string {
+  if (e instanceof ApiError) return e.message;
+  if (e instanceof Error) return e.message;
+  return fallback;
+}
 
 /* ============================================================
    复盘中心：按部门聚合所有员工的复盘教训 + 手动触发复盘
@@ -102,7 +110,12 @@ export default function ReflectionCenterPage() {
       if (detailData) {
         setDetailData({ ...detailData, lessons: detailData.lessons.filter((l: Lesson) => l.id !== lessonId) });
       }
-    } catch {}
+      notify("success", "已删除该条经验教训");
+    } catch (e) {
+      // 原实现是 `catch {}` 静默吞掉：删除失败时列表毫无变化，
+      // 用户不知道是没删掉还是没生效。现在必须说明原因。
+      notify("error", describe(e, "删除失败"));
+    }
   }
 
   const detailModal = mounted && detail ? createPortal(

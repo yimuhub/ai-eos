@@ -111,11 +111,13 @@ export default function AgentDetailPage() {
     if (!agentId || !newModelId) return;
     setSwitching(true);
     try {
-      await api.patch(`/agents/${agentId}/switch-model`, { model_id: newModelId });
+      // 后端实际注册的是 PUT /agents/{id}/switch-model，原代码用 PATCH
+      // → 405 Method Not Allowed，切换模型永远失败（且错误提示只有一句 HTTP 405）。
+      await api.put(`/agents/${agentId}/switch-model`, { model_id: newModelId });
       setMsg(`✅ 已切换到模型: ${allModels.find((m) => m.id === newModelId)?.name || newModelId}`);
       selectAgent(agentId);
     } catch (e: any) {
-      setMsg(e.message || String(e));
+      setMsg(`❌ ${e.message || String(e)}`);
     }
     setSwitching(false);
   }

@@ -529,6 +529,33 @@ async def autonomous_overview(
     return out
 
 
+@router.delete("/autonomous-overview/{settings_id}")
+async def delete_autonomous_settings(
+    settings_id: str,
+    company_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """清除某个对象（部门/项目/Agent）的专属自治设置，使其回落到公司默认等级。
+
+    ## 改造说明
+    前端「自治运行」页的"清除"按钮调用本路由，但后端**从未实现**
+    （前端只留了一句"后端若无删除接口则提示"的兜底注释），
+    导致该功能自始至终 404。这里补上实现并加归属校验。
+    """
+    row = await db.get(AutonomousSettings, settings_id)
+    # 记录级归属校验：防止用自己公司的 company_id 删除他人配置
+    if not row or row.company_id != company_id:
+        raise HTTPException(404, "自治设置不存在")
+
+    scope_desc = f"{row.scope_type}:{row.scope_id or company_id}"
+    await db.delete(row)
+    await db.commit()
+    return {"ok": True, "deleted_id": settings_id,
+            "scope": scope_desc,
+            "message": "已清除专属设置，该对象将回落到公司默认自治等级"}
+
+
 @router.get("/autonomous-logs")
 async def list_autonomous_logs(
     company_id: str = Query(...),

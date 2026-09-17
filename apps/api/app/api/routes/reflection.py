@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_agent_owned, get_current_user, get_db
 from app.models.agent import Agent
 from app.models.company import Department
 from app.models.reflection import (AgentExperience, AgentReflection,
@@ -37,9 +37,7 @@ async def create_experience(
     user: User = Depends(get_current_user),
 ):
     """记录工作经历并（可选）立即触发 LLM 复盘。"""
-    a = await db.get(Agent, data.agent_id)
-    if not a:
-        raise HTTPException(404, "Agent not found")
+    a = await assert_agent_owned(db, user.id, data.agent_id)  # 归属校验
     if data.outcome not in ("SUCCESS", "FAILED", "PARTIAL"):
         raise HTTPException(400, "outcome must be SUCCESS/FAILED/PARTIAL")
 
@@ -77,11 +75,40 @@ async def lessons(
     user: User = Depends(get_current_user),
 ):
     """该 Agent 的经验教训库（可用于后续任务的 prompt 注入）。"""
+    await assert_agent_owned(db, user.id, agent_id)  # 归属校验
     q = await db.execute(select(ExperienceLesson).where(
         ExperienceLesson.agent_id == agent_id).order_by(
         ExperienceLesson.created_at.desc()).limit(limit))
     return [{"id": l.id, "lesson": l.lesson, "tags": l.tags,
              "created_at": l.created_at.isoformat()} for l in q.scalars().all()]
+
+
+@router.delete("/agents/{agent_id}/lessons/{lesson_id}")
+async def delete_lesson(
+    agent_id: str,
+    lesson_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """删除一条经验教训。
+
+    ## 改造说明
+    前端「复盘中心」和「员工档案」两个页面都实现了"删除这条复盘"，
+    调用的是 `DELETE /reflection/agents/{id}/lessons/{lesson_id}`，
+    但后端**从未实现该路由** → 用户点删除永远 404，
+    且前端用 `catch {}` 静默吞掉，表现为"点了没反应"。
+    这里补上实现：既修复断链，也补上记录级归属校验。
+    """
+    await assert_agent_owned(db, user.id, agent_id)
+
+    row = await db.get(ExperienceLesson, lesson_id)
+    # 同时校验记录本身归属：防止用自己 Agent 的 id 删除他人记录
+    if not row or row.agent_id != agent_id:
+        raise HTTPException(404, "经验教训不存在")
+
+    await db.delete(row)
+    await db.commit()
+    return {"ok": True, "deleted_id": lesson_id}
 
 
 @router.get("/agents/{agent_id}/reflections")
@@ -91,6 +118,7 @@ async def reflections(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await assert_agent_owned(db, user.id, agent_id)  # 归属校验
     q = await db.execute(select(AgentReflection).where(
         AgentReflection.agent_id == agent_id).order_by(
         AgentReflection.created_at.desc()).limit(limit))

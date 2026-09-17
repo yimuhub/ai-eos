@@ -34,6 +34,9 @@ const LEVEL_BADGE: Record<number, string> = {
 export default function AutonomousPage() {
   const [companyLv, setCompanyLv] = useState<number>(2);
   const [stopped, setStopped] = useState(false);
+  // 显式保存当前公司 id：原代码在删除请求里写死 `company_id=x` 占位符，
+  // 只有在 api 层已记录激活公司时才会被替换，否则会把字面量 "x" 发给后端 → 404。
+  const [cid, setCid] = useState("");
   const [scopes, setScopes] = useState<ScopeRow[]>([]);
   const [logs, setLogs] = useState<LogItem[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -64,8 +67,9 @@ export default function AutonomousPage() {
         api.get("/governance/autonomous-logs?limit=30"),
         api.get("/agents"),
         api.get(`/companies`).then(async (cs: any[]) => {
-          const cid = cs[0]?.id;
-          return cid ? api.get(`/companies/${cid}/departments`) : [];
+          const id = cs[0]?.id;
+          if (id) setCid(id);
+          return id ? api.get(`/companies/${id}/departments`) : [];
         }),
         api.get("/external-agents"),
       ]);
@@ -122,14 +126,14 @@ export default function AutonomousPage() {
 
   async function removeScoped(row: ScopeRow) {
     if (!confirm(`确定清除「${row.name}」的专属设置？将回落到公司默认等级。`)) return;
+    if (!cid) { flash("未识别到当前公司，请先到「公司管理」选择公司", "err"); return; }
     setBusy(`rm-${row.id}`);
     try {
-      await api.del(`/governance/autonomous-overview/${row.id}?company_id=x`);
-      flash("✅ 已清除，该对象回落到公司默认");
+      const r = await api.del(`/governance/autonomous-overview/${row.id}?company_id=${cid}`);
+      flash(`✅ ${r?.message || "已清除，该对象回落到公司默认"}`);
       load();
     } catch (e: any) {
-      // 后端若无删除接口则提示
-      flash(e.message || "暂不支持清除，可将其改为与公司一致的等级", "err");
+      flash(e.message || "清除失败", "err");
     } finally { setBusy(""); }
   }
 

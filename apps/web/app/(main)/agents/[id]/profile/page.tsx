@@ -4,6 +4,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useRef } from "react";
 import { api } from "@/lib/api";
+import { notify } from "@/components/Toast";
 
 /* ============================================================
    综合档案页：成长 / 训练 / 技能 / 私人知识库 / 复盘 / 考核 / 职业
@@ -197,7 +198,11 @@ export default function AgentProfilePage() {
     try {
       await api.del(`/reflection/agents/${agentId}/lessons/${lessonId}`);
       setLessons(prev => prev.filter(l => l.id !== lessonId));
-    } catch { /* ignore */ }
+      notify("success", "已删除该条复盘");
+    } catch (e) {
+      // 原实现 `catch { /* ignore */ }` 让删除失败完全无声
+      notify("error", e instanceof Error ? e.message : "删除失败");
+    }
   }
 
   const availableNodes = () => {
