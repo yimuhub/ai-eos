@@ -7,6 +7,7 @@ import { confirmAction } from "@/components/ConfirmDialog";
 import { notify } from "@/components/Toast";
 import AgentChat from "@/components/AgentChat";
 import InfoEditPanel from "@/components/InfoEditPanel";
+import type { Company } from "@/lib/types";
 
 /* ============================================================
    Agent 详情中心：暗色主题 + 切换模型 + 批量学习技能
@@ -100,7 +101,7 @@ export default function AgentDetailPage() {
         notify("error", describeError(e, "加载员工列表失败"));
       }
     })();
-    api.get("/companies").then((cs: any[]) => {
+    api.get<Company[]>("/companies").then((cs) => {
       if (cs[0]?.id) api.get(`/skill-growth/tree?company_id=${cs[0].id}`).then(setNodes).catch(() => {});
     }).catch(() => {});
     api.get("/models").then((m: ModelRow[]) => setAllModels(m)).catch(() => {});

@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { api, ApiError } from "@/lib/api";
 
 /* ============================================================
    全功能测试台（开发/测试辅助工具）
@@ -20,12 +21,13 @@ export default function TestConsolePage() {
 
   const load = useCallback(async () => {
     try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/test-console/meta`,
-        { headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });
-      if (r.status === 404) { setNotFound(true); return; }
-      setMeta(await r.json());
-    } catch {
+      // 这个页面依赖"接口是否存在"来决定是否显示（生产环境后端会返回 404）。
+      // 走统一 api 层后 404 是 ApiError.isNotFound —— 比手工比 r.status 更明确，
+      // 而且不会再因为"忘了带鉴权头"而把 401 误判成 404。
+      setMeta(await api.get<Meta>("/test-console/meta"));
+      setNotFound(false);
+    } catch (e) {
+      if (e instanceof ApiError && e.isAuth) return; // 401 由全局层跳登录，此处不误报"未启用"
       setNotFound(true);
     }
   }, []);

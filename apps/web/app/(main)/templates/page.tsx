@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import type { Company } from "@/lib/types";
 
 type Template = { key: string; name: string; builtin: boolean; departments?: number; agents?: number };
 
@@ -12,7 +13,7 @@ export default function TemplatesPage() {
   const [msg, setMsg] = useState("");
 
   useEffect(() => {
-    api.get("/companies").then((cs: any[]) => setCid(cs[0]?.id));
+    api.get<Company[]>("/companies").then((cs) => setCid(cs[0]?.id));
     api.get("/governance/templates").then(setTemplates);
   }, []);
 

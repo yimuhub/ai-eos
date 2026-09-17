@@ -3,9 +3,10 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useRef } from "react";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import { confirmAction } from "@/components/ConfirmDialog";
 import { notify } from "@/components/Toast";
+import type { Company } from "@/lib/types";
 
 /* ============================================================
    综合档案页：成长 / 训练 / 技能 / 私人知识库 / 复盘 / 考核 / 职业
@@ -74,7 +75,7 @@ export default function AgentProfilePage() {
     const loadMemories = () =>
       api.get(`/growth-center/agents/${aid}/detail?company_id=${cidRef.current}`)
         .then((d: any) => setMemories(d?.memories || [])).catch(() => {});
-    api.get("/companies").then((cs: any[]) => {
+    api.get<Company[]>("/companies").then((cs) => {
       if (cs.length && !cidRef.current) cidRef.current = cs[0].id;
       loadMemories();
     }).catch(loadMemories);
@@ -86,7 +87,7 @@ export default function AgentProfilePage() {
       setAgentName(as.find((a: any) => a.id === agentId)?.name || "");
     }).catch(() => {});
     api.get("/kb2/agents/" + agentId + "/documents").then(setKbDocs).catch(() => {});
-    api.get("/companies").then((cs: any[]) => {
+    api.get<Company[]>("/companies").then((cs) => {
       if (cs[0]?.id) {
         cidRef.current = cs[0].id;
         api.get(`/skills?company_id=${cs[0].id}`).then((all: any[]) => {
@@ -104,17 +105,13 @@ export default function AgentProfilePage() {
     try {
       const fd = new FormData();
       fd.append("file", f);
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/training/upload-material?agent_id=${agentId}&company_id=${cidRef.current}`,
-        { method: "POST",
-          headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-          body: fd });
-      const d = await r.json();
+      const d = await api.upload<{ ok?: boolean; chunks?: number }>(
+        `/training/upload-material?agent_id=${agentId}&company_id=${cidRef.current}`, fd);
       if (d.ok) {
         setTrInput((prev: string) => (prev ? prev + "\n\n" : "") + `【来自附件 ${f.name} 的内容已入库私人知识库】`);
         setMsg(`✅ 附件 ${f.name} 已转 MD 存入私人知识库（${d.chunks} 块）`);
-      } else setMsg("❌ 附件解析失败");
-    } catch (e: any) { setMsg("❌ " + (e.message || e)); }
+      } else setMsg("❌ 附件解析失败：未能从该文件提取到文本");
+    } catch (e) { setMsg(`❌ ${describeError(e, "附件上传失败")}`); }
     setTrUploading(false);
   }
 

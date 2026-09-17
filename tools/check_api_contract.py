@@ -24,6 +24,8 @@
   宽松匹配通过的会列入"需人工确认"，不计为失败。
 - raw `fetch()` 调用**不在**本工具扫描范围内（它们绕过了统一 API 层）。
   如果要用 raw fetch，请先确认它是否也该走 api 层。
+- 模板串里嵌三元表达式（如 `/x/${a ? "b" : "c"}`）会因引号提前终止捕获，
+  此类调用会被判为「无法静态解析」并计入失败——请改写成 if/else 两条字面调用。
 """
 from __future__ import annotations
 
@@ -110,6 +112,13 @@ def check() -> tuple[list[tuple], list[tuple]]:
     dynamic: list[tuple] = []
 
     for file, line, method, raw in frontend_calls():
+        # 路径模板被截断 = 静态扫描看不懂（例如模板串里嵌了三元表达式，
+        # 其中的引号会提前终止正则捕获）。这属于**校验盲区**，
+        # 必须显式报错而不是当成"没发现问题"放过去。
+        if raw.count("${") > raw.count("}"):
+            broken.append((file, line, method, raw + "  ← 模板无法静态解析", []))
+            continue
+
         norm = _normalize(raw)
         if norm in routes and method in routes[norm]:
             continue

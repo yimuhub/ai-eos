@@ -1,8 +1,10 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import { confirmAction } from "@/components/ConfirmDialog";
 import { createPortal } from "react-dom";
+import { notify } from "@/components/Toast";
+import type { Company } from "@/lib/types";
 
 /* ============================================================
    知识库中心 v2：全局公用库 + Agent 私人库（P4）
@@ -53,7 +55,7 @@ export default function KnowledgePage() {
   const [cfgSaved, setCfgSaved] = useState(false);
 
   const load = useCallback(async () => {
-    const cs: any[] = await api.get("/companies");
+    const cs = await api.get<Company[]>("/companies");
     if (!cs.length) return;
     setCid(cs[0].id);
     api.get(`/kb2/global/documents?company_id=${cs[0].id}`).then(setGlobalDocs).catch(() => {});
@@ -117,26 +119,30 @@ export default function KnowledgePage() {
   async function uploadFile(file: File) {
     if (tab !== "private" || !selAgent) return;
     setUploadMsg(`上传中：${file.name}…`);
-    const fd = new FormData();
-    fd.append("file", file);
-    const r = await fetch(
-      `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/kb2/agents/${selAgent}/upload`,
-      { method: "POST", headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` }, body: fd });
-    const data = await r.json();
-    setUploadMsg(data.converted
-      ? `✅ ${file.name} 已入库（${data.chunks} 块索引 + 原始文件保留）`
-      : `⚠️ ${file.name} 无法提取文本，仅保留原始文件`);
-    await loadPrivate();
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      // multipart 上传走 api.upload：由 api 层负责鉴权、超时与错误规范化
+      const data = await api.upload<{ converted?: boolean; chunks?: number }>(
+        `/kb2/agents/${selAgent}/upload`, fd);
+      setUploadMsg(data.converted
+        ? `✅ ${file.name} 已入库（${data.chunks} 块索引 + 原始文件保留）`
+        : `⚠️ ${file.name} 无法提取文本，仅保留原始文件`);
+      await loadPrivate();
+    } catch (e) {
+      setUploadMsg(`❌ ${file.name} 上传失败：${describeError(e, "上传失败")}`);
+    }
   }
 
   async function importTpl(key: string) {
     if (!selAgent) return;
-    const r = await fetch(
-      `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/kb2/agents/${selAgent}/import-template/${key}`,
-      { method: "POST", headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });
-    if (r.ok) {
+    try {
+      await api.post(`/kb2/agents/${selAgent}/import-template/${key}`);
       setUploadMsg(`✅ 模板「${templates.find((t) => t.key === key)?.name}」已导入私人库`);
       await loadPrivate();
+    } catch (e) {
+      // 原来失败时什么都不说，用户只会觉得"点了没反应"
+      setUploadMsg(`❌ 导入模板失败：${describeError(e, "导入失败")}`);
     }
   }
 
@@ -155,15 +161,14 @@ export default function KnowledgePage() {
   async function saveCostMode(mode: string) {
     setCostMode(mode);
     if (!selAgent) return;
-    await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/kb2/agents/${selAgent}/config`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json",
-                   Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({ cost_mode: mode }),
-      });
-    setCfgSaved(true);
-    setTimeout(() => setCfgSaved(false), 2000);
+    try {
+      await api.put(`/kb2/agents/${selAgent}/config`, { cost_mode: mode });
+      setCfgSaved(true);
+      setTimeout(() => setCfgSaved(false), 2000);
+    } catch (e) {
+      // 原来不看返回就显示"已保存"：保存失败时用户以为生效了
+      notify("error", `成本模式保存失败：${describeError(e, "保存失败")}`);
+    }
   }
 
   async function openPreview(doc: Doc) {

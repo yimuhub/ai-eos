@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 
 /* ============================================================
    治理与控制：改进审批 · 能力包市场 · 企业模板 · 自治等级
@@ -43,17 +43,24 @@ export default function GovernancePage() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api.get("/governance/self-improvement-cases").then(setCases).catch(() => {});
-    api.get("/governance/marketplace/packages").then((r: any) => setInstalls(r.installations || [])).catch(() => {});
-    api.get("/governance/templates").then((r: any) => setTemplates(r.templates || [])).catch(() => {});
+    api.get<Case[]>("/governance/self-improvement-cases").then(setCases).catch(() => {});
+    api.get<{ installations?: Install[] }>("/governance/marketplace/packages")
+      .then((r) => setInstalls(r.installations || [])).catch(() => {});
+    api.get<{ templates?: Template[] }>("/governance/templates")
+      .then((r) => setTemplates(r.templates || [])).catch(() => {});
   }, []);
 
   async function approve(id: string, status: string) {
-    const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/governance/self-improvement-cases/${id}/${status}`,
-      { method: "PUT", headers: { "Content-Type": "application/json" } });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    setMsg(`✅ ${STATUS_ZH[status] || status}`);
-    api.get("/governance/self-improvement-cases").then(setCases).catch(() => {});
+    try {
+      // 这里原来是裸 fetch 且**完全没带鉴权头**，只有 Content-Type。
+      // 需要登录的部署下这个审批按钮点了必然失败（而且失败原因不可见）。
+      // 改走统一 api 层后鉴权头自动注入。
+      await api.put(`/governance/self-improvement-cases/${id}/${status}`);
+      setMsg(`✅ ${STATUS_ZH[status] || status}`);
+      api.get<Case[]>("/governance/self-improvement-cases").then(setCases).catch(() => {});
+    } catch (e) {
+      setMsg(`❌ ${describeError(e, "审批失败")}`);
+    }
   }
 
   async function publishPkg() {

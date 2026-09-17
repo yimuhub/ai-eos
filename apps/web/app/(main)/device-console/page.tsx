@@ -1,7 +1,7 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import AppAliasSection from "@/components/AppAliasSection";
 
 /* ============================================================
@@ -13,7 +13,26 @@ import AppAliasSection from "@/components/AppAliasSection";
 type LogRow = {
   id: string; agent_id: string | null; action: string;
   allowed: boolean; deny_reason?: string | null;
-  mock: boolean; result: any; created_at: string;
+  mock: boolean; result: unknown; created_at: string;
+};
+
+/** 单项能力是否已授权：{ screenshot: true, run_shell: false, ... } */
+type Perms = Record<string, boolean>;
+
+/** 电脑操作执行结果 */
+type ExecResult = {
+  /** 实际执行模式：real = 真的操作了本机；mock = 未授权下的模拟 */
+  mode: string;
+  result?: { ok?: boolean; [k: string]: unknown };
+  [k: string]: unknown;
+};
+
+/** 浏览器抓取结果（render=js 时 rendered 为真） */
+type BrowserFetchResult = {
+  title?: string;
+  text?: string;
+  error?: string;
+  rendered?: boolean;
 };
 
 const ACTIONS: { type: string; label: string; icon: string }[] = [
@@ -27,10 +46,10 @@ const ACTIONS: { type: string; label: string; icon: string }[] = [
 
 export default function DeviceConsolePage() {
   const [cid, setCid] = useState("");
-  const [perms, setPerms] = useState<Record<string, boolean>>({});
+  const [perms, setPerms] = useState<Perms>({});
   const [action, setAction] = useState("screenshot");
   const [paramsText, setParamsText] = useState("{}");
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<ExecResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [logs, setLogs] = useState<LogRow[]>([]);
@@ -39,42 +58,38 @@ export default function DeviceConsolePage() {
   // 浏览器抓取
   const [url, setUrl] = useState("https://example.com");
   const [renderJs, setRenderJs] = useState(false);
-  const [fetchResult, setFetchResult] = useState<any>(null);
+  const [fetchResult, setFetchResult] = useState<BrowserFetchResult | null>(null);
   const [fetchBusy, setFetchBusy] = useState(false);
 
-  const tokenRef = useRef<string>("");
-  const getToken = () => tokenRef.current || (tokenRef.current = localStorage.getItem("aieos_token") || "");
-
   const load = useCallback(async () => {
-    const cs: any[] = await api.get("/companies");
+    const cs = await api.get<{ id: string }[]>("/companies");
     if (!cs.length) return;
-    setCid(cs[0].id);
-    try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/computer-agent/permissions?company_id=${cs[0].id}`,
-        { headers: { Authorization: `Bearer ${getToken()}` } });
-      setPerms(await r.json());
-    } catch {}
-    try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/computer-agent/logs?company_id=${cs[0].id}&limit=30`,
-        { headers: { Authorization: `Bearer ${getToken()}` } });
-      setLogs(await r.json());
-    } catch {}
+    const companyId = cs[0].id;
+    setCid(companyId);
+    // 权限与日志是两个独立数据，并发取；各自失败不影响另一个
+    const [permRes, logRes] = await Promise.allSettled([
+      api.get<Perms>(`/computer-agent/permissions?company_id=${companyId}`),
+      api.get<LogRow[]>(`/computer-agent/logs?company_id=${companyId}&limit=30`),
+    ]);
+    if (permRes.status === "fulfilled") setPerms(permRes.value);
+    if (logRes.status === "fulfilled") setLogs(logRes.value);
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
   async function grant(cap: string) {
-    await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/computer-agent/grant?capability=${cap}&company_id=${cid}`,
-      { method: "POST", headers: { Authorization: `Bearer ${getToken()}` } });
-    load();
+    try {
+      // 原来不看返回就重新加载：授权失败时按钮看起来"点了没反应"
+      await api.post(`/computer-agent/grant?capability=${cap}&company_id=${cid}`);
+      await load();
+    } catch (e) { setMsg(`❌ ${describeError(e, "授权失败")}`); }
   }
 
   async function revoke(cap: string) {
-    await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/computer-agent/revoke?capability=${cap}&company_id=${cid}`,
-      { method: "POST", headers: { Authorization: `Bearer ${getToken()}` } });
-    load();
+    try {
+      await api.post(`/computer-agent/revoke?capability=${cap}&company_id=${cid}`);
+      await load();
+    } catch (e) { setMsg(`❌ ${describeError(e, "撤销失败")}`); }
   }
 
   async function execute() {
@@ -84,32 +99,18 @@ export default function DeviceConsolePage() {
     try { params = JSON.parse(paramsText || "{}"); }
     catch { setMsg("❌ 参数不是合法 JSON"); setBusy(false); return; }
     try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/computer-agent/execute?company_id=${cid}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
-          body: JSON.stringify({ action_type: action, params }),
-        });
-      const data = await r.json();
-      if (r.ok) {
-        setResult(data);
-        if (action === "screenshot" && data.result?.ok) {
-          // 拉取最新截屏 base64
-          const imgR = await fetch(
-            `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/computer-agent/screenshots/latest?company_id=${cid}`,
-            { headers: { Authorization: `Bearer ${getToken()}` } });
-          if (imgR.ok) {
-            const imgData = await imgR.json();
-            setScreenshotUrl(imgData.image_base64);
-          }
-        }
-        setMsg(`✅ 执行完成（${data.mode}）`);
-        load();
-      } else {
-        setMsg(`❌ ${typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail)}`);
+      const data = await api.post<ExecResult>(`/computer-agent/execute?company_id=${cid}`,
+        { action_type: action, params });
+      setResult(data);
+      if (action === "screenshot" && data.result?.ok) {
+        // 拉取最新截屏 base64
+        const imgData = await api.get<{ image_base64?: string }>(
+          `/computer-agent/screenshots/latest?company_id=${cid}`).catch(() => null);
+        if (imgData?.image_base64) setScreenshotUrl(imgData.image_base64);
       }
-    } catch (e: any) { setMsg(`❌ ${e.message}`); }
+      setMsg(`✅ 执行完成（${data.mode}）`);
+      await load();
+    } catch (e) { setMsg(`❌ ${describeError(e, "执行失败")}`); }
     setBusy(false);
   }
 
@@ -117,16 +118,9 @@ export default function DeviceConsolePage() {
     if (fetchBusy) return;
     setFetchBusy(true); setFetchResult(null);
     try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/browser-agent/fetch?company_id=${cid}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
-          body: JSON.stringify({ url, render: renderJs ? "js" : null }),
-        });
-      const data = await r.json();
-      setFetchResult(data);
-    } catch (e: any) { setFetchResult({ error: e.message }); }
+      setFetchResult(await api.post(`/browser-agent/fetch?company_id=${cid}`,
+        { url, render: renderJs ? "js" : null }));
+    } catch (e) { setFetchResult({ error: describeError(e, "抓取失败") }); }
     setFetchBusy(false);
   }
 

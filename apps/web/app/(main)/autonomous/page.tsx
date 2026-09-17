@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { confirmAction } from "@/components/ConfirmDialog";
+import type { Company } from "@/lib/types";
 
 type Agent = { id: string; name: string; role?: string; department_id?: string | null };
 type Dept = { id: string; name: string };
@@ -67,7 +68,7 @@ export default function AutonomousPage() {
         api.get("/governance/autonomous-overview"),
         api.get("/governance/autonomous-logs?limit=30"),
         api.get("/agents"),
-        api.get(`/companies`).then(async (cs: any[]) => {
+        api.get<Company[]>(`/companies`).then(async (cs) => {
           const id = cs[0]?.id;
           if (id) setCid(id);
           return id ? api.get(`/companies/${id}/departments`) : [];

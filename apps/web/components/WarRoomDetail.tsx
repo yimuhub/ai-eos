@@ -2,7 +2,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useParams, useSearchParams } from "next/navigation";
-import { api } from "@/lib/api";
+import { api, describeError, downloadURL, fetchBlobURL, fetchText } from "@/lib/api";
+import type { Company } from "@/lib/types";
 
 /* ============================================================
    项目作战室（War Room）
@@ -24,10 +25,16 @@ type WRTask = {
 type WRSession = {
   id: string; goal: string; status: string;
   leader_agent_id: string; leader_name: string;
-  analysis?: any; deliverable_format?: string | null;
+  analysis?: WRAnalysis; deliverable_format?: string | null;
   deliverable_rule?: string | null; final_output_path?: string | null;
   tasks: WRTask[];
 };
+
+/** `POST /war-room/{sid}/acknowledge` 的返回 */
+type AckResult = { all_acknowledged?: boolean };
+
+/** 负责人分析结果（LLM 自由文本 + 拆解出的任务清单） */
+type WRAnalysis = { analysis?: string; [k: string]: unknown };
 
 const STATUS_FLOW = [
   ["analyzing", "负责人分析"], ["announcing", "分工宣告"], ["confirmed", "校对确认"],
@@ -75,12 +82,12 @@ export default function WarRoomDetail() {
   const [team, setTeam] = useState<any | null>(null);
   const [chatMsgs, setChatMsgs] = useState<any[]>([]);
   const [sayText, setSayText] = useState("");
-  const [previewFile, setPreviewFile] = useState<{ name: string; url: string; content?: string } | null>(null);
+  const [previewFile, setPreviewFile] = useState<{ name: string; url: string; content?: string; loading?: boolean } | null>(null);
   const chatBoxRef = useRef<HTMLDivElement>(null);
   useEffect(() => { setMounted(true); }, []);
 
   const load = useCallback(async () => {
-    const cs: any[] = await api.get("/companies");
+    const cs = await api.get<Company[]>("/companies");
     if (!cs.length) return;
     setCid(cs[0].id);
     setAgents(await api.get(`/agents?company_id=${cs[0].id}`));
@@ -131,16 +138,11 @@ export default function WarRoomDetail() {
     if (!goal.trim() || !leaderId) return;
     setBusy(true);
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/war-room/kickoff`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({ company_id: cid, goal: goal.trim(),
-          leader_agent_id: leaderId, project_id: projectId,
-          deliverable_format: fmt }),
+      await api.post("/war-room/kickoff", {
+        company_id: cid, goal: goal.trim(),
+        leader_agent_id: leaderId, project_id: projectId,
+        deliverable_format: fmt,
       });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
       // 提交成功即关闭弹窗；负责人在后台分析，看板自动轮询刷新
       setShowKickoff(false);
       setGoal("");
@@ -154,10 +156,7 @@ export default function WarRoomDetail() {
     if (!active) return;
     setBusy(true);
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/war-room/${active.id}/announce?company_id=${cid}`, {
-        method: "POST", headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      await api.post(`/war-room/${active.id}/announce?company_id=${cid}`);
       setMsg("✅ 全员已在群聊复述各自任务");
       await load();
     } catch (e: any) { setMsg("❌ " + (e.message || e)); }
@@ -167,11 +166,8 @@ export default function WarRoomDetail() {
   async function bossSay() {
     if (!sayText.trim() || !active) return;
     try {
-      await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/war-room/sessions/${active.id}/say?company_id=${cid}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({ text: sayText.trim() }),
+      await api.post(`/war-room/sessions/${active.id}/say?company_id=${cid}`, {
+        text: sayText.trim(),
       });
       setSayText("");
       setMsg("💬 已发送，成员正在回应…");
@@ -190,65 +186,71 @@ export default function WarRoomDetail() {
 
   async function openFile(sessId: string, name: string | null | undefined) {
     if (!name) return;
-    const url = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/war-room/sessions/${sessId}/file?company_id=${cid}&name=${encodeURIComponent(name)}`;
-    setPreviewFile({ name, url });
-    // 文本类直接拉内容预览；二进制（docx/pptx/xlsx）提示下载
+    const path = `/war-room/sessions/${sessId}/file?company_id=${cid}&name=${encodeURIComponent(name)}`;
+    setPreviewFile({ name, url: "", loading: true });
+    // 文本类直接拉内容预览；二进制（docx/pptx/xlsx）只提供下载
     const ext = (name.split(".").pop() || "").toLowerCase();
-    if (["md", "txt", "csv", "json"].includes(ext)) {
-      try {
-        const r = await fetch(url, { headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });
-        setPreviewFile({ name, url, content: await r.text() });
-      } catch { setPreviewFile({ name, url, content: "加载失败" }); }
-    } else {
-      setPreviewFile({ name, url, content: undefined });
+    try {
+      // 下载链接必须是 objectURL：该接口要求 Bearer token，
+      // 而 <a href> 不会带 header，改造前点了就是 401。
+      const url = await fetchBlobURL(path);
+      const content = ["md", "txt", "csv", "json"].includes(ext)
+        ? await fetchText(path)
+        : undefined;
+      setPreviewFile({ name, url, content });
+    } catch (e: any) {
+      setPreviewFile({ name, url: "", content: `加载失败：${describeError(e)}` });
     }
   }
 
-  async function ack(task: WRTask, correct: boolean, fb?: string) {
-    const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/war-room/${active!.id}/acknowledge?company_id=${cid}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json",
-        Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-      body: JSON.stringify({ task_id: task.id, correct, feedback: fb }),
+  /** 关闭预览时释放 objectURL，否则每次预览都会泄漏一份文件在内存里 */
+  function closePreview() {
+    setPreviewFile((prev) => {
+      if (prev?.url) URL.revokeObjectURL(prev.url);
+      return null;
     });
-    const d = await r.json();
-    if (!r.ok) { setMsg("❌ " + (d.detail?.message || d.detail || "")); return; }
+  }
+
+  async function ack(task: WRTask, correct: boolean, fb?: string) {
+    let d: AckResult;
+    try {
+      d = await api.post<AckResult>(
+        `/war-room/${active!.id}/acknowledge?company_id=${cid}`,
+        { task_id: task.id, correct, feedback: fb },
+      );
+    } catch (e: any) { setMsg("❌ " + describeError(e, "校对失败")); return; }
     setRejectTask(null); setFeedback("");
     if (d.all_acknowledged) setMsg("✅ 全部任务校对通过，可以开工！");
     await load();
   }
 
   async function startExec() {
-    const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/war-room/${active!.id}/start?company_id=${cid}`, {
-      method: "POST", headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });
-    const d = await r.json();
-    if (!r.ok) { setMsg("❌ " + (d.detail || "")); return; }
-    setMsg(`🚀 已派发 ${d.dispatched} 名成员并行执行`);
-    await load();
+    try {
+      const d = await api.post<{ dispatched: number }>(
+        `/war-room/${active!.id}/start?company_id=${cid}`);
+      setMsg(`🚀 已派发 ${d.dispatched} 名成员并行执行`);
+      await load();
+    } catch (e: any) { setMsg("❌ " + describeError(e, "派发失败")); }
   }
 
   async function submitReview(task: WRTask, approve: boolean, comment: string, reviewer: string) {
-    const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/war-room/tasks/${task.id}/review?company_id=${cid}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json",
-        Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-      body: JSON.stringify({ approve, comment, reviewer }),
-    });
-    setReviewTask(null); setReviewComment("");
-    setMsg(approve ? "✅ 审核通过" : "↩️ 已打回重做");
-    await load();
+    try {
+      await api.post(`/war-room/tasks/${task.id}/review?company_id=${cid}`,
+        { approve, comment, reviewer });
+      setReviewTask(null); setReviewComment("");
+      setMsg(approve ? "✅ 审核通过" : "↩️ 已打回重做");
+      await load();
+    } catch (e: any) { setMsg("❌ " + describeError(e, "审核失败")); }
   }
 
   async function finalize() {
     setBusy(true);
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/war-room/${active!.id}/finalize?company_id=${cid}`, {
-        method: "POST", headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      const d = await api.post<{ merged_parts: number }>(
+        `/war-room/${active!.id}/finalize?company_id=${cid}`);
       setMsg(`🎉 最终方案已整合完成（${d.merged_parts} 部分）`);
       await load();
-    } catch (e: any) { setMsg("❌ " + (e.message || e)); }
+    } catch (e: any) { setMsg("❌ " + describeError(e, "整合失败")); }
     setBusy(false);
   }
 
@@ -598,9 +600,18 @@ export default function WarRoomDetail() {
                   </div>
                   <button onClick={() => openFile(active.id, fname)}
                     className="btn-primary !py-2 !px-4 text-xs">👁 预览</button>
-                  <a href={`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/war-room/sessions/${active.id}/file?company_id=${cid}&name=${encodeURIComponent(fname || "")}`}
-                    download className="btn-ghost text-xs"
-                    style={{ border: "1px solid rgba(16,185,129,0.35)", color: "#6ee7b7" }}>⬇ 下载</a>
+                  {/* 同样走 blob：该接口要求 token，<a href> 点了只会 401 */}
+                  <button type="button" onClick={async () => {
+                    if (!fname) return;
+                    try {
+                      downloadURL(await fetchBlobURL(
+                        `/war-room/sessions/${active.id}/file?company_id=${cid}&name=${encodeURIComponent(fname)}`,
+                      ), fname);
+                    } catch (e: any) {
+                      setMsg("❌ 下载失败：" + describeError(e));
+                    }
+                  }} className="btn-ghost text-xs"
+                    style={{ border: "1px solid rgba(16,185,129,0.35)", color: "#6ee7b7" }}>⬇ 下载</button>
                 </div>
               </div>
             );
@@ -713,7 +724,7 @@ export default function WarRoomDetail() {
       {mounted && previewFile && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center px-4 overflow-y-auto py-8"
           style={{ background: "rgba(0,0,0,0.65)", backdropFilter: "blur(6px)" }}
-          onClick={() => setPreviewFile(null)}>
+          onClick={closePreview}>
           <div className="w-full max-w-3xl rounded-2xl p-5 space-y-3 max-h-[90vh] overflow-y-auto animate-fade-up"
             style={{ background: "linear-gradient(180deg,#15151f,#101018)", border: "1px solid rgba(99,102,241,0.35)" }}
             onClick={(e) => e.stopPropagation()}>
@@ -721,12 +732,17 @@ export default function WarRoomDetail() {
               <span className="w-9 h-9 rounded-xl flex items-center justify-center text-lg shrink-0"
                 style={{ background: "linear-gradient(135deg,#10b981,#22d3ee)" }}>📄</span>
               <h3 className="font-semibold text-sm flex-1 truncate">{previewFile.name}</h3>
-              <a href={`${previewFile.url}`} download
-                className="btn-ghost text-xs"
-                style={{ border: "1px solid rgba(16,185,129,0.35)", color: "#6ee7b7" }}>⬇ 下载</a>
-              <button onClick={() => setPreviewFile(null)} className="btn-ghost !px-2 !py-0.5 text-xs">✕</button>
+              <button type="button" disabled={!previewFile.url}
+                onClick={() => previewFile.url && downloadURL(previewFile.url, previewFile.name)}
+                className="btn-ghost text-xs disabled:opacity-40"
+                style={{ border: "1px solid rgba(16,185,129,0.35)", color: "#6ee7b7" }}>⬇ 下载</button>
+              <button onClick={closePreview} className="btn-ghost !px-2 !py-0.5 text-xs">✕</button>
             </div>
-            {previewFile.content !== undefined ? (
+            {previewFile.loading ? (
+              <div className="text-center py-12" style={{ color: "var(--muted)" }}>
+                正在加载文件内容…
+              </div>
+            ) : previewFile.content !== undefined ? (
               <pre className="text-[11px] whitespace-pre-wrap rounded-xl p-4 max-h-[65vh] overflow-y-auto leading-relaxed"
                 style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--border)" }}>
                 {previewFile.content}
@@ -737,9 +753,8 @@ export default function WarRoomDetail() {
                 <p className="text-sm" style={{ color: "var(--muted)" }}>
                   该文件格式（{previewFile.name.split(".").pop()}）暂不支持在线预览
                 </p>
-                <a href={previewFile.url} download className="btn-primary !py-2 !px-5 text-xs inline-block">
-                  ⬇ 下载查看
-                </a>
+                <button type="button" onClick={() => previewFile.url && downloadURL(previewFile.url, previewFile.name)}
+                  className="btn-primary !py-2 !px-5 text-xs">⬇ 下载查看</button>
               </div>
             )}
           </div>

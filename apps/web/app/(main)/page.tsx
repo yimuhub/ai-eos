@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
 import { api, setActiveCompanyId } from "@/lib/api";
+import { useVisibilityInterval } from "@/lib/useResource";
 import TeamGenModal from "@/components/TeamGenModal";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
 import OnboardingWizard from "@/components/OnboardingWizard";
@@ -123,12 +124,17 @@ export default function DashboardPage() {
     }
   }, []);
 
+  useEffect(() => { load(); }, [load]);
+
+  /* 指挥中心需要"实时"：任务正在跑，5 秒一次的新鲜度是合理的。
+     但**页面在后台时不该继续打后端**——用户看不见的刷新是纯粹的成本，
+     还可能与真正的前台请求抢连接。切回来自动补一次，避免第一眼是旧数据。 */
+  useVisibilityInterval(load, 5000);
+
   useEffect(() => {
-    load();
-    const t = setInterval(load, 5000);
     const onSwitch = () => load();
     window.addEventListener("aieos-company-changed", onSwitch);
-    return () => { clearInterval(t); window.removeEventListener("aieos-company-changed", onSwitch); };
+    return () => window.removeEventListener("aieos-company-changed", onSwitch);
   }, [load]);
 
   /* ---------- 部门化选人 ---------- */

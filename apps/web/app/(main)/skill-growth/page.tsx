@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import type { Company } from "@/lib/types";
 
 type Agent = { id: string; name: string };
 type Skill = { skill: string; level: string; experience_count: number; evidence_count: number };
@@ -16,7 +17,7 @@ export default function SkillGrowthPage() {
 
   useEffect(() => {
     api.get("/agents").then((a: Agent[]) => { setAgents(a); if (a.length) setAgentId(a[0].id); }).catch(() => {});
-    api.get("/companies").then((cs: any[]) => {
+    api.get<Company[]>("/companies").then((cs) => {
       if (cs[0]?.id) api.get(`/skill-growth/tree?company_id=${cs[0].id}`).then(setNodes).catch(() => {});
     }).catch(() => {});
   }, []);

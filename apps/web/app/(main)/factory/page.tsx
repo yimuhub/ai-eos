@@ -1,7 +1,8 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
+import type { Company } from "@/lib/types";
 
 type Blueprint = {
       name?: string; role?: string; responsibilities?: string[];
@@ -26,7 +27,7 @@ export default function FactoryPage() {
 
   const load = useCallback(async () => {
     try {
-      const cs: any[] = await api.get("/companies");
+      const cs = await api.get<Company[]>("/companies");
       const c = cs[0]?.id;
       if (c) {
         setCid(c);
@@ -102,11 +103,11 @@ export default function FactoryPage() {
               {j.status === "TESTING" && (
                 <button onClick={async () => {
                   setReviewOpen(j.id); setReviewData(null);
-                  try {
-                    const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/factory/jobs/${j.id}/training-detail`, {
-                      headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });
-                    setReviewData(await r.json());
-                  } catch { setReviewData({ error: true }); }
+                  // 失败时给一个显式的 error 标记，而不是静默留空——
+                  // 否则弹窗里"什么都没有"，用户分不清"没培训记录"和"接口挂了"
+                  const review = await api.get(`/factory/jobs/${j.id}/training-detail`)
+                    .catch(() => ({ error: true }));
+                  setReviewData(review);
                 }}
                   className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs shrink-0">📋 培训验收</button>
               )}
@@ -266,16 +267,11 @@ export default function FactoryPage() {
                             onClick={async () => {
                               setAsking(i);
                               try {
-                                const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/factory/jobs/${reviewOpen}/ask`, {
-                                  method: "POST",
-                                  headers: { "Content-Type": "application/json",
-                                    Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-                                  body: JSON.stringify({ question: t }),
-                                });
-                                const d = await r.json();
+                                const d = await api.post<{ answer?: string }>(
+                                  `/factory/jobs/${reviewOpen}/ask`, { question: t });
                                 setTestAnswers((prev) => ({ ...prev, [i]: d.answer || "(无回答)" }));
-                              } catch (e: any) {
-                                setTestAnswers((prev) => ({ ...prev, [i]: "❌ " + (e.message || e) }));
+                              } catch (e) {
+                                setTestAnswers((prev) => ({ ...prev, [i]: `❌ ${describeError(e, "作答失败")}` }));
                               }
                               setAsking(null);
                             }}
@@ -309,28 +305,28 @@ export default function FactoryPage() {
                   <div className="flex gap-2 justify-end pt-2 border-t" style={{ borderColor: "var(--border)" }}>
                     <button onClick={() => setReviewOpen(null)} className="btn-ghost text-xs">稍后再定</button>
                     <button onClick={async () => {
-                      await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/factory/jobs/${reviewOpen}/review-training`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json",
-                          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-                        body: JSON.stringify({ approve: false,
-                          notes: reviewNotes || "验收未通过，需重新培训" }),
-                      });
-                      setMsg("❌ 已驳回，员工保持禁用状态（培训记忆已清除）");
-                      setReviewOpen(null); await load();
+                      try {
+                        // 原先不看返回就提示"已驳回"——验收动作没生效也会报喜
+                        await api.post(`/factory/jobs/${reviewOpen}/review-training`,
+                          { approve: false, notes: reviewNotes || "验收未通过，需重新培训" });
+                        setMsg("❌ 已驳回，员工保持禁用状态（培训记忆已清除）");
+                        setReviewOpen(null); await load();
+                      } catch (e) {
+                        setMsg(`❌ ${describeError(e, "驳回失败")}`);
+                      }
                     }} className="text-xs py-1.5 px-3 rounded-lg text-red-300 hover:bg-red-500/15 transition-colors"
                       style={{ border: "1px solid rgba(248,113,113,0.35)" }}>
                       ✕ 驳回（重新培训）
                     </button>
                     <button onClick={async () => {
-                      await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/factory/jobs/${reviewOpen}/review-training`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json",
-                          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-                        body: JSON.stringify({ approve: true, notes: reviewNotes }),
-                      });
-                      setMsg("🎉 验收通过！员工已正式上岗（ACTIVE）");
-                      setReviewOpen(null); await load();
+                      try {
+                        await api.post(`/factory/jobs/${reviewOpen}/review-training`,
+                          { approve: true, notes: reviewNotes });
+                        setMsg("🎉 验收通过！员工已正式上岗（ACTIVE）");
+                        setReviewOpen(null); await load();
+                      } catch (e) {
+                        setMsg(`❌ ${describeError(e, "验收失败")}`);
+                      }
                     }} className="btn-primary text-xs">
                       ✅ 验收通过，正式上岗
                     </button>

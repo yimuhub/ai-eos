@@ -2,10 +2,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { api } from "@/lib/api";
+import { api, describeError, downloadURL, fetchBlobURL } from "@/lib/api";
 import { TASK_STATUS_ZH, EVENT_TYPE_ZH, EXEC_STATUS_ZH, zh } from "@/lib/i18n";
 import { DeliverablesPanel, TaskLogsPanel } from "@/components/DeliverablesLogs";
 import { createPortal } from "react-dom";
+import { notify } from "@/components/Toast";
+import type { Company } from "@/lib/types";
 
 /* ============================================================
    任务详情 v2（仿项目详情）：
@@ -42,7 +44,29 @@ const PRIORITY_META: Record<string, { label: string; cls: string }> = {
 };
 const AVATAR_GRADS = ["#6366f1,#8b5cf6", "#22d3ee,#3b82f6", "#f59e0b,#ef4444", "#10b981,#14b8a6", "#ec4899,#f43f5e"];
 
-type ChatMsg = { role: "user" | "assistant" | "system"; text: string };
+/** 任务群聊的一条消息。
+ *
+ * 注意 role **不能用** `"user" | "assistant"` 这种窄联合：员工消息的 role
+ * 直接就是员工姓名，界面靠 isBoss / isAgent 决定气泡方向与配色。
+ * 写成窄联合的后果是渲染处只能写 `(m: any)`，等于把类型全丢了。
+ */
+type ChatMsg = {
+  role: string;
+  text: string;
+  isBoss?: boolean;
+  isAgent?: boolean;
+  agent?: string;
+  search?: boolean;
+};
+
+/** `GET /group-chat/{scope}/{id}/history` 里的一条记录 */
+type GroupChatMessage = {
+  role: "boss" | "agent" | string;
+  text?: string;
+  agent_name?: string;
+  agent_id?: string;
+  search_used?: boolean;
+};
 
 export default function TaskDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -90,7 +114,7 @@ export default function TaskDetailPage() {
     // 现统一归到下方"cid 就绪后触发一次"的 effect。
     api.get("/models").then(setAllModels).catch(() => {});
     api.get("/skills").then(setAvailableSkills).catch(() => {});
-    api.get("/companies").then(async (cs: any[]) => {
+    api.get<Company[]>("/companies").then(async (cs) => {
       if (cs.length) setCid(cs[0].id);
     }).catch(() => {});
     const t = setInterval(load, 5000);
@@ -101,17 +125,17 @@ export default function TaskDetailPage() {
   useEffect(() => {
     if (!cid || !id || chatHist) return;
     setChatHist(true);
-    fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/group-chat/task/${id}/history?company_id=${cid}`, {
-      headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-    }).then((r) => r.json()).then((d: any) => {
-      if (d.messages?.length) {
-        setChatLog(d.messages.map((m: any) => ({
-          role: m.role === "boss" ? "user" : m.agent_name || "agent",
-          text: m.text || "", isAgent: m.role === "agent",
-          agent: m.agent_name, search: m.search_used,
-        })));
-      }
-    }).catch(() => {});
+    api.get<{ messages?: GroupChatMessage[] }>(`/group-chat/task/${id}/history?company_id=${cid}`)
+      .then((d) => {
+        if (d.messages?.length) {
+          setChatLog(d.messages.map((m) => ({
+            role: m.role === "boss" ? "user" : m.agent_name || "agent",
+            text: m.text || "", isAgent: m.role === "agent",
+            agent: m.agent_name, search: m.search_used,
+          })));
+        }
+      })
+      .catch(() => {});
   }, [cid, id, chatHist]);
 
   useEffect(() => {
@@ -140,23 +164,19 @@ export default function TaskDetailPage() {
     setChatLog((prev) => [...prev, { role: "user", text, isBoss: true }]);
     setChatInput("");
     try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/group-chat/task/${id}?company_id=${cid}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-          body: JSON.stringify({ message: text }),
-        });
-      const data = await r.json();
-      const replies: any[] = data.replies || [];
+      const data = await api.post<{ replies?: {
+        agent_id?: string; agent_name?: string; text?: string; search_used?: boolean;
+      }[] }>(`/group-chat/task/${id}?company_id=${cid}`, { message: text },
+        // 群里多位员工依次发言，耗时较长——给足上限但不再是无限等待
+        { timeoutMs: 300_000 });
+      const replies = data.replies || [];
       setChatLog((prev) => prev.concat(
         replies.map((rep) => ({ role: rep.agent_name || rep.agent_id || "agent",
                                 text: rep.text || "", isAgent: true,
                                 agent: rep.agent_name, search: rep.search_used || false }))));
       await load();
-    } catch (e: any) {
-      setChatLog((prev) => [...prev, { role: "assistant", text: `出错了：${e.message}`, isBoss: false }]);
+    } catch (e) {
+      setChatLog((prev) => [...prev, { role: "assistant", text: `出错了：${describeError(e, "发送失败")}`, isBoss: false }]);
     }
   }
 
@@ -173,14 +193,8 @@ export default function TaskDetailPage() {
         setMsg("✅ 执行 Agent 已更换");
         // 新 Agent 绑定所选模型
         if (newModelId) {
-          await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/agents/${newAgentId}/switch-model`, {
-            method: "PUT",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${localStorage.getItem("aieos_token")}`,
-            },
-            body: JSON.stringify({ model_id: newModelId }),
-          });
+          // 原来是裸 fetch 且不看返回：模型没切成功也会提示"已更换"
+          await api.put(`/agents/${newAgentId}/switch-model`, { model_id: newModelId });
         }
         // 新 Agent 获得勾选的技能
         for (const sk of Array.from(skillIds)) {
@@ -192,7 +206,7 @@ export default function TaskDetailPage() {
         }
       }
       await load();
-    } catch (e: any) { setMsg(e.message || String(e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "更换失败")}`); }
     setBusy(false);
   }
 
@@ -202,20 +216,14 @@ export default function TaskDetailPage() {
     try {
       const fd = new FormData();
       fd.append("file", file);
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/knowledge/documents`,
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-          body: fd,
-        });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      await api.upload("/knowledge/documents", fd);
       setChatLog((prev) => [...prev, {
         role: "assistant",
         text: `✅ 参考资料「${file.name}」已存入知识库。`,
       }]);
-    } catch (e: any) {
-      setChatLog((prev) => [...prev, { role: "assistant", text: `上传失败：${e.message}` }]);
+    } catch (e) {
+      setChatLog((prev) => [...prev, {
+        role: "assistant", text: `上传失败：${describeError(e, "上传失败")}` }]);
     }
   }
 
@@ -490,11 +498,13 @@ export default function TaskDetailPage() {
                     setFolderOpen(!folderOpen);
                     if (!folderOpen && cid) {
                       try {
-                        const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/delivery/by-scope?company_id=${cid}&scope=task&scope_id=${id}`, {
-                          headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });
-                        const d = await r.json();
-                        setFolderFiles(d.files || []);
-                      } catch {}
+                        const data = await api.get<{ files?: { id?: string; name: string; size?: number }[] }>(
+                          `/delivery/by-scope?company_id=${cid}&scope=task&scope_id=${id}`);
+                        setFolderFiles(data.files || []);
+                      } catch {
+                        // 交付文件拉不到不该影响对话，静默留空即可
+                        setFolderFiles([]);
+                      }
                     }
                   }}
                   className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs transition-colors ${folderOpen ? "bg-indigo-500/20 text-indigo-300" : "hover:bg-white/[0.06]"}`}
@@ -589,16 +599,12 @@ export default function TaskDetailPage() {
                   <div key={f.id} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs"
                     style={{ background: "rgba(255,255,255,0.03)" }}>
                     <span className="truncate flex-1">{f.name}</span>
-                    <button onClick={() => {
-                      fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/delivery/download/${f.id}`, {
-                        headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } })
-                        .then((r2) => r2.blob())
-                        .then((b) => {
-                          const a = document.createElement("a");
-                          a.href = URL.createObjectURL(b);
-                          a.download = f.name; a.click();
-                          URL.revokeObjectURL(a.href);
-                        });
+                    <button onClick={async () => {
+                      try {
+                        downloadURL(await fetchBlobURL(`/delivery/download/${f.id}`), f.name);
+                      } catch (e: any) {
+                        notify("error", `下载失败：${describeError(e)}`);
+                      }
                     }} className="text-indigo-300 shrink-0 text-[10px]">⬇</button>
                   </div>
                 ))}
@@ -612,7 +618,7 @@ export default function TaskDetailPage() {
 
             {/* 消息流 */}
             <div className="flex-1 overflow-y-auto py-3 space-y-2.5">
-              {chatLog.map((m: any, i) => {
+              {chatLog.map((m, i) => {
                 const isBoss = m.isBoss === true;
                 const isAgent = m.isAgent === true;
                 const isErr = !isAgent && !isBoss && m.role === "assistant";

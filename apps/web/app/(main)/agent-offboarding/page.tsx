@@ -1,9 +1,10 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import { notify } from "@/components/Toast";
 import { confirmAction } from "@/components/ConfirmDialog";
+import type { Company } from "@/lib/types";
 
 /* ============================================================
    员工离职中心：多选离职员工 → 选择继承人 → 资产继承 → 执行
@@ -18,6 +19,14 @@ type Dept = { id: string; name: string };
 type Detail = {
   agent_id: string; name: string; role: string | null;
   skills: number; assets: number; memories: number; open_tasks: number;
+};
+/** `POST /agents/offboarding/preview` 的返回：先看清楚要发生什么，再决定执不执行 */
+type Preview = { successor: { id: string; name: string } | null; details: Detail[] };
+/** `POST /agents/offboarding/execute` 的返回（字段以后端为准：id/name/reason） */
+type Result = {
+  offboarded: { id: string; name: string }[];
+  offboarded_count: number;
+  failed: { id: string; reason?: string }[];
 };
 
 const AVATAR_COLORS = ["#6366f1,#8b5cf6", "#22d3ee,#3b82f6", "#f59e0b,#ef4444", "#10b981,#14b8a6", "#ec4899,#f43f5e"];
@@ -38,12 +47,12 @@ export default function OffboardingPage() {
   const [reassignTasks, setReassignTasks] = useState(true);
 
   // 预览 / 执行
-  const [preview, setPreview] = useState<{ successor: any; details: Detail[] } | null>(null);
+  const [preview, setPreview] = useState<Preview | null>(null);
   const [executing, setExecuting] = useState(false);
-  const [result, setResult] = useState<{ offboarded: any[]; offboarded_count: number; failed: any[] } | null>(null);
+  const [result, setResult] = useState<Result | null>(null);
 
   const load = useCallback(async () => {
-    const cs: any[] = await api.get("/companies");
+    const cs = await api.get<Company[]>("/companies");
     if (!cs.length) return;
     const cid = cs[0].id;
     setDepts(await api.get(`/companies/${cid}/departments`));
@@ -66,26 +75,27 @@ export default function OffboardingPage() {
     });
   }
 
+  /** 预演与执行共用的请求体 */
+  function offboardingPayload() {
+    return {
+      agent_ids: Array.from(selected),
+      successor_id: successorId,
+      transfer_skills: transferSkills,
+      transfer_assets: transferAssets,
+      transfer_memories: transferMemories,
+      reassign_open_tasks: reassignTasks,
+    };
+  }
+
   async function doPreview() {
     if (!selected.size || !successorId) return;
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/agents/offboarding/preview`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}`,
-        },
-        body: JSON.stringify({
-          agent_ids: Array.from(selected),
-          successor_id: successorId,
-          transfer_skills: transferSkills,
-          transfer_assets: transferAssets,
-          transfer_memories: transferMemories,
-          reassign_open_tasks: reassignTasks,
-        }),
-      });
-      setPreview(await r.json());
-    } catch (e: any) { notify("error", `交接预演失败：${e.message || String(e)}`); }
+      // 原来两处裸 fetch 都**不看返回状态**：预演失败会把错误体当成结果渲染，
+      // 执行失败会静默（catch 里的提示文字还复制错了，写的是"预演失败"）。
+      setPreview(await api.post<Preview>("/agents/offboarding/preview", offboardingPayload()));
+    } catch (e) {
+      notify("error", `交接预演失败：${describeError(e, "预演失败")}`);
+    }
   }
 
   async function doExecute() {
@@ -106,26 +116,14 @@ export default function OffboardingPage() {
     if (!ok) return;
     setExecuting(true);
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/agents/offboarding/execute`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}`,
-        },
-        body: JSON.stringify({
-          agent_ids: Array.from(selected),
-          successor_id: successorId,
-          transfer_skills: transferSkills,
-          transfer_assets: transferAssets,
-          transfer_memories: transferMemories,
-          reassign_open_tasks: reassignTasks,
-        }),
-      });
-      const data = await r.json();
+      const data = await api.post<Result>("/agents/offboarding/execute", offboardingPayload());
       setResult(data);
       setPreview(null);
       await load();
-    } catch (e: any) { notify("error", `交接预演失败：${e.message || String(e)}`); }
+    } catch (e) {
+      // 这里原来抄了预演那句提示，交接执行失败时告诉用户"预演失败"——误导性极强
+      notify("error", `交接执行失败：${describeError(e, "执行失败")}`);
+    }
     setExecuting(false);
   }
 

@@ -2,24 +2,18 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
+import { invalidate, useActiveCompanyId, useResource } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
 import Field from "@/components/Field";
 import { useFormValidation } from "@/lib/useFormValidation";
 import { V } from "@/lib/validate";
 import { notify } from "@/components/Toast";
 import { AGENT_STATUS_ZH, zh } from "@/lib/i18n";
-
-type Agent = {
-  id: string; name: string; role: string | null; status: string;
-  department_id: string | null;
-  manager_agent_id: string | null;
-  system_prompt?: string | null;
-  memory_config?: { capabilities?: string[]; backend?: string } | null;
-  model_configs?: { role: string; model_id: string }[];
-};
-type Dept = { id: string; name: string };
-type ModelRow = { id: string; name: string; provider_type: string; model_id: string };
+import type {
+  Agent, CapabilityCatalog, CapabilityPack, AgentBackend,
+  Department as Dept, ModelConfig as ModelRow,
+} from "@/lib/types";
 
 const STATUS_STYLE: Record<string, { cls: string; dot: string }> = {
   IDLE: { cls: "text-gray-300", dot: "bg-gray-500" },
@@ -33,9 +27,7 @@ const AVATAR_COLORS = ["#6366f1,#8b5cf6", "#22d3ee,#3b82f6", "#f59e0b,#ef4444", 
 
 export default function AgentsPage() {
   const router = useRouter();
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [depts, setDepts] = useState<Dept[]>([]);
-  const [models, setModels] = useState<ModelRow[]>([]);
+  const cid = useActiveCompanyId();
   const [filter, setFilter] = useState("ALL");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [showForm, setShowForm] = useState(false);
@@ -44,8 +36,6 @@ export default function AgentsPage() {
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
   const [form, setForm] = useState({ name: "", role: "", department_id: "", system_prompt: "", model_id: "", backend: "native_llm" });
-  const [capPacks, setCapPacks] = useState<any[]>([]);
-  const [backends, setBackends] = useState<any[]>([]);
   const [selCaps, setSelCaps] = useState<Set<string>>(new Set());
   // 批量创建
   const [batchText, setBatchText] = useState("");
@@ -79,19 +69,42 @@ export default function AgentsPage() {
     setPinnedAgents((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [id, ...prev]);
   }
 
-  const load = useCallback(async () => {
-    const cs: any[] = await api.get("/companies");
-    if (!cs.length) return;
-    const cid = cs[0].id;
-    setDepts(await api.get(`/companies/${cid}/departments`));
-    setModels(await api.get("/models"));
-    setAgents(await api.get(`/agents?company_id=${cid}`));
-    const cp = await api.get("/agents/capability-packs");
-    setCapPacks(cp.packs || []);
-    setBackends(cp.backends || []);
-  }, []);
+  /* ---------- 数据加载 ----------
+   *
+   * 改造前是 4 个请求**串行**发出（部门 → 模型 → 员工 → 能力目录），
+   * 每个都要等上一个回来，员工越多越慢；且没有缓存，每次进页面从零拉。
+   * 现在交给统一数据层：并发去重、缓存首屏、聚焦重取。
+   */
+  const {
+    data: catalog, error: loadError, refresh,
+  } = useResource(
+    cid ? `agents:${cid}` : null,
+    async () => {
+      // 四个接口互不依赖 → 并发发出，总耗时从"四段之和"降到"最慢的一段"
+      const [depts, models, agents, caps] = await Promise.all([
+        api.get<Dept[]>(`/companies/${cid}/departments`),
+        api.get<ModelRow[]>("/models"),
+        api.get<Agent[]>(`/agents?company_id=${cid}`),
+        api.get<CapabilityCatalog>("/agents/capability-packs"),
+      ]);
+      return { depts, models, agents, capPacks: caps.packs || [], backends: caps.backends || [] };
+    },
+  );
 
-  useEffect(() => { load(); }, [load]);
+  // 派生数据统一 useMemo：`?? []` 每次渲染都是一个新数组，
+  // 会让下游 useMemo 的依赖每次都变，等于缓存失效。
+  const agents = useMemo<Agent[]>(() => catalog?.agents ?? [], [catalog]);
+  const depts = useMemo<Dept[]>(() => catalog?.depts ?? [], [catalog]);
+  const models = useMemo<ModelRow[]>(() => catalog?.models ?? [], [catalog]);
+  const capPacks = useMemo<CapabilityPack[]>(() => catalog?.capPacks ?? [], [catalog]);
+  const backends = useMemo<AgentBackend[]>(() => catalog?.backends ?? [], [catalog]);
+
+  /** 员工数据变了 → 让所有引用 Agent 列表的页面一起失效，再重取本页 */
+  const load = useCallback(async () => {
+    invalidate("agents:");
+    invalidate("models:");
+    await refresh();
+  }, [refresh]);
 
   const shown = useMemo(
     () => (filter === "ALL" ? agents : agents.filter((a) => a.status === filter)),
@@ -139,11 +152,12 @@ export default function AgentsPage() {
       confirmText: "删除",
     }))) return;
     try {
-      const r = await api.post("/agents/batch-delete", { agent_ids: Array.from(selected) });
+      const r = await api.post<{ deleted_count: number; failed: string[] }>(
+        "/agents/batch-delete", { agent_ids: Array.from(selected) });
       setMsg(`✅ 已删除 ${r.deleted_count} 个${r.failed.length ? `，${r.failed.length} 个失败` : ""}`);
       setSelected(new Set());
       await load();
-    } catch (e: any) { setMsg(e.message || String(e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "批量删除失败")}`); }
   }
   async function batchPause() {
     if (!selected.size) return;
@@ -186,9 +200,8 @@ export default function AgentsPage() {
       return;
     }
     try {
-      const cs: any[] = await api.get("/companies");
-      const res = await api.post("/agents", {
-        company_id: cs[0].id, name: form.name, role: form.role || null,
+      const res = await api.post<{ id: string }>("/agents", {
+        company_id: cid, name: form.name, role: form.role || null,
         department_id: form.department_id || null,
         system_prompt: form.system_prompt || null,
         capabilities: Array.from(selCaps),
@@ -203,9 +216,9 @@ export default function AgentsPage() {
       setSelCaps(new Set());
       agentForm.reset();
       await load();
-    } catch (e: any) {
+    } catch (e) {
       // 原来创建失败时异常会直接冒泡成 unhandled rejection：用户看不到任何提示
-      notify("error", `创建失败：${e.message || e}`);
+      notify("error", `创建失败：${describeError(e, "创建失败")}`);
     }
   }
 
@@ -217,9 +230,8 @@ export default function AgentsPage() {
     }).filter((i) => i.name);
     if (!items.length) return;
     try {
-      const cs: any[] = await api.get("/companies");
-      const r = await api.post("/agents/batch-create", {
-        company_id: cs[0].id,
+      const r = await api.post<{ created_count: number }>("/agents/batch-create", {
+        company_id: cid,
         department_id: batchDept || undefined,
         manager_agent_id: batchMgr || undefined,
         model_id: batchModel || undefined,
@@ -229,7 +241,7 @@ export default function AgentsPage() {
       setShowBatchForm(false);
       setBatchText("");
       await load();
-    } catch (e: any) { setMsg(e.message || String(e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "批量创建失败")}`); }
   }
 
   /* ---------- 编辑弹窗 ---------- */
@@ -267,19 +279,14 @@ export default function AgentsPage() {
       // 模型切换
       const currentModel = editing.model_configs?.find((m) => m.role === "primary")?.model_id;
       if (editForm.model_id && editForm.model_id !== currentModel) {
-        await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/agents/${editing.id}/switch-model`, {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("aieos_token")}`,
-          },
-          body: JSON.stringify({ model_id: editForm.model_id }),
-        });
+        // 走统一 api 层：自动带鉴权与超时，失败会抛出可读原因。
+        // 原实现是裸 fetch 且**不看返回值**——切换失败也照样提示"已更新"。
+        await api.put(`/agents/${editing.id}/switch-model`, { model_id: editForm.model_id });
       }
       setMsg(`✅ ${editing.name} 已更新`);
       setEditing(null);
       await load();
-    } catch (e: any) { setMsg(e.message || String(e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "保存失败")}`); }
     setSaving(false);
   }
 
@@ -294,7 +301,7 @@ export default function AgentsPage() {
       setMsg(`✅ ${a.name} 已删除`);
       setEditing(null);
       await load();
-    } catch (e: any) { setMsg(e.message || String(e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "删除失败")}`); }
   }
 
   /* ---------- 渲染单个卡片（复用） ---------- */
@@ -359,7 +366,7 @@ export default function AgentsPage() {
                 </span>
               )}
               {a.memory_config?.capabilities?.map((c) => {
-                const pack = capPacks.find((x: any) => x.key === c);
+                const pack = capPacks.find((x) => x.key === c);
                 return (
                   <span key={c} className="text-[9px] px-1.5 py-0.5 rounded-md"
                     style={{ background: "rgba(16,185,129,0.12)", color: "#6ee7b7" }}>
@@ -433,6 +440,16 @@ export default function AgentsPage() {
       </div>
 
       {msg && <p className="mb-3 text-sm text-indigo-300">{msg}</p>}
+
+      {/* 加载失败不该让页面停在"没有 Agent"的空白上——那会让用户以为员工被删光了 */}
+      {loadError && (
+        <div className="mb-3 flex items-center gap-2.5 px-4 py-3 rounded-xl text-sm"
+          style={{ background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.3)", color: "#fca5a5" }}>
+          <span>🔌</span>
+          <span className="flex-1">加载员工列表失败：{loadError}</span>
+          <button onClick={() => refresh()} className="btn-ghost !py-1 text-xs">重试</button>
+        </div>
+      )}
 
       {/* 单个创建表单 */}
       {showForm && (

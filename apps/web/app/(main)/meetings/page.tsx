@@ -1,9 +1,10 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
 import { notify } from "@/components/Toast";
+import type { Company } from "@/lib/types";
 
 /* ============================================================
    AI 会议中心：部门化选人 + 自定义会议类型 + 无主题闲聊
@@ -72,7 +73,7 @@ export default function MeetingsPage() {
   }, []);
 
   useEffect(() => {
-    api.get("/companies").then(async (cs: any[]) => {
+    api.get<Company[]>("/companies").then(async (cs) => {
       if (!cs.length) return;
       setCid(cs[0].id);
       loadMeetings(cs[0].id);
@@ -268,23 +269,19 @@ export default function MeetingsPage() {
                 onChange={async (e) => {
                   const f = e.target.files?.[0];
                   if (!f || !meetingId) return;
-                  const fd = new FormData(); fd.append("file", f);
                   try {
-                    const resp = await fetch(
-                      `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/meetings/${meetingId}/upload`,
-                      { method: "POST",
-                        headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-                        body: fd });
-                    const d = await resp.json();
+                    const fd = new FormData(); fd.append("file", f);
+                    const d = await api.upload<{ ok?: boolean; chunks?: number }>(
+                      `/meetings/${meetingId}/upload`, fd);
                     // 原来只在成功时提示、失败时静默：用户会以为"传上去了但没生效"
                     if (d.ok) {
                       notify("success", `已上传 ${f.name}`);
                       openDetail(meetingId);
                     } else {
-                      notify("error", `上传 ${f.name} 失败：${d.detail || d.message || "服务端拒绝"}`);
+                      notify("error", `上传 ${f.name} 失败：服务端未接受该文件`);
                     }
-                  } catch (e: any) {
-                    notify("error", `上传 ${f.name} 失败：${e?.message || String(e)}`);
+                  } catch (err) {
+                    notify("error", `上传 ${f.name} 失败：${describeError(err, "上传失败")}`);
                   }
                   e.target.value = ""; // 允许重新选择同一个文件
                 }} />

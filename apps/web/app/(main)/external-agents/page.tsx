@@ -1,27 +1,23 @@
 "use client";
-import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { useMemo, useState } from "react";
+import { api, describeError } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 
 type Conn = { id: string; name: string; provider: string; endpoint?: string; auth_env_var?: string; capabilities?: string[]; status?: string };
 
 export default function ExternalAgentsPage() {
-  const [conns, setConns] = useState<Conn[]>([]);
+  const cid = useActiveCompanyId();
   const [name, setName] = useState("");
   const [provider, setProvider] = useState("API");
   const [endpoint, setEndpoint] = useState("");
   const [envVar, setEnvVar] = useState("");
-  const [cid, setCid] = useState("");
   const [msg, setMsg] = useState("");
 
-  useEffect(() => {
-    api.get("/companies").then((cs: any[]) => {
-      const c = cs[0]?.id;
-      if (c) {
-        setCid(c);
-        api.get(`/external-agents?company_id=${c}`).then(setConns).catch(() => {});
-      }
-    }).catch(() => {});
-  }, []);
+  const { data, refresh } = useResource(
+    cid ? `external-agents:${cid}` : null,
+    () => api.get<Conn[]>(`/external-agents?company_id=${cid}`),
+  );
+  const conns = useMemo(() => data ?? [], [data]);
 
   async function register() {
     if (!name || !cid) return;
@@ -32,23 +28,29 @@ export default function ExternalAgentsPage() {
       });
       setMsg("✅ 已注册");
       setName(""); setEndpoint(""); setEnvVar("");
-      api.get(`/external-agents?company_id=${cid}`).then(setConns).catch(() => {});
-    } catch (e: any) { setMsg(e.message || String(e)); }
+      await refresh();
+    } catch (e) { setMsg(`❌ ${describeError(e, "注册失败")}`); }
   }
 
   async function toggleStatus(c: Conn) {
-    const next = c.status === "ENABLED" ? "DISABLED" : "ENABLED";
-    await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/external-agents/${c.id}/${next}`,
-      { method: "PUT" });
-    setMsg(`已${next === "ENABLED" ? "启用" : "停用"}`);
-    api.get(`/external-agents?company_id=${cid}`).then(setConns).catch(() => {});
+    const enabling = c.status !== "ENABLED";
+    try {
+      // 原来是裸 fetch + PUT `/external-agents/{id}/ENABLED`，
+      // 而后端只有 POST /external-agents/{cid}/enable 与 /disable ——
+      // 这条路径从来就没生效过，界面却照样提示"已启用"。
+      // 现在按后端真实契约调用，且失败会真的报错。
+      if (enabling) await api.post(`/external-agents/${c.id}/enable`);
+      else await api.post(`/external-agents/${c.id}/disable`);
+      setMsg(enabling ? "已启用" : "已停用");
+      await refresh();
+    } catch (e) { setMsg(`❌ ${describeError(e, "切换状态失败")}`); }
   }
 
   async function testConnection(id: string) {
     try {
-      const r = await api.post(`/external-agents/${id}/test`);
+      const r = await api.post<{ ok: boolean; error?: string }>(`/external-agents/${id}/test`);
       setMsg(r.ok ? "✅ 连接成功" : `❌ ${r.error || "失败"}`);
-    } catch (e: any) { setMsg(e.message || String(e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "测试失败")}`); }
   }
 
   return (

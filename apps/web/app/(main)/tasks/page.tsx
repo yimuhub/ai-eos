@@ -3,18 +3,23 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createPortal } from "react-dom";
 import Link from "next/link";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
 import { TASK_STATUS_ZH, zh } from "@/lib/i18n";
+import type { Agent, Task as TaskEntity } from "@/lib/types";
 
 /* ============================================================
    任务中心 v2：渐变横幅 · 多维筛选 · 卡片视图 · 生命周期操作
    （与项目页同一设计体系）
    ============================================================ */
 
-type Task = {
-  id: string; title: string; status: string; priority: string;
-  assigned_agent_id: string | null; description?: string | null; result?: string | null;
+// 复用 lib/types 的任务实体，只把列表展示时必定存在的字段收窄为必填。
+// 好处：后端一旦把 status/priority 改名，这里编译期就报错。
+type Task = Omit<TaskEntity, "status" | "priority" | "assigned_agent_id"> & {
+  status: string;
+  priority: string;
+  assigned_agent_id: string | null;
 };
 
 const STATUS_STYLE: Record<string, { label: string; cls: string; dot: string }> = {
@@ -42,8 +47,7 @@ type Dim = "status" | "priority" | "executor" | "none";
 
 export default function TasksPage() {
   const router = useRouter();
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [agents, setAgents] = useState<{ id: string; name: string }[]>([]);
+  const cid = useActiveCompanyId();
   const [dim, setDim] = useState<Dim>("status");
   const [dimValue, setDimValue] = useState("全部");
   const [search, setSearch] = useState("");
@@ -59,7 +63,6 @@ export default function TasksPage() {
   const [mounted, setMounted] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [ntForm, setNtForm] = useState({ title: "", description: "", priority: "NORMAL" });
-  const [deptGroups, setDeptGroups] = useState<{ dept_id: string; dept_name: string; agents: { id: string; name: string }[] }[]>([]);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [deptOpen, setDeptOpen] = useState<Set<string>>(new Set());
   const [creating, setCreating] = useState(false);
@@ -67,25 +70,45 @@ export default function TasksPage() {
   const [confirmTarget, setConfirmTarget] = useState<{ t: Task } | null>(null);
   useEffect(() => { setMounted(true); }, []);
 
-  const load = useCallback(async () => {
-    const cs: any[] = await api.get("/companies");
-    if (!cs.length) return;
-    const q = `/tasks?company_id=${cs[0].id}`;
-    const data = await api.get(q);
-    setTasks(Array.isArray(data) ? data : []);
-    try {
-      setAgents(await api.get(`/agents?company_id=${cs[0].id}`));
-    } catch {}
-    try {
-      const ov = await api.get(`/growth-center/departments-overview?company_id=${cs[0].id}`);
-      setDeptGroups((ov.departments || []).map((d: any) => ({
-        dept_id: d.dept_id, dept_name: d.dept_name,
-        agents: (d.agents || []).map((a: any) => ({ id: a.id, name: a.name })),
-      })));
-    } catch {}
-  }, []);
+  /* ---------- 数据加载 ----------
+   *
+   * 改造前：先取公司 → 再取任务 → 再取员工 → 再取部门，四段串行；
+   * 而且用的是 `cs[0].id` 这种一次性快照——用户在顶栏切了公司，
+   * 这一页仍然显示旧公司的任务（界面在说谎）。
+   * 现在交给统一数据层：并发取数、缓存首屏、切公司自动跟随。
+   */
+  const {
+    data: bundle, error: loadError, refresh,
+  } = useResource(
+    cid ? `tasks:${cid}` : null,
+    async () => {
+      // 任务列表必须有；员工与部门只用于"按部门选人"，缺失不阻塞主流程
+      const [tasks, agents, deptOv] = await Promise.all([
+        api.get<Task[]>(`/tasks?company_id=${cid}`),
+        api.get<Agent[]>(`/agents?company_id=${cid}`).catch(() => [] as Agent[]),
+        api.get<{ departments?: {
+          dept_id: string; dept_name: string;
+          agents?: { id: string; name: string }[];
+        }[] }>(`/growth-center/departments-overview?company_id=${cid}`).catch(() => null),
+      ]);
+      return {
+        tasks: Array.isArray(tasks) ? tasks : [],
+        agents: Array.isArray(agents) ? agents.map((a) => ({ id: a.id, name: a.name })) : [],
+        deptGroups: (deptOv?.departments || []).map((d) => ({
+          dept_id: d.dept_id, dept_name: d.dept_name,
+          agents: (d.agents || []).map((a) => ({ id: a.id, name: a.name })),
+        })),
+      };
+    },
+  );
 
-  useEffect(() => { load(); }, [load]);
+  // 派生数据统一 useMemo：`?? []` 每次渲染都是新数组，会让下游 useMemo 每次失效
+  const tasks = useMemo<Task[]>(() => bundle?.tasks ?? [], [bundle]);
+  const agents = useMemo(() => bundle?.agents ?? [], [bundle]);
+  const deptGroups = useMemo(() => bundle?.deptGroups ?? [], [bundle]);
+
+  /** 任务变了 → 重取本页（同时让首页指挥中心的同类数据失效） */
+  const load = useCallback(async () => { await refresh(); }, [refresh]);
 
   /* ---------- 筛选 ---------- */
   const dimOptions = useMemo(() => {
@@ -131,10 +154,12 @@ export default function TasksPage() {
       cancel: "已停止（成果保留）", start: "已启动",
     };
     try {
+      // 不管返回什么用户都只看到"✅ 已暂停"，这是"系统会说谎"的典型形态。
+      // 现在失败的异常会被统一转成可读中文，并如实报错。
       await api.post(`/tasks/${id}/${action}`);
       setMsg(`✅ ${zhLabel[action]}`);
       await load();
-    } catch (e: any) { setMsg(`❌ ${e.message || e}`); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "操作失败")}`); }
     setBusyId(null);
   }
 
@@ -161,32 +186,27 @@ export default function TasksPage() {
     if (!ntForm.title.trim() || !picked.size) return;
     setCreating(true);
     try {
-      const cid2 = (await api.get("/companies"))[0]?.id;
       const attachNote = ntAttach.length
         ? `\n\n📎 附件：${ntAttach.map((a) => a.name).join("、")}`
         : "";
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/task-dispatch/dispatch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({
-          company_id: cid2,
-          title: ntForm.title.trim(),
-          description: (ntForm.description || null)
-            ? ntForm.description + attachNote : (attachNote ? attachNote.trim() : null),
-          priority: ntForm.priority,
-          target_type: "multi_agent_list",
-          agent_ids: Array.from(picked),
-        }),
+      // 走统一 api 层：自动注入鉴权与超时，错误也是可读中文。
+      // 原实现是裸 fetch + 手工拼 token，且把 `detail` 直接塞进 Error.message，
+      // 校验失败时会显示 "[object Object]"。
+      const data = await api.post<{ created_count: number }>("/task-dispatch/dispatch", {
+        company_id: cid,
+        title: ntForm.title.trim(),
+        description: (ntForm.description || null)
+          ? ntForm.description + attachNote : (attachNote ? attachNote.trim() : null),
+        priority: ntForm.priority,
+        target_type: "multi_agent_list",
+        agent_ids: Array.from(picked),
       });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
       setMsg(`✅ 已创建任务「${ntForm.title.trim()}」· 分发给 ${data.created_count} 名成员`);
       setShowCreate(false);
       setNtForm({ title: "", description: "", priority: "NORMAL" });
       setPicked(new Set()); setNtAttach([]);
       await load();
-    } catch (e: any) { setMsg(`❌ ${e.message || e}`); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "创建任务失败")}`); }
     setCreating(false);
   }
 
@@ -201,21 +221,14 @@ export default function TasksPage() {
     setConfirmTarget(null);
     setBusyId(t.id);
     try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/task-dispatch/delete`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("aieos_token")}`,
-          },
-          body: JSON.stringify({ task_ids: [t.id] }),
-        });
-      const data = await r.json();
+      const data = await api.post<{ deleted_count: number; failed: string[] }>(
+        "/task-dispatch/delete", { task_ids: [t.id] });
+      // 原来只要请求没抛异常就提示成功，甚至不看 deleted_count，
+      // "删除失败"要和"删除成功"一样明确地说出来。
       if (data.deleted_count === 1) setMsg("🗑 已彻底删除");
-      else setMsg(`❌ 删除失败: ${JSON.stringify(data.failed)}`);
+      else setMsg(`❌ 删除失败：${JSON.stringify(data.failed)}`);
       await load();
-    } catch (e: any) { setMsg(`❌ ${e.message}`); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "删除失败")}`); }
     setBusyId(null);
   }
 
@@ -224,22 +237,13 @@ export default function TasksPage() {
     if (!batchSel.size) return;
     setBatchDeleting(true);
     try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/task-dispatch/delete`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("aieos_token")}`,
-          },
-          body: JSON.stringify({ task_ids: Array.from(batchSel) }),
-        });
-      const data = await r.json();
+      const data = await api.post<{ deleted_count: number; failed: string[] }>(
+        "/task-dispatch/delete", { task_ids: Array.from(batchSel) });
       setMsg(`🗑 已彻底删除 ${data.deleted_count} 个任务${data.failed.length ? `，失败 ${data.failed.length}` : ""}`);
       setShowBatchDelete(false);
       setBatchSel(new Set());
       await load();
-    } catch (e: any) { setMsg(e.message || String(e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "批量删除失败")}`); }
     setBatchDeleting(false);
   }
 

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
+import type { Company } from "@/lib/types";
 
 /* ============================================================
    成果中心：成果版本管理与审核协同
@@ -53,7 +54,7 @@ export default function ArtifactsPage() {
   useEffect(() => { setMounted(true); }, []);
 
   useEffect(() => {
-    api.get("/companies").then((cs: any[]) => {
+    api.get<Company[]>("/companies").then((cs) => {
       const c = cs[0]?.id;
       if (c) {
         setCid(c);

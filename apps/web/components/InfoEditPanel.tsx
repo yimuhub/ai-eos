@@ -1,19 +1,20 @@
 "use client";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import { api, describeError } from "@/lib/api";
 import { confirmAction } from "@/components/ConfirmDialog";
 import { notify } from "@/components/Toast";
+import type { Agent, AgentMemoryConfig, Department, ModelConfig } from "@/lib/types";
 
 /* ============================================================
    员工信息编辑面板（完整复刻列表页编辑弹窗全部字段）
    岗位/状态/部门/上级/驱动模型/执行底座/能力包/SystemPrompt
    ============================================================ */
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-const auth = () => ({
-  Authorization: `Bearer ${localStorage.getItem("aieos_token")}`,
-  "Content-Type": "application/json",
-});
+/** 详情比列表多两个字段：能力/底座存在 memory_config 里 */
+type AgentDetail = Agent & {
+  memory_config?: (AgentMemoryConfig & { system_prompt?: string }) | null;
+};
 
 const STATUS_ZH: Record<string, string> = {
   IDLE: "空闲", ACTIVE: "在线", RUNNING: "工作中", PAUSED: "已暂停",
@@ -50,9 +51,9 @@ export default function InfoEditPanel({ agentId, onClose, onSaved }: {
     manager_agent_id: "", model_id: "", backend: "",
     capabilities: new Set(), system_prompt: "",
   });
-  const [agents, setAgents] = useState<any[]>([]);
-  const [depts, setDepts] = useState<any[]>([]);
-  const [models, setModels] = useState<any[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [depts, setDepts] = useState<Department[]>([]);
+  const [models, setModels] = useState<ModelConfig[]>([]);
   const [saving, setSaving] = useState(false);
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
@@ -61,21 +62,21 @@ export default function InfoEditPanel({ agentId, onClose, onSaved }: {
   useEffect(() => {
     (async () => {
       try {
-        // 并行拉取：当前 Agent、全员、部门、模型
-        const [curRes, agRes, csRes, mRes] = await Promise.all([
-          fetch(`${API}/agents/${agentId}`, { headers: auth() }),
-          fetch(`${API}/agents`, { headers: auth() }),
-          fetch(`${API}/companies`, { headers: auth() }),
-          fetch(`${API}/models`, { headers: auth() }),
+        // 全部并行：当前 Agent、全员、模型、公司列表（只为拿公司 id）
+        const [cur, all, modelList, companies] = await Promise.all([
+          api.get<AgentDetail>(`/agents/${agentId}`),
+          api.get<Agent[]>("/agents"),
+          api.get<ModelConfig[]>("/models"),
+          api.get<{ id: string }[]>("/companies"),
         ]);
-        const cur = await curRes.json();
-        setAgents(await agRes.json());
-        const cs = await csRes.json();
-        if (cs[0]?.id) {
-          fetch(`${API}/companies/${cs[0].id}/departments`,
-            { headers: auth() }).then((r) => r.json()).then(setDepts).catch(() => {});
+        setAgents(all);
+        setModels(modelList);
+        const companyId = companies[0]?.id;
+        if (companyId) {
+          // 部门只用于下拉，失败就留空，不阻塞整个面板
+          setDepts(await api.get<Department[]>(`/companies/${companyId}/departments`)
+            .catch(() => []));
         }
-        setModels(await mRes.json());
 
         // 解析能力包
         const caps = new Set<string>(cur.memory_config?.capabilities || []);
@@ -88,42 +89,38 @@ export default function InfoEditPanel({ agentId, onClose, onSaved }: {
           capabilities: caps,
           system_prompt: cur.memory_config?.system_prompt || "",
         });
-      } catch (e: any) { setMsg(`加载失败: ${e.message}`); }
+      } catch (e) { setMsg(`加载失败: ${describeError(e, "加载失败")}`); }
     })();
   }, [agentId]);
 
   async function save() {
     setSaving(true); setMsg("");
     try {
-      const curRes = await fetch(`${API}/agents/${agentId}`, { headers: auth() });
-      const cur = await curRes.json();
-      const cfg = { ...(cur.memory_config || {}) };
+      const cur = await api.get<AgentDetail>(`/agents/${agentId}`);
+      const cfg: AgentMemoryConfig = { ...(cur.memory_config || {}) };
       cfg.backend = form.backend || undefined;
       cfg.capabilities = Array.from(form.capabilities);
       if (form.system_prompt) cfg.system_prompt = form.system_prompt;
 
-      await fetch(`${API}/agents/${agentId}`, {
-        method: "PATCH", headers: auth(),
-        body: JSON.stringify({
-          role: form.role, status: form.status,
-          department_id: form.department_id || null,
-          manager_agent_id: form.manager_agent_id || null,
-          memory_config: cfg,
-        }),
+      await api.patch(`/agents/${agentId}`, {
+        role: form.role, status: form.status,
+        department_id: form.department_id || null,
+        manager_agent_id: form.manager_agent_id || null,
+        memory_config: cfg,
       });
 
       // 模型绑定变更时调用 switch-model
       const currentModel = cur.model_configs?.[0]?.model_id;
       if (form.model_id && form.model_id !== currentModel) {
-        await fetch(`${API}/agents/${agentId}/switch-model`, {
-          method: "PATCH", headers: auth(),
-          body: JSON.stringify({ model_id: form.model_id }),
-        });
+        // 真实缺陷：这里原来用的是 PATCH，而接口是 PUT（405），
+        // 而且不看返回——所以"在这个面板里换模型"从来没有生效过，
+        // 界面还会提示"✅ 已保存"。这就是审计里说的假成功。
+        await api.put(`/agents/${agentId}/switch-model`, { model_id: form.model_id });
       }
       setMsg("✅ 已保存");
       onSaved?.();
       setTimeout(onClose, 600);
-    } catch (e: any) { setMsg(`❌ ${e.message}`); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "保存失败")}`); }
     setSaving(false);
   }
 
@@ -137,16 +134,11 @@ export default function InfoEditPanel({ agentId, onClose, onSaved }: {
     }))) return;
     setSaving(true);
     try {
-      const r = await fetch(`${API}/agents/${agentId}`,
-        { method: "DELETE", headers: auth() });
-      if (r.status === 204 || r.ok) {
-        // 原来用 alert()：阻塞式弹窗、浅色系统样式，与产品观感割裂
-        notify("success", "已删除该员工，正在返回列表…");
-        window.location.href = "/agents";
-      } else {
-        setMsg(`❌ 删除失败 HTTP ${r.status}`);
-      }
-    } catch (e: any) { setMsg(`❌ ${e.message}`); }
+      await api.del(`/agents/${agentId}`);
+      // 原来用 alert()：阻塞式弹窗、浅色系统样式，与产品观感割裂
+      notify("success", "已删除该员工，正在返回列表…");
+      window.location.href = "/agents";
+    } catch (e) { setMsg(`❌ ${describeError(e, "删除失败")}`); }
     setSaving(false);
   }
 

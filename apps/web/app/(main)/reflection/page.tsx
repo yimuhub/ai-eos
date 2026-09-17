@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { api, ApiError } from "@/lib/api";
 import { notify } from "@/components/Toast";
 import { confirmAction } from "@/components/ConfirmDialog";
+import type { Company } from "@/lib/types";
 
 /** 把任意异常转成一句可读的原因，避免界面出现 "[object Object]" */
 function describe(e: unknown, fallback: string): string {
@@ -64,7 +65,7 @@ export default function ReflectionCenterPage() {
 
   const load = useCallback(async () => {
     try {
-      const cs: any[] = await api.get("/companies");
+      const cs = await api.get<Company[]>("/companies");
       if (!cs.length) return;
       setCid(cs[0].id);
       const d = await api.get(`/reflection/agents-overview?company_id=${cs[0].id}`);

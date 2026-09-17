@@ -1,43 +1,53 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { api, getToken } from "@/lib/api";
+import { useMemo, useRef, useState } from "react";
+import { api, API_BASE, describeError } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { notify } from "@/components/Toast";
 import { ASSET_TYPE_ZH, zh } from "@/lib/i18n";
-
-type Asset = { id: string; name: string; type: string; size: number; task_id: string | null; agent_id: string | null };
+import type { Asset } from "@/lib/types";
 
 export default function AssetsPage() {
-  const [assets, setAssets] = useState<Asset[]>([]);
+  const cid = useActiveCompanyId();
+  const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const load = useCallback(async () => {
-    const cs: any[] = await api.get("/companies");
-    if (!cs.length) return;
-    setAssets(await api.get(`/assets?company_id=${cs[0].id}`));
-  }, []);
-  useEffect(() => { load(); }, [load]);
+  const { data, refresh: load } = useResource(
+    cid ? `assets:${cid}` : null,
+    () => api.get<Asset[]>(`/assets?company_id=${cid}`),
+  );
+  const assets = useMemo(() => data ?? [], [data]);
 
   async function upload(file: File) {
-    const cs: any[] = await api.get("/companies");
-    const form = new FormData();
-    form.append("file", file);
-    await fetch(`http://localhost:8000/assets/upload?company_id=${cs[0].id}`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${getToken()}` },
-      body: form,
-    });
-    load();
+    if (!cid) return;
+    setBusy(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      // 原来这里有两处硬编码：地址写死 http://localhost:8000（换成别的部署就是坏链），
+      // 且不看返回值——上传失败页面上什么都没有。
+      await api.upload(`/assets/upload?company_id=${cid}`, form);
+      notify("success", `已上传 ${file.name}`);
+      await load();
+    } catch (e) {
+      notify("error", `上传失败：${describeError(e, "上传失败")}`);
+    }
+    setBusy(false);
   }
 
   async function preview(id: string) {
-    const d = await api.get(`/assets/${id}`);
-    // 文本类素材用 Toast 展示（原来用 alert：超长内容会被系统弹窗截断且无法复制）
-    // 二进制素材走下载，交给浏览器处理
-    if (d.content !== undefined) {
-      const text = String(d.content);
-      notify("info", text.length > 2000 ? `${text.slice(0, 2000)}…（已截断，共 ${text.length} 字）` : text);
-    } else {
-      window.open(`http://localhost:8000/assets/${id}/download`, "_blank");
+    try {
+      const d = await api.get<{ content?: unknown }>(`/assets/${id}`);
+      // 文本类素材用 Toast 展示（原来用 alert：超长内容会被系统弹窗截断且无法复制）
+      // 二进制素材走下载，交给浏览器处理
+      if (d.content !== undefined) {
+        const text = String(d.content);
+        notify("info", text.length > 2000 ? `${text.slice(0, 2000)}…（已截断，共 ${text.length} 字）` : text);
+      } else {
+        // 用 API_BASE 拼下载地址，不再写死 localhost
+        window.open(`${API_BASE}/assets/${id}/download`, "_blank");
+      }
+    } catch (e) {
+      notify("error", `读取素材失败：${describeError(e, "读取失败")}`);
     }
   }
 
@@ -46,8 +56,12 @@ export default function AssetsPage() {
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold tracking-tight">成果资产中心</h1>
         <div>
-          <input ref={fileRef} type="file" hidden onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])} />
-          <button onClick={() => fileRef.current?.click()} className="btn-primary">⬆ 上传文件</button>
+          <input ref={fileRef} type="file" hidden
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) void upload(f); e.target.value = ""; }} />
+          <button onClick={() => fileRef.current?.click()} disabled={!cid || busy}
+            className="btn-primary disabled:opacity-40">
+            {busy ? "上传中…" : "⬆ 上传文件"}
+          </button>
         </div>
       </div>
       <table className="w-full text-sm">
@@ -59,7 +73,7 @@ export default function AssetsPage() {
             <tr key={a.id} className="border-b border-[var(--border)]">
               <td className="py-2.5">📄 {a.name}</td>
               <td><span className="text-xs bg-white/[0.05] px-2 py-0.5 rounded">{zh(ASSET_TYPE_ZH, a.type)}</span></td>
-              <td className="text-xs text-[var(--muted)]">{(a.size / 1024).toFixed(1)} KB</td>
+              <td className="text-xs text-[var(--muted)]">{((a.size ?? 0) / 1024).toFixed(1)} KB</td>
               <td className="text-xs text-[var(--muted)]">{a.agent_id ? `🤖 ${a.agent_id.slice(0, 8)}…` : "👤 用户"}</td>
               <td><button onClick={() => preview(a.id)} className="text-xs text-blue-400 hover:underline">查看</button></td>
             </tr>

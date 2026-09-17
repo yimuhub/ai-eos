@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import { api, setActiveCompanyId } from "@/lib/api";
+import { api, describeError, setActiveCompanyId } from "@/lib/api";
 import { confirmAction } from "@/components/ConfirmDialog";
 import { notify } from "@/components/Toast";
 import TeamGenModal from "@/components/TeamGenModal";
@@ -40,9 +40,9 @@ export default function CompanyManagePage() {
 
   const load = useCallback(async () => {
     try {
-      const d = await api.get("/company-manage/list");
+      const d = await api.get<{ companies?: CompanyRow[] }>("/company-manage/list");
       setRows(d.companies || []);
-    } catch (e: any) { setMsg("❌ " + (e.message || e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "加载公司列表失败")}`); }
     if (typeof window !== "undefined") {
       setActiveCidState(localStorage.getItem("aieos_active_cid") || "");
     }
@@ -53,13 +53,8 @@ export default function CompanyManagePage() {
   async function del(cid: string) {
     setBusy(true);
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/company-manage/batch-delete`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({ company_ids: [cid] }),
-      });
-      const d = await r.json();
+      const d = await api.post<{ deleted_count: number; failed?: string[] }>(
+        "/company-manage/batch-delete", { company_ids: [cid] });
       setMsg(`🗑 已删除公司（${d.deleted_count}）${d.failed?.length ? `，失败 ${d.failed.length}` : ""}`);
       // 若删的是激活公司 → 切回剩余第一家
       if (cid === activeCid && rows.length > 1) {
@@ -67,7 +62,7 @@ export default function CompanyManagePage() {
         if (next) setActiveCompanyId(next.id);
       }
       await load();
-    } catch (e: any) { setMsg("❌ " + (e.message || e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "删除公司失败")}`); }
     setConfirmTarget(null);
     setBusy(false);
   }
@@ -91,17 +86,12 @@ export default function CompanyManagePage() {
     }))) return;
     setBusy(true);
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/company-manage/batch-delete`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({ company_ids: Array.from(batchSel) }),
-      });
-      const d = await r.json();
+      const d = await api.post<{ deleted_count: number; failed?: string[] }>(
+        "/company-manage/batch-delete", { company_ids: Array.from(batchSel) });
       setMsg(`🗑 已彻底删除 ${d.deleted_count} 家公司${d.failed?.length ? `，失败 ${d.failed.length}` : ""}`);
       setShowBatch(false); setBatchSel(new Set());
       await load();
-    } catch (e: any) { setMsg("❌ " + (e.message || e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "批量删除失败")}`); }
     setBusy(false);
   }
 

@@ -1,7 +1,8 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
 
 /* ============================================================
@@ -15,6 +16,18 @@ type Skill = {
 };
 type AgentRow = { id: string; name: string; role?: string | null };
 
+/** Skill 市场里的一条结果（字段与后端 /skills/market/search 保持一致） */
+type MarketItem = {
+  name: string;
+  description?: string;
+  raw_url: string;
+  /** 来源市场名（如 "skills.sh"），列表副标题用它 */
+  source_market?: string;
+  stars?: number;
+};
+/** 导入前的安全扫描结论：hits 命中的危险模式要原样告诉用户 */
+type SecurityScan = { safe: boolean; level?: string; hits: string[] };
+
 const SOURCE_META: Record<string, { icon: string; label: string; color: string }> = {
   builtin: { icon: "🧩", label: "系统内置", color: "#22d3ee" },
   custom: { icon: "🌱", label: "自主沉淀", color: "#34d399" },
@@ -22,9 +35,7 @@ const SOURCE_META: Record<string, { icon: string; label: string; color: string }
 };
 
 export default function SkillCenterPage() {
-  const [cid, setCid] = useState("");
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [agents, setAgents] = useState<AgentRow[]>([]);
+  const cidRef = useActiveCompanyId();
   const [tab, setTab] = useState<"all" | "builtin" | "custom" | "imported">("all");
   // 创建表单
   const [showCreate, setShowCreate] = useState(false);
@@ -43,11 +54,11 @@ export default function SkillCenterPage() {
   // Skill 市场
   const [showMarket, setShowMarket] = useState(false);
   const [marketQ, setMarketQ] = useState("");
-  const [marketResults, setMarketResults] = useState<any[]>([]);
+  const [marketResults, setMarketResults] = useState<MarketItem[]>([]);
   const [marketSearching, setMarketSearching] = useState(false);
-  const [previewItem, setPreviewItem] = useState<any | null>(null);
+  const [previewItem, setPreviewItem] = useState<MarketItem | null>(null);
   const [previewContent, setPreviewContent] = useState("");
-  const [previewScan, setPreviewScan] = useState<any | null>(null);
+  const [previewScan, setPreviewScan] = useState<SecurityScan | null>(null);
   const [mktScope, setMktScope] = useState("exclusive");
   // 安装目标
   const [installFor, setInstallFor] = useState<Skill | null>(null);
@@ -56,15 +67,27 @@ export default function SkillCenterPage() {
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
 
-  const load = useCallback(async () => {
-    const cs: any[] = await api.get("/companies");
-    if (!cs.length) return;
-    setCid(cs[0].id);
-    setSkills(await api.get(`/skills?company_id=${cs[0].id}`));
-    setAgents(await api.get(`/agents?company_id=${cs[0].id}`));
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
+  /* ---------- 数据加载 ----------
+   * 原实现是"先取公司拿 id → 再串行取技能 → 再取员工"，且 cid 是一次性快照：
+   * 用户在顶栏切了公司，这一页还显示旧公司的技能。现在交给统一数据层。
+   */
+  const {
+    data: bundle, error: loadError, refresh: load,
+  } = useResource(
+    cidRef ? `skills:${cidRef}` : null,
+    async () => {
+      const cid = cidRef as string;
+      const [skills, agents] = await Promise.all([
+        api.get<Skill[]>(`/skills?company_id=${cid}`),
+        api.get<AgentRow[]>(`/agents?company_id=${cid}`),
+      ]);
+      return { skills, agents };
+    },
+  );
+  const skills = useMemo(() => bundle?.skills ?? [], [bundle]);
+  const agents = useMemo(() => bundle?.agents ?? [], [bundle]);
+  /** 页面其余部分沿用字符串形式的 cid；未选公司时是空串 */
+  const cid = cidRef ?? "";
 
   const filtered = skills.filter((s) =>
     tab === "all" ? true : s.source === tab ||
@@ -73,93 +96,81 @@ export default function SkillCenterPage() {
   async function createSkill() {
     if (!name.trim() || !cid) return;
     try {
-      await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/skills/custom?company_id=${cid}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({ name, description: desc, scope, instruction }),
-      });
+      await api.post(`/skills/custom?company_id=${cid}`,
+        { name, description: desc, scope, instruction });
       setShowCreate(false); setName(""); setDesc(""); setInstruction("");
       setMsg("✅ 技能已沉淀入库");
       await load();
-    } catch (e: any) { setMsg("❌ " + (e.message || e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "创建技能失败")}`); }
   }
 
   async function importSkill() {
     if (!impName.trim() || !cid) return;
     try {
       const attachNote = impAttach.length ? `\n\n📎 附件：${impAttach.map((a) => a.name).join("、")}` : "";
-      await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/skills/import?company_id=${cid}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({
-          name: impName, description: impDesc,
-          instruction: (impInstr || "") + attachNote,
-          scope: impScope,
-          attachment_ids: impAttach.map((a) => a.id).filter(Boolean),
-        }),
+      await api.post(`/skills/import?company_id=${cid}`, {
+        name: impName, description: impDesc,
+        instruction: (impInstr || "") + attachNote,
+        scope: impScope,
+        attachment_ids: impAttach.map((a) => a.id).filter(Boolean),
       });
       setShowImport(false); setImpName(""); setImpDesc(""); setImpInstr(""); setImpAttach([]);
       setMsg("✅ 技能已导入");
       await load();
-    } catch (e: any) { setMsg("❌ " + (e.message || e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "导入技能失败")}`); }
   }
 
   /* ---------- Skill 市场 ---------- */
   async function searchMarket(q = "") {
     setMarketSearching(true);
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/skills/market/search?q=${encodeURIComponent(q)}`);
-      const d = await r.json();
+      const d = await api.get<{ results?: MarketItem[] }>(
+        `/skills/market/search?q=${encodeURIComponent(q)}`);
       setMarketResults(d.results || []);
-    } catch { setMarketResults([]); }
+    } catch (e) {
+      setMarketResults([]);
+      setMsg(`❌ 市场检索失败：${describeError(e, "检索失败")}`);
+    }
     setMarketSearching(false);
   }
 
-  async function previewMarket(item: any) {
+  async function previewMarket(item: MarketItem) {
     setPreviewItem(item); setPreviewContent(""); setPreviewScan(null);
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/skills/market/fetch-preview`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ raw_url: item.raw_url }),
-      });
-      const d = await r.json();
+      const d = await api.post<{ content?: string; security_scan?: SecurityScan }>(
+        "/skills/market/fetch-preview", { raw_url: item.raw_url });
       setPreviewContent(d.content || "");
       setPreviewScan(d.security_scan || null);
-    } catch { setPreviewContent("拉取失败"); }
+    } catch (e) {
+      // 原来只写"拉取失败"，不告诉用户是网络问题还是地址失效
+      setPreviewContent(`拉取失败：${describeError(e, "拉取失败")}`);
+    }
   }
 
   async function installFromMarket() {
     if (!previewItem) return;
     try {
-      const cs: any[] = await api.get("/companies");
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/skills/market/install-from-market?company_id=${cs[0].id}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({
-          name: previewItem.name, raw_url: previewItem.raw_url,
-          scope: mktScope,
-          force: !!(previewScan && !previewScan.safe),
-        }),
+      const d = await api.post<{ security_scan?: SecurityScan }>(
+        `/skills/market/install-from-market?company_id=${cid}`, {
+        name: previewItem.name, raw_url: previewItem.raw_url,
+        scope: mktScope,
+        force: !!(previewScan && !previewScan.safe),
       });
-      const d = await r.json();
-      if (!r.ok) throw new Error((d.detail?.message) || d.detail || `HTTP ${r.status}`);
       setShowImport(false); setPreviewItem(null);
       setMsg(`✅ 已从市场导入「${previewItem.name}」` + (d.security_scan?.safe ? "" : ` ⚠️ 含风险内容已标记：${(d.security_scan?.hits || []).join("、")}`));
       await load();
-    } catch (e: any) { setMsg("❌ " + (e.message || e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "导入失败")}`); }
   }
 
   async function toggleScope(sk: Skill) {
     if (!cid) return;
-    await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/skills/${sk.id}/scope?company_id=${cid}&scope=${sk.scope === "public" ? "exclusive" : "public"}`, {
-      method: "PATCH",
-      headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-    });
-    setMsg(`✅ 「${sk.name}」已设为${sk.scope === "public" ? "私有专属" : "公共共享"}技能`);
-    await load();
+    try {
+      // 目标 scope 先算成常量再拼：模板里嵌三元会让契约扫描读不懂这段路径
+      const nextScope = sk.scope === "public" ? "exclusive" : "public";
+      await api.patch(`/skills/${sk.id}/scope?company_id=${cid}&scope=${nextScope}`);
+      setMsg(`✅ 「${sk.name}」已设为${nextScope === "public" ? "公共共享" : "私有专属"}技能`);
+      await load();
+    } catch (e) { setMsg(`❌ ${describeError(e, "修改可见范围失败")}`); }
   }
 
   async function install(skill: Skill, agentId: string) {
@@ -193,6 +204,15 @@ export default function SkillCenterPage() {
       </div>
 
       {msg && <p className="mb-3 text-xs text-indigo-300">{msg}</p>}
+
+      {loadError && (
+        <div className="mb-3 flex items-center gap-2.5 px-4 py-3 rounded-xl text-sm"
+          style={{ background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.3)", color: "#fca5a5" }}>
+          <span>🔌</span>
+          <span className="flex-1">加载技能列表失败：{loadError}</span>
+          <button onClick={() => load()} className="btn-ghost !py-1 text-xs">重试</button>
+        </div>
+      )}
 
       {/* 创建表单 */}
       {showCreate && (

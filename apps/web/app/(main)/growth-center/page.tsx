@@ -1,9 +1,10 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
 import { confirmAction } from "@/components/ConfirmDialog";
+import type { Company } from "@/lib/types";
 
 /* ============================================================
    成长中心：按部门聚合成长档案 + 员工档案弹窗 + 学习计划
@@ -68,7 +69,7 @@ export default function GrowthCenterPage() {
 
   const load = useCallback(async () => {
     try {
-      const cs: any[] = await api.get("/companies");
+      const cs = await api.get<Company[]>("/companies");
       if (!cs.length) return;
       setCid(cs[0].id);
       const d = await api.get(`/growth-center/departments-overview?company_id=${cs[0].id}`);
@@ -84,10 +85,12 @@ export default function GrowthCenterPage() {
     setDetail({ agent: a, profile });
     setDetailData(null); setOpenSection(null);
     try {
-      const d = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/growth-center/agents/${a.id}/detail?company_id=${cid}`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });
-      setDetailData(await d.json());
-    } catch {}
+      // 原来这里 catch 是空的：详情拉不到时弹窗里就是一片空白，
+      // 用户无法区分"这个人没有记录"和"接口挂了"。
+      setDetailData(await api.get(`/growth-center/agents/${a.id}/detail?company_id=${cid}`));
+    } catch (e) {
+      setMsg(`❌ 读取员工档案失败：${describeError(e, "读取失败")}`);
+    }
   }
 
   async function delItem(kind: "skills" | "memories" | "plans", id: string) {
@@ -97,44 +100,49 @@ export default function GrowthCenterPage() {
       description: "删除后该员工将不再拥有这条记录。",
       confirmText: "删除",
     }))) return;
-    await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/growth-center/${kind}/${id}?company_id=${cid}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });
-    // 刷新详情数据 + 计数
-    if (detail) await openDetail(detail.agent);
-    await load();
+    try {
+      // 三类资源各自对应后端不同的路由（/skills/{asn_id}、/memories/{memory_id}、
+      // /plans/{plan_id}）。写成 `/growth-center/${kind}/${id}` 虽然运行时能跑，
+      // 但契约扫描看不出 kind 的取值范围，等于把这段路径排除在校验之外。
+      // 拆成三条字面路径，每一条都能被自动校验到。
+      if (kind === "skills") {
+        await api.del(`/growth-center/skills/${id}?company_id=${cid}`);
+      } else if (kind === "memories") {
+        await api.del(`/growth-center/memories/${id}?company_id=${cid}`);
+      } else {
+        await api.del(`/growth-center/plans/${id}?company_id=${cid}`);
+      }
+      // 刷新详情数据 + 计数
+      if (detail) await openDetail(detail.agent);
+      await load();
+    } catch (e) { setMsg(`❌ ${describeError(e, "删除失败")}`); }
   }
 
   async function createPlan() {
     if (!planTitle.trim() || !planAgents.size || !cid) return;
     setBusy(true);
     try {
-      await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/growth-center/plans?company_id=${cid}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({
-          title: planTitle,
-          agent_ids: Array.from(planAgents),
-          target_skills: planSkills.split(/[,，、]/).map((x) => x.trim()).filter(Boolean),
-          knowledge_scope: planScope || null,
-          period_days: planDays,
-        }),
+      await api.post(`/growth-center/plans?company_id=${cid}`, {
+        title: planTitle,
+        agent_ids: Array.from(planAgents),
+        target_skills: planSkills.split(/[,，、]/).map((x) => x.trim()).filter(Boolean),
+        knowledge_scope: planScope || null,
+        period_days: planDays,
       });
       setMsg("✅ 学习计划已下达");
       setPlanPanel(false); setPlanTitle(""); setPlanSkills(""); setPlanScope("");
       setPlanAgents(new Set());
       await load();
-    } catch (e: any) { setMsg("❌ " + (e.message || e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "下达学习计划失败")}`); }
     setBusy(false);
   }
 
   async function updatePlan(p: Plan, status: string) {
-    await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/growth-center/plans/${p.id}?company_id=${cid}&status=${status}`, {
-      method: "PATCH",
-      headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-    });
-    await load();
+    try {
+      // 原来不看返回：改状态失败也一声不响，用户以为已经生效
+      await api.patch(`/growth-center/plans/${p.id}?company_id=${cid}&status=${status}`);
+      await load();
+    } catch (e) { setMsg(`❌ ${describeError(e, "更新计划失败")}`); }
   }
 
   const sortedDepts = [...depts].sort((a, b) => {

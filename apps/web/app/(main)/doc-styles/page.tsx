@@ -1,6 +1,7 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "@/lib/api";
+import { useMemo, useRef, useState } from "react";
+import { api, describeError } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
 
 /* ============================================================
@@ -11,9 +12,7 @@ type Style = { id: string; name: string; hint: string; sample?: string | null };
 type AgentRow = { id: string; name: string; role?: string | null; doc_style_id?: string | null };
 
 export default function DocStylesPage() {
-  const [cid, setCid] = useState("");
-  const [styles, setStyles] = useState<Style[]>([]);
-  const [agents, setAgents] = useState<AgentRow[]>([]);
+  const cid = useActiveCompanyId();
   const [editing, setEditing] = useState<Style | null>(null);
   const [name, setName] = useState("");
   const [hint, setHint] = useState("");
@@ -23,35 +22,34 @@ export default function DocStylesPage() {
   const [msg, setMsg] = useState("");
   const sampleRef = useRef<HTMLInputElement>(null);
 
-  const load = useCallback(async () => {
-    const cs: any[] = await api.get("/companies");
-    if (!cs.length) return;
-    setCid(cs[0].id);
-    setStyles(await api.get(`/doc-styles?company_id=${cs[0].id}`));
-    const ags: AgentRow[] = await api.get(`/agents?company_id=${cs[0].id}`);
-    setAgents(ags);
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
+  // 公司上下文由数据层统一提供：切公司自动跟随，不用每个页面各写一遍
+  const { data: bundle, refresh: load } = useResource(
+    cid ? `doc-styles:${cid}` : null,
+    async () => {
+      const [styles, agents] = await Promise.all([
+        api.get<Style[]>(`/doc-styles?company_id=${cid}`),
+        api.get<AgentRow[]>(`/agents?company_id=${cid}`),
+      ]);
+      return { styles, agents };
+    },
+  );
+  const styles = useMemo(() => bundle?.styles ?? [], [bundle]);
+  const agents = useMemo(() => bundle?.agents ?? [], [bundle]);
 
   async function save() {
     if (!name.trim() || !hint.trim()) { setMsg("风格名和排版要求必填"); return; }
-    if (editing) {
-      await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/doc-styles/${editing.id}?company_id=${cid}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({ name, hint, sample }),
-      });
-    } else {
-      await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/doc-styles?company_id=${cid}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({ name, hint, sample }),
-      });
-    }
-    setEditing(null); setName(""); setHint(""); setSample("");
-    setMsg("✅ 已保存");
-    await load();
+    try {
+      // 走统一 api 层：原来这里裸 fetch 且不看返回，
+      // 保存失败也会显示"✅ 已保存"——典型的"系统会说谎"。
+      if (editing) {
+        await api.patch(`/doc-styles/${editing.id}?company_id=${cid}`, { name, hint, sample });
+      } else {
+        await api.post(`/doc-styles?company_id=${cid}`, { name, hint, sample });
+      }
+      setEditing(null); setName(""); setHint(""); setSample("");
+      setMsg("✅ 已保存");
+      await load();
+    } catch (e) { setMsg(`❌ ${describeError(e, "保存失败")}`); }
   }
 
   async function remove(id: string) {
@@ -60,22 +58,22 @@ export default function DocStylesPage() {
       description: "已绑定这条风格的员工会自动解除绑定，之后产出的文档将使用默认风格。",
       confirmText: "删除",
     }))) return;
-    await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/doc-styles/${id}?company_id=${cid}`, {
-      method: "DELETE", headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-    });
-    await load();
+    try {
+      await api.del(`/doc-styles/${id}?company_id=${cid}`);
+      setMsg("🗑 已删除该风格");
+      await load();
+    } catch (e) { setMsg(`❌ ${describeError(e, "删除失败")}`); }
   }
 
   async function assign() {
     if (!picked.size) { setMsg("请先勾选员工"); return; }
-    const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/doc-styles/assign?company_id=${cid}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-      body: JSON.stringify({ agent_ids: Array.from(picked), style_id: assignTo || null }),
-    });
-    const d = await r.json();
-    setMsg(`✅ 已更新 ${d.changed} 名员工的文档风格`);
-    await load();
+    try {
+      const d = await api.post<{ changed: number }>(
+        `/doc-styles/assign?company_id=${cid}`,
+        { agent_ids: Array.from(picked), style_id: assignTo || null });
+      setMsg(`✅ 已更新 ${d.changed} 名员工的文档风格`);
+      await load();
+    } catch (e) { setMsg(`❌ ${describeError(e, "分配失败")}`); }
   }
 
   return (
@@ -135,15 +133,11 @@ export default function DocStylesPage() {
                   const fd = new FormData();
                   fd.append("file", f);
                   try {
-                    const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/doc-styles/upload-sample?company_id=${cid}`, {
-                      method: "POST",
-                      headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-                      body: fd,
-                    });
-                    const d = await r.json();
+                    const d = await api.upload<{ markdown?: string }>(
+                      `/doc-styles/upload-sample?company_id=${cid}`, fd);
                     if (d.markdown) { setSample(d.markdown.slice(0, 8000)); setMsg(`✅ 已从 ${f.name} 提取示例`); }
-                    else setMsg("❌ 解析失败");
-                  } catch { setMsg("❌ 上传失败"); }
+                    else setMsg("❌ 解析失败：未能从该文件提取到文本");
+                  } catch (err) { setMsg(`❌ ${describeError(err, "上传失败")}`); }
                   e.target.value = "";
                 }} />
               <button onClick={() => sampleRef.current?.click()}

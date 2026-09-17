@@ -1,8 +1,9 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import { confirmAction } from "@/components/ConfirmDialog";
+import type { Company } from "@/lib/types";
 
 /* ============================================================
    组织架构 v3：卡片排序/置顶 · 部门技能 · 部门专属知识库
@@ -53,7 +54,7 @@ export default function OrganizationPage() {
   const [sortMode, setSortMode] = useState(false);
 
   const load = useCallback(async () => {
-    const cs: any[] = await api.get("/companies");
+    const cs = await api.get<Company[]>("/companies");
     if (!cs.length) return;
     const cid = cs[0].id;
     const ds: Dept[] = await api.get(`/companies/${cid}/departments`);
@@ -101,7 +102,7 @@ export default function OrganizationPage() {
     if (!editForm.name.trim()) return;
     try {
       if (editing?.id === "__new__") {
-        const cs: any[] = await api.get("/companies");
+        const cs = await api.get<Company[]>("/companies");
         await api.post(`/departments?cid=${cs[0].id}`, {
           name: editForm.name.trim(),
           description: editForm.description || null,
@@ -120,7 +121,7 @@ export default function OrganizationPage() {
       }
       setEditing(null);
       await load();
-    } catch (e: any) { setMsg(e.message || String(e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "操作失败")}`); }
   }
 
   async function deleteOne(d: Dept) {
@@ -138,7 +139,7 @@ export default function OrganizationPage() {
       const r = await api.post("/departments/batch-delete", { department_ids: [d.id], mode: "promote" });
       setMsg(r.deleted_count ? `✅ 已删除「${d.name}」` : "❌ 删除失败");
       await load();
-    } catch (e: any) { setMsg(e.message || String(e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "操作失败")}`); }
   }
 
   async function batchCreate() {
@@ -148,7 +149,7 @@ export default function OrganizationPage() {
     }).filter((i) => i.name);
     if (!items.length) return;
     try {
-      const cs: any[] = await api.get("/companies");
+      const cs = await api.get<Company[]>("/companies");
       const r = await api.post("/departments/batch-create", {
         company_id: cs[0].id,
         parent_department_id: batchParent || undefined,
@@ -158,7 +159,7 @@ export default function OrganizationPage() {
       setShowBatchAdd(false);
       setBatchText("");
       await load();
-    } catch (e: any) { setMsg(e.message || String(e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "操作失败")}`); }
   }
 
   async function batchDelete() {
@@ -171,19 +172,18 @@ export default function OrganizationPage() {
       setMsg(`✅ 已删除 ${r.deleted_count} 个部门${r.failed.length ? `，失败 ${r.failed.length}` : ""}`);
       setShowBatchDelete(false); setSelected(new Set());
       await load();
-    } catch (e: any) { setMsg(e.message || String(e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "操作失败")}`); }
     setDeleting(false);
   }
 
   /* ---------- 排序 / 置顶 ---------- */
   async function togglePin(d: Dept) {
-    await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/departments/${d.id}/pin`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-      body: JSON.stringify({ pinned: !d.pinned }),
-    });
-    setMsg(d.pinned ? `「${d.name}」已取消置顶` : `📌 「${d.name}」已置顶`);
-    await load();
+    // 原来裸 fetch 且不看返回：置顶失败也会提示"已置顶"
+    try {
+      await api.put(`/departments/${d.id}/pin`, { pinned: !d.pinned });
+      setMsg(d.pinned ? `「${d.name}」已取消置顶` : `📌 「${d.name}」已置顶`);
+      await load();
+    } catch (e) { setMsg(`❌ ${describeError(e, "置顶失败")}`); }
   }
 
   const [orderDraft, setOrderDraft] = useState<string[] | null>(null);
@@ -202,15 +202,13 @@ export default function OrganizationPage() {
   }
   async function saveSort() {
     if (!orderDraft) return;
-    await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/departments/reorder`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-      body: JSON.stringify({ ordered_ids: orderDraft }),
-    });
-    setSortMode(false);
-    setOrderDraft(null);
-    setMsg("✅ 排序已保存");
-    await load();
+    try {
+      await api.post("/departments/reorder", { ordered_ids: orderDraft });
+      setSortMode(false);
+      setOrderDraft(null);
+      setMsg("✅ 排序已保存");
+      await load();
+    } catch (e) { setMsg(`❌ ${describeError(e, "保存排序失败")}`); }
   }
 
   const nameOf = (id: string | undefined) =>
@@ -290,7 +288,7 @@ export default function OrganizationPage() {
           const staff = agentsOf(d.id);
           const children = tree.childrenMap[d.id] || [];
           const deptSkillNames = (d.skill_ids || [])
-            .map((sid: string) => allSkills.find((sk: any) => sk.id === sid)?.name)
+            .map((sid: string) => allSkills.find((sk) => sk.id === sid)?.name)
             .filter(Boolean) as string[];
 
           return (
@@ -501,7 +499,7 @@ export default function OrganizationPage() {
               <label className="flex items-center gap-2 text-xs cursor-pointer select-none" style={{ color: "var(--muted)" }}>
                 <input type="checkbox"
                   checked={selected.size === depts.length && depts.length > 0}
-                  onChange={() => setSelected(new Set(depts.map((x: any) => x.id)))}
+                  onChange={() => setSelected(new Set(depts.map((x) => x.id)))}
                   className="accent-indigo-500 w-3.5 h-3.5" />
                 全选
               </label>
@@ -666,7 +664,7 @@ export default function OrganizationPage() {
                     description: "子部门将上提为顶级，部门内员工变为「未分配」，员工档案不受影响。",
                     confirmText: "删除部门",
                   }))) return;
-                  await api.del(`/departments/${editing.id}`).catch((e: any) => setMsg(e.message));
+                  await api.del(`/departments/${editing.id}`).catch((e) => setMsg(`❌ ${describeError(e, "删除失败")}`));
                   setEditing(null);
                   await load();
                 }}

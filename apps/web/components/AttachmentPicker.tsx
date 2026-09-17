@@ -1,9 +1,10 @@
 "use client";
 import { useRef, useState } from "react";
+import { api, getActiveCompanyId } from "@/lib/api";
 
 /* ============================================================
    通用附件选择器：所有输入场景统一使用
-   - 选择即真实上传（POST /assets/upload，落盘+入库）
+   - 选择即真实上传（POST /upload，落盘+入库）
    - 展示已传附件标签（文件名 + 大小），可单个移除
    - onChange 回调返回完整附件列表 [{id, name, size}]
    ============================================================ */
@@ -33,6 +34,8 @@ export default function AttachmentPicker({
     setErr("");
     setUploading(true);
     const added: Attachment[] = [];
+    // 公司上下文直接读本地的激活公司，不必为了拿一个 id 多打一次接口
+    const cid = getActiveCompanyId();
     for (const f of Array.from(files)) {
       if (f.size > MAX_MB * 1024 * 1024) {
         setErr(`「${f.name}」超过 ${MAX_MB}MB 上限`);
@@ -41,21 +44,14 @@ export default function AttachmentPicker({
       try {
         const fd = new FormData();
         fd.append("file", f);
-        // company_id 由后端从 token 校验，这里取 localStorage 的 cid 或让调用方传入
-        const cs = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/companies`, {
-          headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        }).then((r) => r.json());
-        const cid = cs[0]?.id;
-        const r = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/upload?company_id=${cid}`,
-          { method: "POST", headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` }, body: fd });
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const d = await r.json();
+        // /upload 在 api 层的"不自动追加 company_id"白名单里，所以要显式传
+        const d = await api.upload<{ id: string; name?: string; size?: number }>(
+          `/upload?company_id=${cid ?? ""}`, fd);
         added.push({ id: d.id, name: d.name || f.name, size: d.size ?? f.size });
       } catch {
         // 上传失败也保留本地信息，提交时由调用方决定
         added.push({ id: "", name: f.name, size: f.size });
-        setErr("部分附件上传失败，已暂存本地");
+        setErr(`「${f.name}」上传失败：只会记录文件名，文件内容不会被引用`);
       }
     }
     onChange([...value, ...added]);

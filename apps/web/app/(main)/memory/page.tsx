@@ -25,7 +25,11 @@ export default function MemoryPage() {
   const load = async (aid = agentId, q = query) => {
     if (!aid) return;
     const c = await cid();
-    const r = await api.get(`/memory/recall?company_id=${c}&agent_id=${aid}${q ? `&q=${encodeURIComponent(q)}` : ""}`);
+    // 查询串用 URLSearchParams 拼：既不用在模板里嵌三元（契约扫描看不懂），
+    // 也顺手解决了"内容含 & 或中文时查询串被截断/编码错"的老问题。
+    const qs = new URLSearchParams({ company_id: c ?? "", agent_id: aid });
+    if (q) qs.set("q", q);
+    const r = await api.get<{ memories: Mem[] }>(`/memory/recall?${qs}`);
     setMems(r.memories);
   };
 

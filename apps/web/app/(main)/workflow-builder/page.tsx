@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { notify } from "@/components/Toast";
+import type { Company } from "@/lib/types";
 
 type Node = {
   node_key: string; node_type: string; name: string;
@@ -111,7 +112,7 @@ export default function WorkflowBuilderPage() {
   }
 
   async function save() {
-    const cs: any[] = await api.get("/companies");
+    const cs = await api.get<Company[]>("/companies");
     const res = await api.post(`/workflows?company_id=${cs[0].id}`, {
       name: wfName, nodes: nodes.map(({ node_key, node_type, name, config, position_x, position_y }) =>
         ({ node_key, node_type, name, config, position_x, position_y })),

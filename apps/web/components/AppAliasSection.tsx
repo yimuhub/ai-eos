@@ -4,7 +4,7 @@
    任何人在本地部署后自动感知本机系统（macOS/Windows/Linux）
    ============================================================ */
 import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import { notify } from "@/components/Toast";
 
 type AliasRule = {
@@ -15,84 +15,87 @@ type InstalledApp = {
   name: string; path: string | null;
   source: string; terminal?: boolean;
 };
+type Platform = { os?: string; hint?: string };
+/** 自然语言 → 应用的匹配结果（界面上用到 matched / name / via 三个字段） */
+type MatchResult = { matched?: boolean; name?: string; via?: string };
+type RunResult = { ok?: boolean; message?: string };
 
 export default function AppAliasSection({ cid }: { cid: string }) {
   const [rules, setRules] = useState<AliasRule[]>([]);
   const [installed, setInstalled] = useState<InstalledApp[]>([]);
-  const [platform, setPlatform] = useState<any>(null);
+  const [platform, setPlatform] = useState<Platform | null>(null);
   const [opened, setOpened] = useState(false);
   const [formAlias, setFormAlias] = useState("");
   const [formApp, setFormApp] = useState("");
   const [formPath, setFormPath] = useState("");
   const [matchText, setMatchText] = useState("");
-  const [matchRes, setMatchRes] = useState<any>(null);
+  const [matchRes, setMatchRes] = useState<MatchResult | null>(null);
   const [running, setRunning] = useState<string | null>(null);
+
+  // 以下三处原来都各自重新读一遍 token 与 base url（同一个文件里重复四遍），
+  // 现在统一走 api 层：鉴权头、超时、错误规范化只有一处实现。
+  const loadRules = async () => {
+    const list = await api.get<AliasRule[]>(`/app-alias/rules?company_id=${cid}`);
+    setRules(Array.isArray(list) ? list : []);
+  };
 
   useEffect(() => {
     if (!cid) return;
-    const t = localStorage.getItem("aieos_token") || "";
-    const hdr = { Authorization: `Bearer ${t}` };
-    const base = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    Promise.all([
-      fetch(`${base}/app-alias/platform?company_id=${cid}`, { headers: hdr }).then(r => r.json()),
-      fetch(`${base}/app-alias/installed?company_id=${cid}`, { headers: hdr }).then(r => r.json()),
-      fetch(`${base}/app-alias/rules?company_id=${cid}`, { headers: hdr }).then(r => r.json()),
-    ]).then(([p, i, r]) => {
-      setPlatform(p);
-      setInstalled(i.installed || []);
-      setRules(Array.isArray(r) ? r : []);
-    }).catch(() => {});
+    (async () => {
+      try {
+        const [p, inst, r] = await Promise.all([
+          api.get<Platform>(`/app-alias/platform?company_id=${cid}`),
+          api.get<{ installed?: InstalledApp[] }>(`/app-alias/installed?company_id=${cid}`),
+          api.get<AliasRule[]>(`/app-alias/rules?company_id=${cid}`),
+        ]);
+        setPlatform(p);
+        setInstalled(inst.installed || []);
+        setRules(Array.isArray(r) ? r : []);
+      } catch {
+        // 本机能力探测失败（如未授权）不该让整块区域崩掉，保持空态即可
+        setInstalled([]); setRules([]);
+      }
+    })();
   }, [cid]);
 
   const doRun = async (text: string) => {
-    const t = localStorage.getItem("aieos_token") || "";
-    const base = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
     setRunning(text);
     try {
-      const r = await fetch(`${base}/app-alias/run?company_id=${cid}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${t}` },
-        body: JSON.stringify({ text }),
-      });
-      const d = await r.json();
+      const d = await api.post<RunResult>(`/app-alias/run?company_id=${cid}`, { text });
       notify(d.ok === false ? "error" : "success", d.message || JSON.stringify(d));
-    } catch (e) { notify("error", `执行失败：${String(e)}`); }
-    finally { setRunning(null); }
+    } catch (e) {
+      notify("error", `执行失败：${describeError(e, "执行失败")}`);
+    } finally { setRunning(null); }
   };
 
   const doMatch = async () => {
-    const t = localStorage.getItem("aieos_token") || "";
-    const base = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    const r = await fetch(`${base}/app-alias/match?company_id=${cid}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${t}` },
-      body: JSON.stringify({ text: matchText }),
-    });
-    setMatchRes(await r.json());
+    try {
+      setMatchRes(await api.post<MatchResult>(`/app-alias/match?company_id=${cid}`, { text: matchText }));
+    } catch (e) {
+      notify("error", `匹配失败：${describeError(e, "匹配失败")}`);
+    }
   };
 
   const doCreateRule = async () => {
     if (!formAlias.trim() || !formApp.trim()) return;
-    const t = localStorage.getItem("aieos_token") || "";
-    const base = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    const r = await fetch(`${base}/app-alias/rules?company_id=${cid}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${t}` },
-      body: JSON.stringify({ alias: formAlias, app_name: formApp, app_path: formPath || null }),
-    });
-    if (r.status >= 400) { notify("error", await r.text()); return; }
-    setRules(await r.json());
-    setFormAlias(""); setFormApp(""); setFormPath("");
+    try {
+      await api.post(`/app-alias/rules?company_id=${cid}`,
+        { alias: formAlias, app_name: formApp, app_path: formPath || null });
+      await loadRules();
+      setFormAlias(""); setFormApp(""); setFormPath("");
+    } catch (e) {
+      notify("error", `新增规则失败：${describeError(e, "新增失败")}`);
+    }
   };
 
   const doDeleteRule = async (id: string) => {
-    const t = localStorage.getItem("aieos_token") || "";
-    const base = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    await fetch(`${base}/app-alias/rules/${id}?company_id=${cid}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${t}` },
-    });
-    setRules(rules.filter(x => x.id !== id));
+    try {
+      await api.del(`/app-alias/rules/${id}?company_id=${cid}`);
+      setRules(rules.filter(x => x.id !== id));
+    } catch (e) {
+      // 原来不看返回就直接从列表里抹掉：删除失败时界面和数据库不一致
+      notify("error", `删除规则失败：${describeError(e, "删除失败")}`);
+    }
   };
 
   const osLabel: Record<string, string> = { mac: "macOS", windows: "Windows", linux: "Linux" };
@@ -108,7 +111,7 @@ export default function AppAliasSection({ cid }: { cid: string }) {
         <div>
           <div className="text-lg font-semibold text-white">📱 本机应用别名（自然语言）</div>
           <div className="text-xs text-white/40 mt-1">
-            {osLabel[platform?.os] || platform?.os || "未知系统"} · 已扫描 {installed.length} 个应用
+            {osLabel[platform?.os || ""] || platform?.os || "未知系统"} · 已扫描 {installed.length} 个应用
             {platform?.os === "windows" && "（开始菜单 .lnk）"}
             {platform?.os === "linux" && "（.desktop 文件）"}
             {platform?.os === "mac" && "（.app 包）"}
@@ -141,7 +144,7 @@ export default function AppAliasSection({ cid }: { cid: string }) {
               </div>
               <div className="flex-1 min-w-[200px]">
                 <div className="text-xs text-white/40 mb-1">路径（可选）</div>
-                <input value={formPath} onChange={e => setFormPath(e.target.value)} placeholder={pathHint[platform?.os] || "/path/to/app"}
+                <input value={formPath} onChange={e => setFormPath(e.target.value)} placeholder={pathHint[platform?.os || ""] || "/path/to/app"}
                   className="w-full rounded-lg bg-white/10 border border-white/10 px-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
               </div>
               <button onClick={doCreateRule}

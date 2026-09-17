@@ -2,15 +2,38 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { api } from "@/lib/api";
+import { api, describeError, downloadURL, fetchBlobURL } from "@/lib/api";
 import { confirmAction } from "@/components/ConfirmDialog";
+import { notify } from "@/components/Toast";
 import { TASK_STATUS_ZH, zh } from "@/lib/i18n";
 import { DeliverablesPanel, ProjectLogsPanel } from "@/components/DeliverablesLogs";
+import type { FolderFile } from "@/components/DeliverablesLogs";
+import type { Company } from "@/lib/types";
 
 /* ============================================================
    项目详情 v2：生命周期操作（暂停/恢复/停止/删除）
    + AI 聊天面板（换Agent/部门承接/加技能/传资料）
    ============================================================ */
+
+/** 项目群聊消息。role 不能收窄成 "user"|"assistant"：员工消息的 role 就是
+ *  员工名字，界面靠 isBoss / isAgent 判断气泡方向。写成窄联合只会逼出 any。 */
+type ChatMsg = {
+  role: string;
+  text: string;
+  isBoss?: boolean;
+  isAgent?: boolean;
+  agent?: string;
+  search?: boolean;
+};
+
+/** `GET /group-chat/{scope}/{id}/history` 里的一条记录 */
+type GroupChatMessage = {
+  role: "boss" | "agent" | string;
+  text?: string;
+  agent_name?: string;
+  agent_id?: string;
+  search_used?: boolean;
+};
 
 type Detail = {
   id: string; name: string; description: string | null; status: string;
@@ -31,8 +54,6 @@ const STATUS_ZH: Record<string, { label: string; cls: string; dot: string }> = {
   ARCHIVED: { label: "已归档", cls: "text-[var(--muted)]", dot: "bg-gray-600" },
   CANCELLED: { label: "已停止", cls: "text-red-300", dot: "bg-red-400" },
 };
-
-type ChatMsg = { role: "user" | "assistant"; text: string };
 
 export default function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -74,12 +95,12 @@ export default function ProjectDetailPage() {
 
   const [chatHist, setChatHist] = useState(false);
   const [folderOpen, setFolderOpen] = useState(false);
-  const [folderFiles, setFolderFiles] = useState<any[]>([]);
+  const [folderFiles, setFolderFiles] = useState<FolderFile[]>([]);
   useEffect(() => {
     load();
     api.get("/agents").then(setAgents).catch(() => {});
     api.get("/skills").then(setSkills).catch(() => {});
-    api.get("/companies").then(async (cs: any[]) => {
+    api.get<Company[]>("/companies").then(async (cs) => {
       if (cs.length) {
         setCid(cs[0].id);
         try { setDepts(await api.get(`/companies/${cs[0].id}/departments`)); } catch {}
@@ -91,17 +112,17 @@ export default function ProjectDetailPage() {
   useEffect(() => {
     if (!cid || !id || chatHist) return;
     setChatHist(true);
-    fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/group-chat/project/${id}/history?company_id=${cid}`, {
-      headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-    }).then((r) => r.json()).then((d: any) => {
-      if (d.messages?.length) {
-        setChatLog(d.messages.map((m: any) => ({
-          role: m.role === "boss" ? "user" : m.agent_name || "agent",
-          text: m.text || "", isAgent: m.role === "agent",
-          agent: m.agent_name, search: m.search_used,
-        })));
-      }
-    }).catch(() => {});
+    api.get<{ messages?: GroupChatMessage[] }>(`/group-chat/project/${id}/history?company_id=${cid}`)
+      .then((d) => {
+        if (d.messages?.length) {
+          setChatLog(d.messages.map((m) => ({
+            role: m.role === "boss" ? "user" : m.agent_name || "agent",
+            text: m.text || "", isAgent: m.role === "agent",
+            agent: m.agent_name, search: m.search_used,
+          })));
+        }
+      })
+      .catch(() => {});
   }, [cid, id, chatHist]);
 
   useEffect(() => {
@@ -112,16 +133,10 @@ export default function ProjectDetailPage() {
     if (!d) return;
     setBusy(true);
     try {
-      await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/projects/${id}/lifecycle`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}`,
-        },
-        body: JSON.stringify({ action }),
-      });
+      // 原来不看返回就重新加载：暂停/停止失败时界面上毫无痕迹
+      await api.post(`/projects/${id}/lifecycle`, { action });
       await load();
-    } catch (e: any) { setMsg(e.message || e); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "操作失败")}`); }
     setBusy(false);
   }
 
@@ -141,16 +156,9 @@ export default function ProjectDetailPage() {
     }))) return;
     setBusy(true);
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/projects/${id}/lifecycle`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}`,
-        },
-        body: JSON.stringify({ action: "delete" }),
-      });
-      if (r.ok) router.push("/projects");
-    } catch (e: any) { setMsg(e.message || e); }
+      await api.post(`/projects/${id}/lifecycle`, { action: "delete" });
+      router.push("/projects");
+    } catch (e) { setMsg(`❌ ${describeError(e, "删除项目失败")}`); }
     setBusy(false);
   }
 
@@ -181,24 +189,17 @@ export default function ProjectDetailPage() {
     setChatLog((prev) => [...prev, { role: "user", text, isBoss: true }]);
     setChatInput("");
     try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/group-chat/project/${id}?company_id=${cid}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("aieos_token")}`,
-          },
-          body: JSON.stringify({ message: text }),
-        });
-      const data = await r.json();
-      const replies: any[] = data.replies || [];
+      const data = await api.post<{ replies?: {
+        agent_id?: string; agent_name?: string; text?: string; search_used?: boolean;
+      }[] }>(`/group-chat/project/${id}?company_id=${cid}`, { message: text },
+        { timeoutMs: 300_000 });
+      const replies = data.replies || [];
       setChatLog((prev) => prev.concat(
         replies.map((rep) => ({ role: rep.agent_name || rep.agent_id || 'agent', text: rep.text || '',
                                  isAgent: true, agent: rep.agent_name, search: rep.search_used || false }))));
       await load();
-    } catch (e: any) {
-      setChatLog((prev) => [...prev, { role: "assistant", text: `出错了：${e.message}` }]);
+    } catch (e) {
+      setChatLog((prev) => [...prev, { role: "assistant", text: `出错了：${describeError(e, "发送失败")}` }]);
     }
   }
 
@@ -209,10 +210,10 @@ export default function ProjectDetailPage() {
     setManualSending(true);
     const parts: string[] = [];
     if (selAgents.size) {
-      parts.push(agents.filter((a: any) => selAgents.has(a.id)).map((a: any) => a.name).join("、"));
+      parts.push(agents.filter((a) => selAgents.has(a.id)).map((a) => a.name).join("、"));
     }
     if (selDepts.size) {
-      parts.push(deptList.filter((x: any) => selDepts.has(x.id)).map((x: any) => x.name).join("、"));
+      parts.push(deptList.filter((x) => selDepts.has(x.id)).map((x) => x.name).join("、"));
     }
     // 先在日志里显示用户操作
     const summary = `⚙ 手动选择：${[
@@ -222,31 +223,23 @@ export default function ProjectDetailPage() {
     ].filter(Boolean).join(" | ")}`;
     setChatLog((prev) => [...prev, { role: "user", text: summary }]);
     try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/group-chat/project/${id}?company_id=${cid}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("aieos_token")}`,
-          },
-          body: JSON.stringify({
-            message: "__manual__",
-            agent_ids: Array.from(selAgents),
-            department_ids: Array.from(selDepts),
-            skill_ids: Array.from(selSkills),
-          }),
-        });
-      const data = await r.json();
-      const replies: any[] = data.replies || [];
+      const data = await api.post<{ replies?: {
+        agent_id?: string; agent_name?: string; text?: string; search_used?: boolean;
+      }[] }>(`/group-chat/project/${id}?company_id=${cid}`, {
+        message: "__manual__",
+        agent_ids: Array.from(selAgents),
+        department_ids: Array.from(selDepts),
+        skill_ids: Array.from(selSkills),
+      }, { timeoutMs: 300_000 });
+      const replies = data.replies || [];
       setChatLog((prev) => prev.concat(
         replies.map((rep) => ({ role: rep.agent_name || rep.agent_id || 'agent', text: rep.text || '',
                                  isAgent: true, agent: rep.agent_name, search: rep.search_used || false }))));
       setSelAgents(new Set()); setSelDepts(new Set()); setSelSkills(new Set());
       setManualMode(false);
       await load();
-    } catch (e: any) {
-      setChatLog((prev) => [...prev, { role: "assistant", text: `出错了：${e.message}` }]);
+    } catch (e) {
+      setChatLog((prev) => [...prev, { role: "assistant", text: `出错了：${describeError(e, "发送失败")}` }]);
     }
     setManualSending(false);
   }
@@ -261,25 +254,15 @@ export default function ProjectDetailPage() {
       // 存入知识库
       const fd = new FormData();
       fd.append("file", file);
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/knowledge/documents`,
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-          body: fd,
-        });
-      if (r.ok) {
-        const doc = await r.json();
-        setChatLog((prev) => [...prev, {
-          role: "assistant",
-          text: `✅ 参考资料「${file.name}」已存入知识库并关联到本项目。`,
-        }]);
-      } else {
-        throw new Error(`HTTP ${r.status}`);
-      }
+      await api.upload("/knowledge/documents", fd);
+      setChatLog((prev) => [...prev, {
+        role: "assistant",
+        text: `✅ 参考资料「${file.name}」已存入知识库并关联到本项目。`,
+      }]);
       await load();
-    } catch (e: any) {
-      setChatLog((prev) => [...prev, { role: "assistant", text: `上传失败：${e.message}` }]);
+    } catch (e) {
+      setChatLog((prev) => [...prev, {
+        role: "assistant", text: `上传失败：${describeError(e, "上传失败")}` }]);
     }
   }
 
@@ -544,11 +527,13 @@ export default function ProjectDetailPage() {
                     setFolderOpen(!folderOpen);
                     if (!folderOpen && cid) {
                       try {
-                        const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/delivery/by-scope?company_id=${cid}&scope=project&scope_id=${id}`, {
-                          headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });
-                        const d = await r.json();
-                        setFolderFiles(d.files || []);
-                      } catch {}
+                        const data = await api.get<{ files?: FolderFile[] }>(
+                          `/delivery/by-scope?company_id=${cid}&scope=project&scope_id=${id}`);
+                        setFolderFiles(data.files || []);
+                      } catch {
+                        // 交付文件拉不到不影响对话
+                        setFolderFiles([]);
+                      }
                     }
                   }}
                   className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs transition-colors ${folderOpen ? "bg-indigo-500/20 text-indigo-300" : "hover:bg-white/[0.06]"}`}
@@ -562,20 +547,16 @@ export default function ProjectDetailPage() {
               <div className="my-2 rounded-xl p-3 animate-fade-up overflow-y-auto max-h-40 space-y-1 shrink-0"
                 style={{ background: "var(--surface-2)", border: "1px solid rgba(99,102,241,0.3)" }}>
                 <p className="text-[11px] font-medium mb-1">📁 项目交付文件（{folderFiles.length}）</p>
-                {folderFiles.map((f: any) => (
+                {folderFiles.map((f) => (
                   <div key={f.id} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs"
                     style={{ background: "rgba(255,255,255,0.03)" }}>
                     <span className="truncate flex-1">{f.name}</span>
-                    <button onClick={() => {
-                      fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/delivery/download/${f.id}`, {
-                        headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } })
-                        .then((r2) => r2.blob())
-                        .then((b) => {
-                          const a = document.createElement("a");
-                          a.href = URL.createObjectURL(b);
-                          a.download = f.name; a.click();
-                          URL.revokeObjectURL(a.href);
-                        });
+                    <button onClick={async () => {
+                      try {
+                        downloadURL(await fetchBlobURL(`/delivery/download/${f.id}`), f.name);
+                      } catch (e: any) {
+                        notify("error", `下载失败：${describeError(e)}`);
+                      }
                     }} className="text-indigo-300 shrink-0 text-[10px]">⬇</button>
                   </div>
                 ))}
@@ -589,7 +570,7 @@ export default function ProjectDetailPage() {
 
             {/* 消息流 */}
             <div className="flex-1 overflow-y-auto py-3 space-y-2.5">
-              {chatLog.map((m: any, i) => {
+              {chatLog.map((m, i) => {
                 const isBoss = m.isBoss === true;
                 const isErr = !m.isAgent && !isBoss && m.role === "assistant";
                 const isAgent = m.isAgent === true;

@@ -1,5 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { api, describeError, downloadURL, fetchBlobURL } from "@/lib/api";
+import { notify } from "@/components/Toast";
 
 /* ============================================================
    AgentChat：老板↔员工对话主界面
@@ -7,9 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
    ============================================================ */
 
 type Msg = { id?: string; role: string; content: string; created_at?: string };
-
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-const auth = () => ({ Authorization: `Bearer ${localStorage.getItem("aieos_token")}` });
+type FolderFile = { id?: string; name: string; size?: number };
 
 export default function AgentChat({
   agentId,
@@ -25,25 +25,23 @@ export default function AgentChat({
   const [uploadNote, setUploadNote] = useState("");
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [folderOpen, setFolderOpen] = useState(false);
-  const [folderFiles, setFolderFiles] = useState<any[]>([]);
+  const [folderFiles, setFolderFiles] = useState<FolderFile[]>([]);
   const endRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/agents/${agentId}/chat/history?limit=50`,
-        { headers: auth() });
-      if (r.ok) setMsgs(await r.json());
-    } catch {}
+      setMsgs(await api.get<Msg[]>(`/agents/${agentId}/chat/history?limit=50`));
+    } catch { /* 历史拉不到不影响发新消息，保持空列表 */ }
   }, [agentId]);
 
   useEffect(() => { setMsgs([]); load(); }, [load]);
 
   const loadFolder = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/delivery/agents/${agentId}/folder`, { headers: auth() });
-      if (r.ok) { const d = await r.json(); setFolderFiles(d.files || []); }
-    } catch {}
+      const d = await api.get<{ files?: FolderFile[] }>(`/delivery/agents/${agentId}/folder`);
+      setFolderFiles(d.files || []);
+    } catch { setFolderFiles([]); }
   }, [agentId]);
   useEffect(() => {
     if (folderOpen) loadFolder();
@@ -53,10 +51,8 @@ export default function AgentChat({
   async function uploadOne(file: File): Promise<string> {
     const fd = new FormData();
     fd.append("file", file);
-    const r = await fetch(`${API}/kb2/agents/${agentId}/upload`,
-      { method: "POST", headers: auth(), body: fd });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+    const d = await api.upload<{ converted?: boolean; chunks?: number }>(
+      `/kb2/agents/${agentId}/upload`, fd);
     return d.converted
       ? `✅ ${file.name} → 已转换入库（${d.chunks} 块索引）+ 原始文件保留`
       : `⚠️ ${file.name} 无法提取文本，仅保留原始文件`;
@@ -68,7 +64,7 @@ export default function AgentChat({
     const notes: string[] = [];
     for (const f of Array.from(files)) {
       try { notes.push(await uploadOne(f)); }
-      catch (e: any) { notes.push(`❌ ${f.name}: ${e.message}`); }
+      catch (e) { notes.push(`❌ ${f.name}: ${describeError(e, "上传失败")}`); }
     }
     setUploadNote(notes.join("\n"));
     setUploading(false);
@@ -89,14 +85,13 @@ export default function AgentChat({
     setMsgs((p) => [...p, { role: "boss", content: text }]);
     setInput(""); setBusy(true);
     try {
-      const r = await fetch(`${API}/agents/${agentId}/chat`,
-        { method: "POST", headers: { ...auth(), "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text }) });
-      const d = await r.json();
+      const d = await api.post<{ reply?: string }>(`/agents/${agentId}/chat`, { message: text },
+        // 员工回复要等模型生成，给足时间但仍有上限（原实现是无限等待）
+        { timeoutMs: 300_000 });
       setMsgs((p) => [...p, { role: "agent",
-        content: d.reply || `❌ ${JSON.stringify(d).slice(0, 200)}` }]);
-    } catch (e: any) {
-      setMsgs((p) => [...p, { role: "agent", content: `❌ ${e.message}` }]);
+        content: d.reply || `❌ 未收到回复：${JSON.stringify(d).slice(0, 200)}` }]);
+    } catch (e) {
+      setMsgs((p) => [...p, { role: "agent", content: `❌ ${describeError(e, "发送失败")}` }]);
     }
     setBusy(false);
   }
@@ -130,15 +125,13 @@ export default function AgentChat({
             <div key={f.id} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs"
               style={{ background: "rgba(255,255,255,0.03)" }}>
               <span className="truncate flex-1">{f.name}</span>
-              <button onClick={() => {
-                fetch(`${API}/delivery/download/${f.id}`, { headers: auth() })
-                  .then((r) => r.blob())
-                  .then((b) => {
-                    const a = document.createElement("a");
-                    a.href = URL.createObjectURL(b);
-                    a.download = f.name; a.click();
-                    URL.revokeObjectURL(a.href);
-                  });
+              <button onClick={async () => {
+                // 下载接口同样要 Bearer token，必须取回 blob 再触发保存
+                try {
+                  downloadURL(await fetchBlobURL(`/delivery/download/${f.id}`), f.name);
+                } catch (e: any) {
+                  notify("error", `下载失败：${describeError(e)}`);
+                }
               }} className="text-indigo-300 shrink-0 text-[10px]">⬇</button>
             </div>
           ))}

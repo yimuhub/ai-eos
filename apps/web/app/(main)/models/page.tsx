@@ -1,7 +1,12 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { api } from "@/lib/api";
+import { useEffect, useMemo, useState } from "react";
+import { api, describeError, getActiveCompanyId } from "@/lib/api";
+import { useActiveCompanyId, useResource, invalidate } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
+import type {
+  Agent, BatchImportResult, ConvertConfig, ModelConfig, ModelTestResult,
+  ProviderModelsResult,
+} from "@/lib/types";
 import Field from "@/components/Field";
 import { useFormValidation } from "@/lib/useFormValidation";
 import { V } from "@/lib/validate";
@@ -11,12 +16,25 @@ import { notify } from "@/components/Toast";
    模型配置中心：管理大模型供应商 + 拉取模型列表 + 勾选启用
    ============================================================ */
 
-type ModelRow = {
-  id: string; name: string; provider_type: string;
-  base_url?: string | null; model_id: string;
-};
-type Agent = { id: string; name: string };
+// 复用 lib/types 的领域类型：接口一旦改字段名，这里编译期就会报错，
+// 而不是等到运行时"某个列表忽然空了"。
+type ModelRow = ModelConfig;
 type AgentUsage = Record<string, number>; // model_id -> 使用 agent 数
+
+/** 就绪自检的返回形状（`GET /models/diagnostics`）——只报"密钥在不在"，不含密钥内容 */
+type Diagnostics = {
+  model_count: number;
+  usable_model_ids: string[];
+  ready: boolean;
+  providers: {
+    provider_type: string;
+    default_env_var: string;
+    key_present: boolean;
+    models_ready: number;
+    model_count: number;
+  }[];
+  hint: string;
+};
 
 const PROVIDER_LABELS: Record<string, string> = {
   openai_compat: "OpenAI 兼容",
@@ -32,10 +50,9 @@ const AGENT_BACKENDS = [
 ];
 
 export default function ModelsPage() {
-  const [models, setModels] = useState<ModelRow[]>([]);
+  const cid = useActiveCompanyId();
+
   const [convertModel, setConvertModel] = useState("");
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [usage, setUsage] = useState<AgentUsage>({});
   const [msg, setMsg] = useState("");
 
   // 新增供应商表单
@@ -56,26 +73,59 @@ export default function ModelsPage() {
   // 测试连接中
   const [testing, setTesting] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setModels(await api.get("/models"));
-    const as: Agent[] = await api.get("/agents");
-    setAgents(as);
-    // 统计每个模型被多少 agent 使用
-    const u: AgentUsage = {};
-    for (const a of as) {
-      const binds = await api.get(`/agents/${a.id}/models`).catch(() => []);
-      for (const b of binds) u[b.model_id] = (u[b.model_id] || 0) + 1;
-    }
-    setUsage(u);
-  }, []);
+  /* ---- 数据加载：列表 + 员工绑定关系 + 就绪自检 ----
+   *
+   * 改造前这里有三处问题：
+   *   1. 5 个请求**串行**发出（列表→员工→逐个查绑定），员工越多越慢；
+   *   2. 没有缓存，每次进页面都从零拉一遍，切回来还要等；
+   *   3. 就绪自检接口后端早就有了，前端从来没调用过——
+   *      于是"模型配好了但密钥没配"这件事，用户要等到任务失败才知道。
+   */
+  const {
+    data: catalog, error: loadError, loading: loadingList, refresh: refreshModels,
+  } = useResource(
+    cid ? `models:${cid}` : null,
+    async () => {
+      const list = await api.get<ModelConfig[]>("/models");
+      const agents = await api.get<Agent[]>("/agents");
+      // 并发查绑定关系：N 个员工只花一次往返的时间
+      const bindings = await Promise.all(
+        agents.map((a) =>
+          api.get<{ model_id: string }[]>(`/agents/${a.id}/models`).catch(() => [])),
+      );
+      const usage: AgentUsage = {};
+      for (const binds of bindings) {
+        for (const b of binds) usage[b.model_id] = (usage[b.model_id] || 0) + 1;
+      }
+      return { list, agents, usage };
+    },
+  );
 
-  useEffect(() => { load(); }, [load]);
+  const models = useMemo(() => catalog?.list ?? [], [catalog]);
+  const usage = catalog?.usage ?? {};
 
+  const { data: diag } = useResource<Diagnostics>(
+    cid ? `models-diag:${cid}` : null,
+    () => api.get<Diagnostics>("/models/diagnostics"),
+  );
+
+  const { data: convertCfg } = useResource<ConvertConfig>(
+    cid ? `convert-cfg:${cid}` : null,
+    () => api.get<ConvertConfig>("/models/convert-config"),
+  );
+
+  // 自检结果回来后回填下拉框（下拉框是可编辑控件，必须用本地 state）
   useEffect(() => {
-    fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/models/convert-config`, {
-      headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-    }).then((r) => r.json()).then((d: any) => setConvertModel(d.convert_model_id || "")).catch(() => {});
-  }, []);
+    if (convertCfg) setConvertModel(convertCfg.convert_model_id || "");
+  }, [convertCfg]);
+
+  /** 改动数据后：本页重取 + 让别处对模型的引用一起失效（如 Agent 页的模型下拉） */
+  async function reload() {
+    invalidate("models:");
+    invalidate("models-diag:");
+    await refreshModels();
+  }
+
   /* ---- 手动添加单个模型配置 ---- */
   //
   // 校验规则与后端 `ModelCreate` 保持一致（名称/模型 ID 必填，URL 与变量名有格式要求）。
@@ -104,12 +154,36 @@ export default function ModelsPage() {
         name: provName, provider_type: provType,
         base_url: provUrl || null, api_key_env: provKeyEnv || null,
         model_id: provModelId,
+        // 必须带上当前公司：模型配置的归属靠这个字段。
+        // 不带的话后端会登记成"未归属/共享"，之后既不能改名也不能删除，
+        // 用户只会觉得"这东西坏了"。
+        company_id: getActiveCompanyId() || null,
       });
       notify("success", `已添加 ${provName}`);
       setProvName(""); setProvUrl(""); setProvKeyEnv(""); setProvModelId("");
       modelForm.reset();
-      await load();
-    } catch (e: any) { notify("error", `添加失败：${e.message || e}`); }
+      await reload();
+    } catch (e) {
+      notify("error", `添加失败：${describeError(e, "添加失败")}`);
+    }
+  }
+
+  /* ---- 认领无主配置 ----
+   *
+   * 升级前的遗留配置 `company_id` 为空，能看见但不能改不能删。
+   * 后端要求"先认领"，前端就得给出这个按钮——否则用户只会看到
+   * 一个点了没反应的删除键。
+   */
+  async function claimModel(m: ModelRow) {
+    const myCid = getActiveCompanyId();
+    if (!myCid) { notify("warning", "请先选择公司"); return; }
+    try {
+      await api.patch(`/models/${m.id}`, { company_id: myCid });
+      notify("success", `已把「${m.name}」归入当前公司，现在可以改名或删除了`);
+      await reload();
+    } catch (e) {
+      notify("error", describeError(e, "认领失败"));
+    }
   }
 
   /* ---- 从供应商拉取模型列表 ---- */
@@ -118,21 +192,21 @@ export default function ModelsPage() {
     setFetching(true);
     setRemoteModels([]);
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/models/providers/list-models`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({ base_url: fetchUrl, api_key: fetchKey || null }),
-      });
-      const data = await r.json();
+      const data = await api.post<ProviderModelsResult>(
+        "/models/providers/list-models",
+        { base_url: fetchUrl, api_key: fetchKey || null },
+      );
       if (data.status === "ok") {
         setRemoteModels(data.models);
         if (!importPrefix) {
-          try { setImportPrefix(new URL(fetchUrl).hostname.split(".")[0]); } catch {}
+          try { setImportPrefix(new URL(fetchUrl).hostname.split(".")[0]); } catch { /* 非法 URL 时保持默认前缀 */ }
         }
       } else {
         setMsg(`❌ ${data.error}`);
       }
-    } catch (e: any) { setMsg(e.message || String(e)); }
+    } catch (e) {
+      setMsg(`❌ ${describeError(e, "拉取模型列表失败")}`);
+    }
     setFetching(false);
   }
 
@@ -140,35 +214,34 @@ export default function ModelsPage() {
   async function importSelected() {
     if (!checked.size || !fetchUrl) return;
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/models/providers/batch-import`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({
+      const data = await api.post<BatchImportResult>(
+        "/models/providers/batch-import",
+        {
           name_prefix: importPrefix || "provider",
           provider_type: "openai_compat",
           base_url: fetchUrl,
           model_ids: Array.from(checked),
-        }),
-      });
-      const data = await r.json();
-      setMsg(`✅ 导入 ${data.imported_count} 个模型${data.skipped_existing?.length ? `，跳过已存在 ${data.skipped_existing.length} 个` : ""}`);
+        },
+      );
+      setMsg(`✅ 导入 ${data.imported_count} 个模型${
+        data.skipped_existing?.length ? `，跳过已存在 ${data.skipped_existing.length} 个` : ""}`);
       setChecked(new Set());
       setRemoteModels([]);
-      await load();
-    } catch (e: any) { setMsg(e.message || String(e)); }
+      await reload();
+    } catch (e) {
+      setMsg(`❌ ${describeError(e, "导入失败")}`);
+    }
   }
 
   /* ---- 连通性测试 ---- */
   async function testModel(mid: string) {
     setTesting(mid);
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/models/${mid}/test`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-      });
-      const d = await r.json();
+      const d = await api.post<ModelTestResult>(`/models/${mid}/test`);
       setMsg(d.status === "ok" ? `✅ 连通正常，模型回复: ${d.reply}` : `❌ ${d.error?.slice(0, 120)}`);
-    } catch (e: any) { setMsg(e.message || String(e)); }
+    } catch (e) {
+      setMsg(`❌ ${describeError(e, "连通测试失败")}`);
+    }
     setTesting(null);
   }
 
@@ -178,9 +251,28 @@ export default function ModelsPage() {
       description: "已绑定它的 Agent 的历史记录不受影响，但新任务将无法再选用这个配置。",
       confirmText: "删除",
     }))) return;
-    await api.del(`/models/${m.id}`).catch((e: any) => setMsg(e.message));
-    await load();
+    try {
+      await api.del(`/models/${m.id}`);
+      notify("success", `已删除「${m.name}」`);
+      await reload();
+    } catch (e) {
+      notify("error", describeError(e, "删除失败"));
+    }
   }
+
+  /* ---- 就绪状态：把"缺哪一步"直接说清楚 ----
+   *
+   * 三种状态要给三种下一步动作，不能混成一句"配置不完整"：
+   *   没有任何模型   → 去添加
+   *   有模型但没密钥 → 去 .env 填变量名
+   *   一切就绪       → 不打扰
+   */
+  const readiness = useMemo(() => {
+    if (!diag) return null;
+    if (diag.ready) return { tone: "ok" as const, text: `已就绪 · ${diag.usable_model_ids.length} 个模型可调用` };
+    if (!diag.model_count) return { tone: "warn" as const, text: "还没有配置模型，员工无法开工" };
+    return { tone: "warn" as const, text: diag.hint || "模型已登记但缺少密钥" };
+  }, [diag]);
 
   return (
     <div className="p-6 max-w-[1400px] mx-auto animate-fade-up space-y-5">
@@ -190,6 +282,26 @@ export default function ModelsPage() {
           管理大模型供应商 · 拉取可用模型 · 为 Agent 配置驱动底座
         </p>
       </div>
+
+      {/* 就绪自检横幅：这是"配完到底能不能跑"的唯一明确回答 */}
+      {readiness && (
+        <div className="flex items-start gap-2.5 px-4 py-3 rounded-xl text-sm"
+          style={readiness.tone === "ok"
+            ? { background: "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.3)", color: "#6ee7b7" }
+            : { background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.3)", color: "#fcd34d" }}>
+          <span>{readiness.tone === "ok" ? "✅" : "⚠️"}</span>
+          <span className="flex-1">{readiness.text}</span>
+        </div>
+      )}
+
+      {loadError && (
+        <div className="flex items-center gap-2.5 px-4 py-3 rounded-xl text-sm"
+          style={{ background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.3)", color: "#fca5a5" }}>
+          <span>🔌</span>
+          <span className="flex-1">加载模型配置失败：{loadError}</span>
+          <button onClick={() => refreshModels()} className="btn-ghost !py-1 text-xs">重试</button>
+        </div>
+      )}
 
       {msg && <p className="text-sm text-indigo-300">{msg}</p>}
 
@@ -203,20 +315,16 @@ export default function ModelsPage() {
           <select value={convertModel} onChange={(e) => setConvertModel(e.target.value)}
             className="input flex-1 !py-2 text-xs">
             <option value="">— 未设置（不使用 LLM 整理，仅规则转换） —</option>
-            {(models || []).map((m: any) => (
+            {models.map((m) => (
               <option key={m.id} value={m.id}>{m.name} ({m.model_id})</option>
             ))}
           </select>
           <button onClick={async () => {
             try {
-              await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/models/convert-config`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json",
-                  Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-                body: JSON.stringify({ convert_model_id: convertModel }),
-              });
-              setMsg("✅ 转换模型已保存");
-            } catch (e: any) { setMsg("❌ " + e.message); }
+              await api.post("/models/convert-config", { convert_model_id: convertModel });
+              invalidate("convert-cfg:");
+              notify("success", "转换模型已保存");
+            } catch (e) { notify("error", describeError(e, "保存失败")); }
           }} className="btn-primary !py-2 !px-4 text-xs shrink-0">保存</button>
         </div>
       </div>
@@ -286,35 +394,63 @@ export default function ModelsPage() {
       <div className="card card-static">
         <h2 className="text-sm font-semibold mb-3">已配置的模型（{models.length}）</h2>
         <div className="space-y-2">
-          {models.map((m) => (
-            <div key={m.id} className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-colors hover:bg-white/[0.03]"
-              style={{ background: "var(--surface-2)" }}>
-              <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
-              <div className="min-w-0 flex-1">
-                <div className="text-sm truncate">{m.name}</div>
-                <div className="text-xs mt-0.5 truncate" style={{ color: "var(--muted)" }}>
-                  {PROVIDER_LABELS[m.provider_type] || m.provider_type} · {m.model_id}
-                  {m.base_url ? ` · ${m.base_url}` : ""}
+          {models.map((m) => {
+            const usable = diag?.usable_model_ids?.includes(m.id);
+            return (
+              <div key={m.id} className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-colors hover:bg-white/[0.03]"
+                style={{ background: "var(--surface-2)" }}>
+                {/* 小圆点从"恒定绿色"改为真实状态：绿色=密钥就位，琥珀=登记了但调不通。
+                    之前它永远是绿的，等于一个从不报警的告警灯。 */}
+                <span className={`w-2 h-2 rounded-full shrink-0 ${usable ? "bg-emerald-400" : "bg-amber-400"}`}
+                  title={usable ? "密钥已就位，可直接调用" : "尚未取到密钥，调用会失败"} />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm truncate flex items-center gap-1.5">
+                    {m.name}
+                    {m.unowned && (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded shrink-0"
+                        style={{ background: "rgba(245,158,11,0.18)", color: "#fcd34d" }}
+                        title="升级前登记的遗留配置，未归属任何公司：可认领后再管理">
+                        未归属
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs mt-0.5 truncate" style={{ color: "var(--muted)" }}>
+                    {PROVIDER_LABELS[m.provider_type] || m.provider_type} · {m.model_id}
+                    {m.base_url ? ` · ${m.base_url}` : ""}
+                  </div>
                 </div>
+                <span className="text-[11px] px-2 py-0.5 rounded-md shrink-0"
+                  style={{ background: "rgba(99,102,241,0.15)", color: "#a5b4fc" }}>
+                  {usage[m.id] || 0} 名员工使用
+                </span>
+                {m.unowned ? (
+                  <button onClick={() => claimModel(m)}
+                    title="把这条遗留配置归入当前公司，之后即可改删"
+                    className="btn-primary !py-1 text-xs shrink-0">
+                    认领
+                  </button>
+                ) : (
+                  <>
+                    <button onClick={() => testModel(m.id)} disabled={testing === m.id}
+                      className="btn-ghost text-xs py-1 shrink-0">
+                      {testing === m.id ? "测试中…" : "测试"}
+                    </button>
+                    <button onClick={() => delModel(m)}
+                      className="text-xs py-1 px-2 rounded-lg text-red-400/80 hover:text-red-300 hover:bg-red-400/10 shrink-0">
+                      删除
+                    </button>
+                  </>
+                )}
               </div>
-              <span className="text-[11px] px-2 py-0.5 rounded-md shrink-0"
-                style={{ background: "rgba(99,102,241,0.15)", color: "#a5b4fc" }}>
-                {usage[m.id] || 0} 名员工使用
-              </span>
-              <button onClick={() => testModel(m.id)} disabled={testing === m.id}
-                className="btn-ghost text-xs py-1 shrink-0">
-                {testing === m.id ? "测试中…" : "测试"}
-              </button>
-              <button onClick={() => delModel(m)}
-                className="text-xs py-1 px-2 rounded-lg text-red-400/80 hover:text-red-300 hover:bg-red-400/10 shrink-0">
-                删除
-              </button>
-            </div>
-          ))}
-          {!models.length && (
+            );
+          })}
+          {!models.length && !loadingList && (
             <p className="text-xs text-center py-8" style={{ color: "var(--muted)" }}>
               还没有配置模型，先从上方拉取或手动添加
             </p>
+          )}
+          {loadingList && !models.length && (
+            <p className="text-xs text-center py-8" style={{ color: "var(--muted)" }}>加载中…</p>
           )}
         </div>
       </div>

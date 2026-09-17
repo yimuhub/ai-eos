@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
+import type { Company } from "@/lib/types";
 
 type TriggerType = "TIME" | "EVENT" | "FILE" | "PROJECT" | "TASK" | "AGENT" | "WEBHOOK" | "HUMAN" | "MANUAL";
 type Mode = "TEST" | "SIMULATION" | "PRODUCTION";
@@ -55,7 +56,7 @@ export default function AutomationsPage() {
   const [maxRuns, setMaxRuns] = useState("10");
 
   useEffect(() => {
-    api.get("/companies").then((cs: any[]) => {
+    api.get<Company[]>("/companies").then((cs) => {
       const c = cs[0]?.id;
       if (c) setCid(c);
     });

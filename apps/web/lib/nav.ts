@@ -90,7 +90,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: "/growth-center", label: "成长中心", icon: "🌱", desc: "员工的成长路径与培养动作", keywords: ["growth", "chengzhang", "成长", "培养"] },
       { href: "/reflection", label: "复盘中心", icon: "🔄", desc: "任务结束后的自我复盘与教训沉淀", keywords: ["reflection", "fupan", "复盘", "总结", "教训"] },
       { href: "/training", label: "培训中心", icon: "🎓", desc: "针对性训练员工并对比训练前后效果", keywords: ["training", "peixun", "培训", "训练"] },
-      { href: "/performance", label: "绩效中心", icon: "📊", desc: "谁的产出多、谁在拖后腿", keywords: ["performance", "jixiao", "绩效", "考核", "KPI"] },
+      { href: "/performance", label: "绩效中心", icon: "📊", desc: "系统靠不靠谱：成功率、耗时、失败原因，以及谁在拖后腿", keywords: ["performance", "jixiao", "绩效", "考核", "KPI", "可靠性", "成功率", "度量", "metrics", "失败原因", "归因"] },
       { href: "/governance", label: "治理与审计", icon: "⬢", desc: "合规策略与越界行为的审计记录", keywords: ["governance", "zhili", "治理", "合规", "审计"] },
       { href: "/external-agents", label: "外部协作", icon: "🔗", desc: "接入外部 Agent 参与公司业务", keywords: ["external", "waibu", "外部", "第三方", "协作"] },
       { href: "/intervention", label: "干预中心", icon: "🛠", desc: "员工卡住或跑偏时，人工介入并批准", keywords: ["intervention", "ganyu", "干预", "人工", "审批", "介入"] },

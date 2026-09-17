@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, getCompanies } from "@/lib/api";
+import type { Company } from "@/lib/types";
 import { notify } from "@/components/Toast";
 
 // ## 改造说明
@@ -25,7 +26,8 @@ type Req = {
   status: string;
   reason?: string;
   requested_by?: string;
-  payload?: any;
+  /** LLM 生成的自由结构，前端只做展示（JSON.stringify） */
+  payload?: Record<string, unknown>;
   created_at?: string;
 };
 
@@ -39,8 +41,8 @@ type OverrideRow = {
   id: string;
   target_type: string;
   target_id: string;
-  original?: any;
-  override?: any;
+  original?: Record<string, unknown>;
+  override?: Record<string, unknown>;
   reason?: string;
   created_at: string;
 };
@@ -99,7 +101,7 @@ export default function InterventionPage() {
     (async () => {
       setLoading(true);
       try {
-        const cs = await getCompanies<any>();
+        const cs = await getCompanies<Company>();
         const cid = cs?.[0]?.id || null;
         setCompanyId(cid);
         if (cid) await load(cid);

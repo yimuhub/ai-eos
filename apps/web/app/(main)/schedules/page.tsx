@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, describeError } from "@/lib/api";
 import { notify } from "@/components/Toast";
+import type { Company } from "@/lib/types";
 
 type Schedule = { id: string; name: string; trigger_type: string; action_type: string;
   status: string; next_run_at?: string; last_run_at?: string; run_count: number };
@@ -34,7 +35,7 @@ export default function SchedulesPage() {
     let cancelled = false;
     (async () => {
       try {
-        const cs: any[] = await api.get("/companies");
+        const cs = await api.get<Company[]>("/companies");
         const c = cs[0]?.id;
         if (cancelled) return;
         if (!c) {

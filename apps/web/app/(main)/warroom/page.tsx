@@ -3,7 +3,8 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createPortal } from "react-dom";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
+import type { Company } from "@/lib/types";
 
 /* 作战室总览：跨项目全部作战会话 + 右上角直接下达作战任务（自动建项目） */
 
@@ -49,7 +50,7 @@ export default function WarRoomHubPage() {
   useEffect(() => { setMounted(true); }, []);
 
   const load = useCallback(async () => {
-    const cs: any[] = await api.get("/companies");
+    const cs = await api.get<Company[]>("/companies");
     if (!cs.length) return;
     setCid(cs[0].id);
     try {
@@ -68,36 +69,27 @@ export default function WarRoomHubPage() {
 
   async function lifecycle(sid: string, action: "pause" | "resume" | "stop" | "delete") {
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/war-room/sessions/${sid}/lifecycle?company_id=${cid}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({ action }),
-      });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+      // 走统一 api 层：会话过期/无权限的原因会被规范化成中文，
+      // 而不是把后端原始 detail 直接抛到界面上。
+      await api.post(`/war-room/sessions/${sid}/lifecycle?company_id=${cid}`, { action });
       setMsg(action === "delete" ? "🗑 已彻底删除" :
              action === "pause" ? "⏸ 已暂停（现场保留）" :
              action === "resume" ? "▶ 已恢复" : "⏹ 已停止");
       await load();
-    } catch (e: any) { setMsg("❌ " + (e.message || e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "操作失败")}`); }
   }
 
   async function batchDelete() {
     if (!batchSel.size) return;
     setDeleting(true);
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/war-room/sessions/batch-delete?company_id=${cid}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({ session_ids: Array.from(batchSel) }),
-      });
-      const d = await r.json();
+      const d = await api.post<{ deleted_count: number; failed?: string[] }>(
+        `/war-room/sessions/batch-delete?company_id=${cid}`,
+        { session_ids: Array.from(batchSel) });
       setMsg(`🗑 已彻底删除 ${d.deleted_count} 场作战${d.failed?.length ? `，失败 ${d.failed.length}` : ""}`);
       setShowBatchDelete(false); setBatchSel(new Set());
       await load();
-    } catch (e: any) { setMsg("❌ " + (e.message || e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "批量删除失败")}`); }
     setDeleting(false);
   }
 
@@ -111,22 +103,17 @@ export default function WarRoomHubPage() {
     if (!goal.trim() || !leaderId) return;
     setBusy(true);
     try {
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/war-room/kickoff`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({ company_id: cid, goal: goal.trim(),
-          leader_agent_id: leaderId, project_name: projName.trim() || undefined,
-          deliverable_format: fmt }),
+      const d = await api.post<{ project_id?: string }>("/war-room/kickoff", {
+        company_id: cid, goal: goal.trim(),
+        leader_agent_id: leaderId, project_name: projName.trim() || undefined,
+        deliverable_format: fmt,
       });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
       setShowKickoff(false); setGoal(""); setProjName("");
       setMsg("🧠 目标已下达，新项目已自动创建，负责人正在分析拆解…");
       // 直接跳进该作战的详情页看实时进展
       if (d.project_id) router.push(`/projects/${d.project_id}/warroom`);
       else await load();
-    } catch (e: any) { setMsg("❌ " + (e.message || e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "下达目标失败")}`); }
     setBusy(false);
   }
 

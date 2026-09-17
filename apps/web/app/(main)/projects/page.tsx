@@ -2,8 +2,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
+import type { Company } from "@/lib/types";
 
 /* ============================================================
    项目中心 v2：多维分类 · 卡片视图 · 进度可视化 · 生命周期操作
@@ -67,7 +68,7 @@ export default function ProjectsPage() {
   const [batchDeleting, setBatchDeleting] = useState(false);
 
   const load = useCallback(async () => {
-    const cs: any[] = await api.get("/companies");
+    const cs = await api.get<Company[]>("/companies");
     if (!cs.length) return;
     const cid = cs[0].id;
     const ps: Project[] = await api.get(`/projects?company_id=${cid}`);
@@ -140,22 +141,13 @@ export default function ProjectsPage() {
     if (!batchSel.size) return;
     setBatchDeleting(true);
     try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/projects/batch-delete`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("aieos_token")}`,
-          },
-          body: JSON.stringify({ project_ids: Array.from(batchSel) }),
-        });
-      const data = await r.json();
+      const data = await api.post<{ deleted_count: number; failed: string[] }>(
+        "/projects/batch-delete", { project_ids: Array.from(batchSel) });
       setMsg(`🗑 已彻底删除 ${data.deleted_count} 个项目${data.failed.length ? `，失败 ${data.failed.length}` : ""}`);
       setShowBatchDelete(false);
       setBatchSel(new Set());
       await load();
-    } catch (e: any) { setMsg(e.message || String(e)); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "批量删除失败")}`); }
     setBatchDeleting(false);
   }
 
@@ -170,22 +162,11 @@ export default function ProjectsPage() {
     setConfirmTarget(null);
     setBusyId(p.id);
     try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/projects/${p.id}/lifecycle`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("aieos_token")}`,
-          },
-          body: JSON.stringify({ action }),
-        });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+      await api.post(`/projects/${p.id}/lifecycle`, { action });
       const zhLabel = { pause: "已暂停（现场保留）", resume: "已恢复执行", stop: "已永久停止（成果保留）", delete: "已彻底删除" };
       setMsg(`✅ 「${p.name}」${zhLabel[action]}`);
       await load();
-    } catch (e: any) { setMsg(`❌ ${e.message || e}`); }
+    } catch (e) { setMsg(`❌ ${describeError(e, "操作失败")}`); }
     setBusyId(null);
   }
 
@@ -214,7 +195,7 @@ export default function ProjectsPage() {
   async function createProject() {
     if (!form.name.trim()) return;
     try {
-      const cs: any[] = await api.get("/companies");
+      const cs = await api.get<Company[]>("/companies");
       const created = await api.post(`/projects?company_id=${cs[0].id}`, {
         name: form.name.trim(),
         description: form.description || null,

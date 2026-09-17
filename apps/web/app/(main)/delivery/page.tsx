@@ -1,6 +1,8 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { api, describeError, downloadURL, fetchBlobURL } from "@/lib/api";
+import { notify } from "@/components/Toast";
+import type { Company } from "@/lib/types";
 
 /* ============================================================
    交付中心：Agent 专属交付文件夹
@@ -50,7 +52,7 @@ export default function DeliveryCenterPage() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const cs: any[] = await api.get("/companies");
+    const cs = await api.get<Company[]>("/companies");
     if (!cs.length) return;
     setCid(cs[0].id);
     try {
@@ -70,17 +72,13 @@ export default function DeliveryCenterPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  function download(id: string, name: string) {
-    fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/delivery/download/${id}`,
-      { headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } })
-      .then((r) => r.blob())
-      .then((blob) => {
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = name;
-        a.click();
-        URL.revokeObjectURL(a.href);
-      });
+  async function download(id: string, name: string) {
+    try {
+      // 下载接口要求 Bearer token，<a href> 带不上——必须取回 blob 再触发保存
+      downloadURL(await fetchBlobURL(`/delivery/download/${id}`), name);
+    } catch (e: any) {
+      notify("error", `下载失败：${describeError(e)}`);
+    }
   }
 
   const match = (n: string) => !search || n.toLowerCase().includes(search.toLowerCase());

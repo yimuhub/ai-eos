@@ -1,12 +1,16 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { api, describeError, downloadText, downloadURL, fetchBlobURL, fetchText } from "@/lib/api";
+import { notify } from "@/components/Toast";
 
 /* ============================================================
    交付成果与日志面板（项目详情 / 任务详情共用）
    - 成果列表：点击弹出预览窗口
    - 项目日志：Agent 沟通/想法，支持导出 MD
    ============================================================ */
+
+/** 交付文件夹里的一条文件（`/delivery/by-scope` 返回的 files 元素） */
+export type FolderFile = { id: string; name: string; size?: number; path?: string };
 
 type Asset = {
   id: string; name: string; type: string; size: number;
@@ -34,13 +38,13 @@ export function DeliverablesPanel({ projectId }: { projectId: string }) {
   async function openPreview(a: Asset) {
     setLoadingPreview(true);
     try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/assets/${a.id}`,
-        { headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });
-      const text = await r.text();
+      // 原实现用 r.text() 取原始响应体——而 /assets/{id} 返回的是 JSON，
+      // 于是预览窗口里显示的是一整段 {"id":...,"content":"..."} 而不是正文。
+      const d = await api.get<{ content?: unknown }>(`/assets/${a.id}`);
+      const text = d.content !== undefined ? String(d.content) : JSON.stringify(d, null, 2);
       setPreview({ name: a.name, content: text });
-    } catch (e: any) {
-      setPreview({ name: a.name, content: `预览失败：${e.message}` });
+    } catch (e) {
+      setPreview({ name: a.name, content: `预览失败：${describeError(e, "预览失败")}` });
     }
     setLoadingPreview(false);
   }
@@ -86,9 +90,19 @@ export function DeliverablesPanel({ projectId }: { projectId: string }) {
             <div className="px-5 py-3.5 border-b flex items-center justify-between" style={{ borderColor: "var(--border)" }}>
               <h3 className="font-bold text-sm truncate">📄 {preview.name}</h3>
               <div className="flex gap-2 items-center shrink-0">
-                <a href={`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/assets/${assets.find((x) => x.name === preview.name)?.id}/download`}
-                  download
-                  className="btn-primary !py-1.5 !px-3 text-xs">下载</a>
+                {/* 下载接口需要 Bearer token：不能用 <a href>（浏览器不会带 header，
+                    点了只会拿到 401），必须先取回 blob 再本地保存 */}
+                <button type="button"
+                  onClick={async () => {
+                    const assetId = assets.find((x) => x.name === preview.name)?.id;
+                    if (!assetId) { notify("error", "找不到该成果，无法下载"); return; }
+                    try {
+                      downloadURL(await fetchBlobURL(`/assets/${assetId}/download`), preview.name);
+                    } catch (e: any) {
+                      notify("error", `下载失败：${describeError(e)}`);
+                    }
+                  }}
+                  className="btn-primary !py-1.5 !px-3 text-xs">下载</button>
                 <button onClick={() => setPreview(null)} className="btn-ghost !px-2 !py-1 text-xs">✕</button>
               </div>
             </div>
@@ -109,10 +123,7 @@ export function ProjectLogsPanel({ projectId }: { projectId: string }) {
 
   const load = useCallback(async () => {
     try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/projects/${projectId}/logs`,
-        { headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });
-      const data = await r.json();
+      const data = await api.get<{ logs?: LogEntry[] }>(`/projects/${projectId}/logs`);
       setLogs(data.logs || []);
     } catch { setLogs([]); }
   }, [projectId]);
@@ -125,10 +136,16 @@ export function ProjectLogsPanel({ projectId }: { projectId: string }) {
     event: { icon: "⚙", label: "事件" },
   };
 
-  function exportMd() {
-    window.open(
-      `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/projects/${projectId}/logs/export?format=md&_t=${Date.now()}`,
-      "_blank");
+  async function exportMd() {
+    // 原来用 window.open(接口地址)：导出接口同样需要 token，
+    // 新标签页打开只会显示 401 的 JSON，用户以为"导出了但没内容"。
+    try {
+      const md = await fetchText(`/projects/${projectId}/logs/export?format=md`);
+      downloadText(`项目日志-${projectId.slice(0, 8)}.md`, md);
+      notify("success", "日志已导出为 Markdown");
+    } catch (e: any) {
+      notify("error", `导出失败：${describeError(e)}`);
+    }
   }
 
   return (
@@ -201,10 +218,7 @@ export function TaskLogsPanel({ taskId }: { taskId: string }) {
 
   const load = useCallback(async () => {
     try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/tasks/${taskId}/logs`,
-        { headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });
-      const data = await r.json();
+      const data = await api.get<{ logs?: LogEntry[] }>(`/tasks/${taskId}/logs`);
       setLogs(data.logs || []);
     } catch { setLogs([]); }
   }, [taskId]);
