@@ -5,6 +5,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.permissions import (Capability, ensure_capability,
+                                 require_capability)
 from app.db.session import get_db
 from app.models.company import Company, Department
 from app.services.event_system import log_event
@@ -63,7 +65,12 @@ async def update_company(cid: str, data: CompanyIn, db: AsyncSession = Depends(g
     return c
 
 
-@router.delete("/companies/{cid}", status_code=204)
+@router.delete("/companies/{cid}", status_code=204,
+               # 删公司会级联清除项目、员工、成果、日志——整个系统里最重的一档。
+               # 用依赖声明而不是在函数体里比较 owner_id：危险级别对调用方可见，
+               # 将来引入"管理员"角色时这里一行都不用改。
+               dependencies=[Depends(require_capability(
+                   Capability.DESTRUCTIVE, "cid"))])
 async def delete_company(cid: str, db: AsyncSession = Depends(get_db),
                          user=Depends(get_current_user)):
     c = await _owned_company(db, user.id, cid)
@@ -160,6 +167,8 @@ async def pin_department(did: str, data: PinIn,
 async def delete_department(did: str, db: AsyncSession = Depends(get_db),
                             user=Depends(get_current_user)):
     d = await _owned_department(db, user.id, did)
+    # 删部门会解除员工与专属技能/知识库的关联（可重建），属于次高危险级别
+    await ensure_capability(db, user.id, d.company_id, Capability.MANAGE)
     await db.delete(d)
     await db.commit()
 

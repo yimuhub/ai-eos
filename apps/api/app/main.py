@@ -4,13 +4,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import (agents, artifacts, assets, auth, browser_agent, group_chat, growth_center, doc_styles,
+from app.api.routes import (access, agents, artifacts, assets, auth, browser_agent, group_chat, growth_center, doc_styles,
                             agent_chat, delivery, departments_batch, kb2, offboarding, task_dispatch,
                             test_console,
                             career,
                             companies, collaboration, computer_agent, context,
                             dashboard, events, health, intervention, knowledge,
-                            learning, meetings, memory, messages, models_api,
+                            learning, meetings, memory, messages, metrics, models_api,
                             orchestrate, performance, projects, reflection,
                             factory, external_agents, review, sandbox,
                             automation, governance,
@@ -88,10 +88,11 @@ async def _unhandled_exception_handler(request, exc):
     )
 
 for r in (health, auth, companies, agents, agent_chat, models_api, skills, tasks, messages, kb2, delivery, group_chat, doc_styles, growth_center,
-          assets, events, dashboard, orchestrate, projects, workflows, meetings,
+          assets, events, dashboard, metrics, orchestrate, projects, workflows, meetings,
           collaboration, knowledge, memory, context, artifacts, intervention,
           performance, team_builder, browser_agent, computer_agent, app_alias,
           schedules, learning, training, reflection, skill_growth, career,
           review, factory, external_agents, sandbox, automation, governance,
-          offboarding, departments_batch, task_dispatch, test_console, war_room, team_generator, company_manage, tokens):
+          offboarding, departments_batch, task_dispatch, test_console, war_room, team_generator, company_manage, tokens,
+          access):
     app.include_router(r.router)

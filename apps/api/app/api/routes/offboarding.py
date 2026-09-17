@@ -72,6 +72,10 @@ async def execute_offboarding(data: OffboardIn,
     if not succ:
         raise HTTPException(404, "继承人不存在")
     await _verify_agent_access(db, user.id, succ)
+    # 离职交接会真实改写归属（技能/成果/记忆转移到继承人）并删除原员工，
+    # 不可撤销：声明为最高危险级别。
+    from app.core.permissions import Capability, ensure_capability
+    await ensure_capability(db, user.id, succ.company_id, Capability.DESTRUCTIVE)
     sid = str(succ.id)
 
     user_id = user.id  # 提前缓存，防 rollback 过期后触发同步懒加载

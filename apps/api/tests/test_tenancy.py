@@ -59,14 +59,18 @@ async def test_cannot_list_other_company_departments(client, tenants):
 
 
 async def test_dashboard_does_not_leak_other_company(client, tenants):
-    """`/dashboard/{cid}` 用 200 + error 字段表示"找不到"（软失败）。
+    """`/dashboard/{cid}` 对他人公司必须 404，且不返回任何数据。
 
-    这里不强行断言 404（那属于改契约），但要确保它**不返回他人数据**。
+    这里原先容忍"200 + {"error": ...}"的软失败写法（当时把改契约当成越界）。
+    后来把契约统一成了 404：软失败在 HTTP 层看不出问题，前端只能靠读 body
+    里的 error 字段判断，很容易漏判成"数据都是 0"——一个空看板比报错更误导人。
     """
     r = await client.get(f"/dashboard/{tenants.alice_co['id']}",
                          headers=tenants.bob["headers"])
-    assert r.status_code in (200, 404)
-    assert "error" in r.json(), f"疑似返回了他人公司看板数据：{r.text[:200]}"
+    assert r.status_code == 404, f"疑似返回了他人公司看板数据：{r.text[:200]}"
+    body = r.json()
+    assert "agents" not in body and "tasks" not in body, \
+        f"404 响应里仍带了看板数据：{body}"
 
 
 # ---------------------------------------------------------------- Agent

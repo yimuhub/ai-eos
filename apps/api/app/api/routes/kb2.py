@@ -141,6 +141,9 @@ async def delete_doc(doc_id: str, db: AsyncSession = Depends(get_db),
     doc = await db.get(KBDocument, doc_id)
     if not doc:
         raise HTTPException(404)
+    # 归属校验：原先只按 id 取文档，任何登录用户都能删掉别家公司的知识库文档
+    from app.api.deps import assert_company_owned
+    await assert_company_owned(db, user.id, doc.company_id)
     cid = doc.company_id
     # 原始文件一并删除
     if doc.original_path and os.path.exists(doc.original_path):

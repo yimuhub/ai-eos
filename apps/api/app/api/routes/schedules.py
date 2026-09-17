@@ -119,6 +119,9 @@ async def archive_schedule(
     sched = await db.get(AutomationSchedule, sid)
     if not sched:
         raise HTTPException(404, "not found")
+    # 归属校验：原先按 id 就归档，任何登录用户都能停掉别家公司的定时任务
+    from app.api.deps import assert_company_owned
+    await assert_company_owned(db, user.id, sched.company_id)
     sched.status = "ARCHIVED"
     await db.commit()
     return {"id": sid, "status": "ARCHIVED"}

@@ -143,9 +143,22 @@ async def approve_continue(rid: str, db: AsyncSession = Depends(get_db),
 async def emergency_stop(company_id: str = Query(...),
                          db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
-    """紧急停止：所有运行中的自动化立即中止。"""
-    q = await db.execute(select(AutomationRunRecord).where(
-        AutomationRunRecord.status.in_(("RUNNING", "WAITING_APPROVAL"))))
+    """紧急停止：本公司的自动化立即中止。
+
+    修复两处真实缺陷：
+    1. **不校验归属**——任何登录用户传一个 company_id 就能触发急停；
+    2. **不按公司过滤**——原查询直接捞全部 RUNNING/WAITING_APPROVAL 运行记录，
+       结果是 A 公司点急停会把 B 公司正在跑的自动化一并中止。
+    """
+    from app.core.permissions import Capability, ensure_capability
+    await ensure_capability(db, user.id, company_id, Capability.DESTRUCTIVE)
+
+    q = await db.execute(
+        select(AutomationRunRecord)
+        .join(AutomationDefinition,
+              AutomationDefinition.id == AutomationRunRecord.definition_id)
+        .where(AutomationDefinition.company_id == company_id,
+               AutomationRunRecord.status.in_(("RUNNING", "WAITING_APPROVAL"))))
     stopped = 0
     for r in q.scalars().all():
         r.status = "ABORTED"

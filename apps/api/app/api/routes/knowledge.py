@@ -99,6 +99,9 @@ async def delete_document(
     doc = await db.get(KBDocument, doc_id)
     if not doc:
         raise HTTPException(404, "Document not found")
+    # 归属校验：原先只按 id 取文档，任何登录用户都能删掉别家公司的知识库文档
+    from app.api.deps import assert_company_owned
+    await assert_company_owned(db, user.id, doc.company_id)
     await db.delete(doc)
     await db.commit()
     return {"detail": "deleted"}

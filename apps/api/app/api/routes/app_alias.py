@@ -116,6 +116,10 @@ async def create_rule(data: AliasIn, company_id: str = Query(...),
 async def delete_rule(rule_id: str, company_id: str = Query(...),
                       user: Annotated[User, Depends(get_current_user)] = None,
                       db: AsyncSession = Depends(get_db)):
+    # 原实现把「记录的公司 == 调用者传入的公司」当成鉴权——两边都来自调用者，
+    # 等于没有校验：传别人的 company_id 就能删掉别人的规则。
+    from app.api.deps import assert_company_owned
+    await assert_company_owned(db, user.id, company_id)
     r = await db.get(AppAliasRule, rule_id)
     if not r or r.company_id != company_id:
         raise HTTPException(404, "not found")

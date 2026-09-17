@@ -319,6 +319,10 @@ async def remove_agent_skill(agent_id: str, asn_id: str,
                               db: AsyncSession = Depends(get_db),
                               user: User = Depends(get_current_user)):
     """移除 Agent 的一项技能（从综合档案中删减）。"""
+    # 原先只比较"该 Agent 的公司 == 调用者传入的公司"，两边都可被调用者控制，
+    # 等于没有鉴权：传别人的 company_id 就能削减别人员工的技能。
+    from app.api.deps import assert_company_owned
+    await assert_company_owned(db, user.id, company_id)
     a = await db.get(Agent, agent_id)
     if not a or a.company_id != company_id:
         raise HTTPException(404)

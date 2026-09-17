@@ -1,16 +1,53 @@
-"""Model registry CRUD (Provider configs)."""
-from fastapi import APIRouter, Depends, HTTPException
+"""Model registry CRUD (Provider configs).
+
+## 归属规则（本次修复的真实漏洞）
+
+`models.company_id` 字段一直存在，但**创建时不写、查询时不用**：
+任何注册用户都能列出、修改、测试、删除别人的模型配置——包括对方的
+base_url 与"密钥放在哪个环境变量"这类信息。这是跨租户越权（IDOR），
+在多租户部署下属于严重问题。
+
+现在把归属真正接起来：
+
+* 创建时写入 `company_id`（前端传当前激活公司）；为空表示"未归属/共享"。
+* 列表只返回"自己公司的"与"未归属的"，未归属的在响应里标记 `unowned`。
+* 改 / 删 / 测试都需要该公司具备对应能力（见 `core.permissions`）。
+* 未归属的配置只允许被**认领**（PATCH 带上自己的 company_id），不能直接删：
+  无主配置可能正被别家公司的员工使用，直接删会造成看不见的破坏。
+"""
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.permissions import Capability, ensure_capability
 from app.db.session import get_db
 from app.model_gateway import PROVIDERS
 from app.models.agent import Model, ModelProviderType
+from app.models.company import Company
 from app.models.user import User
 
 router = APIRouter(prefix="/models", tags=["models"])
+
+
+async def _my_company_ids(db: AsyncSession, user_id: str) -> list[str]:
+    rows = await db.execute(select(Company.id).where(Company.owner_id == user_id))
+    return [cid for (cid,) in rows.all()]
+
+
+async def _ensure_model_access(db, user, m: Model, capability: Capability) -> None:
+    """校验对某条模型配置的操作权限。
+
+    未归属（company_id 为空）的配置不允许直接改删——见模块文档：
+    它可能正被别人公司的员工使用，先认领再操作。
+    """
+    if m.company_id is None:
+        raise HTTPException(
+            409,
+            "该模型配置未归属任何公司（多为升级前登记的遗留配置），"
+            "不能直接修改或删除。请先认领：PATCH 时带上自己公司的 company_id。")
+    await ensure_capability(db, user.id, m.company_id, capability)
 
 # 各 provider 对应的默认环境变量名（与 .env.example 保持一致）。
 # 这里只用于"密钥是否就位"的判断，永远不读取/返回密钥内容。
@@ -47,6 +84,8 @@ class ModelIn(BaseModel):
     api_key_env: str | None = None
     model_id: str
     config: dict | None = {}
+    # 归属公司。不传则登记为"未归属/共享"（本地单人使用时够用）。
+    company_id: str | None = None
 
 
 @router.get("/diagnostics")
@@ -63,7 +102,9 @@ async def diagnostics(db: AsyncSession = Depends(get_db),
     本接口让前端能明确告诉用户卡在哪一步。安全约束：
     **只报告密钥是否存在（布尔），绝不返回密钥内容本身**。
     """
-    rows = list((await db.execute(select(Model))).scalars())
+    rows = list((await db.execute(select(Model).where(
+        or_(Model.company_id.is_(None),
+            Model.company_id.in_(await _my_company_ids(db, user.id)))))).scalars())
     providers = []
     for ptype, env_name in PROVIDER_ENV_VARS.items():
         configured = [m for m in rows
@@ -103,11 +144,28 @@ async def diagnostics(db: AsyncSession = Depends(get_db),
 
 
 @router.get("")
-async def list_models(db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
-    q = await db.execute(select(Model))
+async def list_models(company_id: str | None = Query(None),
+                      db: AsyncSession = Depends(get_db),
+                      user=Depends(get_current_user)):
+    """列出当前用户可见的模型配置。
+
+    可见 = "自己公司的" 或 "未归属的（升级前遗留）"。
+    改造前这里返回**全表**：任何注册用户都能看到别人的 provider 配置。
+    """
+    mine = await _my_company_ids(db, user.id)
+    if company_id:
+        # 指定公司时必须真的有权限，否则等于借参数绕过隔离
+        await ensure_capability(db, user.id, company_id, Capability.VIEW)
+        mine = [company_id]
+    q = await db.execute(select(Model).where(
+        or_(Model.company_id.is_(None), Model.company_id.in_(mine))))
     return [
         {"id": m.id, "name": m.name, "provider_type": m.provider_type.value,
-         "base_url": m.base_url, "model_id": m.model_id, "config": m.config}
+         "base_url": m.base_url, "model_id": m.model_id, "config": m.config,
+         "company_id": m.company_id,
+         # 未归属的配置要显式标出来，前端才能提示去认领，
+         # 否则用户只会疑惑"为什么这条我删不掉"。
+         "unowned": m.company_id is None}
         for m in q.scalars()
     ]
 
@@ -119,21 +177,47 @@ async def create_model(data: ModelIn, db: AsyncSession = Depends(get_db),
         pt = ModelProviderType(data.provider_type)
     except ValueError:
         raise HTTPException(400, f"provider_type must be one of {list(PROVIDERS)}")
+    if data.company_id:
+        # 只能登记到自己有管理权的公司名下
+        await ensure_capability(db, user.id, data.company_id, Capability.MANAGE)
     payload = data.model_dump()
     payload.pop("provider_type", None)
     m = Model(**payload, provider_type=pt)
     db.add(m)
     await db.commit()
     await db.refresh(m)
-    return {"id": m.id, "name": m.name, "provider_type": m.provider_type.value}
+    return {"id": m.id, "name": m.name, "provider_type": m.provider_type.value,
+            "company_id": m.company_id}
 
 
 @router.patch("/{mid}")
 async def update_model(mid: str, data: dict, db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
+    """修改模型配置。未归属的配置只允许被「认领」（补上 company_id）。"""
     m = await db.get(Model, mid)
     if not m:
         raise HTTPException(404, "Model not found")
+
+    claim_to = data.get("company_id")
+    if m.company_id is None:
+        # 未归属：唯一允许的改动是认领。认领后归属明确，可正常管理。
+        if not claim_to:
+            raise HTTPException(
+                409,
+                "该模型配置未归属任何公司（多为升级前登记的遗留配置）。"
+                '请先认领：提交 {"company_id": "<你的公司 id>"}。')
+        await ensure_capability(db, user.id, claim_to, Capability.MANAGE)
+        m.company_id = claim_to
+        await db.commit()
+        return {"id": m.id, "name": m.name, "company_id": m.company_id,
+                "claimed": True}
+
+    await _ensure_model_access(db, user, m, Capability.MANAGE)
+    if claim_to and claim_to != m.company_id:
+        # 转让归属要求两边都有权限，否则等于"把别人的模型搬到我家"
+        await ensure_capability(db, user.id, claim_to, Capability.MANAGE)
+        m.company_id = claim_to
+
     allowed = {"name", "base_url", "api_key_env", "model_id", "config"}
     if "provider_type" in data:
         m.provider_type = ModelProviderType(data["provider_type"])
@@ -141,7 +225,7 @@ async def update_model(mid: str, data: dict, db: AsyncSession = Depends(get_db),
         if k in allowed:
             setattr(m, k, v)
     await db.commit()
-    return {"id": m.id, "name": m.name}
+    return {"id": m.id, "name": m.name, "company_id": m.company_id}
 
 
 @router.delete("/{mid}", status_code=204)
@@ -150,6 +234,7 @@ async def delete_model(mid: str, db: AsyncSession = Depends(get_db),
     m = await db.get(Model, mid)
     if not m:
         raise HTTPException(404, "Model not found")
+    await _ensure_model_access(db, user, m, Capability.DESTRUCTIVE)
     await db.delete(m)
     await db.commit()
 
@@ -162,6 +247,9 @@ async def test_model(mid: str, db: AsyncSession = Depends(get_db),
     m = await db.get(Model, mid)
     if not m:
         raise HTTPException(404, "Model not found")
+    # 未归属的配置属于共享资源，允许测试；有主的要求可见权限
+    if m.company_id is not None:
+        await ensure_capability(db, user.id, m.company_id, Capability.VIEW)
     provider = PROVIDERS[m.provider_type](
         base_url=m.base_url or "", api_key=_resolve_api_key(m), model_id=m.model_id)
     try:

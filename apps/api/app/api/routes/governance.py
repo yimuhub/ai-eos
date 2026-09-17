@@ -543,6 +543,11 @@ async def delete_autonomous_settings(
     （前端只留了一句"后端若无删除接口则提示"的兜底注释），
     导致该功能自始至终 404。这里补上实现并加归属校验。
     """
+    # 先校验调用者真的拥有这家公司。原实现只比较
+    # "记录的公司 == 调用者传入的公司"，两边都来自调用者，等于没有校验。
+    from app.api.deps import assert_company_owned
+    await assert_company_owned(db, user.id, company_id)
+
     row = await db.get(AutonomousSettings, settings_id)
     # 记录级归属校验：防止用自己公司的 company_id 删除他人配置
     if not row or row.company_id != company_id:
@@ -677,7 +682,14 @@ async def emergency_stop(
     user: User = Depends(get_current_user),
     data: EmergencyStopIn | None = None,
 ):
-    """全局紧急停止：冻结自治设置 + 保存检查点。"""
+    """全局紧急停止：冻结自治设置 + 保存检查点。
+
+    修复：原先只按 company_id 过滤数据，却不校验调用者是否拥有这家公司——
+    任何登录用户都能冻结别人公司的自治行为（IDOR）。
+    """
+    from app.core.permissions import Capability, ensure_capability
+    await ensure_capability(db, user.id, company_id, Capability.DESTRUCTIVE)
+
     q = await db.execute(select(AutonomousSettings).where(
         AutonomousSettings.company_id == company_id))
     stopped = 0
@@ -700,7 +712,13 @@ async def resume_from_checkpoint(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """从检查点恢复：解除紧急停止。"""
+    """从检查点恢复：解除紧急停止。
+
+    与 emergency-stop 对称：解除别人公司的紧急停止同样是越权。
+    """
+    from app.core.permissions import Capability, ensure_capability
+    await ensure_capability(db, user.id, company_id, Capability.DESTRUCTIVE)
+
     q = await db.execute(select(AutonomousExecutionLog).where(
         AutonomousExecutionLog.company_id == company_id).order_by(
         AutonomousExecutionLog.created_at.desc()).limit(5))

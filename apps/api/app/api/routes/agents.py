@@ -169,6 +169,10 @@ async def delete_agent(aid: str, db: AsyncSession = Depends(get_db),
     if not a:
         raise HTTPException(404, "Agent not found")
     await _verify_agent_access(db, user.id, a)
+    # 删除员工不可逆：其技能绑定、记忆、档案一并消失。
+    # 走统一权限层声明危险级别，而不是就地比较 owner_id。
+    from app.core.permissions import Capability, ensure_capability
+    await ensure_capability(db, user.id, a.company_id, Capability.DESTRUCTIVE)
     await db.delete(a)
     await db.commit()
 

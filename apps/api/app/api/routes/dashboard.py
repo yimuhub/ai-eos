@@ -1,5 +1,5 @@
 """Command Center: company-wide live stats."""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +19,10 @@ async def dashboard(company_id: str, db: AsyncSession = Depends(get_db),
                     user=Depends(get_current_user)):
     c = await db.get(Company, company_id)
     if not c or c.owner_id != user.id:
-        return {"error": "Company not found"}
+        # 原先返回 200 + {"error": ...}：HTTP 层看不出失败，前端只能
+        # 靠读 body 里的 error 字段判断，很容易漏判成"数据都是 0"。
+        # 统一改成 404，与其它接口一致（前端已有 try/catch + Toast）。
+        raise HTTPException(404, "Company not found")
 
     # agent status counts
     agent_counts = {"total": 0}

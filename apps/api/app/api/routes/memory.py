@@ -56,6 +56,9 @@ async def forget_ep(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # 归属校验：原实现直接按 id 遗忘，任何登录用户都能删掉别人员工的记忆
+    from app.api.deps import assert_agent_owned
+    await assert_agent_owned(db, user.id, agent_id)
     ok = await forget(db, agent_id, memory_id)
     if not ok:
         raise HTTPException(404, "Memory not found")

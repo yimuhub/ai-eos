@@ -164,6 +164,10 @@ async def delete_collaboration(
     collab = await db.get(AgentCollaboration, collaboration_id)
     if not collab:
         raise HTTPException(status_code=404, detail="Collaboration not found")
+    # 协作关系自身没有公司字段，归属经由两端 Agent 推导。
+    # 原实现拿到 id 就删：任何登录用户都能拆掉别家公司的协作关系。
+    from app.api.deps import assert_agent_owned
+    await assert_agent_owned(db, user.id, collab.source_agent_id)
 
     await db.delete(collab)
     await db.commit()

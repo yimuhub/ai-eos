@@ -111,6 +111,9 @@ async def delete_connection(cid: str, db: AsyncSession = Depends(get_db),
     conn = await db.get(ExternalAgentConnection, cid)
     if not conn:
         raise HTTPException(404, "not found")
+    # 归属校验：原先按 id 就删，任何登录用户都能删掉别家公司的外部 Agent 接入
+    from app.api.deps import assert_company_owned
+    await assert_company_owned(db, user.id, conn.company_id)
     await db.delete(conn)
     await db.commit()
     return {"deleted": True}

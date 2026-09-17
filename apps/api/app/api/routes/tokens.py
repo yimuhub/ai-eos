@@ -107,6 +107,16 @@ async def delete_pricing(pid: str, db: AsyncSession = Depends(get_db),
     p = await db.get(PricingConfig, pid)
     if not p:
         raise HTTPException(404, "not found")
+    # 计费标准挂在模型上，归属经由模型推导。原先按 id 就删：
+    # 任何登录用户都能抹掉别人公司的计费标准（成本口径随之失真）。
+    from app.api.deps import assert_company_owned
+    from app.models.agent import Model as ModelRow
+    model = await db.get(ModelRow, p.model_id)
+    if model is None or model.company_id is None:
+        raise HTTPException(
+            409, "该计费标准所属的模型未归属任何公司，无法确认所有权。"
+                 "请先在自己的公司下重新登记模型，再配置计费标准。")
+    await assert_company_owned(db, user.id, model.company_id)
     await db.delete(p)
     await db.commit()
     return {"deleted": True}

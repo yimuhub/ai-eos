@@ -102,6 +102,11 @@ async def batch_delete(data: DeleteIn, db: AsyncSession = Depends(get_db),
                 if not c or c.owner_id != user.id:
                     failed.append({"id": cid, "reason": "not found"})
                     continue
+                # 批量删除公司会级联清除项目/员工/成果/日志，是最重的一档。
+                # 走统一权限层而不是就地比较 owner_id：将来引入"管理员"角色时，
+                # 这里不需要任何改动。
+                from app.core.permissions import Capability, ensure_capability
+                await ensure_capability(db, user.id, cid, Capability.DESTRUCTIVE)
                 valid_ids.append(cid)
             async with engine.begin() as trans:
                 for cid in valid_ids:

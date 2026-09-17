@@ -186,6 +186,9 @@ async def delete_project(pid: str, db: AsyncSession = Depends(get_db),
     from app.models.task import AgentExecution, Task
     from app.models.asset import Asset
     p = await _project_owned(db, user.id, pid)
+    # 删项目会清除里程碑与成员关系、并把任务/成果/执行记录与项目解绑：不可逆
+    from app.core.permissions import Capability, ensure_capability
+    await ensure_capability(db, user.id, p.company_id, Capability.DESTRUCTIVE)
 
     # 显式删除无 ON DELETE CASCADE 的子表，其余表由 DB 级联/SET NULL 处理
     for model in (ProjectContextSnapshot, ProjectMember, Milestone):

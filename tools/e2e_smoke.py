@@ -470,6 +470,68 @@ def run(keep: bool, verbose: bool) -> int:
                      int(logs.get("count") or 0) >= 0,
                      f"{logs.get('count')} 条")
 
+        report.section("质量度量")
+        metrics = client.get(f"/metrics/overview?company_id={company_id}") or {}
+        m_tasks = metrics.get("tasks") or {}
+        report.check("度量：成功任务被计入且成功率为 100%",
+                     m_tasks.get("success_rate") == 1.0,
+                     f"完成={m_tasks.get('completed')} 失败={m_tasks.get('failed')} "
+                     f"成功率={m_tasks.get('success_rate')}")
+        m_calls = metrics.get("model_calls") or {}
+        report.check("度量：模型调用成功率与延迟",
+                     m_calls.get("success_rate") == 1.0
+                     and m_calls.get("avg_latency_ms") is not None,
+                     f"{m_calls.get('total')} 次调用 / "
+                     f"成功率={m_calls.get('success_rate')} / "
+                     f"平均 {m_calls.get('avg_latency_ms')} ms")
+        m_exec = metrics.get("executions") or {}
+        report.check("度量：执行耗时被测出（依赖执行记录起止时间）",
+                     m_exec.get("avg_duration_seconds") is not None,
+                     f"平均 {m_exec.get('avg_duration_seconds')} 秒")
+
+        report.section("失败路径（负面验证）")
+        bad_agent = client.post("/agents", {
+            "company_id": company_id, "name": "未配模型的员工"})
+        bad_agent_id = (bad_agent or {}).get("id")
+        bad_task = client.post("/tasks", {
+            "company_id": company_id, "title": "注定失败的任务",
+            "assigned_agent_id": bad_agent_id})
+        bad_task_id = (bad_task or {}).get("id")
+        report.check("可以为一个未配模型的员工下达任务", bool(bad_task_id))
+
+        client.post(f"/tasks/{bad_task_id}/start")
+        bad_final = _poll_task(client, bad_task_id, 60)
+        report.check("无模型任务在超时内判定为 FAILED",
+                     (bad_final or {}).get("status") == "FAILED",
+                     f"状态={(bad_final or {}).get('status')}")
+        report.check("失败任务没有留下'半成品'结果",
+                     not (bad_final or {}).get("result"),
+                     "result 为空（符合预期）")
+
+        bad_detail = client.get(f"/tasks/{bad_task_id}") or {}
+        bad_execs = [e for e in (bad_detail.get("executions") or [])
+                     if e.get("status") == "failed"]
+        bad_error = (bad_execs[0].get("error") if bad_execs else "") or ""
+        report.check("失败原因已落库（用户点开就能看到为什么）",
+                     bool(bad_error), (bad_error or "无")[:70])
+        report.check("失败原因可操作（点明缺失的是模型配置）",
+                     "模型" in bad_error, (bad_error or "")[:70])
+
+        bad_logs = client.get(f"/tasks/{bad_task_id}/logs") or {}
+        report.check("任务时间线包含执行记录（而非只有事件流）",
+                     any(l.get("kind") == "execution"
+                         for l in (bad_logs.get("logs") or [])),
+                     f"{bad_logs.get('count')} 条日志")
+
+        metrics2 = client.get(f"/metrics/overview?company_id={company_id}") or {}
+        report.check("度量如实反映一半成功一半失败（成功率 0.5）",
+                     (metrics2.get("tasks") or {}).get("success_rate") == 0.5,
+                     f"成功率={(metrics2.get('tasks') or {}).get('success_rate')}")
+        report.check("度量指出失败原因与责任员工",
+                     bool(metrics2.get("failure_reasons"))
+                     and bool(metrics2.get("failure_by_agent")),
+                     (metrics2.get("failure_reasons") or [{}])[0].get("reason", "无")[:60])
+
         report.section("租户隔离（负面验证）")
         other = Client(base)
         other.post("/auth/register", {
