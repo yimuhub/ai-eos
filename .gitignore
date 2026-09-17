@@ -1,0 +1,53 @@
+# === 依赖（可重建，不入库） ===
+node_modules/
+**/node_modules/
+.venv/
+**/.venv/
+venv/
+
+# === 构建产物 ===
+.next/
+**/.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.so
+
+# === 运行期数据（含用户数据，绝不入库） ===
+data/
+storage/
+logs/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# === 环境与密钥（安全红线） ===
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# === 打包产物 ===
+packaging/dist/
+packaging/build/
+*.dmg
+*.app/
+*.zip
+
+# === 操作系统 ===
+.DS_Store
+**/.DS_Store
+Thumbs.db
+*.swp
+*~

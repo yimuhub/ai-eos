@@ -1,0 +1,147 @@
+"""Skill plugin system — Skills are plugins, never hardcoded into Runtime."""
+import re
+from abc import ABC, abstractmethod
+from typing import Any
+
+import httpx
+
+
+class BaseSkill(ABC):
+    """Skill Plugin interface."""
+
+    id: str = ""
+    name: str = ""
+    description: str = ""
+    version: str = "0.1.0"
+    input_schema: dict = {}
+    output_schema: dict = {}
+    permissions: list[str] = []
+
+    @abstractmethod
+    async def execute(self, input_data: dict) -> dict: ...
+
+
+class TextProcessingSkill(BaseSkill):
+    id = "text_processing"
+    name = "Text Processing"
+    description = "Summarize / clean / transform text."
+
+    async def execute(self, input_data: dict) -> dict:
+        text = input_data.get("text", "")
+        op = input_data.get("operation", "word_count")
+        if op == "word_count":
+            return {"result": {"characters": len(text), "words": len(text.split())}}
+        if op == "extract_urls":
+            urls = re.findall(r"https?://[^\s\)\>]+", text)
+            return {"result": {"urls": urls}}
+        return {"result": {"text": text.strip()}}
+
+
+class FileReaderSkill(BaseSkill):
+    id = "file_reader"
+    name = "File Reader"
+    description = "Read a text/markdown/json file from the workspace storage."
+
+    async def execute(self, input_data: dict) -> dict:
+        from pathlib import Path
+
+        path = Path(input_data["path"])
+        content = path.read_text(encoding="utf-8", errors="replace")
+        return {"result": {"path": str(path), "content": content[:50000], "size": len(content)}}
+
+
+class WebSearchSkill(BaseSkill):
+    """真实 Web 搜索：DuckDuckGo，无需 API key。"""""
+
+    id = "web_search"
+    name = "Web Search"
+    description = "Search the web to get real-time information."
+    permissions = ["network"]
+
+    async def execute(self, input_data: dict) -> dict:
+        """Bing中国搜索（国内可达），HTML解析。"""
+        import asyncio
+        import re as _re
+        import urllib.request as _uq
+        from html import unescape as _unesc
+
+        query = input_data.get("query", "")
+        max_results = min(int(input_data.get("max_results", 5)), 10)
+
+        def _fetch():
+            url = ("https://cn.bing.com/search?q="
+                   + _uq.quote(query) + "&count=" + str(max_results))
+            req = _uq.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                              "AppleWebKit/537.36"})
+            with _uq.urlopen(req, timeout=12) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+
+        try:
+            html = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=15)
+            results = []
+            # 解析 b_algo 结果块
+            for m in _re.finditer(r'<li class="b_algo".*?</li>', html, _re.S):
+                block = m.group()
+                tm = _re.search(r'<h2[^>]*>.*?<a[^>]*>(.*?)</a>', block, _re.S)
+                hm = _re.search(r'<h2[^>]*>.*?<a[^>]*href="([^"]+)"', block, _re.S)
+                pm = _re.search(r'<p[^>]*>(.*?)</p>', block, _re.S)
+                if tm:
+                    title = _unesc(_re.sub(r"<[^>]+>", "", tm.group(1))).strip()
+                    snippet = _unesc(_re.sub(r"<[^>]+>", "", pm.group(1))).strip() if pm else ""
+                    results.append({"title": title,
+                                    "href": hm.group(1) if hm else "",
+                                    "body": snippet[:300]})
+                if len(results) >= max_results:
+                    break
+            if not results:
+                # 兜底：直接抓所有 h2 链接
+                for m in _re.finditer(r'<h2><a[^>]*href="([^"]+)"[^>]*>(.*?)</a></h2>',
+                                      html, _re.S):
+                    results.append({
+                        "title": _unesc(_re.sub(r"<[^>]+>", "", m.group(2))).strip(),
+                        "href": m.group(1), "body": ""})
+                    if len(results) >= max_results:
+                        break
+            if results:
+                return {"result": {"query": query, "backend": "bing_cn",
+                                   "results": results, "count": len(results)}}
+            return {"result": {"query": query, "error": "no results parsed",
+                               "results": []}}
+        except Exception as e:
+            # 兜底再试 ddgs
+            try:
+                from ddgs import DDGS
+                results = DDGS().text(query, max_results=max_results)
+                if results:
+                    return {"result": {"query": query, "backend": "ddgs",
+                                       "results": results, "count": len(results)}}
+            except Exception as e2:
+                pass
+            return {"result": {"query": query, "error": str(e), "results": []}}
+
+
+# ---- Skill registry: future skills can be installed from plugins/skills/ directory ----
+BUILTIN_SKILLS: list[type[BaseSkill]] = [TextProcessingSkill, FileReaderSkill, WebSearchSkill]
+
+_registry: dict[str, type[BaseSkill]] = {s.id: s for s in BUILTIN_SKILLS}
+
+
+def register_skill(cls: type[BaseSkill]):
+    _registry[cls.id] = cls
+
+
+def get_skill_class(skill_slug: str) -> type[BaseSkill] | None:
+    return _registry.get(skill_slug)
+
+
+async def execute_skill(skill_slug: str, input_data: dict) -> dict[str, Any]:
+    # 自定义/导入技能：按 input_schema.instruction 方法论执行（LLM 按步骤指导）
+    if skill_slug.startswith(("custom_", "imp_")):
+        return {"result": {"skill": skill_slug,
+                           "mode": "methodology",
+                           "instruction": (input_data.get("instruction") or "")}}
+    cls = _registry.get(skill_slug)
+    if not cls:
+        raise ValueError(f"Unknown skill: {skill_slug}")
+    return await cls().execute(input_data)
