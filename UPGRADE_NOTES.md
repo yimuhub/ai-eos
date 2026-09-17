@@ -258,6 +258,7 @@ e1a5c8f  治理 28 处静默失败
 4332717  重建测试体系 + 交付前自检门禁
 5d54b62  前端 lint 归零 + 全局兜底页
 6ff6e41  文档与实现对齐 + 生产环境安全门禁
+faa9880  补上 lint 门禁缺口（含移除 next.config 的 ignoreDuringBuilds）
 ```
 
 ---
