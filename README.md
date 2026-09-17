@@ -11,13 +11,15 @@
 |------|--------|
 | 后端 | 21,554 行 Python / 135 个文件 |
 | 前端 | 17,738 行 TS/TSX / 34 个一级业务页面 |
-| API | **307 条路径 / 354 个端点** |
+| API | **309 条路径 / 354 个端点** |
 | 数据表 | **94 张** |
 | 数据库迁移 | 28 个 Alembic 版本 |
-| 测试 | 113 个用例（离线可重复） |
+| 测试 | **158 个用例**（离线可重复，含 8 类护栏） |
+| 端到端 | **38 项断言**（真实进程 + 本地假模型，无需密钥） |
 
-> **完成度说明**：功能广度已经很大，但工程质量刚完成一轮系统性补齐
-> （修复 9 处未定义变量、28 处静默吞异常、11 处接口契约错配，并重建测试体系与交付门禁）。
+> **完成度说明**：功能广度已经很大，工程质量已完成一轮系统性补齐
+> （9 处未定义变量、28 处静默吞异常、11 处接口契约错配、12 处跨租户越权、
+> 30+ 处裸 fetch 收口，并重建测试体系、端到端试跑与交付门禁）。
 > 详见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
 
 ## 文档导航
@@ -119,14 +121,21 @@ npm run dev          # http://localhost:3000
 ```
 
 覆盖：后端静态检查（未定义名 / 语法）→ 应用与 OpenAPI 可生成 → SQLAlchemy mapper 可配置 →
-前后端接口契约（404 / 405 门禁）→ 前端 TypeScript strict 类型检查 → 前端 ESLint → 测试套件。
-**任一失败即非零退出**，可直接接进 CI。
+前后端接口契约（404 / 405 门禁）→ 前端 TypeScript strict 类型检查 → 前端 ESLint →
+测试套件 → **端到端主链路试跑**。**任一失败即非零退出**，可直接接进 CI。
+
+> 端到端试跑起的是**本地假 OpenAI 兼容模型服务**，因此不需要任何真实密钥。
+> 它证明的是「链路通、失败会出声、记账正确」；配好 `.env` 里的真实密钥后
+> 用同一脚本再跑一次，即可验证产出质量。
 
 ### 分别运行
 
 ```bash
-# 后端测试（122 个用例，每会话独立临时 SQLite，不碰真实库）
+# 后端测试（158 个用例，每会话独立临时 SQLite，不碰真实库）
 cd apps/api && .venv/bin/python -m pytest tests/ -q
+
+# 端到端主链路试跑（真实进程 + 假模型，无需密钥）
+python tools/e2e_smoke.py
 
 # 前端类型检查与 lint
 cd apps/web && npx tsc --noEmit && npx eslint app components lib
@@ -135,9 +144,11 @@ cd apps/web && npx tsc --noEmit && npx eslint app components lib
 cd apps/api && .venv/bin/python ../../tools/check_api_contract.py --strict
 ```
 
-> 测试里除了功能用例，还有一类**体验护栏**（`tests/test_code_quality.py`）：
-> 禁止原生 `confirm/alert`、要求每个页面都有入口、导航不得有死链。
-> 这类问题编译器和 lint 都拦不住，但会实实在在地让产品显得不专业。
+> 测试里除了功能用例，还有 **8 类护栏**（`tests/test_code_quality.py` 等）：
+> 禁止原生 `confirm/alert`、要求每个页面都有入口、导航不得有死链、
+> **每个 DELETE 端点必须有归属校验**、**前端不得出现裸 fetch / 硬编码地址 / 手工取 token**。
+> 这类问题编译器和 lint 都拦不住，但会实实在在地让产品显得不专业 ——
+> 每类都已反向验证：注入违规代码会立刻让自检变红。
 
 > 仓库根目录的 `tests/` 是**历史手工脚本**，依赖 `/tmp` 临时文件与硬编码 UUID，无法在
 > pytest 下运行。它们已从测试收集中排除，说明见 [tests/LEGACY_SCRIPTS.md](tests/LEGACY_SCRIPTS.md)。
@@ -148,5 +159,7 @@ cd apps/api && .venv/bin/python ../../tools/check_api_contract.py --strict
 - ✅ **Phase 1**：AI 公司基础系统（组织 / Agent / 模型 / 技能 / 任务 / 协同 / 资产 / 管控）
 - ✅ **Phase 2**：AI 会议系统、工作流引擎、任务依赖 DAG、全过程回放
 - ✅ **Phase 3**：Agent 学习成长、绩效体系、职业发展、Computer Agent
-- 🚧 **工程质量**：可靠性改造已完成一轮（见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)）；
-  下一步是收敛功能广度、精细化权限模型、建立度量体系
+- ✅ **工程质量（本轮）**：可靠性改造完成一轮 —— 端到端主链路试跑、
+  12 处跨租户越权修复、度量体系、前端数据层与类型统一、schema 自动补列
+- 🚧 **下一步**：用真实密钥重跑一次端到端验证产出质量；接入多成员角色
+  （矩阵已就位，当前仅 OWNER 可达）；是否收敛功能广度做深度（产品决策）
