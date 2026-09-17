@@ -101,7 +101,7 @@ export default function MeetingsPage() {
   const toggleAgent = (id: string) => {
     setPicked((prev) => {
       const n = new Set(prev);
-      n.has(id) ? n.delete(id) : n.add(id);
+      if (n.has(id)) n.delete(id); else n.add(id);
       return n;
     });
   };
@@ -446,7 +446,7 @@ export default function MeetingsPage() {
                         style={{ background: `linear-gradient(135deg,${grad})` }}>🏢</span>
                       <button onClick={() => setDeptOpen((prev) => {
                         const n = new Set(prev);
-                        n.has(g.dept_id) ? n.delete(g.dept_id) : n.add(g.dept_id);
+                        if (n.has(g.dept_id)) n.delete(g.dept_id); else n.add(g.dept_id);
                         return n;
                       })}
                         className="flex-1 text-left text-sm font-medium flex items-center gap-2">

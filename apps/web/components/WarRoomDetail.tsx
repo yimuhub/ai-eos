@@ -118,11 +118,14 @@ export default function WarRoomDetail() {
     if (chatBoxRef.current) chatBoxRef.current.scrollTop = chatBoxRef.current.scrollHeight;
   }, [chatMsgs]);
   // 执行中自动刷新
+  // 只依赖 status 而不是整个 active 对象：对象每次轮询回来都是新引用，
+  // 用它当依赖会导致定时器被反复重建（刷新节奏失控）。
+  const activeStatus = active?.status;
   useEffect(() => {
-    if (!active || !["analyzing", "announcing", "executing", "confirmed"].includes(active.status)) return;
-    const t = setInterval(load, active.status === "analyzing" ? 3000 : 6000);
+    if (!activeStatus || !["analyzing", "announcing", "executing", "confirmed"].includes(activeStatus)) return;
+    const t = setInterval(load, activeStatus === "analyzing" ? 3000 : 6000);
     return () => clearInterval(t);
-  }, [active?.status, load]);
+  }, [activeStatus, load]);
 
   async function kickoff() {
     if (!goal.trim() || !leaderId) return;

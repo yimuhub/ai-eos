@@ -628,7 +628,7 @@ export default function ProjectDetailPage() {
                     return (
                       <button key={a.id}
                         onClick={() => setSelAgents((prev) => {
-                          const n = new Set(prev); n.has(a.id) ? n.delete(a.id) : n.add(a.id); return n;
+                          const n = new Set(prev); if (n.has(a.id)) n.delete(a.id); else n.add(a.id); return n;
                         })}
                         className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-xs transition-all border ${
                           on ? "border-indigo-500/50 bg-indigo-500/10" : "hover:bg-white/[0.04]"}`}
@@ -648,7 +648,7 @@ export default function ProjectDetailPage() {
                     return (
                       <button key={dp.id}
                         onClick={() => setSelDepts((prev) => {
-                          const n = new Set(prev); n.has(dp.id) ? n.delete(dp.id) : n.add(dp.id); return n;
+                          const n = new Set(prev); if (n.has(dp.id)) n.delete(dp.id); else n.add(dp.id); return n;
                         })}
                         className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-xs transition-all border ${
                           on ? "border-cyan-500/50 bg-cyan-500/10" : "hover:bg-white/[0.04]"}`}
@@ -663,7 +663,7 @@ export default function ProjectDetailPage() {
                     return (
                       <button key={sk.id}
                         onClick={() => setSelSkills((prev) => {
-                          const n = new Set(prev); n.has(sk.id) ? n.delete(sk.id) : n.add(sk.id); return n;
+                          const n = new Set(prev); if (n.has(sk.id)) n.delete(sk.id); else n.add(sk.id); return n;
                         })}
                         className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-xs transition-all border ${
                           on ? "border-emerald-500/50 bg-emerald-500/10" : "hover:bg-white/[0.04]"}`}

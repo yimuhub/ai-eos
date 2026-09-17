@@ -402,7 +402,9 @@ export default function GrowthCenterPage() {
                 return (
                   <button key={a.id}
                     onClick={() => setPlanAgents((prev) => {
-                      const n = new Set(prev); on ? n.delete(a.id) : n.add(a.id); return n;
+                      const n = new Set(prev);
+                      if (on) n.delete(a.id); else n.add(a.id);
+                      return n;
                     })}
                     className={`px-2.5 py-1 rounded-lg text-[11px] border transition-all ${on ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-300" : "hover:bg-white/[0.04]"}`}
                     style={on ? {} : { borderColor: "rgba(99,102,241,0.25)", color: "var(--muted)" }}>
@@ -466,7 +468,7 @@ export default function GrowthCenterPage() {
           <div key={g.dept_id} className="mb-7">
             <div className="flex items-center gap-3 mb-3 group/dept">
               <button onClick={() => setCollapsed((prev) => {
-                const n = new Set(prev); n.has(g.dept_id) ? n.delete(g.dept_id) : n.add(g.dept_id); return n;
+                const n = new Set(prev); if (n.has(g.dept_id)) n.delete(g.dept_id); else n.add(g.dept_id); return n;
               })} className="flex items-center gap-2.5">
                 <span className={`text-indigo-300 transition-transform ${isCollapsed ? "-rotate-90" : ""}`}>▾</span>
                 <span className="w-8 h-8 rounded-lg flex items-center justify-center text-sm"

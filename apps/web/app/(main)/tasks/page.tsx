@@ -143,7 +143,7 @@ export default function TasksPage() {
   const isAllPicked = allAgentIds.length > 0 && allAgentIds.every((id) => picked.has(id));
   const toggleAll = () => setPicked(isAllPicked ? new Set() : new Set(allAgentIds));
   const toggleAgent = (id: string) => setPicked((prev) => {
-    const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
+    const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n;
   });
   const isDeptAllPicked = (g: { agents: { id: string }[] }) => g.agents.every((a) => picked.has(a.id));
   const toggleDept = (g: { agents: { id: string }[] }) => {
@@ -245,7 +245,7 @@ export default function TasksPage() {
 
   function toggleBatchSel(id: string) {
     setBatchSel((prev) => {
-      const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
+      const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n;
     });
   }
 
@@ -511,7 +511,7 @@ export default function TasksPage() {
                           style={{ background: `linear-gradient(135deg,${grad})` }}>🏢</span>
                         <button type="button" onClick={() => setDeptOpen((prev) => {
                           const n = new Set(prev);
-                          n.has(g.dept_id) ? n.delete(g.dept_id) : n.add(g.dept_id);
+                          if (n.has(g.dept_id)) n.delete(g.dept_id); else n.add(g.dept_id);
                           return n;
                         })}
                           className="flex-1 text-left text-sm font-medium flex items-center gap-2">

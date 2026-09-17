@@ -117,3 +117,24 @@ body {
   50% { opacity: 0.35; }
 }
 .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+
+/* ---------- 加载骨架 ----------
+   统一的骨架占位样式。改造前没有加载态，用户只能面对"毫无反应"的界面；
+   骨架屏让"正在加载"这件事可见，也让页面切换不再有布局跳动。 */
+.skeleton {
+  background: linear-gradient(90deg, #1c1c26 25%, #26263200 37%, #1c1c26 63%);
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+
+/* 尊重用户的"减少动效"偏好 —— 前庭功能敏感的用户会被持续动画影响 */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
+  .animate-fade-up { animation: none; }
+  .pulse-dot { animation: none; }
+  * { transition-duration: 0.01ms !important; }
+}

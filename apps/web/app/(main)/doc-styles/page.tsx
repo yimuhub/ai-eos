@@ -164,7 +164,7 @@ export default function DocStylesPage() {
               const on = picked.has(a.id);
               return (
                 <button key={a.id}
-                  onClick={() => setPicked((prev) => { const n = new Set(prev); on ? n.delete(a.id) : n.add(a.id); return n; })}
+                  onClick={() => setPicked((prev) => { const n = new Set(prev); if (on) n.delete(a.id); else n.add(a.id); return n; })}
                   className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-xs transition-all border ${on ? "border-emerald-500/50 bg-emerald-500/10" : "hover:bg-white/[0.04]"}`}
                   style={on ? {} : { borderColor: "transparent" }}>
                   <span className="truncate flex-1">{a.name}{a.role ? ` · ${a.role}` : ""}</span>

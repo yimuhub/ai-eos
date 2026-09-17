@@ -103,7 +103,7 @@ export default function WarRoomHubPage() {
 
   function toggleSel(sid: string) {
     setBatchSel((prev) => {
-      const n = new Set(prev); n.has(sid) ? n.delete(sid) : n.add(sid); return n;
+      const n = new Set(prev); if (n.has(sid)) n.delete(sid); else n.add(sid); return n;
     });
   }
 

@@ -157,7 +157,7 @@ export default function AppAliasSection({ cid }: { cid: string }) {
               <div className="space-y-2">
                 {rules.map(r => (
                   <div key={r.id} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-white/5">
-                    <span className="text-indigo-300 font-mono text-sm">"{r.alias}"</span>
+                    <span className="text-indigo-300 font-mono text-sm">「{r.alias}」</span>
                     <span className="text-white/30">→</span>
                     <span className="text-white text-sm">{r.app_name}</span>
                     {r.app_path && <span className="text-white/30 text-xs font-mono flex-1 truncate">{r.app_path}</span>}

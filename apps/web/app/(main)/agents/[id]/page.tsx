@@ -1,8 +1,9 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { useRouter } from "next/navigation";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
+import { notify } from "@/components/Toast";
 import AgentChat from "@/components/AgentChat";
 import InfoEditPanel from "@/components/InfoEditPanel";
 
@@ -57,20 +58,22 @@ export default function AgentDetailPage() {
   const [newModelId, setNewModelId] = useState("");
   const [switching, setSwitching] = useState(false);
 
-  useEffect(() => {
-    api.get("/agents").then((a: Agent[]) => {
-      setAgents(a);
-      // 以 URL 为准；URL 无效时才回退到第一个
-      const target = a.find((x) => x.id === urlId) ? urlId : (a[0]?.id || "");
-      selectAgent(target);
-    }).catch(() => {});
-    api.get("/companies").then((cs: any[]) => {
-      if (cs[0]?.id) api.get(`/skill-growth/tree?company_id=${cs[0].id}`).then(setNodes).catch(() => {});
-    }).catch(() => {});
-    api.get("/models").then((m: ModelRow[]) => setAllModels(m)).catch(() => {});
+  // refreshAll / selectAgent 只调用 setState 与 api，对外部状态无依赖，
+  // 用 useCallback 固定引用后即可安全放进下方 effect 的依赖数组，
+  // 避免"依赖数组撒谎"——那会让后续改动引入真正的闭包过期问题。
+  //
+  // 注意顺序：它们必须定义在依赖它们的 useEffect **之前**。
+  // 放进依赖数组会在渲染期求值，若定义在后面就会命中 TDZ（暂时性死区）。
+  const refreshAll = useCallback((id: string) => {
+    api.get(`/learning/agents/${id}/profile`).then(setProfile).catch(() => {});
+    api.get(`/skill-growth/agents/${id}/matrix`).then(setSkills).catch(() => {});
+    api.get(`/reflection/agents/${id}/lessons`).then(setLessons).catch(() => {});
+    api.get(`/reflection/agents/${id}/reflections`).then(setReflections).catch(() => {});
+    api.get(`/reviews/agents/${id}`).then(setReviews).catch(() => {});
+    api.get(`/career/agents/${id}/timeline`).then(setCareer).catch(() => {});
   }, []);
 
-  function selectAgent(id: string) {
+  const selectAgent = useCallback((id: string) => {
     setAgentId(id);
     setMsg("");
     refreshAll(id);
@@ -78,16 +81,30 @@ export default function AgentDetailPage() {
     api.get(`/agents/${id}/models`).then((bindings: any[]) => {
       if (bindings.length) setNewModelId(bindings[0].model_id);
     }).catch(() => {});
-  }
+  }, [refreshAll]);
 
-  function refreshAll(id: string) {
-    api.get(`/learning/agents/${id}/profile`).then(setProfile).catch(() => {});
-    api.get(`/skill-growth/agents/${id}/matrix`).then(setSkills).catch(() => {});
-    api.get(`/reflection/agents/${id}/lessons`).then(setLessons).catch(() => {});
-    api.get(`/reflection/agents/${id}/reflections`).then(setReflections).catch(() => {});
-    api.get(`/reviews/agents/${id}`).then(setReviews).catch(() => {});
-    api.get(`/career/agents/${id}/timeline`).then(setCareer).catch(() => {});
-  }
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const a: Agent[] = await api.get("/agents");
+        if (cancelled) return;
+        setAgents(a);
+        // 以 URL 为准；URL 无效时才回退到第一个
+        const target = a.find((x) => x.id === urlId) ? urlId : (a[0]?.id || "");
+        if (target) selectAgent(target);
+        else notify("warning", "还没有数字员工，请先创建或生成团队");
+      } catch (e) {
+        // 原实现 catch(() => {}) 会把"加载失败"渲染成永远的空页面
+        notify("error", describeError(e, "加载员工列表失败"));
+      }
+    })();
+    api.get("/companies").then((cs: any[]) => {
+      if (cs[0]?.id) api.get(`/skill-growth/tree?company_id=${cs[0].id}`).then(setNodes).catch(() => {});
+    }).catch(() => {});
+    api.get("/models").then((m: ModelRow[]) => setAllModels(m)).catch(() => {});
+    return () => { cancelled = true; };
+  }, [urlId, selectAgent]);
 
   async function createTraining() {
     if (!trTitle || !agentId) return;

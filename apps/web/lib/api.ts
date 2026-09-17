@@ -65,6 +65,18 @@ export function normalizeErrorDetail(detail: unknown): string {
   return String(detail);
 }
 
+/** 把任意异常转成一句可展示的中文，失败时给出兜底文案。
+ *
+ * 此前每个页面各自复制了一份同样的 `describe()`，改一处漏一处；
+ * 统一到这里，页面只负责给出业务语境的兜底词（如"审批失败"）。
+ */
+export function describeError(e: unknown, fallback = "操作失败"): string {
+  if (e instanceof ApiError) return e.message || fallback;
+  if (e instanceof Error) return e.message || fallback;
+  if (typeof e === "string" && e) return e;
+  return fallback;
+}
+
 export function getToken(): string | null {
   if (typeof window === "undefined") return null;
   return localStorage.getItem("aieos_token");

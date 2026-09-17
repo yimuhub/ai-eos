@@ -256,7 +256,7 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
           <div>
             <h2 className="font-semibold text-lg">配置一个能干活的模型</h2>
             <p className="text-xs mt-1.5 leading-relaxed" style={{ color: "var(--muted)" }}>
-              数字员工的"大脑"来自大模型服务。没有它，员工接不了任务。
+              数字员工的「大脑」来自大模型服务。没有它，员工接不了任务。
               如果你已经有可用的 API Key，这一步 30 秒就能完成。
             </p>
           </div>

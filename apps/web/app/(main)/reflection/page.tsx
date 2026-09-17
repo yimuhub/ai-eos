@@ -273,7 +273,7 @@ export default function ReflectionCenterPage() {
           <div key={g.dept_id} className="mb-7">
             <div className="flex items-center gap-3 mb-3 group/dept">
               <button onClick={() => setCollapsed((prev) => {
-                const n = new Set(prev); n.has(g.dept_id) ? n.delete(g.dept_id) : n.add(g.dept_id); return n;
+                const n = new Set(prev); if (n.has(g.dept_id)) n.delete(g.dept_id); else n.add(g.dept_id); return n;
               })} className="flex items-center gap-2.5">
                 <span className={`text-orange-300 transition-transform ${isCollapsed ? "-rotate-90" : ""}`}>▾</span>
                 <span className="w-8 h-8 rounded-lg flex items-center justify-center text-sm"

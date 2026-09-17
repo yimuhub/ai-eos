@@ -135,7 +135,7 @@ export default function DashboardPage() {
   const isAllPicked = allAgentIds.length > 0 && allAgentIds.every((id) => picked.has(id));
   const toggleAll = () => setPicked(isAllPicked ? new Set() : new Set(allAgentIds));
   const toggleAgent = (id: string) => setPicked((prev) => {
-    const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
+    const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n;
   });
   const isDeptAllPicked = (g: { agents: { id: string }[] }) => g.agents.every((a) => picked.has(a.id));
   const toggleDept = (g: { agents: { id: string }[] }) => {
@@ -468,7 +468,7 @@ export default function DashboardPage() {
               return (
                 <div key={t.id}
                   onClick={() => setTaskSel((prev) => {
-                    const n = new Set(prev); n.has(t.id) ? n.delete(t.id) : n.add(t.id); return n;
+                    const n = new Set(prev); if (n.has(t.id)) n.delete(t.id); else n.add(t.id); return n;
                   })}
                   className={`group w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left cursor-pointer transition-all border ${
                     on ? "border-indigo-500/60 bg-indigo-500/10" : "hover:bg-white/[0.03]"}`}
@@ -635,7 +635,7 @@ export default function DashboardPage() {
                           style={{ background: `linear-gradient(135deg,${grad})` }}>🏢</span>
                         <button type="button" onClick={() => setDeptOpen((prev) => {
                           const n = new Set(prev);
-                          n.has(g.dept_id) ? n.delete(g.dept_id) : n.add(g.dept_id);
+                          if (n.has(g.dept_id)) n.delete(g.dept_id); else n.add(g.dept_id);
                           return n;
                         })}
                           className="flex-1 text-left text-sm font-medium flex items-center gap-2">

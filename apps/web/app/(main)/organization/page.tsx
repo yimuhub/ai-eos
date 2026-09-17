@@ -505,7 +505,7 @@ export default function OrganizationPage() {
                 return (
                   <button key={d.id} type="button"
                     onClick={() => setSelected((prev) => {
-                      const n = new Set(prev); n.has(d.id) ? n.delete(d.id) : n.add(d.id); return n;
+                      const n = new Set(prev); if (n.has(d.id)) n.delete(d.id); else n.add(d.id); return n;
                     })}
                     className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-left transition-all border ${
                       on ? "border-red-500/60 bg-red-500/10" : "hover:bg-white/[0.04]"}`}
@@ -588,7 +588,7 @@ export default function OrganizationPage() {
                       <button key={sk.id} type="button"
                         onClick={() => setEditForm((prev) => {
                           const n = new Set(prev.skills);
-                          n.has(sk.id) ? n.delete(sk.id) : n.add(sk.id);
+                          if (n.has(sk.id)) n.delete(sk.id); else n.add(sk.id);
                           return { ...prev, skills: n };
                         })}
                         className={`px-2.5 py-1 rounded-full text-xs transition-all border ${
@@ -617,7 +617,7 @@ export default function OrganizationPage() {
                       <button key={doc.id} type="button"
                         onClick={() => setEditForm((prev) => {
                           const n = new Set(prev.kbDocs);
-                          n.has(doc.id) ? n.delete(doc.id) : n.add(doc.id);
+                          if (n.has(doc.id)) n.delete(doc.id); else n.add(doc.id);
                           return { ...prev, kbDocs: n };
                         })}
                         className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-xs transition-colors ${

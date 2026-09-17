@@ -1,6 +1,7 @@
 "use client";
-import { useEffect, useState } from "react";
-import { api } from "@/lib/api";
+import { useCallback, useEffect, useState } from "react";
+import { api, describeError } from "@/lib/api";
+import { notify } from "@/components/Toast";
 
 type Schedule = { id: string; name: string; trigger_type: string; action_type: string;
   status: string; next_run_at?: string; last_run_at?: string; run_count: number };
@@ -14,17 +15,46 @@ export default function SchedulesPage() {
   const [dailyTime, setDailyTime] = useState("09:00");
   const [actionType, setActionType] = useState("snapshot_performance");
   const [msg, setMsg] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  // reload 必须在 effect 之前用 useCallback 定义：
+  // 原实现把 reload 写在 effect 之后，effect 首次执行时闭包捕获的是
+  // 尚未初始化的引用，且 lint 无法校验依赖 → 加载失败时页面静默空白。
+  const reload = useCallback(async (c?: string) => {
+    const target = c ?? cid;
+    if (!target) return;
+    try {
+      setSchedules(await api.get(`/schedules?company_id=${target}`));
+    } catch (e) {
+      notify("error", describeError(e, "加载调度失败"));
+    }
+  }, [cid]);
 
   useEffect(() => {
-    api.get("/companies").then((cs: any[]) => {
-      const c = cs[0]?.id;
-      if (c) { setCid(c); reload(c); }
-    });
-  }, []);
-
-  const reload = (c = cid) => api.get(`/schedules?company_id=${c}`).then(setSchedules);
+    let cancelled = false;
+    (async () => {
+      try {
+        const cs: any[] = await api.get("/companies");
+        const c = cs[0]?.id;
+        if (cancelled) return;
+        if (!c) {
+          // 没有公司就没有调度可谈，要明确告诉用户，而不是给一个空列表
+          setMsg("还没有 AI 公司，请先在指挥中心创建团队");
+          return;
+        }
+        setCid(c);
+        await reload(c);
+      } catch (e) {
+        notify("error", describeError(e, "加载公司列表失败"));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [reload]);
 
   const create = async () => {
+    if (!name.trim()) { setMsg("请先填写调度名称"); return; }
     try {
       const body: any = { name, trigger_type: trigger,
         action_type: actionType };
@@ -32,13 +62,18 @@ export default function SchedulesPage() {
       else body.time = dailyTime;
       await api.post(`/schedules?company_id=${cid}`, body);
       setName(""); setMsg("调度已创建"); reload();
-    } catch (e) { setMsg(String(e)); }
+    } catch (e) { setMsg(`创建失败：${describeError(e)}`); }
   };
-
   const toggle = async (s: Schedule) => {
-    if (s.status === "ACTIVE") await api.post(`/schedules/${s.id}/pause`);
-    else await api.post(`/schedules/${s.id}/resume`);
-    reload();
+    try {
+      if (s.status === "ACTIVE") await api.post(`/schedules/${s.id}/pause`);
+      else await api.post(`/schedules/${s.id}/resume`);
+      await reload();
+      notify("success", s.status === "ACTIVE" ? "已暂停" : "已恢复");
+    } catch (e) {
+      // 原实现没有 catch：失败会变成未处理的 Promise 拒绝，界面毫无反馈
+      notify("error", describeError(e, "切换调度状态失败"));
+    }
   };
 
   return (
@@ -71,7 +106,19 @@ export default function SchedulesPage() {
       </div>
 
       <div className="space-y-2">
-        {schedules.map((s) => (
+        {/* 加载态：原先没有，用户看到的"暂无调度任务"其实是"还没加载完" */}
+        {loading && (
+          <div className="space-y-2" aria-busy="true" aria-label="正在加载调度">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="border border-[var(--border)] rounded p-3 card">
+                <div className="skeleton h-4 w-40 rounded" />
+                <div className="skeleton h-3 w-64 rounded mt-2" />
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!loading && schedules.map((s) => (
           <div key={s.id} className="border border-[var(--border)] rounded p-3 card flex justify-between items-center">
             <div>
               <b className="text-sm">{s.name}</b>
@@ -87,9 +134,13 @@ export default function SchedulesPage() {
             </button>
           </div>
         ))}
-        {!schedules.length && <p className="text-[var(--muted)] text-sm">暂无调度任务</p>}
+        {!loading && !schedules.length && (
+          <p className="text-[var(--muted)] text-sm">
+            {msg || "暂无调度任务——在上方填写名称并创建第一个定时任务"}
+          </p>
+        )}
       </div>
-      {msg && <p className="mt-3 text-sm text-green-700">{msg}</p>}
+      {msg && schedules.length > 0 && <p className="mt-3 text-sm text-green-700">{msg}</p>}
     </div>
   );
 }

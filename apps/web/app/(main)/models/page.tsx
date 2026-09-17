@@ -237,7 +237,7 @@ export default function ModelsPage() {
                   style={{ background: checked.has(m) ? "rgba(99,102,241,0.12)" : "var(--surface-2)" }}>
                   <input type="checkbox" checked={checked.has(m)}
                     onChange={() => setChecked((prev) => {
-                      const n = new Set(prev); n.has(m) ? n.delete(m) : n.add(m); return n;
+                      const n = new Set(prev); if (n.has(m)) n.delete(m); else n.add(m); return n;
                     })}
                     className="accent-indigo-500 w-3.5 h-3.5 shrink-0" />
                   <span className="truncate">{m}</span>

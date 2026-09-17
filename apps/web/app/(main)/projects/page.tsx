@@ -105,12 +105,14 @@ export default function ProjectsPage() {
     return ["全部"];
   }, [dim, agents, depts]);
 
-  function projectDeptName(p: Project): string {
+  // 包成 useCallback：它被下面的 useMemo 依赖，普通函数每次渲染都会换引用，
+  // 会让 useMemo 的缓存永远失效（也会让 lint 无法判断依赖是否完整）。
+  const projectDeptName = useCallback((p: Project): string => {
     const mgr = agents.find((a) => a.id === p.manager_agent_id);
     if (!mgr) return "未分配部门";
     const d = depts.find((x) => x.id === (mgr as any).department_id);
     return d?.name || "未分配部门";
-  }
+  }, [agents, depts]);
 
   const filtered = useMemo(() => {
     let list = [...projects];
@@ -132,7 +134,7 @@ export default function ProjectsPage() {
       });
     }
     return list;
-  }, [projects, search, dimValue, dim, agents, depts]);
+  }, [projects, search, dimValue, dim, agents, projectDeptName]);
 
   async function batchDeleteProjects() {
     if (!batchSel.size) return;
@@ -194,7 +196,7 @@ export default function ProjectsPage() {
   const toggleAll = () => setPicked(isAllPicked ? new Set() : new Set(allAgentIds));
   const toggleAgent = (id: string) => setPicked((prev) => {
     const n = new Set(prev);
-    n.has(id) ? n.delete(id) : n.add(id);
+    if (n.has(id)) n.delete(id); else n.add(id);
     return n;
   });
   const deptAgentIdsOf = (g: { agents: { id: string }[] }) => g.agents.map((a) => a.id);
@@ -345,7 +347,7 @@ export default function ProjectsPage() {
                         style={{ background: `linear-gradient(135deg,${grad})` }}>🏢</span>
                       <button type="button" onClick={() => setDeptOpen((prev) => {
                         const n = new Set(prev);
-                        n.has(g.dept_id) ? n.delete(g.dept_id) : n.add(g.dept_id);
+                        if (n.has(g.dept_id)) n.delete(g.dept_id); else n.add(g.dept_id);
                         return n;
                       })}
                         className="flex-1 text-left text-sm font-medium flex items-center gap-2">
@@ -430,7 +432,7 @@ export default function ProjectsPage() {
               showBatchDelete && batchSel.has(p.id) ? "!border-red-500/60" : ""}`}
               onClick={() => showBatchDelete
                 ? setBatchSel((prev) => {
-                    const n = new Set(prev); n.has(p.id) ? n.delete(p.id) : n.add(p.id); return n;
+                    const n = new Set(prev); if (n.has(p.id)) n.delete(p.id); else n.add(p.id); return n;
                   })
                 : router.push(`/projects/${p.id}`)}>
               <div className="absolute top-0 left-0 w-full h-[2px]"
@@ -448,7 +450,7 @@ export default function ProjectsPage() {
                   onClick={(e) => e.stopPropagation()}>
                   <input type="checkbox" checked={batchSel.has(p.id)}
                     onChange={() => setBatchSel((prev) => {
-                      const n = new Set(prev); n.has(p.id) ? n.delete(p.id) : n.add(p.id); return n;
+                      const n = new Set(prev); if (n.has(p.id)) n.delete(p.id); else n.add(p.id); return n;
                     })}
                     className="accent-red-500 w-4 h-4" />
                 </label>
@@ -616,7 +618,7 @@ export default function ProjectsPage() {
                 return (
                   <button key={pj.id} type="button"
                     onClick={() => setBatchSel((prev) => {
-                      const n = new Set(prev); n.has(pj.id) ? n.delete(pj.id) : n.add(pj.id); return n;
+                      const n = new Set(prev); if (n.has(pj.id)) n.delete(pj.id); else n.add(pj.id); return n;
                     })}
                     className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-left transition-all border ${
                       on ? "border-red-500/60 bg-red-500/10" : "hover:bg-white/[0.04]"}`}

@@ -84,20 +84,10 @@ export default function TaskDetailPage() {
   useEffect(() => {
     load();
     api.get("/agents").then(setAgents).catch(() => {});
-    if (cid && id && !chatHist) {
-      setChatHist(true);
-      fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/group-chat/task/${id}/history?company_id=${cid}`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` }
-      }).then((r) => r.json()).then((d: any) => {
-        if (d.messages?.length) {
-          setChatLog(d.messages.map((m: any) => ({
-            role: m.role === "boss" ? "user" : m.agent_name || "agent",
-            text: m.text || "", isAgent: m.role === "agent",
-            agent: m.agent_name, search: m.content?.search_used
-          })));
-        }
-      }).catch(() => {});
-    }
+    // 注：群聊历史在此处曾有一份重复实现（与下方 useEffect 完全同款请求）。
+    // 两份都靠 chatHist 布尔量互斥，谁先跑谁生效——行为上无害，但等于
+    // 同一段逻辑维护两遍，且让本 effect 的依赖数组失真。
+    // 现统一归到下方"cid 就绪后触发一次"的 effect。
     api.get("/models").then(setAllModels).catch(() => {});
     api.get("/skills").then(setAvailableSkills).catch(() => {});
     api.get("/companies").then(async (cs: any[]) => {
@@ -561,7 +551,7 @@ export default function TaskDetailPage() {
                     return (
                       <button key={sk.id}
                         onClick={() => setSelSkills((prev) => {
-                          const n = new Set(prev); n.has(sk.id) ? n.delete(sk.id) : n.add(sk.id); return n;
+                          const n = new Set(prev); if (n.has(sk.id)) n.delete(sk.id); else n.add(sk.id); return n;
                         })}
                         className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left text-xs transition-all border ${
                           on ? "border-emerald-500/50 bg-emerald-500/10" : "hover:bg-white/[0.04]"}`}

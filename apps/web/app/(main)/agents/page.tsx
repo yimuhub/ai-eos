@@ -115,7 +115,7 @@ export default function AgentsPage() {
   function toggleSelect(id: string) {
     setSelected((prev) => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
   }
@@ -441,7 +441,7 @@ export default function AgentsPage() {
                 return (
                   <button key={c.key} type="button"
                     onClick={() => setSelCaps((prev) => {
-                      const n = new Set(prev); n.has(c.key) ? n.delete(c.key) : n.add(c.key); return n;
+                      const n = new Set(prev); if (n.has(c.key)) n.delete(c.key); else n.add(c.key); return n;
                     })}
                     className={`text-left px-3 py-2 rounded-xl text-xs transition-all border ${
                       on ? "border-emerald-500/60 bg-emerald-500/10" : "hover:bg-white/[0.04]"}`}
@@ -538,7 +538,7 @@ export default function AgentsPage() {
                 <button
                   onClick={() => setCollapsedDepts((prev) => {
                     const n = new Set(prev);
-                    n.has(deptName) ? n.delete(deptName) : n.add(deptName);
+                    if (n.has(deptName)) n.delete(deptName); else n.add(deptName);
                     return n;
                   })}
                   className="flex items-center gap-2 transition-colors"
@@ -677,7 +677,7 @@ export default function AgentsPage() {
                     <button key={c.key} type="button"
                       onClick={() => setEditForm((prev) => {
                         const n = new Set(prev.capabilities);
-                        n.has(c.key) ? n.delete(c.key) : n.add(c.key);
+                        if (n.has(c.key)) n.delete(c.key); else n.add(c.key);
                         return { ...prev, capabilities: n };
                       })}
                       className={`text-left px-3 py-2 rounded-xl text-xs transition-all border ${
