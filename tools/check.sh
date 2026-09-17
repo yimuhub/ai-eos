@@ -81,6 +81,20 @@ else
   printf '  \033[33m－\033[0m 跳过（未安装 node_modules）\n'
 fi
 
+step "前端：ESLint"
+# lint 必须进门禁：改造前项目积累了 36 个 error（其中 32 处是"用三元表达式
+# 做副作用"这种极易被误删的写法），而 next.config 里 ignoreDuringBuilds=true
+# 把它们全部掩盖了。不设门禁，这类问题会再次堆积。
+if [[ -x "$WEB/node_modules/.bin/eslint" ]]; then
+  if OUT="$(cd "$WEB" && ./node_modules/.bin/eslint app components lib 2>&1)"; then
+    ok "0 个问题"
+  else
+    bad "存在 lint 问题："; echo "$OUT" | tail -30
+  fi
+else
+  printf '  \033[33m－\033[0m 跳过（未安装 node_modules）\n'
+fi
+
 # ---------------------------------------------------------------- 测试
 if [[ $FAST -eq 0 ]]; then
   step "测试套件（离线、可重复）"
