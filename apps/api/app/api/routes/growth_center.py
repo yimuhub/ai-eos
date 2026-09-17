@@ -223,12 +223,24 @@ async def agent_detail(agent_id: str, company_id: str = Query(...),
 async def delete_agent_skill(asn_id: str, company_id: str = Query(...),
                              db: AsyncSession = Depends(get_db),
                              user: User = Depends(get_current_user)):
-    """删除员工的一项技能掌握记录。"""
+    """删除员工的一项技能掌握记录。
+
+    修复两处缺陷：
+    1. 原代码 `from app.models.skill import AgentSkillNode`（该模型不存在）
+       并直接使用未导入的 `AgentSkill` → 必然 NameError → 500。
+    2. 原代码只校验了 company_id 归属，未校验被删记录本身属于该公司，
+       知道 id 即可跨租户删除。现按 agent→company 显式校验。
+    """
     await _owned(db, user.id, company_id)
-    from app.models.skill import AgentSkillNode
+    from app.models.skill import AgentSkill
+
     row = await db.get(AgentSkill, asn_id)
     if not row:
-        raise HTTPException(404)
+        raise HTTPException(404, "技能记录不存在")
+    # 跨租户保护：记录所属 Agent 必须属于当前公司
+    owner = await db.get(Agent, row.agent_id)
+    if not owner or owner.company_id != company_id:
+        raise HTTPException(404, "技能记录不存在")
     await db.delete(row)
     await db.commit()
     return {"ok": True}
@@ -238,11 +250,17 @@ async def delete_agent_skill(asn_id: str, company_id: str = Query(...),
 async def delete_agent_memory(memory_id: str, company_id: str = Query(...),
                               db: AsyncSession = Depends(get_db),
                               user: User = Depends(get_current_user)):
-    """删除员工的一条长期记忆（错误或累赘的记忆）。"""
+    """删除员工的一条长期记忆（错误或累赘的记忆）。
+
+    同 delete_agent_skill：补上记录级的租户归属校验，避免跨公司删除。
+    """
     await _owned(db, user.id, company_id)
     m = await db.get(AgentMemory, memory_id)
     if not m:
-        raise HTTPException(404)
+        raise HTTPException(404, "记忆不存在")
+    owner = await db.get(Agent, m.agent_id)
+    if not owner or owner.company_id != company_id:
+        raise HTTPException(404, "记忆不存在")
     await db.delete(m)
     await db.commit()
     return {"ok": True}

@@ -19,10 +19,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.core.logging_config import get_logger
 from app.db.base import Base
 from app.models.agent import Agent
 from sqlalchemy import JSON, String, Integer, Text, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/agents", tags=["agent-chat"])
 
@@ -70,6 +73,44 @@ async def execute_skill_safe(db, fname, args):
     from app.skill_system import execute_skill
     res = await execute_skill(fname, args)
     return res.get("result") or res
+
+
+async def _computer_action(db: AsyncSession, capability: str, args: dict,
+                           user_id: str, company_id: str) -> dict:
+    """聊天中调用 computer_* 工具时的统一入口。
+
+    ## 改造说明（这是一个真实存在但从未定义的函数）
+
+    改造前本文件的 tool_call 分支调用 `_computer_action(...)`，
+    但该函数在整个代码库中**只有调用、没有定义**（pyflakes: undefined name）。
+    NameError 被外层 `except Exception` 吞掉，表现为"电脑操作功能没反应"。
+
+    危险之处在于：如果只是顺手补一个直连 executor 的实现，
+    就等于给 LLM 开了一条**绕过 ComputerPermission 权限模型**、
+    直通主机 shell 的通道。因此这里强制走 computer_service——
+    未授权能力一律拒绝，且每次调用（含被拒绝的）都落审计日志。
+    """
+    from app.core.logging_config import get_logger
+    from app.services.computer_service import (
+        ComputerActionDenied,
+        execute_computer_action,
+    )
+
+    logger = get_logger(__name__)
+    logger.info("聊天触发本机操作 user=%s company=%s capability=%s",
+                user_id, company_id, capability)
+
+    try:
+        outcome = await execute_computer_action(
+            db, company_id=company_id, capability=capability,
+            params=args if isinstance(args, dict) else {})
+    except ComputerActionDenied as exc:
+        # 给模型一句可读的拒绝原因，让它能向老板解释而不是"操作失败"
+        return {"ok": False, "denied": True, "capability": capability,
+                "error": f"{exc.reason}。如需使用，请先在工作台「本机能力授权」中开启。"}
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    return outcome["result"]
 
 
 def _now():
@@ -142,6 +183,11 @@ async def boss_chat(aid: str, data: ChatIn,
     text = data.message.strip()
     if not text:
         raise HTTPException(400, "empty message")
+
+    # 本次对话触发的动作汇总（前端用来展示"我到底做了什么"）。
+    # 提到函数开头显式初始化：原代码用 locals().get("_actions") 做惰性判断，
+    # 依赖 CPython 局部变量字典的行为，既脆弱又难读。
+    actions: list[dict] = []
 
     await _save_msg(db, a, "boss", text)
 
@@ -292,31 +338,37 @@ async def boss_chat(aid: str, data: ChatIn,
             "", final_reply, flags=re.S).strip()
     if tool_calls:
         from app.skill_system import execute_skill
+
         tool_results = []
         search_summary = []
         for tc in tool_calls:
             fname = tc.get("function", {}).get("name", "")
             try:
                 args = json.loads(tc.get("function", {}).get("arguments", "{}"))
-                if fname.startswith("computer_"):
+                if not isinstance(args, dict):
+                    args = {}
+                is_computer = fname.startswith("computer_")
+                if is_computer:
                     cap = fname.replace("computer_", "")
                     res = await _computer_action(db, cap, args, user.id, a.company_id)
-                    result_data = res.get("result") or res
                 else:
                     res = await execute_skill(fname, args)
-                    result_data = res.get("result") or res
-                # 收集 computer 操作
-                if fname.startswith("computer_"):
-                    if not locals().get("_actions"):
-                        _actions = []
-                    _actions.append({"type": "computer_action", "action": fname.replace("computer_", ""),
-                                     "command": args.get("command", ""), "result": res})
+                result_data = res.get("result") or res
+                # 收集 computer 操作，供前端展示"我做了什么"
+                if is_computer:
+                    actions.append({
+                        "type": "computer_action",
+                        "action": fname.replace("computer_", ""),
+                        "command": args.get("command", ""),
+                        "result": res})
+                # 修复：原代码在同一个字典里写了两次 tool_call_id（后者覆盖前者），
+                # 属于复制粘贴残留；此处去重。
                 tool_results.append({"tool_call_id": tc.get("id"), "role": "tool",
-                                     "tool_call_id": tc.get("id"), "content": str(result_data)})
+                                     "content": str(result_data)})
                 if fname == "web_search" and isinstance(result_data, dict):
                     hits = result_data.get("results") or []
                     search_summary = [f"• {h.get('title','')}: {h.get('body','')[:120]}"
-                                     for h in hits[:5] if h.get('title')]
+                                      for h in hits[:5] if h.get('title')]
             except Exception as e:
                 tool_results.append({"tool_call_id": tc.get("id"), "role": "tool",
                                      "tool_call_id": tc.get("id"), "content": f"error: {e}"})
@@ -416,7 +468,7 @@ async def boss_chat(aid: str, data: ChatIn,
         pass
 
     await db.commit()
-    return {"reply": final_reply, "file": doc_file, "actions": locals().get("_actions") or []}
+    return {"reply": final_reply, "file": doc_file, "actions": actions}
 
 
 # ---------------- Agent 删除时级联清空聊天 ----------------
@@ -453,28 +505,14 @@ async def chat_generate_doc(aid: str, data: GenDocIn,
     if not tname:
         raise HTTPException(400, f"doc_type 必须是 word/excel/ppt/md")
 
-    # P4: 公文写作能力注入（按指令关键词识别文种）
-    try:
-        from app.public_doc_skill import get_public_doc_system_prompt, resolve_style
-        # Agent 专属文档风格（有技能用专属，无技能用通用格式）
-        from app.models.skill import AgentSkill, Skill as SkillRow
-        from app.public_doc_skill import get_bound_style
-        _sk_rows = (await db.execute(select(SkillRow.name).join(
-            AgentSkill, AgentSkill.skill_id == SkillRow.id).where(
-            AgentSkill.agent_id == str(agent.id)))).scalars().all()
-        custom = await get_bound_style(db, agent)
-        style = resolve_style(agent.role, list(_sk_rows), custom_style=custom)
-        messages.append({"role": "system", "content":
-            f"【文档风格要求】使用「{style['style_name']}"
-            + ("" if style["is_custom"] else "（该员工未配置专属风格技能，采用通用格式）")
-            + "」：" + style["hint"]})
-        instr = (data.instruction or "").lower()
-        if any(kw in instr for kw in ("报告","请示","方案","纪要","通知")):
-            doc_type_map = {"word":"报告","ppt":"方案","excel":"报告","md":"报告"}
-            doc_prompt = get_public_doc_system_prompt(agent.role, doc_type_map.get(data.doc_type.lower(), "报告"))
-            messages.append({"role": "system", "content": doc_prompt})
-    except Exception:
-        pass
+    # ---- 先建立消息骨架，再注入风格提示 ----
+    #
+    # 改造说明：原代码把风格/公文提示 `messages.append(...)` 写在
+    # `messages = [...]` 之前，且引用了未定义的 `agent`（本函数里变量名是 `a`）。
+    # 两个 NameError 被外层 `except Exception: pass` 吞掉，
+    # 于是「文档风格 + 公文写作」这块能力 100% 静默失效——
+    # 接口返回 200、文档也生成了，但风格/文种要求从未生效。
+    # 现在把顺序理顺，并让失败可见。
 
     # 结构提示：ppt 按 ## 分页；word 按 #/##/- 层级
     struct_hint = {
@@ -484,13 +522,47 @@ async def chat_generate_doc(aid: str, data: GenDocIn,
         "excel": "输出 markdown 表格（|列|列|格式），或 JSON 数组。",
     }.get(data.doc_type.lower(), "")
 
-    messages = [
+    messages: list[dict] = [
         {"role": "system", "content":
             f"你是「{a.name}」，{a.role or '数字员工'}。"
             f"老板要求你生成一份{tname}。{struct_hint}\n"
             "只输出生成的文档正文内容，不要解释。"},
-        {"role": "user", "content": f"文档标题：{data.title}\n\n要求：{data.instruction}"},
     ]
+
+    # P4: 文档风格 + 公文写作能力注入（按指令关键词识别文种）
+    try:
+        from app.models.skill import AgentSkill, Skill as SkillRow
+        from app.public_doc_skill import (
+            get_bound_style,
+            get_public_doc_system_prompt,
+            resolve_style,
+        )
+
+        skill_names = (await db.execute(
+            select(SkillRow.name)
+            .join(AgentSkill, AgentSkill.skill_id == SkillRow.id)
+            .where(AgentSkill.agent_id == str(a.id)))).scalars().all()
+        custom = await get_bound_style(db, a)
+        style = resolve_style(a.role, list(skill_names), custom_style=custom)
+        messages.append({"role": "system", "content":
+            f"【文档风格要求】使用「{style['style_name']}"
+            + ("" if style["is_custom"] else "（该员工未配置专属风格技能，采用通用格式）")
+            + "」：" + style["hint"]})
+
+        instr = (data.instruction or "").lower()
+        if any(kw in instr for kw in ("报告", "请示", "方案", "纪要", "通知")):
+            doc_type_map = {"word": "报告", "ppt": "方案",
+                            "excel": "报告", "md": "报告"}
+            messages.append({"role": "system", "content":
+                get_public_doc_system_prompt(
+                    a.role, doc_type_map.get(data.doc_type.lower(), "报告"))})
+    except Exception as style_err:
+        # 风格注入失败不阻塞出稿，但必须出声——否则又会退回"静默失效"
+        logger.warning("文档风格注入失败 agent=%s: %s", aid, style_err,
+                       exc_info=True)
+
+    messages.append({"role": "user",
+                     "content": f"文档标题：{data.title}\n\n要求：{data.instruction}"})
 
     gw = ModelGateway(db)
     from app.model_gateway import set_usage_context

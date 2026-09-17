@@ -11,14 +11,19 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging_config import get_logger
 from app.model_gateway import ModelGateway
 from app.models.agent import Agent, AgentModelConfig, AgentStatus
+from app.models.asset import Asset as AssetModel
+from app.models.asset import AssetType
 from app.models.skill import AgentSkill
 from app.models.skill import Skill as SkillRow
 from app.models.task import AgentExecution, ExecutionCheckpoint, Task, TaskStatus
 from app.skill_system import get_skill_class
 from app.task_engine import transition
 from app.services.event_system import log_event
+
+logger = get_logger(__name__)
 
 
 def utcnow_iso() -> str:
@@ -206,30 +211,46 @@ async def run_agent_on_task(
                             "agent", agent.id, {"error": str(asset_err)[:300]})
 
         # P4: 检测 LLM 输出中的文档生成标记 → 渲染真实文件存入 Agent 交付文件夹
+        # 修复：原代码引用了未导入的 AssetType，NameError 被 except:pass 吞掉，
+        # 导致"LLM 生成了文档标记但文件永不落盘"这一故障完全不可见。
         try:
-            from app.doc_generator import parse_doc_markers, generate_document
-            from app.models.asset import Asset as AssetModel
-            import mimetypes as _mt2
-            for spec in parse_doc_markers(llm_result["content"] or ""):
+            from app.doc_generator import generate_document, parse_doc_markers
+
+            doc_specs = parse_doc_markers(llm_result["content"] or "")
+            for spec in doc_specs:
                 try:
                     gen = generate_document(spec["type"], spec["title"],
                                             spec["content"], agent_id=str(agent.id))
                     asset_doc = AssetModel(
                         company_id=task.company_id,
-                        name=f"{spec['title']}{gen['file_name'][gen['file_name'].rfind('.'):]}" ,
+                        name=gen["file_name"],
                         type=AssetType.OTHER, path=gen["file_path"],
                         mime_type=gen["mime"], size=gen["size"],
                         created_by=str(agent.id), creator_type="agent",
                         task_id=task.id, agent_id=str(agent.id))
                     db.add(asset_doc)
+                    await db.flush()
                     await log_event(db, "doc.generated", "task", str(task.id),
                                     "agent", agent.id,
                                     {"type": spec["type"], "title": spec["title"],
                                      "file": gen["file_name"]})
-                except Exception:
-                    pass  # 单个文档失败不阻塞
-        except Exception:
-            pass
+                except Exception as doc_err:
+                    # 单个文档失败不阻塞任务，但必须出声（日志 + 事件留痕）
+                    logger.warning("文档渲染失败 task=%s type=%s: %s",
+                                   task.id, spec.get("type"), doc_err,
+                                   exc_info=True)
+                    await log_event(db, "doc.generate_failed", "task", str(task.id),
+                                    "agent", agent.id,
+                                    {"type": spec.get("type"),
+                                     "title": spec.get("title"),
+                                     "error": f"{type(doc_err).__name__}: {doc_err}"[:300]})
+        except Exception as marker_err:
+            # 解析层失败（非单文档问题）同样要留痕，否则整块能力会静默消失
+            logger.warning("文档标记解析失败 task=%s: %s", task.id, marker_err,
+                           exc_info=True)
+            await log_event(db, "doc.parse_failed", "task", str(task.id),
+                            "agent", agent.id,
+                            {"error": f"{type(marker_err).__name__}: {marker_err}"[:300]})
 
         # 持久记忆 + 自我学习：有能力包时任务结束自动沉淀经验
         if set(caps.packs) & {"persistent_memory", "self_learning"}:

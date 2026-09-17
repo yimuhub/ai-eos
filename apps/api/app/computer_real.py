@@ -133,65 +133,178 @@ async def real_run_app(params: dict) -> dict:
             "error": None if ok else err.decode().strip()}
 
 
-async def real_run_shell(params: dict) -> dict:
-    """受控 shell 执行（HIGH RISK——需要 run_shell 授权 + 白名单命令）。"""
-    ALLOWED_PREFIXES = ("ls", "cat ", "head ", "tail ", "pwd", "echo ",
-                        "date", "whoami", "df ", "du ", "wc ", "find ")
-    cmd = str((params or {}).get("command", "")).strip()
-    if not cmd or any(c in cmd for c in ";|&$`><"):
-        return {"ok": False, "error": "command contains forbidden characters"}
-    if not cmd.startswith(ALLOWED_PREFIXES):
-        return {"ok": False,
-                "error": f"command not in whitelist (allowed prefixes: {ALLOWED_PREFIXES})"}
+# ==================== 受控 shell 执行 ====================
+#
+# ## 改造说明（原实现存在真实的命令注入通道）
+#
+# 原 `real_run_shell` / `real_run_write` 用 `asyncio.create_subprocess_shell`
+# 执行**拼接后的字符串**，而且过滤不完整：
+#   - real_run_shell 过滤了 `;|&$`><`，但没有过滤换行、`(`、`)`、`\`；
+#   - real_run_write 只过滤了 `&&`、`||`、`$(`、反引号，
+#     **完全没有过滤 `;`、`|`、`>`、`<`、换行**，却允许 `rm -rf` 前缀。
+# 于是一句 `mkdir /tmp/x; rm -rf ~/Documents` 可以通过白名单校验并被 shell 执行。
+#
+# 现在的做法：
+#   1. 拒绝一切 shell 元字符——因为下面根本不用 shell，任何元字符都属异常输入；
+#   2. 用 shlex 解析为 argv，只允许 argv[0] 命中二进制白名单；
+#   3. 路径类参数逐个过文件沙箱（app/core/sandbox.py），越界即拒绝；
+#   4. 子进程 cwd 固定为沙箱根，`ls` 这类无参命令不会泄露进程工作目录；
+#   5. 用 create_subprocess_exec（非 shell）执行 argv，
+#      即使过滤有漏，shell 层也已不存在，无法解释 `;` 或 `|`。
+#
+# 失败方向始终是"拒绝执行"，不会退化成"放行危险操作"。
+
+# 只读命令白名单
+_READ_BINARIES = {
+    "ls", "cat", "head", "tail", "wc", "file", "stat", "du", "df",
+    "pwd", "date", "whoami", "echo", "sort", "uniq", "cut", "grep",
+    "find", "basename", "dirname", "realpath",
+}
+
+# 写入命令白名单。rm/rmdir 属破坏性操作，仅允许作用于沙箱内路径，
+# 因此无法删除沙箱之外的任何东西（`rm -rf /` 会在沙箱校验阶段被拒）。
+_WRITE_BINARIES = {"cp", "mv", "mkdir", "touch", "rm", "rmdir"}
+
+# 需要逐参做沙箱校验的命令（这些命令的参数代表文件路径）
+_PATH_TAKING_BINARIES = {
+    "ls", "cat", "head", "tail", "wc", "file", "stat", "du", "df",
+    "sort", "uniq", "cut", "grep", "find",
+    "cp", "mv", "mkdir", "touch", "rm", "rmdir",
+    "basename", "dirname", "realpath",
+}
+
+# shell 元字符：既然不经过 shell，出现即视为可疑输入，直接拒绝。
+# 只拒绝"在无 shell 环境下也没有合法用途"的字符；`*?()[]{}"` 等保留，
+# 因为 `find . -name "*.md"` 这类命令需要它们，且无 shell 时它们是惰性的。
+_SHELL_METACHARS = set(";|&<>$`\\\n\r")
+
+
+def _sandbox_cwd() -> str:
+    """子进程工作目录 = 仓库根。
+
+    必须与 sandbox.resolve_safe_path() 解析相对路径的基准保持一致，
+    否则会出现"校验通过但执行找不到文件"的错位。
+
+    注意（改造中发现的真实问题）：早期实现取 sandbox_roots()[1]，
+    该目录（data/uploads）通常不存在，于是回退到 Path.home()，
+    导致无参 `ls` 直接列出了用户的真实主目录。现在固定为仓库根，
+    且所有路径参数都已过沙箱，越界路径在参数校验阶段就被拒绝。
+    """
+    from app.core.sandbox import PROJECT_ROOT
+
+    return str(PROJECT_ROOT)
+
+
+def _validate_command(command: str, allowed: set[str]) -> tuple[list[str] | None, str]:
+    """校验并解析命令。返回 (argv, "") 或 (None, 拒绝原因)。"""
+    import shlex
+
+    cmd = (command or "").strip()
+    if not cmd:
+        return None, "命令为空"
+
+    hit = [ch for ch in _SHELL_METACHARS if ch in cmd]
+    if hit:
+        readable = "、".join(repr(c) for c in sorted(set(hit)))
+        return None, f"命令包含被禁止的 shell 字符：{readable}（本执行器不支持管道/重定向/连接）"
+
     try:
-        proc = await asyncio.create_subprocess_shell(
-            cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
+        argv = shlex.split(cmd)
+    except ValueError as exc:
+        return None, f"命令解析失败：{exc}"
+    if not argv:
+        return None, "命令为空"
+
+    binary = os.path.basename(argv[0])
+    if binary not in allowed:
+        return None, (f"命令 {binary} 不在白名单内。"
+                      f"允许：{'、'.join(sorted(allowed))}")
+
+    # 路径参数逐一过沙箱
+    if binary in _PATH_TAKING_BINARIES:
+        from app.core.sandbox import is_path_allowed
+
+        for token in argv[1:]:
+            if token.startswith("-"):
+                continue
+            ok, reason = is_path_allowed(token)
+            if not ok:
+                return None, f"参数 {token!r} 越界：{reason}"
+
+    return argv, ""
+
+
+async def _exec_argv(argv: list[str], timeout: int = 30) -> dict:
+    """用 exec（非 shell）执行已校验的 argv。"""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=_sandbox_cwd(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         return {"ok": proc.returncode == 0,
-                "stdout": out.decode()[:2000],
-                "stderr": err.decode()[:500]}
+                "stdout": out.decode(errors="replace")[:2000],
+                "stderr": err.decode(errors="replace")[:500],
+                "exit_code": proc.returncode}
+    except asyncio.TimeoutError:
+        return {"ok": False, "error": f"命令超时（>{timeout}s），已终止"}
+    except FileNotFoundError as e:
+        return {"ok": False, "error": f"命令不存在：{e}"}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+async def real_run_shell(params: dict) -> dict:
+    """受控只读 shell 执行。
+
+    HIGH RISK 能力：需要公司级 run_shell 授权（默认未授权即拒绝），
+    且仅允许只读命令、仅作用于沙箱内路径、不经 shell 解释。
+    """
+    argv, reason = _validate_command(
+        str((params or {}).get("command", "")), _READ_BINARIES)
+    if argv is None:
+        return {"ok": False, "error": reason}
+    return await _exec_argv(argv)
 
 
 async def real_run_write(params: dict) -> dict:
-    """Run write shell command (mv/cp/mkdir/rm/touch) with safety checks."""
-    READ_PREFIXES = ("ls", "cat ", "head ", "tail ", "pwd", "echo ",
-                     "date", "whoami", "df ", "du ", "wc ", "find ")
-    WRITE_PREFIXES = ("mv ", "cp ", "mkdir ", "touch ", "rm -rf ", "rm -r ",
-                      "rm ", "cat ", "head ", "tail ")
-    cmd = str((params or {}).get("command", "")).strip()
-    if not cmd:
-        return {"ok": False, "error": "empty command"}
-    DANGEROUS = ("&&", "||", "$(", "`")
-    if any(d in cmd for d in DANGEROUS):
-        return {"ok": False, "error": "forbidden operators: " + str(DANGEROUS)}
-    ok = cmd.startswith(READ_PREFIXES) or cmd.startswith(WRITE_PREFIXES)
-    if not ok:
-        return {"ok": False, "error": "command not in whitelist"}
-    is_dry = "--dry-run" in cmd or " -n " in cmd
-    preview = []
-    if cmd.startswith(("mv ", "cp ")):
-        parts = cmd.split()
-        if len(parts) >= 3:
-            preview.append(f"将: {parts[1]} → {parts[2]}")
-    elif cmd.startswith("rm"):
-        preview.append(f"将删除: {cmd[len('rm'):].strip()}")
-    elif cmd.startswith("mkdir"):
-        preview.append(f"将创建目录: {cmd[len('mkdir'):].strip()}")
-    elif cmd.startswith("touch"):
-        preview.append(f"将创建文件: {cmd[len('touch'):].strip()}")
-    try:
-        if is_dry:
-            return {"ok": True, "dry_run": True, "preview": preview,
-                    "dry_run_message": "dry-run 模式，未执行实际写入。"}
-        proc = await asyncio.create_subprocess_shell(
-            cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
-        return {"ok": proc.returncode == 0, "preview": preview,
-                "stdout": out.decode()[:2000], "stderr": err.decode()[:500]}
-    except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    """受控写操作。
+
+    HIGH RISK 能力：需要公司级 run_write 授权。
+    破坏性操作（rm/rmdir/mv）默认只做预演，必须由调用方显式传
+    dry_run=False 才真正执行；且仅能作用于沙箱内路径。
+    """
+    command = str((params or {}).get("command", ""))
+    argv, reason = _validate_command(command, _WRITE_BINARIES)
+    if argv is None:
+        return {"ok": False, "error": reason}
+
+    binary = os.path.basename(argv[0])
+    targets = [t for t in argv[1:] if not t.startswith("-")]
+
+    preview: list[str] = []
+    if binary in ("mv", "cp") and len(targets) >= 2:
+        preview.append(f"将 {targets[0]} → {targets[1]}")
+    elif binary in ("rm", "rmdir"):
+        preview.append(f"将删除：{'、'.join(targets)}")
+    elif binary == "mkdir":
+        preview.append(f"将创建目录：{'、'.join(targets)}")
+    elif binary == "touch":
+        preview.append(f"将创建文件：{'、'.join(targets)}")
+
+    # 破坏性操作强制预演：只有调用方**显式**传 dry_run=False 才真正执行，
+    # 避免 LLM 只写一句 `rm -rf xxx` 就把文件删掉。
+    destructive = binary in ("rm", "rmdir")
+    explicit_execute = (params or {}).get("dry_run") is False
+    if destructive and not explicit_execute:
+        return {"ok": True, "dry_run": True, "preview": preview,
+                "dry_run_message": ("破坏性操作预演：未实际执行。"
+                                    "确认无误后请以 dry_run=false 再次调用。")}
+
+    result = await _exec_argv(argv)
+    result["preview"] = preview
+    return result
 
 
 REAL_EXECUTORS = {

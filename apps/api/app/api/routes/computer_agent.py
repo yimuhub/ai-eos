@@ -2,18 +2,33 @@
 
 screenshot/type_text/click/key/run_app/run_shell 全部走 macOS 原生工具
 （screencapture + osascript + open）真实执行；授权与审计模型不变。
+
+改造要点：
+1. 全部端点补充 company_id 归属校验——此前任何登录用户只要知道
+   company_id 就能替他人公司授权主机操作能力。
+2. 执行路径统一走 app/services/computer_service.py，与聊天里的
+   computer_* 工具调用共用同一份权限判断与审计逻辑。
 """
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_company_owned, get_current_user, get_db
 from app.computer_agent import ComputerActionLog, ComputerPermission
-from app.computer_real import REAL_EXECUTORS, EXTENDED_CAPABILITIES
+from app.computer_real import EXTENDED_CAPABILITIES
+from app.core.logging_config import get_logger
 from app.models.user import User
+from app.services.computer_service import (
+    ComputerActionDenied,
+    capability_status,
+    execute_computer_action,
+)
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/computer-agent", tags=["computer-agent"])
 
@@ -30,10 +45,12 @@ async def grant_capability(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """用户授权某项本机操作能力。"""
+    """用户授权某项本机操作能力。默认全未授权，必须显式开启。"""
+    await assert_company_owned(db, user.id, company_id)
     if capability not in EXTENDED_CAPABILITIES:
-        raise HTTPException(400,
-                            f"capability must be one of {EXTENDED_CAPABILITIES}")
+        raise HTTPException(
+            400, f"未知能力 {capability!r}，可用：{', '.join(EXTENDED_CAPABILITIES)}")
+
     q = await db.execute(select(ComputerPermission).where(
         ComputerPermission.company_id == company_id,
         ComputerPermission.capability == capability))
@@ -45,6 +62,8 @@ async def grant_capability(
     perm.granted = True
     perm.granted_by = user.id
     await db.commit()
+    logger.info("能力已授权 company=%s capability=%s by=%s",
+                company_id, capability, user.id)
     return {"capability": capability, "granted": True}
 
 
@@ -55,6 +74,7 @@ async def revoke_capability(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await assert_company_owned(db, user.id, company_id)
     q = await db.execute(select(ComputerPermission).where(
         ComputerPermission.company_id == company_id,
         ComputerPermission.capability == capability))
@@ -62,6 +82,8 @@ async def revoke_capability(
     if perm:
         perm.granted = False
         await db.commit()
+    logger.info("能力已撤销 company=%s capability=%s by=%s",
+                company_id, capability, user.id)
     return {"capability": capability, "granted": False}
 
 
@@ -71,10 +93,22 @@ async def list_permissions(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    q = await db.execute(select(ComputerPermission).where(
-        ComputerPermission.company_id == company_id))
-    perms = {p.capability: p.granted for p in q.scalars().all()}
-    return {c: perms.get(c, False) for c in EXTENDED_CAPABILITIES}
+    """权限总览（复用 service，保证与执行路径使用同一判断）。"""
+    await assert_company_owned(db, user.id, company_id)
+    return await capability_status(db, company_id)
+
+
+@router.get("/capabilities")
+async def list_capabilities(
+    company_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """可用能力清单 + 授权状态（前端权限面板用）。"""
+    await assert_company_owned(db, user.id, company_id)
+    status = await capability_status(db, company_id)
+    return {"capabilities": sorted(EXTENDED_CAPABILITIES),
+            "granted": status}
 
 
 @router.post("/execute")
@@ -86,36 +120,20 @@ async def execute_action(
     user: User = Depends(get_current_user),
 ):
     """Agent 请求执行本机操作：检查授权 → 真实执行 → 审计落库。"""
-    if data.action_type not in EXTENDED_CAPABILITIES:
-        raise HTTPException(400,
-                            f"unknown action {data.action_type}")
-
-    q = await db.execute(select(ComputerPermission).where(
-        ComputerPermission.company_id == company_id,
-        ComputerPermission.capability == data.action_type))
-    perm = q.scalars().first()
-    allowed = bool(perm and perm.granted)
-
-    log = ComputerActionLog(
-        id=str(uuid.uuid4()), company_id=company_id, agent_id=agent_id,
-        action_type=data.action_type, params=data.params, allowed=allowed,
-        mock=False)
-    if not allowed:
-        log.deny_reason = f"capability '{data.action_type}' not granted"
-        db.add(log)
-        await db.commit()
-        raise HTTPException(403, log.deny_reason)
-
-    executor = REAL_EXECUTORS[data.action_type]
+    await assert_company_owned(db, user.id, company_id)
     try:
-        result = await executor(data.params or {})
-    except Exception as e:
-        result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-    log.result = result
-    db.add(log)
-    await db.commit()
-    return {"log_id": log.id, "action": data.action_type,
-            "result": log.result,
+        outcome = await execute_computer_action(
+            db, company_id=company_id, capability=data.action_type,
+            params=data.params, agent_id=agent_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except ComputerActionDenied as exc:
+        # 未授权：审计日志已在 service 内落库
+        raise HTTPException(403, exc.reason) from exc
+
+    result = outcome["result"]
+    return {"log_id": outcome["log_id"], "action": outcome["capability"],
+            "result": result,
             "mode": "REAL" if result.get("ok") else "REAL_FAILED"}
 
 
@@ -126,14 +144,16 @@ async def list_logs(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """操作审计日志。所有本机操作（含被拒绝的）都可在前端追溯。"""
+    await assert_company_owned(db, user.id, company_id)
     q = await db.execute(select(ComputerActionLog).where(
         ComputerActionLog.company_id == company_id).order_by(
         ComputerActionLog.created_at.desc()).limit(limit))
     rows = q.scalars().all()
-    return [{"id": l.id, "agent_id": l.agent_id, "action": l.action_type,
-             "allowed": l.allowed, "deny_reason": l.deny_reason,
-             "mock": l.mock, "result": l.result,
-             "created_at": l.created_at.isoformat()} for l in rows]
+    return [{"id": log.id, "agent_id": log.agent_id, "action": log.action_type,
+             "allowed": log.allowed, "deny_reason": log.deny_reason,
+             "mock": log.mock, "result": log.result,
+             "created_at": log.created_at.isoformat()} for log in rows]
 
 
 @router.get("/screenshots/latest")
@@ -144,8 +164,8 @@ async def latest_screenshot(
 ):
     """返回最近一张真实截屏的 base64（供前端 <img> 预览）。"""
     import base64
-    from pathlib import Path
 
+    await assert_company_owned(db, user.id, company_id)
     q = await db.execute(select(ComputerActionLog).where(
         ComputerActionLog.company_id == company_id,
         ComputerActionLog.action_type == "screenshot",
@@ -153,10 +173,17 @@ async def latest_screenshot(
         ComputerActionLog.created_at.desc()))
     log = q.scalars().first()
     if not log or not (log.result or {}).get("image_path"):
-        raise HTTPException(404, "no screenshot yet")
-    path = Path(log.result["image_path"])
-    if not path.exists():
-        raise HTTPException(404, "screenshot file missing")
+        raise HTTPException(404, "还没有截屏记录")
+
+    # 截屏路径即便来自数据库也不应无条件信任：仍限制在截屏目录内
+    from app.core.sandbox import SandboxViolation, resolve_safe_path
+
+    try:
+        path = resolve_safe_path(log.result["image_path"], must_exist=True)
+    except SandboxViolation as exc:
+        logger.warning("截屏路径越界，拒绝返回：%s", exc)
+        raise HTTPException(404, "截屏文件不可访问") from exc
+
     b64 = base64.b64encode(path.read_bytes()).decode()
     return {"image_base64": f"data:image/png;base64,{b64}",
             "taken_at": log.created_at.isoformat(),

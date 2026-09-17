@@ -41,13 +41,48 @@ class FileReaderSkill(BaseSkill):
     id = "file_reader"
     name = "File Reader"
     description = "Read a text/markdown/json file from the workspace storage."
+    # 说明：本技能只能读取 storage 沙箱内的文件。
+    # 路径由 LLM 生成，因此必须视为不可信输入——详见 app/core/sandbox.py。
+
+    # 单文件读取上限，避免把巨型文件塞进上下文
+    MAX_BYTES = 50_000
+    ALLOWED_SUFFIXES = {".md", ".txt", ".json", ".csv", ".yaml", ".yml",
+                        ".log", ".html", ".xml", ".ini", ".conf", ".rst"}
 
     async def execute(self, input_data: dict) -> dict:
-        from pathlib import Path
+        from app.core.sandbox import SandboxViolation, resolve_safe_path
 
-        path = Path(input_data["path"])
-        content = path.read_text(encoding="utf-8", errors="replace")
-        return {"result": {"path": str(path), "content": content[:50000], "size": len(content)}}
+        raw_path = (input_data or {}).get("path")
+        if not raw_path:
+            # 改造前这里是 input_data["path"] → KeyError → 500。
+            # 参数缺失是可预期的调用错误，应返回结构化错误而非崩溃。
+            return {"result": {"ok": False, "error": "缺少参数 path"}}
+
+        try:
+            path = resolve_safe_path(str(raw_path), must_exist=True)
+        except SandboxViolation as exc:
+            return {"result": {"ok": False,
+                               "error": f"拒绝访问：{exc}",
+                               "path": str(raw_path)}}
+
+        # 扩展名校验：明确区分"文件类型不支持"与"权限不足"
+        if path.suffix.lower() not in self.ALLOWED_SUFFIXES:
+            return {"result": {"ok": False,
+                               "error": f"不支持的文件类型 {path.suffix}",
+                               "allowed": sorted(self.ALLOWED_SUFFIXES)}}
+
+        try:
+            # 先按上限截断读取，避免把超大文件整个读进内存
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read(self.MAX_BYTES + 1)
+        except OSError as exc:
+            return {"result": {"ok": False, "error": f"读取失败：{exc}"}}
+
+        truncated = len(content) > self.MAX_BYTES
+        return {"result": {"ok": True, "path": str(path),
+                           "content": content[:self.MAX_BYTES],
+                           "truncated": truncated,
+                           "size": path.stat().st_size}}
 
 
 class WebSearchSkill(BaseSkill):

@@ -1,11 +1,18 @@
 """Agent digital employees + model configs (P1-04, P1-05)."""
 import enum
+from typing import TYPE_CHECKING
 
 from sqlalchemy import JSON, Enum, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from .base import TimestampMixin
+
+if TYPE_CHECKING:
+    # 仅在类型检查期导入：Department 与本模型互相引用，
+    # 运行时靠 SQLAlchemy registry 按类名解析字符串关系目标。
+    # 显式声明可让 pyflakes / mypy 正确识别 Mapped["Department"]。
+    from app.models.company import Department
 
 
 class AgentStatus(str, enum.Enum):

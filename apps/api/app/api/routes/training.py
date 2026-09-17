@@ -139,18 +139,32 @@ async def rollback(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """撤销一次训练应用（恢复前置状态）。"""
+    """撤销一次训练应用（恢复前置状态）。
+
+    修复三处缺陷：
+    1. `application.proposal_id` → 未定义名 `application`（应为 app_rec）→ NameError → 500。
+    2. 原代码完全没有租户归属校验：任何登录用户知道 app_id 就能撤销他人公司的训练。
+    3. `s = await db.get(TrainingSession, ...)` 可能为 None，随后 `s.agent_id` 抛
+       AttributeError，被错误地表现为 500 而非明确的 404。
+    """
+    from app.api.deps import assert_agent_owned
+
     app_rec = await db.get(TrainingApplication, app_id)
     if not app_rec:
-        raise HTTPException(404, "not found")
+        raise HTTPException(404, "训练应用记录不存在")
+    session = await db.get(TrainingSession, app_rec.session_id)
+    if not session:
+        raise HTTPException(404, "训练会话不存在")
+    # 归属校验：会话所属 Agent 必须属于当前用户自己的公司
+    agent = await assert_agent_owned(db, user.id, session.agent_id)
+
     if app_rec.rolled_back_at:
-        raise HTTPException(409, "已撤销过")
-    s = await db.get(TrainingSession, app_rec.session_id)
-    a = await _agent(db, s.agent_id)
-    ok = await rollback_application(db, app_rec, a, actor=user.id)
+        raise HTTPException(409, "该次训练已撤销过，无需重复操作")
+
+    ok = await rollback_application(db, app_rec, agent, actor=user.id)
     if not ok:
         # 空回滚（无可回滚内容）也算成功——提案状态仍需修正
-        prop0 = await db.get(TrainingProposal, application.proposal_id)
+        prop0 = await db.get(TrainingProposal, app_rec.proposal_id)
         if prop0:
             prop0.status = "REJECTED"
         await db.commit()

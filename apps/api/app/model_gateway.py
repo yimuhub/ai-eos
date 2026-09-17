@@ -3,7 +3,6 @@
 Agent Runtime NEVER calls an LLM directly — always through ModelGateway.
 每次调用自动记录 Token 用量流水（六维：公司/部门/个人/项目/任务/场景）。
 """
-import os
 import time
 from abc import ABC, abstractmethod
 
@@ -191,15 +190,16 @@ PROVIDERS: dict[ModelProviderType, type[BaseModelProvider]] = {
 
 
 def _resolve_api_key(model_row: Model) -> str:
-    if model_row.api_key_env:
-        return os.environ.get(model_row.api_key_env, "")
-    # fallback to default env keys by provider type
-    defaults = {
-        ModelProviderType.OPENAI_COMPAT: os.environ.get("OPENAI_COMPAT_API_KEY", ""),
-        ModelProviderType.ANTHROPIC: os.environ.get("ANTHROPIC_API_KEY", ""),
-        ModelProviderType.GEMINI: os.environ.get("GEMINI_API_KEY", ""),
-    }
-    return defaults.get(model_row.provider_type, "")
+    """解析模型密钥。
+
+    改造前这里直接读 os.environ，而 .env 从未被注入 os.environ，
+    导致"只在 .env 里配了密钥"时静默取到空串、调用方收到 401 却查不出原因。
+    现在统一走 settings.resolved_api_key（.env 已在 core.config 导入期注入）。
+    """
+    from app.core.config import settings
+
+    provider_name = getattr(model_row.provider_type, "value", "") or ""
+    return settings.resolved_api_key(model_row.api_key_env, provider_name)
 
 
 class ModelGateway:

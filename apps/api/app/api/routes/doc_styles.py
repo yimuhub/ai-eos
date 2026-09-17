@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.db.base import Base
+from app.models.agent import Agent
 from app.models.company import Company
 from app.models.user import User
 
