@@ -281,8 +281,22 @@ async def run_agent_on_task(
         execution.error = str(e)[:4000]
         execution.completed_at = utcnow_iso()
         agent.status = AgentStatus.ERROR
-        await log_event(db, "agent.failed", "agent", agent.id, actor_type, agent.id,
-                        {"task_id": task.id, "error": str(e)[:1000]})
+        try:
+            await log_event(db, "agent.failed", "agent", agent.id, actor_type, agent.id,
+                            {"task_id": task.id, "error": str(e)[:1000]})
+            # 失败证据必须**先落库，再往上抛**。
+            #
+            # 调用方（api/routes/tasks._run_in_background）为了把任务从 RUNNING
+            # 清理到 FAILED 会执行 session.rollback()。如果失败原因还停留在
+            # 未提交事务里，就会被一并撤销——用户看到"任务失败"，点进执行记录
+            # 却什么都没有，错误只存在于服务端日志里。
+            # 这正是端到端试跑抓到的缺陷：/tasks/{id}/executions 返回空数组。
+            await db.commit()
+        except Exception as persist_err:
+            # 证据落库本身失败也不能掩盖原始错误，两个都要留痕
+            await db.rollback()
+            logger.error("失败证据落库失败 task=%s agent=%s 原始错误=%s: %s",
+                         task.id, agent.id, e, persist_err, exc_info=True)
         raise
     finally:
         await db.flush()

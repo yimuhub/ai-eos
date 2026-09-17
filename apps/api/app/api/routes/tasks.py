@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.agent_runtime import pause_execution, run_agent_on_task, resume_execution, utcnow_iso
+from app.core.logging_config import get_logger
 from app.db.session import AsyncSessionLocal, get_db
 from app.models.agent import Agent
 from app.models.company import Company
@@ -16,6 +17,8 @@ from app.models.task import (AgentExecution, Intervention, Task, TaskEvent, Task
                              TaskPriority, TaskStatus)
 from app.services.event_system import log_event
 from app.task_engine import IllegalTransition, add_task_event, transition
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -117,9 +120,11 @@ def _run_in_background(task_id: str, agent_id: str):
                                  actor_type="agent", actor_id=agent_id)
             else:
                 await session.commit()
-        except Exception:
-            import traceback
-            traceback.print_exc()
+        except Exception as exc:
+            # 用结构化日志而不是 print_exc：print 走 stdout，
+            # 会绕过日志级别与统一格式，线上排查时反而更难定位。
+            logger.error("任务执行失败 task=%s agent=%s: %s",
+                         task_id, agent_id, exc, exc_info=True)
             await session.rollback()
             t2 = await session.get(Task, task_id)
             if t2 and t2.status == TS.RUNNING:
@@ -128,7 +133,19 @@ def _run_in_background(task_id: str, agent_id: str):
             a2 = await session.get(Agent, agent_id)
             if a2 and a2.status == AgentStatus.ERROR:
                 a2.status = AgentStatus.IDLE
-            await session.commit()
+            try:
+                # 失败还必须落在**任务维度**上：用户排查时是按任务查的。
+                # 只记录 agent.failed（挂在员工上）会让"这个任务为什么失败"
+                # 无从检索——而这正是用户最常问的问题。
+                await log_event(session, "task.failed", "task", task_id,
+                                "system", None,
+                                {"agent_id": agent_id,
+                                 "error": f"{type(exc).__name__}: {exc}"[:800]})
+                await session.commit()
+            except Exception as mark_err:
+                await session.rollback()
+                logger.error("任务失败状态落库失败 task=%s: %s",
+                             task_id, mark_err, exc_info=True)
 
     background_jobs.submit_async(_job)
 
@@ -267,6 +284,21 @@ async def task_logs(tid: str, db: AsyncSession = Depends(get_db),
             "who": "老板（人工介入）",
             "type": i.type.value if hasattr(i.type, "value") else str(i.type),
             "title": "", "content": i.content or "",
+        })
+
+    # 执行记录也是"日志"：用户真正想知道的是"我的员工做了什么、为什么失败"，
+    # 而失败原因只存在于执行记录里。原实现只返回事件流与人工介入，
+    # 与函数文档声称的"执行记录摘要"不符——失败任务的时间线会是空的。
+    execs = (await db.execute(select(AgentExecution).where(
+        AgentExecution.task_id == tid).order_by(AgentExecution.created_at))).scalars().all()
+    for ex in execs:
+        body = ex.error or ex.output or ""
+        logs.append({
+            "ts": str(ex.completed_at or ex.created_at), "kind": "execution",
+            "who": "AI 员工",
+            "type": str(ex.status),
+            "title": "执行失败" if ex.status == "failed" else "执行完成",
+            "content": body[:300],
         })
 
     logs.sort(key=lambda x: x["ts"], reverse=True)

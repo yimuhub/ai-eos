@@ -21,6 +21,25 @@ PROVIDER_ENV_VARS: dict[str, str] = {
 }
 
 
+def key_available(model_row: Model) -> bool:
+    """该模型在**实际调用时**能否取到密钥。
+
+    必须与 `model_gateway._resolve_api_key()` 使用同一套解析逻辑
+    （`settings.resolved_api_key`）。否则自检与运行时会出现两种事实：
+    自检说"缺密钥"、任务却能跑通；或者自检说"就绪"、任务 401 失败。
+    """
+    import os
+
+    from app.core.config import settings
+
+    provider = model_row.provider_type.value
+    if settings.resolved_api_key(model_row.api_key_env, provider):
+        return True
+    # 兼容 <ENV>_FILE 形式的密钥文件注入
+    env_name = model_row.api_key_env or PROVIDER_ENV_VARS.get(provider, "")
+    return bool(env_name and os.environ.get(f"{env_name}_FILE", ""))
+
+
 class ModelIn(BaseModel):
     name: str
     provider_type: str  # openai_compat|anthropic|gemini
@@ -44,28 +63,25 @@ async def diagnostics(db: AsyncSession = Depends(get_db),
     本接口让前端能明确告诉用户卡在哪一步。安全约束：
     **只报告密钥是否存在（布尔），绝不返回密钥内容本身**。
     """
-    import os
-
     rows = list((await db.execute(select(Model))).scalars())
     providers = []
     for ptype, env_name in PROVIDER_ENV_VARS.items():
         configured = [m for m in rows
                       if m.provider_type.value == ptype]
+        ready_of_type = [m for m in configured if key_available(m)]
         providers.append({
             "provider_type": ptype,
             "default_env_var": env_name,
-            "key_present": bool(os.environ.get(env_name, "")
-                                or os.environ.get(f"{env_name}_FILE", "")),
+            # 该 provider 下"至少有一个模型能取到密钥"即为就绪。
+            # 只看默认环境变量会误报：用户在模型配置里填了自定义变量名
+            # （api_key_env）时，系统其实可用，界面却显示"缺密钥"。
+            "key_present": bool(ready_of_type),
+            "models_ready": len(ready_of_type),
             "model_count": len(configured),
         })
 
-    # 是否存在"至少一个模型 + 该 provider 的密钥已就位"的组合
-    ready_models = []
-    for m in rows:
-        env_name = m.api_key_env or PROVIDER_ENV_VARS.get(
-            m.provider_type.value, "")
-        if env_name and os.environ.get(env_name, ""):
-            ready_models.append(m.id)
+    # 是否存在"至少一个模型 + 该模型的密钥已就位"的组合
+    ready_models = [m.id for m in rows if key_available(m)]
 
     missing_hint = ""
     if not rows:

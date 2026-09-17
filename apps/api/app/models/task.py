@@ -76,6 +76,10 @@ class AgentExecution(TimestampMixin, Base):
     output: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
     metadata_json: Mapped[dict | None] = mapped_column(JSON, default=dict)
+    # 完成时间。原先 agent_runtime 与 tasks 路由都会写 execution.completed_at，
+    # 但模型上没有这一列——赋值只是挂了个临时 Python 属性，**入库时静默丢弃**，
+    # 于是"单次执行耗时"永远查不出来。端到端试跑核对表结构时发现的。
+    completed_at: Mapped[str | None] = mapped_column(String(50))
 
 
 class ExecutionCheckpoint(TimestampMixin, Base):

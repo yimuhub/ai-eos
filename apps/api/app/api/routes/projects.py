@@ -29,6 +29,10 @@ class ProjectIn(BaseModel):
     manager_agent_id: str | None = None
     start_date: str | None = None
     target_date: str | None = None
+    # 归属公司。其它创建接口（/agents、/tasks）都把 company_id 放在请求体里，
+    # 这里原先只接受查询参数，属于历史不一致——现在两种写法都接受，
+    # 既保持向后兼容，也让 API 有一致的形状。
+    company_id: str | None = None
 
 
 class MilestoneIn(BaseModel):
@@ -82,13 +86,18 @@ async def list_projects(company_id: str | None = None, status: str | None = None
 
 
 @router.post("/projects", status_code=201)
-async def create_project(data: ProjectIn, company_id: str,
+async def create_project(data: ProjectIn, company_id: str | None = None,
                          db: AsyncSession = Depends(get_db),
                          user=Depends(get_current_user)):
-    c = await db.get(Company, company_id)
+    """创建项目。`company_id` 可放在请求体，也可放在查询参数（兼容旧调用）。"""
+    cid = company_id or data.company_id
+    if not cid:
+        raise HTTPException(422, "缺少 company_id：请在请求体或查询参数中提供")
+    c = await db.get(Company, cid)
     if not c or c.owner_id != user.id:
         raise HTTPException(404, "Company not found")
-    p = Project(**data.model_dump(), company_id=company_id,
+    payload = data.model_dump(exclude={"company_id"})
+    p = Project(**payload, company_id=cid,
                 status=ProjectStatus.PLANNING, owner_id=user.id)
     db.add(p)
     await log_event(db, "project.created", "project", None, "user", user.id,

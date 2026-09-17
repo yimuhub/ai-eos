@@ -5,9 +5,14 @@
 # 目的不是追求形式上的绿色，而是把这次审计暴露出的三类缺陷
 # （未定义变量 / 契约错配 / 失败静默）钉死在自动化里。
 #
+# 检查分两层：
+#   零件级 —— 静态检查 / 依赖导入 / 契约 / 类型 / lint / 单元测试
+#   链路级 —— 端到端主链路试跑（真实进程 + 真实 HTTP + 真实数据库，
+#             模型侧用本地假服务，因此不需要任何真实密钥）
+#
 # 用法：
 #   ./tools/check.sh            # 全部检查
-#   ./tools/check.sh --fast     # 跳过较慢的测试套件，只做静态检查
+#   ./tools/check.sh --fast     # 只做静态与前端检查，跳过测试与端到端试跑
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -102,6 +107,23 @@ if [[ $FAST -eq 0 ]]; then
     ok "$(echo "$OUT" | grep -E 'passed|failed' | tail -1)"
   else
     bad "测试未通过："; echo "$OUT"
+  fi
+fi
+
+# ---------------------------------------------------------------- 端到端试跑
+# 前面所有检查都是"零件级"的：它们能证明每个零件没问题，
+# 但证明不了"整条链路能跑通"——而用户真正关心的是后者。
+# 这一步用真实进程 + 真实 HTTP + 真实数据库把主链路跑一遍，
+# 模型侧用本地假服务，因此不需要任何真实密钥，也能在 CI 里跑。
+if [[ $FAST -eq 0 ]]; then
+  step "端到端主链路试跑（真实进程 + 假模型服务，无需密钥）"
+  SYS_PY="$(command -v python3 || true)"
+  if [[ -z "$SYS_PY" ]]; then
+    printf '  \033[33m－\033[0m 跳过（PATH 中找不到 python3）\n'
+  elif OUT="$(cd "$ROOT" && "$SYS_PY" tools/e2e_smoke.py 2>&1 | tail -14)"; then
+    ok "$(printf '%s\n' "$OUT" | grep -E '端到端试跑(通过|未通过)' | tail -1)"
+  else
+    bad "端到端试跑未通过："; printf '%s\n' "$OUT"
   fi
 fi
 

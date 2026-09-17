@@ -220,13 +220,28 @@ class ModelGateway:
         config: dict | None = None,
     ) -> dict:
         """Try models in priority order (primary -> secondary -> fallback).
-        每次成功调用自动记录 Token 用量流水（上下文来自 set_usage_context）。"""
+        每次成功调用自动记录 Token 用量流水（上下文来自 set_usage_context）。
+
+        错误信息必须**可操作**：原实现在没有绑定任何模型时会抛出
+        `All configured models failed: None`——既没说明原因，也没告诉用户
+        该做什么。端到端试跑正是靠断言"错误里必须出现『模型』"抓到它的。
+        """
+        if not model_ids:
+            raise RuntimeError(
+                "该员工尚未绑定任何模型，无法执行任务。"
+                "请到「模型配置」登记一个模型并配置密钥，"
+                "再在员工详情页把它绑定为 primary。")
+
         last_error: Exception | None = None
         ctx = usage_ctx.get()
+        attempted = 0
+        missing: list[str] = []
         for mid in model_ids:
             row = await self.db.get(Model, mid)
             if row is None:
+                missing.append(mid)
                 continue
+            attempted += 1
             provider_cls = PROVIDERS[row.provider_type]
             provider = provider_cls(
                 base_url=row.base_url or "",
@@ -255,7 +270,13 @@ class ModelGateway:
             except Exception as e:  # failover to next model
                 last_error = e
                 continue
-        raise RuntimeError(f"All configured models failed: {last_error}")
+
+        if attempted == 0:
+            raise RuntimeError(
+                f"该员工绑定的模型已不存在（可能已被删除）：{', '.join(missing[:3])}。"
+                "请重新绑定一个可用模型。")
+        raise RuntimeError(
+            f"已绑定的 {attempted} 个模型全部调用失败，最后一次错误：{last_error}")
 
 
 async def chat_with_agent_models_by_agent(self, agent, messages, tools=None):

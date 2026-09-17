@@ -34,13 +34,21 @@ async def lifespan(app: FastAPI):
         logger.warning("安全提示：%s", _w)
 
     # 便携/SQLite 模式：启动时自动建表（幂等）
+    from app.db.session import engine
+    from app.db.base import Base
+    import app.models  # noqa: F401 — 确保所有模型注册到 Base.metadata
     if settings.database_url.startswith("sqlite"):
-        from app.db.session import engine
-        from app.db.base import Base
-        import app.models  # noqa: F401 — 确保所有模型注册到 Base.metadata
         async with engine.begin() as conn:
             await conn.run_sync(lambda c: Base.metadata.create_all(c))
         logger.info("[startup] sqlite schema ensured")
+
+    # 补列：create_all 只建缺失的表，**不会给已存在的表补新列**。
+    # 升级后老数据库缺少新增字段会直接报 "no such column"，
+    # 而用户只是换了版本、什么都没做错。这里幂等地把可空列补上。
+    from app.db.migrations import ensure_columns
+    _added = await ensure_columns(engine)
+    if _added:
+        logger.info("[startup] 自动补齐 %d 个新增列", len(_added))
     from app.scheduler_engine import start_scheduler, stop_scheduler
     start_scheduler()
     # 启动时恢复卡在 RUNNING 的会议（自愈）
