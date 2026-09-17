@@ -90,13 +90,11 @@ async def _computer_action(db: AsyncSession, capability: str, args: dict,
     直通主机 shell 的通道。因此这里强制走 computer_service——
     未授权能力一律拒绝，且每次调用（含被拒绝的）都落审计日志。
     """
-    from app.core.logging_config import get_logger
     from app.services.computer_service import (
         ComputerActionDenied,
         execute_computer_action,
     )
 
-    logger = get_logger(__name__)
     logger.info("聊天触发本机操作 user=%s company=%s capability=%s",
                 user_id, company_id, capability)
 
@@ -270,8 +268,8 @@ async def boss_chat(aid: str, data: ChatIn,
             lines = "\n".join(f"- {m.get('content', '')[:180]}" for m in mems[:6])
             messages.append({"role": "system",
                              "content": f"你的长期记忆：\n{lines}"})
-    except Exception:
-        pass
+    except Exception as mem_err:
+        logger.warning("聊天记忆召回失败 agent=%s: %s", a.id, mem_err, exc_info=True)
 
     # 知识库（成本优化两级检索）
     try:
@@ -280,8 +278,8 @@ async def boss_chat(aid: str, data: ChatIn,
         if rag.get("context_text"):
             messages.append({"role": "system",
                              "content": f"相关知识库内容：\n{rag['context_text']}"})
-    except Exception:
-        pass
+    except Exception as kb_err:
+        logger.warning("聊天知识库检索失败 agent=%s: %s", a.id, kb_err, exc_info=True)
 
     # 最近对话上下文（最近7条，跳过刚存的当前消息避免重复）
     recent = (await db.execute(select(AgentChatMessage).where(
@@ -392,8 +390,15 @@ async def boss_chat(aid: str, data: ChatIn,
                         messages.append({"role": "assistant", "content": "", "tool_calls": [tc]})
                         messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                          "content": str(res2)})
-                    except Exception:
-                        break
+                    except Exception as tool_err:
+                        # 原为 break：静默中断工具链，且不把失败告知模型，
+                        # 模型会在"工具没返回"的状态下继续，产生幻觉式回复
+                        logger.warning("续轮工具执行失败 tool=%s agent=%s: %s",
+                                       (tc.get("function") or {}).get("name"), a.id,
+                                       tool_err, exc_info=True)
+                        messages.append({"role": "assistant", "content": "", "tool_calls": [tc]})
+                        messages.append({"role": "tool", "tool_call_id": tc.get("id"),
+                                         "content": f"error: {tool_err}"})
                 second = await gw.chat_with_agent_models(model_ids, messages, tools=[WEB_SEARCH_TOOL, *COMPUTER_TOOLS])
                 second_reply = (second.get("content") or "").strip()
                 rounds += 1
@@ -407,8 +412,10 @@ async def boss_chat(aid: str, data: ChatIn,
                         res2 = await execute_skill_safe(db, tc["function"]["name"], args2)
                         messages.append({"role": "user",
                                          "content": f"[搜索结果] {str(res2)[:1500]}"})
-                    except Exception:
-                        pass
+                    except Exception as tool_err:
+                        logger.warning("二次工具调用失败 tool=%s agent=%s: %s",
+                                       tc.get("function", {}).get("name"), a.id,
+                                       tool_err, exc_info=True)
                 second = await gw.chat_with_agent_models(model_ids, messages)
                 second_reply = (second.get("content") or "").strip()
                 if "<tool_call>" not in second_reply:
@@ -440,8 +447,11 @@ async def boss_chat(aid: str, data: ChatIn,
                           size=gen["size"], created_by=str(a.id),
                           creator_type="agent", agent_id=str(a.id)))
             doc_file = gen
-    except Exception:
-        pass
+    except Exception as doc_err:
+        # 文档生成失败：对话仍返回，但用户会"看到回复却拿不到文件"，
+        # 这正是之前被静默吞掉的那类缺陷，必须出声并回传原因
+        logger.warning("聊天内文档生成失败 agent=%s: %s", a.id, doc_err, exc_info=True)
+        doc_error = f"{type(doc_err).__name__}: {doc_err}"
 
     await _save_msg(db, a, "agent", final_reply)
 
@@ -464,11 +474,14 @@ async def boss_chat(aid: str, data: ChatIn,
                            MemoryType.EPISODIC,
                            (digest.get("content") or "").strip()[:300],
                            importance=0.7)
-    except Exception:
-        pass
+    except Exception as digest_err:
+        # 记忆压缩失败不阻断对话，但会导致记忆越攒越多直至超出上下文预算
+        logger.warning("对话记忆压缩失败 agent=%s: %s", a.id, digest_err,
+                       exc_info=True)
 
     await db.commit()
-    return {"reply": final_reply, "file": doc_file, "actions": actions}
+    return {"reply": final_reply, "file": doc_file, "doc_error": doc_error,
+            "actions": actions}
 
 
 # ---------------- Agent 删除时级联清空聊天 ----------------

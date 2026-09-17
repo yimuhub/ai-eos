@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging_config import get_logger
 from app.models.agent import Agent, AgentModelConfig
 from app.models.collaboration import (
     AgentCollaboration,
@@ -19,6 +20,8 @@ from app.models.collaboration import (
     CollaborationMessageType,
 )
 from app.models.company import Company, Department
+
+logger = get_logger(__name__)
 
 
 async def route_message(
@@ -150,12 +153,15 @@ async def _route_by_context(
     # 检查是否关联到任务
     try:
         task = await db.get(TaskModel, context_ref)
-        if task and task.created_by and task.created_by in agent_ids:
-            result.add(task.created_by)
-        if task.created_by and task.created_by != sender_id:
-            result.add(task.created_by)
-    except Exception:
-        pass
+        if task is not None and task.created_by:
+            if task.created_by in agent_ids:
+                result.add(task.created_by)
+            if task.created_by != sender_id:
+                result.add(task.created_by)
+    except Exception as ctx_err:
+        # 任务上下文解析失败会导致路由降级为"发给所有人"，必须留痕
+        logger.warning("按任务上下文路由失败 ref=%s: %s", context_ref, ctx_err,
+                       exc_info=True)
 
     # 检查是否关联到项目成员
     try:
@@ -167,8 +173,9 @@ async def _route_by_context(
         for m in members:
             if m.agent_id in agent_ids and m.agent_id != sender_id:
                 result.add(m.agent_id)
-    except Exception:
-        pass
+    except Exception as proj_err:
+        logger.warning("按项目成员路由失败 ref=%s: %s", context_ref, proj_err,
+                       exc_info=True)
 
     if not result:
         result = agent_ids - {sender_id}

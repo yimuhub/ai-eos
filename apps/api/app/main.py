@@ -18,6 +18,12 @@ from app.api.routes import (agents, artifacts, assets, auth, browser_agent, grou
                             app_alias, skills, tasks, team_builder, training, workflows, war_room, team_generator, company_manage,
                             tokens)
 from app.core.config import settings
+from app.core.logging_config import get_logger, setup_logging
+
+# 尽早配置日志：保证后续所有模块（含第三方库降噪）都走统一格式，
+# 也让"失败出声"从进程启动第一秒就生效。
+setup_logging()
+logger = get_logger(__name__)
 
 
 @asynccontextmanager
@@ -52,6 +58,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request, exc):
+    """兜底异常处理：任何未被捕获的异常都必须进日志（含堆栈），
+    并以统一 JSON 结构返回，避免前端拿到裸 500 后无从判断。"""
+    logger.error("未处理异常 %s %s: %s", request.method, request.url.path, exc,
+                 exc_info=exc)
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "服务器内部错误，请查看后端日志获取详细堆栈",
+                 "error_type": type(exc).__name__},
+    )
 
 for r in (health, auth, companies, agents, agent_chat, models_api, skills, tasks, messages, kb2, delivery, group_chat, doc_styles, growth_center,
           assets, events, dashboard, orchestrate, projects, workflows, meetings,

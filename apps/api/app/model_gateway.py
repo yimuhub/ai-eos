@@ -9,10 +9,14 @@ from abc import ABC, abstractmethod
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import contextvars
+
+from app.core.logging_config import get_logger
 from app.models.agent import Model, ModelProviderType
 
+logger = get_logger(__name__)
+
 # 调用上下文（ContextVar 支持并发请求各自隔离）
-import contextvars
 
 usage_ctx: contextvars.ContextVar = contextvars.ContextVar("usage_ctx", default=None)
 
@@ -239,8 +243,11 @@ class ModelGateway:
                     await record_token_usage(
                         self.db, result, model_row=row, ctx=ctx,
                         latency_ms=int((time.time() - t0) * 1000))
-                except Exception:
-                    pass
+                except Exception as usage_err:
+                    # 计量落库失败不阻断本次调用，但会导致用量/成本统计缺口，
+                    # 属于财务口径问题，必须留痕而不是静默丢弃
+                    logger.error("Token 用量落库失败 model=%s mid=%s: %s",
+                                 row.name, mid, usage_err, exc_info=True)
                 return result
             except NotImplementedError as e:
                 last_error = e

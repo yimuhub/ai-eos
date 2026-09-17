@@ -7,6 +7,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.logging_config import get_logger
 from app.db.session import get_db
 from app.models.agent import Agent
 from app.models.asset import Asset
@@ -15,6 +16,8 @@ from app.models.project import (Milestone, MilestoneStatus, Project,
                                 ProjectMember, ProjectStatus)
 from app.models.task import Task, TaskStatus
 from app.services.event_system import log_event
+
+logger = get_logger(__name__)
 
 router = APIRouter(tags=["projects"])
 
@@ -638,8 +641,10 @@ async def project_logs(pid: str, db: AsyncSession = Depends(get_db),
                 "title": getattr(m, "title", "") or "",
                 "content": m.content or "",
             })
-    except Exception:
-        pass
+    except Exception as log_err:
+        # 项目日志静默变空会让用户以为"项目没干活"，必须留痕
+        logger.warning("项目协作消息加载失败 project=%s: %s", pid, log_err,
+                       exc_info=True)
 
     # 会议发言
     meets = (await db.execute(select(Meeting).where(Meeting.project_id == pid))).scalars().all()

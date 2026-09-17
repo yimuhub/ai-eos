@@ -93,8 +93,10 @@ async def build_context(db: AsyncSession, agent: Agent, task: Task) -> tuple[lis
         doc_prompt = get_public_doc_system_prompt(agent.role)
         messages.append({"role": "system",
                          "content": f"公文写作能力（GB/T 9704-2012）：\n{doc_prompt}"})
-    except Exception:
-        pass
+    except Exception as doc_err:
+        # 公文提示词注入失败不阻塞任务，但需要可见（否则排版能力静默降级）
+        logger.warning("公文写作提示词注入失败 agent=%s role=%s: %s",
+                       agent.id, agent.role, doc_err, exc_info=True)
 
     # P4: 成本优化的两级知识库检索（全局公用+Agent私人，分层召回+压缩+缓存+预算）
     try:
@@ -113,8 +115,10 @@ async def build_context(db: AsyncSession, agent: Agent, task: Task) -> tuple[lis
                              "profile": rag["meta"].get("profile"),
                              "cached": rag.get("from_cache", False),
                              "tokens_saved_est": rag.get("tokens_saved_est", 0)})
-    except Exception:
-        pass  # 知识库失败不阻塞任务
+    except Exception as kb_err:
+        # 知识库失败不阻塞任务，但检索失败会让回答质量静默下降，必须留痕
+        logger.warning("知识库检索失败 task=%s agent=%s: %s",
+                       task.id, agent.id, kb_err, exc_info=True)
 
     messages.append({
         "role": "user",

@@ -10,10 +10,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent_runtime import run_agent_on_task
+from app.core.logging_config import get_logger
 from app.models.agent import Agent
 from app.models.task import Task, TaskPriority, TaskStatus
 from app.services.event_system import log_event
 from app.task_engine import transition
+
+logger = get_logger(__name__)
 
 DECOMPOSE_PROMPT = """你是 AI 公司的 CEO（协调者）。
 
@@ -115,8 +118,10 @@ async def orchestrate(db: AsyncSession, parent: Task, coordinator: Agent) -> Tas
                     await log_event(s2, "orchestrator.subtask_failed", "task",
                                     task_id, "agent", agent_id, {"error": str(exc)[:500]})
                     await s2.commit()
-            except Exception:
-                pass
+            except Exception as mark_err:
+                # 失败标记本身也失败：不能再吞——否则子任务会永久停在 RUNNING
+                logger.error("子任务失败标记落库失败 task=%s agent=%s 原始错误=%s: %s",
+                             task_id, agent_id, exc, mark_err, exc_info=True)
             return {"task": title, "agent": agent_name, "status": "FAILED",
                     "output": "", "error": str(exc)[:500]}
 
@@ -129,7 +134,10 @@ async def orchestrate(db: AsyncSession, parent: Task, coordinator: Agent) -> Tas
     failed = []
     for out in outcomes:
         if isinstance(out, Exception):
-            failed.append({"task": "(unknown)", "agent": "", "status": "EXCEPTION"})
+            # 之前这里只记 "(unknown)"，把异常本身丢掉了——失败原因不可追溯
+            logger.error("子任务执行抛出未捕获异常: %s", out, exc_info=out)
+            failed.append({"task": "(未捕获异常)", "agent": "",
+                           "status": f"EXCEPTION: {type(out).__name__}: {str(out)[:200]}"})
             continue
         if out["status"] == "COMPLETED" and out["output"]:
             collected.append(f"## {out['task']}\n（执行者: {out['agent']}）\n\n{out['output']}\n")

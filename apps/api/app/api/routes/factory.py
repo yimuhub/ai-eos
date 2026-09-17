@@ -5,10 +5,13 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.core.logging_config import get_logger
 from app.factory_engine import (AgentFactoryJob, FactoryJobStatus,
                                 check_quota, generate_blueprint)
 from app.models.agent import Agent, AgentModelConfig
 from app.models.user import User
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/factory", tags=["factory"])
 
@@ -280,8 +283,10 @@ async def review_training(job_id: str, data: ReviewIn,
             await db.execute(text(
                 "DELETE FROM agent_memories WHERE agent_id = :aid").bindparams(
                 aid=job.agent_id))
-        except Exception:
-            pass
+        except Exception as mem_err:
+            # 清除失败会让"被驳回员工"带着错误知识残留——必须可见
+            logger.error("驳回时清除培训记忆失败 job=%s agent=%s: %s",
+                         job_id, job.agent_id, mem_err, exc_info=True)
     await db.commit()
     return {"job_id": job_id, "status": job.status.value}
 
@@ -316,8 +321,9 @@ async def exam_ask(job_id: str, data: AskIn,
             lines = "\n".join(f"- {m.get('content', '')[:150]}" for m in mems[:6])
             messages.append({"role": "system",
                              "content": f"你在岗前培训中学到的要点：\n{lines}"})
-    except Exception:
-        pass
+    except Exception as mem_err:
+        logger.warning("验收考试记忆召回失败 agent=%s: %s", agent.id, mem_err,
+                       exc_info=True)
     # 知识库
     try:
         rag = await cost_optimized_rag(db, agent.company_id, str(agent.id),
@@ -325,8 +331,9 @@ async def exam_ask(job_id: str, data: AskIn,
         if rag.get("context_text"):
             messages.append({"role": "system",
                              "content": f"相关知识库：\n{rag['context_text'][:1500]}"})
-    except Exception:
-        pass
+    except Exception as kb_err:
+        logger.warning("验收考试知识库检索失败 agent=%s: %s", agent.id, kb_err,
+                       exc_info=True)
     messages.append({"role": "user", "content": data.question})
 
     gw = ModelGateway(db)

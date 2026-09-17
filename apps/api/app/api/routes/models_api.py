@@ -8,8 +8,17 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.model_gateway import PROVIDERS
 from app.models.agent import Model, ModelProviderType
+from app.models.user import User
 
 router = APIRouter(prefix="/models", tags=["models"])
+
+# 各 provider 对应的默认环境变量名（与 .env.example 保持一致）。
+# 这里只用于"密钥是否就位"的判断，永远不读取/返回密钥内容。
+PROVIDER_ENV_VARS: dict[str, str] = {
+    "openai_compat": "OPENAI_COMPAT_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+}
 
 
 class ModelIn(BaseModel):
@@ -19,6 +28,62 @@ class ModelIn(BaseModel):
     api_key_env: str | None = None
     model_id: str
     config: dict | None = {}
+
+
+@router.get("/diagnostics")
+async def diagnostics(db: AsyncSession = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    """模型配置就绪自检。
+
+    ## 为什么需要
+
+    改造前的冷启动断链：新建公司 → 系统里**没有任何 Model 记录** →
+    老板下达任务 → 运行时找不到可用模型 → 任务失败。
+    而前端没有任何地方提示"你还缺一步：配置模型和密钥"。
+
+    本接口让前端能明确告诉用户卡在哪一步。安全约束：
+    **只报告密钥是否存在（布尔），绝不返回密钥内容本身**。
+    """
+    import os
+
+    rows = list((await db.execute(select(Model))).scalars())
+    providers = []
+    for ptype, env_name in PROVIDER_ENV_VARS.items():
+        configured = [m for m in rows
+                      if m.provider_type.value == ptype]
+        providers.append({
+            "provider_type": ptype,
+            "default_env_var": env_name,
+            "key_present": bool(os.environ.get(env_name, "")
+                                or os.environ.get(f"{env_name}_FILE", "")),
+            "model_count": len(configured),
+        })
+
+    # 是否存在"至少一个模型 + 该 provider 的密钥已就位"的组合
+    ready_models = []
+    for m in rows:
+        env_name = m.api_key_env or PROVIDER_ENV_VARS.get(
+            m.provider_type.value, "")
+        if env_name and os.environ.get(env_name, ""):
+            ready_models.append(m.id)
+
+    missing_hint = ""
+    if not rows:
+        missing_hint = "还没有配置任何模型。请添加一个模型（推荐 OpenAI 兼容协议）。"
+    elif not ready_models:
+        names = "、".join(
+            sorted({m.api_key_env or PROVIDER_ENV_VARS.get(m.provider_type.value, "")
+                    for m in rows} - {""}))
+        missing_hint = (f"模型已登记但缺少密钥。请在 apps/api/.env 中设置 "
+                        f"{names} 后重启后端服务。")
+
+    return {
+        "model_count": len(rows),
+        "usable_model_ids": ready_models,
+        "ready": bool(ready_models),
+        "providers": providers,
+        "hint": missing_hint,
+    }
 
 
 @router.get("")

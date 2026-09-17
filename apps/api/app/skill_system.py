@@ -5,6 +5,10 @@ from typing import Any
 
 import httpx
 
+from app.core.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class BaseSkill(ABC):
     """Skill Plugin interface."""
@@ -152,7 +156,10 @@ class WebSearchSkill(BaseSkill):
                     return {"result": {"query": query, "backend": "ddgs",
                                        "results": results, "count": len(results)}}
             except Exception as e2:
-                pass
+                # 两个搜索后端都失败：这是"搜索无结果"与"搜索坏了"的分界，
+                # 必须区分开，否则排查时看不到到底是哪个后端挂了
+                logger.warning("搜索降级后端 ddgs 亦失败 query=%r: %s（原始错误: %s）",
+                               query[:80], e2, e)
             return {"result": {"query": query, "error": str(e), "results": []}}
 
 

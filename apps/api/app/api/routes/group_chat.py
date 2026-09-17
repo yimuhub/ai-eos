@@ -14,11 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.api.deps import get_current_user, get_db
+from app.core.logging_config import get_logger
 from app.db.base import Base
 from app.models.agent import Agent, Model
 from app.models.company import Company
 from app.models.user import User
 import re as _re2
+
+logger = get_logger(__name__)
 
 
 def _parse_text_tool_calls(content: str) -> list[dict]:
@@ -146,8 +149,9 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
     try:
         messages.append({"role": "system",
                          "content": get_public_doc_system_prompt(agent.role)})
-    except Exception:
-        pass
+    except Exception as doc_err:
+        logger.warning("群聊公文提示词注入失败 agent=%s: %s", agent.id, doc_err,
+                       exc_info=True)
     # Agent 专属文档风格（有技能用专属，无技能用通用格式）
     try:
         from app.models.skill import AgentSkill, Skill as SkillRow
@@ -161,8 +165,10 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
             f"【文档风格要求】使用「{style['style_name']}"
             + ("" if style["is_custom"] else "（该员工未配置专属风格技能，采用通用格式）")
             + "」：" + style["hint"]})
-    except Exception:
-        pass
+    except Exception as style_err:
+        # 之前静默吞掉，导致"专属风格不生效"永远查不出来
+        logger.warning("群聊文档风格注入失败 agent=%s: %s", agent.id, style_err,
+                       exc_info=True)
     # 知识库
     try:
         rag = await cost_optimized_rag(db, agent.company_id, str(agent.id),
@@ -170,8 +176,9 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
         if rag.get("context_text"):
             messages.append({"role": "system",
                              "content": f"相关知识库：\n{rag['context_text'][:2000]}"})
-    except Exception:
-        pass
+    except Exception as kb_err:
+        logger.warning("群聊知识库检索失败 agent=%s: %s", agent.id, kb_err,
+                       exc_info=True)
     # 历史发言（含其他 Agent）
     if history_lines:
         messages.append({"role": "system",
@@ -188,8 +195,8 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
     content = (llm.get("content") or "").strip()
     # agnes-2.5-flash 可能返回空 content 但有 tool_calls，走下方工具调用分支
     if not content and not (llm.get("tool_calls") or []):
-        import logging
-        logging.warning(f"[group_chat] agent={agent.name} empty content and no tool_calls")
+        logger.warning("群聊发言空内容且无工具调用 agent=%s topic=%s",
+                       agent.name, (topic or "")[:60])
     search_used = False
     tool_calls = llm.get("tool_calls") or []
     # agnes 等模型可能以文本形式输出 <tool_call>（无论是否有结构化字段），一律解析并剥离
@@ -246,8 +253,10 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
                             messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                              "content": str((r2.get("result") or r2))[:1500]})
                             executed = True
-                        except Exception:
-                            pass
+                        except Exception as tool_err:
+                            logger.warning("群聊续轮工具执行失败 tool=%s agent=%s: %s",
+                                           (tc.get("function") or {}).get("name"),
+                                           agent.id, tool_err, exc_info=True)
                     if not executed:
                         break
                     continue
@@ -266,8 +275,10 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
                                 for h in hits)
                             messages.append({"role": "user",
                                              "content": f"[搜索结果，请基于此总结]\n{summary}"})
-                        except Exception:
-                            pass
+                        except Exception as search_err:
+                            logger.warning("群聊搜索结果处理失败 tool=%s agent=%s: %s",
+                                           tc.get("function", {}).get("name"),
+                                           agent.id, search_err, exc_info=True)
                     if not clean or len(clean) < 20:
                         continue
                     content = clean
@@ -314,8 +325,8 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
             content += (f"\n\n📎 已生成交付文件：{gen['file_name']}"
                         f"（{gen['size']//1024}KB，见交付中心/交付文件夹）")
     except Exception as _doc_err:
-        import logging
-        logging.warning(f"[group_doc] generate failed: {_doc_err}")
+        logger.warning("群聊文档生成失败 agent=%s: %s", agent.id, _doc_err,
+                       exc_info=True)
 
     return {"text": content or "(未发言)", "search_used": search_used}
 

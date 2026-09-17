@@ -14,6 +14,10 @@ import os
 import platform
 from pathlib import Path
 
+from app.core.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 def get_platform() -> dict:
     """返回当前系统信息。"""
@@ -39,8 +43,10 @@ def scan_apps() -> list[dict]:
             apps = _scan_windows()
         elif p == "linux":
             apps = _scan_linux()
-    except Exception:
-        pass
+    except Exception as scan_err:
+        # 扫描失败会静默表现为"本机一个应用都没有"，用户无从判断是环境问题
+        logger.warning("扫描本机应用失败 platform=%s: %s", p, scan_err,
+                       exc_info=True)
     # 去重（同名保留第一个）
     seen, out = set(), []
     for a in sorted(apps, key=lambda x: x["name"].lower()):

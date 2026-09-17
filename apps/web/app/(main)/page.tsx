@@ -5,6 +5,8 @@ import { createPortal } from "react-dom";
 import { api, setActiveCompanyId } from "@/lib/api";
 import TeamGenModal from "@/components/TeamGenModal";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
+import OnboardingWizard from "@/components/OnboardingWizard";
+import { notify } from "@/components/Toast";
 import { TASK_STATUS_ZH, EVENT_TYPE_ZH, zh } from "@/lib/i18n";
 
 /* ============================================================
@@ -65,11 +67,29 @@ export default function DashboardPage() {
   // 创建新团队向导（共享组件）
   const [showTeamGen, setShowTeamGen] = useState(false);
 
+  // 冷启动向导：没有公司时不再白屏，而是给出可执行的三步引导
+  const [onboarding, setOnboarding] = useState(false);
+  const [bootError, setBootError] = useState("");
+
   useEffect(() => { setMounted(true); }, []);
 
   const load = useCallback(async () => {
-    const companies: Company[] = await api.get("/companies");
-    if (!companies.length) return;
+    // 原实现在这里没有 try/catch，且"没有公司"时直接 return，
+    // 结果是用户看到一片空白页且完全不知道发生了什么。
+    // 现在：明确区分"加载失败（可重试）"与"还没有公司（走引导向导）"。
+    let companies: Company[] = [];
+    try {
+      companies = await api.get<Company[]>("/companies");
+    } catch (e) {
+      setBootError(e instanceof Error ? e.message : "加载失败");
+      return;
+    }
+    setBootError("");
+    if (!companies.length) {
+      setOnboarding(true);
+      return;
+    }
+    setOnboarding(false);
     setCompanies(companies);
     // 拦截层已把激活公司排第一；若 localStorage 为空则初始化为第一项
     const cur = companies[0];
@@ -78,20 +98,28 @@ export default function DashboardPage() {
     }
     setCompany(cur);
     const cid = cur.id;
-    const d = await api.get(`/dashboard/${cid}`);
-    setDash(d);
+    try {
+      setDash(await api.get(`/dashboard/${cid}`));
+    } catch (e) {
+      // 仪表盘失败不应让整页空白，也不该静默
+      notify("error", e instanceof Error ? e.message : "加载仪表盘失败");
+    }
     try {
       const ov = await api.get(`/growth-center/departments-overview?company_id=${cid}`);
       setDeptGroups((ov.departments || []).map((dep: any) => ({
         dept_id: dep.dept_id, dept_name: dep.dept_name,
         agents: (dep.agents || []).map((a: any) => ({ id: a.id, name: a.name })),
       })));
-    } catch {}
+    } catch {
+      // 部门列表缺失只影响"按部门选人"，不阻塞主流程，保持为空
+    }
     try {
       const tasks = await api.get(`/tasks?company_id=${cid}`);
       setRunningTasks((Array.isArray(tasks) ? tasks : []).filter((t: any) =>
         ["TODO", "PLANNING", "RUNNING", "WAITING"].includes(t.status)));
-    } catch {}
+    } catch {
+      setRunningTasks([]);
+    }
   }, []);
 
   useEffect(() => {
@@ -128,11 +156,10 @@ export default function DashboardPage() {
       const attachNote = ntAttach.length
         ? `\n\n📎 附件：${ntAttach.map((a) => a.name).join("、")}`
         : "";
-      const r = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/task-dispatch/dispatch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({
+      // 改走统一 api 层：自动注入鉴权、超时、错误规范化（原先裸 fetch + 手工拼 token）
+      const data = await api.post<{ created_count?: number }>(
+        "/task-dispatch/dispatch",
+        {
           company_id: company?.id,
           title: ntForm.title.trim(),
           description: (ntForm.description || null)
@@ -140,73 +167,91 @@ export default function DashboardPage() {
           priority: ntForm.priority,
           target_type: "multi_agent_list",
           agent_ids: Array.from(picked),
-        }),
-      });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
-      setMsg(`✅ 已创建任务「${ntForm.title.trim()}」· 分发给 ${data.created_count} 名成员`);
+        },
+      );
+      notify("success", `已创建任务「${ntForm.title.trim()}」· 分发给 ${data?.created_count ?? picked.size} 名成员`);
       setShowCreate(false);
       setNtForm({ title: "", description: "", priority: "NORMAL" });
       setPicked(new Set()); setNtAttach([]);
       await load();
-    } catch (e: any) { setMsg(`❌ ${e.message || e}`); }
+    } catch (e: any) {
+      notify("error", e?.message || String(e));
+    }
     setCreating(false);
   }
 
   /* ---------- 运行/排队任务操作 ---------- */
   async function taskOp(tid: string, op: "pause" | "resume" | "stop") {
     const ep = { pause: "pause", resume: "resume", stop: "cancel" }[op];
-    await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/tasks/${tid}/${ep}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json",
-        Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-      body: JSON.stringify({ reason: op === "stop" ? "manual stop" : undefined }),
-    });
     const zhLabel = { pause: "已暂停（进度保留）", resume: "已恢复执行", stop: "已停止（成果保留）" };
-    setMsg(`✅ ${zhLabel[op]}`);
-    await load();
+    try {
+      // 关键修复：原实现 `await fetch(...)` 后**不看响应**就提示"✅ 已暂停"，
+      // 即使后端返回 403/500 也一样报喜——这是"系统会说谎"最典型的形态。
+      await api.post(`/tasks/${tid}/${ep}`,
+        op === "stop" ? { reason: "manual stop" } : undefined);
+      notify("success", zhLabel[op]);
+      await load();
+    } catch (e: any) {
+      notify("error", e?.message || String(e));
+    }
   }
 
   async function changePriority() {
     if (!taskSel.size) return;
     const qs = new URLSearchParams({ company_id: company?.id || "" });
     Array.from(taskSel).forEach((id) => qs.append("task_ids", id));
-    const r = await fetch(
-      `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/task-dispatch/running/priority?${qs.toString()}`,
-      { method: "PATCH",
-        headers: { "Content-Type": "application/json",
-          Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-        body: JSON.stringify({ priority: bulkPriority }) });
-    const data = await r.json();
-    setMsg(`✅ 已调整 ${data.updated} 个任务优先级为「${PRIORITY_META[bulkPriority]?.label}」`);
-    setTaskSel(new Set());
-    await load();
+    try {
+      const data = await api.patch<{ updated?: number }>(
+        `/task-dispatch/running/priority?${qs.toString()}`,
+        { priority: bulkPriority },
+      );
+      notify("success", `已调整 ${data?.updated ?? taskSel.size} 个任务优先级为「${PRIORITY_META[bulkPriority]?.label}」`);
+      setTaskSel(new Set());
+      await load();
+    } catch (e: any) {
+      notify("error", e?.message || String(e));
+    }
   }
 
   async function deleteSelected() {
     if (!taskSel.size) return;
-    await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/task-dispatch/delete`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json",
-        Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-      body: JSON.stringify({ task_ids: Array.from(taskSel) }),
-    });
-    setMsg(`🗑 已彻底删除 ${taskSel.size} 个任务`);
-    setTaskSel(new Set());
-    await load();
+    if (!confirm(`确认彻底删除这 ${taskSel.size} 个任务？\n其记忆、成果、执行记录将全部清除，且不可恢复。`)) return;
+    try {
+      await api.post("/task-dispatch/delete", { task_ids: Array.from(taskSel) });
+      notify("success", `已彻底删除 ${taskSel.size} 个任务`);
+      setTaskSel(new Set());
+      await load();
+    } catch (e: any) {
+      notify("error", e?.message || String(e));
+    }
   }
 
   /* ---------- 全局中断 ---------- */
   async function globalInterrupt() {
     setInterrupting(true);
-    const r = await fetch(
-      `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/task-dispatch/global-interrupt?company_id=${company?.id}&reason=manual`,
-      { method: "POST", headers: { Authorization: `Bearer ${localStorage.getItem("aieos_token")}` } });
-    const data = await r.json();
-    setMsg(`🛑 已中断 ${data.interrupted_count} 个运行中任务（记录保留）`);
-    setConfirmInterrupt(false);
-    await load();
-    setInterrupting(false);
+    try {
+      const data = await api.post<{ interrupted_count?: number }>(
+        `/task-dispatch/global-interrupt?company_id=${company?.id}&reason=manual`);
+      notify("success", `已中断 ${data?.interrupted_count ?? 0} 个运行中任务（记录保留）`);
+      setConfirmInterrupt(false);
+      await load();
+    } catch (e: any) {
+      notify("error", e?.message || String(e));
+    } finally {
+      setInterrupting(false);
+    }
+  }
+
+  /* ---------- 单任务彻底删除（原为裸 fetch 且忽略失败） ---------- */
+  async function deleteOne(tid: string, title: string) {
+    if (!confirm(`确认彻底删除任务「${title.slice(0, 25)}…」？\n其记忆、成果、执行记录将全部清除！`)) return;
+    try {
+      await api.post("/task-dispatch/delete", { task_ids: [tid] });
+      notify("success", "已彻底删除该任务");
+      await load();
+    } catch (e: any) {
+      notify("error", e?.message || String(e));
+    }
   }
 
   const prioBadge = (p: string) => {
@@ -230,6 +275,27 @@ export default function DashboardPage() {
 
   return (
     <div className="p-6 space-y-6 max-w-[1400px] mx-auto animate-fade-up">
+      {/* ===== 冷启动：没有公司时给出可执行的引导，而不是空白页 ===== */}
+      {onboarding && (
+        <OnboardingWizard
+          onDone={async () => {
+            setOnboarding(false);
+            await load();
+          }}
+        />
+      )}
+
+      {/* ===== 加载失败：说清原因并允许重试 ===== */}
+      {!onboarding && bootError && (
+        <div className="card card-static max-w-lg mx-auto text-center space-y-3 mt-10">
+          <div className="text-2xl">🔌</div>
+          <h2 className="font-medium">加载公司信息失败</h2>
+          <p className="text-sm" style={{ color: "var(--muted)" }}>{bootError}</p>
+          <button onClick={load} className="btn-primary">重试</button>
+        </div>
+      )}
+
+      {!onboarding && !bootError && (<>
       {/* 页头 */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
@@ -434,16 +500,7 @@ export default function DashboardPage() {
                     )}
                     <span title="停止（成果保留）" onClick={() => taskOp(t.id, "stop")}
                       className="w-6 h-6 rounded-md flex items-center justify-center text-xs hover:bg-orange-500/20 cursor-pointer">⏹</span>
-                    <span title="彻底删除" onClick={() => {
-                      if (confirm(`确认彻底删除任务「${t.title.slice(0, 25)}…」？\n其记忆、成果、执行记录将全部清除！`)) {
-                        fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/task-dispatch/delete`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json",
-                            Authorization: `Bearer ${localStorage.getItem("aieos_token")}` },
-                          body: JSON.stringify({ task_ids: [t.id] }),
-                        }).then(() => load());
-                      }
-                    }}
+                    <span title="彻底删除" onClick={() => deleteOne(t.id, t.title)}
                       className="w-6 h-6 rounded-md flex items-center justify-center text-xs hover:bg-red-500/20 text-red-400 cursor-pointer">🗑</span>
                   </span>
                 </div>
@@ -658,6 +715,7 @@ export default function DashboardPage() {
           </div>
         </div>, document.body
       )}
+      </>)}
     </div>
   );
 }

@@ -5,6 +5,9 @@
 - 排版规则（字号/页边距/行距规范）
 - 常见公文错误自检清单
 """
+from app.core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 PUBLIC_DOC_TEMPLATES = {
     "报告": """# 报告
@@ -250,6 +253,10 @@ async def get_bound_style(db, agent) -> dict | None:
         row = await db.get(DocStyle, agent.doc_style_id)
         if row:
             return {"name": row.name, "hint": row.hint}
-    except Exception:
-        pass
+    except Exception as style_err:
+        # 读不到专属风格时应回落通用格式；但失败原因必须可见，
+        # 否则用户会以为"我配的风格没生效"却查不到任何线索
+        logger.warning("读取 Agent 专属文档风格失败 agent=%s style_id=%s: %s",
+                       getattr(agent, "id", "?"), agent.doc_style_id,
+                       style_err, exc_info=True)
     return None
