@@ -12,6 +12,9 @@ dependencies = [
     "alembic>=1.14",
     "pydantic[email]>=2.10",
     "pydantic-settings>=2.6",
+    # env_loader 依赖它把 .env 注入 os.environ（此前漏声明，
+    # 导致"只在 .env 配密钥 → os.environ 取到空串"）
+    "python-dotenv>=1.0",
     "python-jose[cryptography]>=3.3",
     "passlib[bcrypt]>=1.7",
     "httpx>=0.28",
@@ -27,4 +30,29 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "aiosqlite>=0.20"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "aiosqlite>=0.20",
+    # 静态检查：把"未定义名"这类会让整块功能静默失效的问题拦在提交前
+    "pyflakes>=3.2",
+]
+
+# ---------------------------------------------------------------------------
+# pytest 配置
+#
+# 为什么只跑 tests/：仓库根目录的 ../tests/ 是改造前遗留的 28 个手工脚本，
+# 它们依赖 /tmp/aieos_token 与硬编码的真实数据库 UUID，只有本机特定环境
+# 才能运行（pytest 收集时直接报错）。见 ../tests/LEGACY_SCRIPTS.md。
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+addopts = "-q --strict-markers"
+markers = [
+    "requires_llm: 需要真实模型密钥才能运行的端到端用例（无密钥时自动跳过）",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:passlib.*",
+]

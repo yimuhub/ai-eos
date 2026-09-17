@@ -1,4 +1,14 @@
-"""Career & Promotion API (P3-05 + P3-06)."""
+"""Career & Promotion API (P3-05 + P3-06).
+
+## 改造说明（租户隔离）
+
+本模块改造前**所有端点都没有归属校验**：只要知道 agent_id / position_id /
+proposal_id，任何登录用户都能替他人公司创建职位、给他人 Agent 改任职、
+甚至直接审批生效一次晋升。因此这里统一补上归属断言。
+
+职位（CareerPosition）允许 `company_id is None` 表示"全局内置岗位"，
+这类岗位对所有人可读，但**可写的那部分必须属于自己公司**。
+"""
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -6,7 +16,9 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import (assert_agent_owned, assert_company_owned,
+                          get_current_user, get_db)
+from app.core.logging_config import get_logger
 from app.learning_engine import add_growth_event
 from app.models.agent import Agent
 from app.models.career import (AgentCareerRecord, CareerPosition,
@@ -15,11 +27,22 @@ from app.models.learning import GrowthEventType
 from app.models.skill_growth import AgentSkillNode
 from app.models.user import User
 
+logger = get_logger(__name__)
+
 router = APIRouter(prefix="/career", tags=["career"])
 
 
 def _id():
     return str(uuid.uuid4())
+
+
+async def _assert_position_readable(db: AsyncSession, user_id: str,
+                                    position: CareerPosition) -> None:
+    """职位可读判定：全局内置岗位（company_id 为空）人人可读，
+    公司自定义岗位必须属于自己。"""
+    if position.company_id is None:
+        return
+    await assert_company_owned(db, user_id, position.company_id)
 
 
 # ---------- 职位 ----------
@@ -39,6 +62,7 @@ async def create_position(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await assert_company_owned(db, user.id, company_id)
     p = CareerPosition(id=_id(), company_id=company_id,
                        **{k: v for k, v in data.model_dump().items()})
     db.add(p)
@@ -52,6 +76,7 @@ async def list_positions(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await assert_company_owned(db, user.id, company_id)
     q = await db.execute(select(CareerPosition).where(
         (CareerPosition.company_id == company_id) |
         (CareerPosition.company_id.is_(None))).order_by(CareerPosition.level))
@@ -75,12 +100,11 @@ async def join_position(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    a = await db.get(Agent, agent_id)
-    if not a:
-        raise HTTPException(404, "Agent not found")
+    a = await assert_agent_owned(db, user.id, agent_id)
     pos = await db.get(CareerPosition, position_id)
     if not pos:
         raise HTTPException(404, "position not found")
+    await _assert_position_readable(db, user.id, pos)
     cur = await _current_record(db, agent_id)
     if cur:
         raise HTTPException(409, f"已有现任职位：{cur.position_title}")
@@ -102,6 +126,7 @@ async def career_timeline(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await assert_agent_owned(db, user.id, agent_id)
     q = await db.execute(select(AgentCareerRecord).where(
         AgentCareerRecord.agent_id == agent_id).order_by(
         AgentCareerRecord.start_date))
@@ -160,6 +185,7 @@ async def create_trial(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await assert_agent_owned(db, user.id, agent_id)
     t = TrialAssignment(id=_id(), agent_id=agent_id,
                         target_position_id=target_position_id,
                         task_description=data.get("task_description"))
@@ -181,7 +207,11 @@ async def review_trial(
     user: User = Depends(get_current_user),
 ):
     t = await db.get(TrialAssignment, tid)
-    if not t or t.status != "IN_PROGRESS":
+    if not t:
+        raise HTTPException(404, "trial not found")
+    # 先校验归属再判断状态：否则 409/404 的差异会泄露"这个 id 是否存在"
+    await assert_agent_owned(db, user.id, t.agent_id)
+    if t.status != "IN_PROGRESS":
         raise HTTPException(409, "invalid trial state")
     from datetime import datetime, timezone
     t.status = "PASSED" if data.passed else "FAILED"
@@ -208,21 +238,22 @@ async def create_proposal(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    a = await db.get(Agent, agent_id)
-    if not a:
-        raise HTTPException(404, "Agent not found")
+    await assert_agent_owned(db, user.id, agent_id)
     if data.proposal_type not in ("PROMOTION", "TRANSFER", "DUAL_ROLE", "TEMPORARY"):
         raise HTTPException(400, "invalid proposal_type")
     cur = await _current_record(db, agent_id)
 
-    # Gap 分析快照存入提案
+    # Gap 分析快照存入提案。失败不阻断提案创建（缺口分析只是参考信息），
+    # 但不能静默——否则用户会看到一个空的 gap_analysis 却查不出原因。
     gap = {}
     try:
         gap_resp = await gap_analysis(agent_id, data.to_position_id, db, user)
         gap = {"missing_skills": gap_resp["missing_skills"],
                "training_plan": gap_resp["training_plan"]}
-    except HTTPException:
-        pass
+    except HTTPException as exc:
+        logger.warning("提案的缺口分析失败，gap_analysis 将为空 "
+                       "agent=%s target_position=%s: %s",
+                       agent_id, data.to_position_id, exc.detail)
 
     prop = CareerProposal(id=_id(), agent_id=agent_id,
                           proposal_type=data.proposal_type,
@@ -242,7 +273,10 @@ async def submit_proposal(
     user: User = Depends(get_current_user),
 ):
     prop = await db.get(CareerProposal, pid)
-    if not prop or prop.status != "DRAFT":
+    if not prop:
+        raise HTTPException(404, "proposal not found")
+    await assert_agent_owned(db, user.id, prop.agent_id)
+    if prop.status != "DRAFT":
         raise HTTPException(409, "只有 DRAFT 可提交")
     prop.status = "PROPOSED"
     await db.commit()
@@ -263,7 +297,10 @@ async def decide_proposal(
 ):
     from datetime import datetime, timezone
     prop = await db.get(CareerProposal, pid)
-    if not prop or prop.status != "PROPOSED":
+    if not prop:
+        raise HTTPException(404, "proposal not found")
+    await assert_agent_owned(db, user.id, prop.agent_id)
+    if prop.status != "PROPOSED":
         raise HTTPException(409, "只有 PROPOSED 可审批")
     if data.decision == "reject":
         prop.status = "REJECTED"
@@ -277,6 +314,12 @@ async def decide_proposal(
     # 批准 → 应用：结束当前任职，写入新履历
     a = await db.get(Agent, prop.agent_id)
     pos = await db.get(CareerPosition, prop.to_position_id)
+    # 原先这里直接访问 pos.id / a.company_id：目标职位被删或 Agent 已删
+    # 会抛 AttributeError，表现为 500 而不是可读的业务错误。
+    if not a:
+        raise HTTPException(404, "Agent not found")
+    if not pos:
+        raise HTTPException(409, "目标职位已被删除，提案无法生效")
     cur = await _current_record(db, prop.agent_id)
     if cur:
         cur.is_current = False

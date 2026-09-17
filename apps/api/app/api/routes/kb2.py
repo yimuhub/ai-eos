@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.core.logging_config import get_logger
 from app.kb_engine import (COST_PROFILES, cache_invalidate,
                            cost_optimized_rag)
 from app.kb_templates import SKILL_KB_TEMPLATES, list_templates
@@ -21,6 +22,8 @@ from app.knowledge_engine import _tokens
 from app.models.agent import Agent
 from app.models.knowledge import KBChunk, KBDocument, KBDocumentStatus
 from app.models.user import User
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/kb2", tags=["knowledge-p4"])
 
@@ -143,8 +146,11 @@ async def delete_doc(doc_id: str, db: AsyncSession = Depends(get_db),
     if doc.original_path and os.path.exists(doc.original_path):
         try:
             os.remove(doc.original_path)
-        except OSError:
-            pass
+        except OSError as rm_err:
+            # 删库成功但文件残留 → 磁盘上会留下"已删除文档"的内容，
+            # 属于数据泄漏面，必须留痕而不是静默
+            logger.warning("删除知识库原始文件失败 path=%s: %s",
+                           doc.original_path, rm_err)
     await db.delete(doc)
     await db.commit()
     cache_invalidate(cid)

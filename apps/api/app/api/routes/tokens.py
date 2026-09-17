@@ -7,10 +7,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.core.logging_config import get_logger
 from app.models.agent import Agent, Model
 from app.models.company import Company, Department
 from app.models.token_usage import PricingConfig, TokenUsage, new_id
 from app.models.user import User
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/tokens", tags=["tokens"])
 
@@ -163,18 +166,26 @@ async def _attach_names(db, rows, kind: str):
 
 
 def _parse_range(days: int | None, start: str | None, end: str | None):
+    """解析时间范围过滤条件。
+
+    无效的时间字符串此前被静默忽略——用户传了 `start=2026-13-45`，
+    系统会**当作没有过滤条件**返回全量数据，界面上看不出任何异常。
+    这里改为留痕；同时保留"非法值即忽略"的宽松行为，避免直接 500。
+    """
     conds = []
     if start:
         try:
             conds.append(TokenUsage.created_at >= datetime.fromisoformat(start))
-        except ValueError:
-            pass
+        except ValueError as exc:
+            logger.warning("用量查询的 start 参数不是合法时间，已忽略该过滤条件 "
+                           "start=%r: %s", start, exc)
     if end:
         try:
             e = datetime.fromisoformat(end)
             conds.append(TokenUsage.created_at <= e)
-        except ValueError:
-            pass
+        except ValueError as exc:
+            logger.warning("用量查询的 end 参数不是合法时间，已忽略该过滤条件 "
+                           "end=%r: %s", end, exc)
     if not conds and days:
         conds.append(TokenUsage.created_at >= _now_utc() - timedelta(days=days))
     return conds

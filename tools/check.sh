@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# AI-EOS 交付前自检门禁
+#
+# 一条命令跑完所有"出问题会很难查"的检查，任何一项失败即退出码非零。
+# 目的不是追求形式上的绿色，而是把这次审计暴露出的三类缺陷
+# （未定义变量 / 契约错配 / 失败静默）钉死在自动化里。
+#
+# 用法：
+#   ./tools/check.sh            # 全部检查
+#   ./tools/check.sh --fast     # 跳过较慢的测试套件，只做静态检查
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+API="$ROOT/apps/api"
+WEB="$ROOT/apps/web"
+PY="$API/.venv/bin/python"
+
+FAST=0
+[[ "${1:-}" == "--fast" ]] && FAST=1
+
+FAILED=0
+step() { printf '\n\033[1m▶ %s\033[0m\n' "$1"; }
+ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; FAILED=1; }
+
+if [[ ! -x "$PY" ]]; then
+  echo "找不到 $PY —— 请先在 apps/api 下创建 .venv 并安装依赖" >&2
+  exit 2
+fi
+
+# ---------------------------------------------------------------- 后端静态检查
+step "后端：未定义名 / 语法错误（pyflakes）"
+if OUT="$("$PY" -m pyflakes "$API/app" 2>&1 | grep -E 'undefined name|syntax error' || true)"; then
+  if [[ -z "$OUT" ]]; then ok "无未定义名"; else bad "存在未定义名："; echo "$OUT"; fi
+else
+  bad "pyflakes 不可用（pip install pyflakes）"
+fi
+
+step "后端：应用可导入 + OpenAPI 可生成"
+IMPORT_PROBE='
+import app.main as m
+print(len(m.app.openapi()["paths"]), "条路径")
+'
+if OUT="$(cd "$API" && "$PY" -c "$IMPORT_PROBE" 2>&1)"; then
+  ok "导入成功（${OUT}）"
+else
+  bad "应用无法导入："; echo "$OUT"
+fi
+
+step "后端：SQLAlchemy mapper 可配置"
+MAPPER_PROBE='
+import app.models
+from sqlalchemy.orm import configure_mappers
+configure_mappers()
+print("ok")
+'
+if OUT="$(cd "$API" && "$PY" -c "$MAPPER_PROBE" 2>&1)"; then
+  ok "mapper 配置成功"
+else
+  bad "mapper 配置失败："; echo "$OUT"
+fi
+
+# ---------------------------------------------------------------- 契约
+step "前后端接口契约（404 / 405 门禁）"
+if OUT="$(cd "$API" && "$PY" "$ROOT/tools/check_api_contract.py" --strict 2>&1)"; then
+  ok "契约一致"
+  grep -E '动态拼接' <<<"$OUT" && true
+else
+  bad "存在接口契约不匹配："; echo "$OUT"
+fi
+
+# ---------------------------------------------------------------- 前端
+step "前端：TypeScript 类型检查（strict）"
+if [[ -x "$WEB/node_modules/.bin/tsc" ]]; then
+  if OUT="$(cd "$WEB" && ./node_modules/.bin/tsc --noEmit 2>&1)"; then
+    ok "0 个类型错误"
+  else
+    bad "存在类型错误："; echo "$OUT" | head -40
+  fi
+else
+  printf '  \033[33m－\033[0m 跳过（未安装 node_modules）\n'
+fi
+
+# ---------------------------------------------------------------- 测试
+if [[ $FAST -eq 0 ]]; then
+  step "测试套件（离线、可重复）"
+  if OUT="$(cd "$API" && "$PY" -m pytest 2>&1 | tail -3)"; then
+    ok "$(echo "$OUT" | grep -E 'passed|failed' | tail -1)"
+  else
+    bad "测试未通过："; echo "$OUT"
+  fi
+fi
+
+# ---------------------------------------------------------------- 汇总
+printf '\n'
+if [[ $FAILED -eq 0 ]]; then
+  printf '\033[32m全部检查通过。\033[0m\n'
+else
+  printf '\033[31m存在未通过的检查项，请勿直接交付。\033[0m\n'
+fi
+exit $FAILED
