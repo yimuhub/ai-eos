@@ -1,165 +1,201 @@
-# AI-EOS 人工智能企业操作系统
+<div align="center">
 
-> 数字员工工作平台 —— 创建 AI 公司、雇佣数字员工、下达目标，系统自动拆解任务、多 Agent 并行执行、汇总成果。
+# 🏢 AI-EOS
 
-## 当前状态
+**The AI-Native Enterprise Operating System — Found an AI Company, Hire Digital Employees, Delegate Work**
 
-代码已实现到 **Phase 3**（Agent 学习成长 / 绩效 / 职业发展 / Computer Agent 均已落地），
-**不是** Phase 1 MVP。文档此前长期停留在 Phase 1，本文件已按实测数据校正。
+[![Phase](https://img.shields.io/badge/phase-Phase%203%20Complete-success.svg?style=flat-square)](#-latest-phase-3--2026-10-14-hardening)
+[![License: BSL 1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg?style=flat-square)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.12+-green.svg?style=flat-square)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688.svg?style=flat-square)](https://fastapi.tiangolo.com)
+[![Next.js](https://img.shields.io/badge/frontend-Next.js%2014-black.svg?style=flat-square)](https://nextjs.org/)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20Docker-blueviolet.svg?style=flat-square)](#-quick-start)
+[![Tests](https://img.shields.io/badge/tests-158%20cases-informational.svg?style=flat-square)](#-testing)
 
-| 项目 | 实测值 |
-|------|--------|
-| 后端 | 21,554 行 Python / 135 个文件 |
-| 前端 | 17,738 行 TS/TSX / 34 个一级业务页面 |
-| API | **309 条路径 / 354 个端点** |
-| 数据表 | **94 张** |
-| 数据库迁移 | 28 个 Alembic 版本 |
-| 测试 | **158 个用例**（离线可重复，含 8 类护栏） |
-| 端到端 | **38 项断言**（真实进程 + 本地假模型，无需密钥） |
+<p align="center">
+  <b>One Command. A Whole Company at Work.</b><br>
+  <i>一声令下，全公司为你开工</i>
+</p>
 
-> **完成度说明**：功能广度已经很大，工程质量已完成一轮系统性补齐
-> （9 处未定义变量、28 处静默吞异常、11 处接口契约错配、12 处跨租户越权、
-> 30+ 处裸 fetch 收口，并重建测试体系、端到端试跑与交付门禁）。
-> 详见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
+**English** • [简体中文说明](README_ZH.md)
 
-## 文档导航
+[✨ Features](#-core-features) • [🚀 Quick Start](#-quick-start) • [🏗️ Architecture](#-system-architecture) • [🧪 Testing](#-testing) • [📦 Latest](#-latest-phase-3--2026-10-14-hardening) • [📜 License](#-license--copyright-terms)
 
-| 文档 | 内容 |
-|------|------|
-| [INTRODUCTION.md](INTRODUCTION.md) | 系统介绍：产品能力总览（从这里开始了解） |
-| [DEVELOPMENT.md](DEVELOPMENT.md) | 开发文档：架构 / 目录 / 数据模型 / API / 模块实现 / 踩坑记录 |
-| [UPGRADE_NOTES.md](UPGRADE_NOTES.md) | **工程质量改造记录**：改了什么、为什么改、如何验证 |
-| [AI_EOS_DEVELOPMENT_CONSTITUTION.md](AI_EOS_DEVELOPMENT_CONSTITUTION.md) | 开发宪法：八条强制规则 |
-| docs/ | 详细设计文档（架构 / Schema / API / Runtime / 测试报告等） |
+</div>
 
-## 技术栈
+---
 
-- **前端**：Next.js 14（App Router）+ TypeScript（strict）+ Tailwind CSS
-- **后端**：Python + FastAPI + SQLAlchemy 2.x（async）+ Alembic
-- **数据库**：PostgreSQL 16（Docker）；测试用 SQLite（`aiosqlite`），无需外部依赖
-- **缓存**：Redis 7（已部署，Phase 2 启用）
-- **模型网关**：Provider Adapter 插件化（OpenAI 兼容 / Anthropic / Gemini）
+## 💡 Why AI-EOS?
 
-## 快速启动
+AI chatbots answer questions — but the work still lands on your desk. Meanwhile:
 
-### 前置要求
+1. **Chatbots don't do work**: They produce text; you still execute, follow up, and coordinate everything yourself.
+2. **Real teams are expensive**: A small business owner can't hire a research team, a content team, and an ops team just to move faster.
+3. **Agent tools are single-threaded**: Most "AI agent" products are one prompt box with no organization, no division of labor, no audit trail — you can't trust them with real work.
 
-- Python 3.11+、Node.js 18+
-- Docker（用于 PostgreSQL）
+**AI-EOS is not a chatbot. It's a digital-employee work platform.** You found an AI company, hire digital employees (Agents) into departments, give each one a role, a model, and skills — then issue a task. A CEO agent decomposes it, dispatches subtasks to employees working in parallel, lets them discuss, and consolidates the results. You watch the whole process live, and can pause, intervene, or take over at any moment.
 
-### 1. 启动数据库
+---
 
-```bash
-docker compose -f docker/docker-compose.yml up -d
+## ✨ Core Features
+
+### 1. 🏢 Run It Like a Real Company
+- **Companies → Departments → Employees**: a clear org tree, just like a real business.
+- Every employee is a full profile: name, title, department, manager, persona (system prompt), and one of 6 states (idle / working / paused / error / disabled / online).
+- **Employee lifecycle**: hiring from templates, training proposals with approval & rollback, performance reviews, promotions, transfers, and offboarding handover.
+
+### 2. 🤖 CEO Task Orchestration
+- Issue one task from the Command Center — the CEO agent **decomposes it, dispatches subtasks in parallel, and consolidates a final report**.
+- Batch dispatch to a single agent, a list, a whole department, or the entire company; batch delete, batch reprioritize, and one-click global interrupt.
+- **Failed tasks are retryable** (`POST /tasks/{id}/retry`); pause actually resumes from checkpoints; stuck tasks self-heal on restart.
+
+### 3. 👥 AI Meeting System
+- Multi-round meetings with user interjection, auto-generated minutes, and action items that convert into tasks with one click.
+
+### 4. 🖥️ Computer Agent (Real Desktop Automation)
+- Takes real screenshots, types and clicks for real via a guarded sandbox: binary allowlist, path sandboxing, dry-run by default for destructive commands.
+
+### 5. 🔌 Model Gateway with Failover & Metering
+- **Primary → secondary → fallback** automatic failover across providers (OpenAI-compatible, Anthropic, Gemini — plus a plugin directory for more).
+- **Six-dimensional token metering** (company / department / agent / project / task / scenario) with cost snapshots — the raw material for chargeback and pricing.
+
+### 6. 🧠 Knowledge Base, Workflow Builder & Automation
+- Knowledge base with retrieval over your documents; a drag-and-drop **workflow canvas** (nodes, edges, run with live polling); an automation engine with scheduled triggers.
+
+### 7. 🛡️ Security & Tenancy Done Seriously
+- Login rate limiting (Redis-backed), password policy, bcrypt hashing, **refresh-token rotation with revocation**, and 404-instead-of-403 on authorization failures to prevent tenant ID enumeration.
+- Capability × role matrix as a single source of truth; per-route ownership checks.
+
+### 8. 🎭 Onboarding for Humans
+- A 3-step wizard (about 1 minute), a **keyless demo mode** to try before configuring models, Chinese actionable error messages, and a ⌘K command palette with pinyin search.
+
+---
+
+## 🏗️ System Architecture
+
+```mermaid
+flowchart TD
+    subgraph UI["Presentation Layer (Next.js 14 + TypeScript, strict)"]
+        Web["🖥️ Command Center Web UI"]
+        Palette["⌘K Command Palette"]
+    end
+
+    subgraph API["API Layer (FastAPI + SQLAlchemy Async)"]
+        Router["REST Routers (354 endpoints)"]
+        Auth["Auth / RBAC / Multi-tenancy"]
+        Gateway["Model Gateway (failover + metering)"]
+    end
+
+    subgraph Engines["Business Engines"]
+        Orchestrator["CEO Orchestrator"]
+        Runtime["Agent Runtime"]
+        Workflow["Workflow Engine"]
+        Meetings["Meeting Engine"]
+        Computer["Computer Agent"]
+        Automation["Automation Engine"]
+    end
+
+    subgraph Storage["Persistence Layer"]
+        DB[("PostgreSQL 16 / SQLite")]
+        Redis[("Redis 7")]
+        Files["Storage (artifacts / uploads)"]
+    end
+
+    UI --> API
+    API --> Engines
+    Engines --> Storage
 ```
 
-### 2. 后端
+**Scale (measured from source)**: backend ~21,500 lines / 135 files / 354 endpoints / 94 tables / 28 Alembic migrations; frontend ~17,700 lines / 34 top-level pages; 158 backend test cases.
+
+---
+
+## 🚀 Quick Start
+
+### System Requirements
+- **Python**: 3.12+
+- **Node.js**: 18+ (frontend)
+- **OS**: macOS / Linux / Windows
+- **Optional**: PostgreSQL 16 + Redis 7 (Docker compose covers both; SQLite works out of the box)
+
+### Local Setup
 
 ```bash
+# 1. Clone
+git clone https://github.com/yimuhub/ai-eos.git
+cd ai-eos
+
+# 2. Configure (copy the template and fill in your model API keys)
+cp .env.example apps/api/.env
+
+# 3. Backend
 cd apps/api
+uv sync
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8001
 
-# 安装依赖
-uv sync                     # 或：python -m venv .venv && .venv/bin/pip install -e .
-
-# 配置环境变量（必须！见下方说明）
-cp ../../.env.example .env
-# 编辑 apps/api/.env，至少填好 DATABASE_URL / JWT_SECRET / 模型密钥
-
-# 建表并启动
-uv run alembic upgrade head
-uv run uvicorn app.main:app --port 8000 --reload
-```
-
-> **关于密钥**：模型密钥写在 `apps/api/.env`（键名如 `OPENAI_COMPAT_API_KEY`）。
-> 改造前的代码只读系统环境变量、从不加载 `.env`，会让密钥取到空串并报 401；
-> 现已修复为统一从 `.env` 加载。注意**真实系统环境变量的优先级更高**——
-> 这是有意设计，避免生产环境被仓库里的文件误改。
-
-### 3. 前端
-
-```bash
+# 4. Frontend (new terminal)
 cd apps/web
 npm install
-npm run dev          # http://localhost:3000
+npm run dev
 ```
 
-### 4. 创建账号
+Open **`http://localhost:3000`**, then **register an account on the login page** (no preset accounts — the first registration is yours).
 
-**没有预置账号**，请直接在登录页注册（用户名 ≥ 2 位，密码 ≥ 8 位且需同时含字母和数字）。
+> 💡 No API key yet? The onboarding wizard offers a **keyless demo mode** (one demo employee + one sample task) so you can feel the product before configuring any model.
 
-> 旧版 README 让用 `boss@aieos.dev` / `Passw0rd!` 登录 —— 那套账号在整个代码库中
-> 从未被创建，属文档层面的历史遗留，现已删除该说明。
+### 📦 Portable Launchers (Double-Click)
 
-首次登录后会看到**三步引导向导**：创建 AI 公司 → 配置模型 → 生成团队。
+- **macOS**: double-click `packaging/start-mac.sh` (installs deps on first run, snapshots `data/` before start)
+- **Windows**: double-click `packaging/start-win.bat`
 
-### 5. 界面使用要点
-
-系统有 35 个页面。**不用在侧边栏里逐级找**：
-
-| 快捷键 | 作用 |
-| --- | --- |
-| `⌘K` / `Ctrl+K` | 打开全局搜索，按标题、说明、英文名或口语说法直达任意页面 |
-| `↑` `↓` | 在搜索结果中移动选择 |
-| `↵` | 打开选中项 |
-| `Esc` | 关闭弹窗 |
-
-侧边栏按使用动线分为五组（指挥中枢 / 组织与智能体 / 协作执行 / 知识与资产 / 成长与治理），
-首次进入只展开你当前所在的分组；鼠标悬停任意菜单或分组可看到它"为什么存在"的一句话说明。
-
-所有破坏性操作都会弹出一致的确认框，并**逐条列出会失去什么**；
-其中不可恢复的操作（删除公司、批量删除员工/任务、删除项目）需要逐字输入确认词
-——这是"手滑"和"确认"之间的真实区别。
-
-## 验证与测试
-
-### 交付前自检（推荐）
-
-一条命令跑完全部检查，不需要启动服务、不需要模型密钥：
+### 🐳 Docker
 
 ```bash
-./tools/check.sh
+cd docker && docker compose up -d
 ```
 
-覆盖：后端静态检查（未定义名 / 语法）→ 应用与 OpenAPI 可生成 → SQLAlchemy mapper 可配置 →
-前后端接口契约（404 / 405 门禁）→ 前端 TypeScript strict 类型检查 → 前端 ESLint →
-测试套件 → **端到端主链路试跑**。**任一失败即非零退出**，可直接接进 CI。
+---
 
-> 端到端试跑起的是**本地假 OpenAI 兼容模型服务**，因此不需要任何真实密钥。
-> 它证明的是「链路通、失败会出声、记账正确」；配好 `.env` 里的真实密钥后
-> 用同一脚本再跑一次，即可验证产出质量。
-
-### 分别运行
+## 🧪 Testing
 
 ```bash
-# 后端测试（158 个用例，每会话独立临时 SQLite，不碰真实库）
-cd apps/api && .venv/bin/python -m pytest tests/ -q
-
-# 端到端主链路试跑（真实进程 + 假模型，无需密钥）
-python tools/e2e_smoke.py
-
-# 前端类型检查与 lint
-cd apps/web && npx tsc --noEmit && npx eslint app components lib
-
-# 前后端接口契约（独立运行，便于定位具体错配）
-cd apps/api && .venv/bin/python ../../tools/check_api_contract.py --strict
+cd apps/api && uv run pytest        # 158 backend test cases
+cd apps/web && npm run test          # vitest (frontend)
 ```
 
-> 测试里除了功能用例，还有 **8 类护栏**（`tests/test_code_quality.py` 等）：
-> 禁止原生 `confirm/alert`、要求每个页面都有入口、导航不得有死链、
-> **每个 DELETE 端点必须有归属校验**、**前端不得出现裸 fetch / 硬编码地址 / 手工取 token**。
-> 这类问题编译器和 lint 都拦不住，但会实实在在地让产品显得不专业 ——
-> 每类都已反向验证：注入违规代码会立刻让自检变红。
+> ⚠️ When running `test_auth.py`, **do not start a local Redis** — the test asserts on the in-memory rate-limit dict, and a live Redis would route limiting through the Redis path instead.
 
-> 仓库根目录的 `tests/` 是**历史手工脚本**，依赖 `/tmp` 临时文件与硬编码 UUID，无法在
-> pytest 下运行。它们已从测试收集中排除，说明见 [tests/LEGACY_SCRIPTS.md](tests/LEGACY_SCRIPTS.md)。
-> 当前测试套件位于 `apps/api/tests/`。
+---
 
-## 路线图
+## 📦 Latest: Phase 3 + 2026-10-14 Hardening
 
-- ✅ **Phase 1**：AI 公司基础系统（组织 / Agent / 模型 / 技能 / 任务 / 协同 / 资产 / 管控）
-- ✅ **Phase 2**：AI 会议系统、工作流引擎、任务依赖 DAG、全过程回放
-- ✅ **Phase 3**：Agent 学习成长、绩效体系、职业发展、Computer Agent
-- ✅ **工程质量（本轮）**：可靠性改造完成一轮 —— 端到端主链路试跑、
-  12 处跨租户越权修复、度量体系、前端数据层与类型统一、schema 自动补列
-- 🚧 **下一步**：用真实密钥重跑一次端到端验证产出质量；接入多成员角色
-  （矩阵已就位，当前仅 OWNER 可达）；是否收敛功能广度做深度（产品决策）
+**Phase 3** delivered the agent growth system (learning, performance reviews, skill marketplace, external agent onboarding, Computer Agent).
+
+The **2026-10-14 hardening pass** (full report in `CHANGELOG.md`) fixed every P0 from an independent five-perspective code review:
+
+- 🔁 Task retry endpoint, true resume-from-checkpoint, stuck-task self-healing, per-type timeouts (no more 600s death line)
+- 🔌 Model gateway circuit breaker + cooldown, failover logging, failure-aware metering
+- 🔑 Refresh-token rotation with revocation, Redis-backed login rate limiting, AST-level silent-exception guard
+- 🧩 Real plugin loading for `plugins/skills/` and `plugins/providers/`
+- 📦 Fixed portable launchers, `.env.example`, backup runbook, production-ready Docker compose
+- ⚖️ Licensed under **BSL 1.1**
+
+---
+
+## 📜 License & Copyright Terms
+
+- **Copyright Entity & Licensor**: 山东阗言密语寅卯辰文化传播有限公司
+- **License**: **Business Source License 1.1 (BSL 1.1 / BUSL-1.1)**
+
+### 📄 Commercial Terms & Use Grant
+- 🎁 **Free tier**: personal learning, research, non-commercial use, personal creator workflows, internal company evaluation, and **any entity whose direct commercial value from the software is below RMB ¥100,000 in any consecutive 12-month period** — 100% free, no authorization needed.
+- 💼 **Commercial licensing**: usage at or above RMB ¥100,000 of direct commercial value in 12 months requires a commercial license (free registration at `yimu@hyipf.com` or tiered agreements available).
+- 🔄 **Automatic open-source conversion**: each version automatically converts to **Apache License 2.0** four years after its release date.
+
+For full legal terms, read [LICENSE](LICENSE).
+
+---
+
+<div align="center">
+  <sub>Copyright © 2026 山东阗言密语寅卯辰文化传播有限公司 · All rights reserved.</sub>
+</div>
