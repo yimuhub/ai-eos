@@ -60,9 +60,10 @@
 
 ### 交付运维（运营 P0/P1）
 
-- **LICENSE**：BSL 1.1（BUSL-1.1）——Licensor 山东阗言密语寅卯辰文化传播有限公司；
-  免费层含个人学习/研究/非商业/个人自媒体/企业内评/连续 12 个月直接商业价值 < 10 万元；
-  ≥10 万需商业授权（免费登记 yimu@hyipf.com）；Change Date 2030-10-14（满 4 年转 Apache-2.0）；
+- **LICENSE**：BSL 1.1（BUSL-1.1）——Licensor eos.hyipf.com（2026-10-14 晚由
+  山东阗言密语寅卯辰文化传播有限公司变更）；免费层：个人学习/研究、非商业用途、
+  团队规模不超过 3 人的团队内部使用；超 3 人使用或云端/公网/SaaS 部署须商业授权
+  （登记 eos@hyipf.com）；Change Date 2030-10-14（满 4 年转 Apache-2.0）；
   对外称 source-available；`pyproject.toml` / `package.json` 同步标识
 - 打包说明：账号三处收敛为「首次使用请在登录页注册」（删弱口令节）；`rm -f data/aieos.db` 改为先备份再重建；
   Python 要求更正为 3.12+

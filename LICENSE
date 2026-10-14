@@ -9,11 +9,11 @@ License text copyright (c) 2024 MariaDB plc, All Rights Reserved.
 Parameters
 ================================================================================
 
-Licensor:             山东阗言密语寅卯辰文化传播有限公司
+Licensor:             eos.hyipf.com
 
 Licensed Work:        AI-EOS（AI 企业操作系统 / 数字员工平台）
                       本仓库中的全部源代码。
-                      Copyright (c) 2026 山东阗言密语寅卯辰文化传播有限公司。
+                      Copyright (c) 2026 eos.hyipf.com.
                       All rights reserved.
 
 Additional Use Grant: 在遵守本 License 其他条款的前提下，Licensor 额外授予您
@@ -22,25 +22,21 @@ Additional Use Grant: 在遵守本 License 其他条款的前提下，Licensor �
 
                       1. 个人学习、研究；
                       2. 非商业用途；
-                      3. 个人自媒体创作；
-                      4. 企业内部评估；
-                      5. 任何主体（个人或组织）因使用 Licensed Work 获得的连续
-                         12 个月直接商业价值低于人民币 100,000 元（壹拾万元整）。
+                      3. 团队规模不超过 3 人的团队内部使用。
 
-                      超出上述范围的生产使用（包括但不限于连续 12 个月直接商业
-                      价值 ≥ 人民币 100,000 元），须另行获得 Licensor 的商业授权。
-                      商业授权可免费登记（联系 yimu@hyipf.com），亦可采用阶梯定价，
-                      具体以 Licensor 公布的方案为准。
+                      超出上述范围的使用，包括但不限于：(a) 团队规模超过 3 人
+                      使用 Licensed Work；(b) 将 Licensed Work 部署于云端/公网
+                      服务器，或以 SaaS 形式对外提供服务；须另行获得 Licensor
+                      的商业授权。商业授权登记请联系 eos@hyipf.com。
 
                       (English summary: You may use the Licensed Work in production
-                      for personal learning and research, non-commercial use,
-                      personal self-media creation, internal enterprise evaluation,
-                      and any use where the direct commercial value attributable to
-                      the Licensed Work is less than RMB 100,000 in any consecutive
-                      12-month period. Production use beyond this scope requires a
-                      separate commercial license from the Licensor; free
-                      registration is available via yimu@hyipf.com, and tiered
-                      pricing options may apply.)
+                      for personal learning and research, non-commercial use, and
+                      internal use by teams of no more than 3 people. Use beyond
+                      this scope — including use by teams larger than 3 people,
+                      or deploying the Licensed Work on cloud/public servers or
+                      offering it as a SaaS service — requires a separate commercial
+                      license from the Licensor; to register for a commercial
+                      license, contact eos@hyipf.com.)
 
 Change Date:          2030-10-14
                       （以实际发布日起算：Licensed Work 的每一个版本，自其首次
@@ -50,7 +46,7 @@ Change Date:          2030-10-14
 Change License:       Apache License, Version 2.0
 
 For information about alternative licensing arrangements for the Licensed Work,
-please contact: yimu@hyipf.com
+please contact: eos@hyipf.com
 
 Notice
 
@@ -138,10 +134,10 @@ under an Open Source License, as stated in this License.
 
 - 本项目采用 Business Source License 1.1（SPDX 标识：BUSL-1.1），对外称
   "source-available"（源码可见）。BSL 1.1 不是 OSI 认证的开源许可证。
-- 免费层：个人学习、研究、非商业用途、个人自媒体创作、企业内部评估，以及
-  任何主体连续 12 个月直接商业价值 < 人民币 10 万元，均可免费使用（含生产使用）。
-- 连续 12 个月直接商业价值 ≥ 人民币 10 万元：须获得商业授权；可免费登记
-  （联系 yimu@hyipf.com），亦可阶梯定价。
+- 免费层：个人学习、研究；非商业用途；团队规模不超过 3 人的团队内部使用。
+- 超出免费层范围的使用，包括团队规模超过 3 人使用，或将本软件部署于云端/
+  公网服务器、以 SaaS 形式对外提供服务：须获得商业授权；商业授权登记请联系
+  eos@hyipf.com。
 - 每个版本自首次公开发布之日起满 4 年，自动转为 Apache License 2.0。
 - 本许可不授予任何商标权；"AI-EOS" 等商标需另行注册/授权。
-- 许可文本的法律问题请咨询律师；商业授权事宜联系 yimu@hyipf.com。
+- 许可文本的法律问题请咨询律师；商业授权事宜联系 eos@hyipf.com。

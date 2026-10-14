@@ -147,12 +147,28 @@ npm run dev
 
 - **macOS**：双击 `packaging/start-mac.sh`（首次自动装依赖，启动前自动快照 `data/`）
 - **Windows**：双击 `packaging/start-win.bat`
+- **Linux**：终端执行 `./packaging/start-linux.sh`（与 macOS 同标准：自动装依赖、快照 `data/`、日志追加）
 
 ### 🐳 Docker
 
 ```bash
 cd docker && docker compose up -d
 ```
+
+### 🌐 服务器一键部署
+
+在全新的 Linux 服务器上（Ubuntu / Debian / CentOS / Rocky / Alpine）：
+
+```bash
+git clone https://github.com/yimuhub/ai-eos.git
+cd ai-eos
+chmod +x 服务器一键部署.sh && ./服务器一键部署.sh
+```
+
+脚本会自动安装系统依赖、拉取代码（仓库是私有的——请提前准备好 GitHub personal access token）、
+配置后端（`uv sync`、自动生成带随机 `JWT_SECRET` 的 `.env`、`alembic upgrade head`）与前端
+（`npm install && npm run build`），然后注册并启动 `ai-eos-api` / `ai-eos-web` 两个 systemd 服务。
+完成后打开 `http://<服务器IP>:8000` 即可使用。
 
 ---
 
@@ -184,12 +200,12 @@ cd apps/web && npm run test          # 前端 vitest
 
 ## 📜 许可与版权说明
 
-- **版权方与 Licensor**：山东阗言密语寅卯辰文化传播有限公司
+- **版权方与 Licensor**：eos.hyipf.com
 - **许可证**：**Business Source License 1.1（BSL 1.1 / BUSL-1.1）**
 
 ### 📄 商业条款与使用授权
-- 🎁 **免费层**：个人学习、研究、非商业用途、个人自媒体创作、企业内部评估，以及**任何主体连续 12 个月直接商业价值低于人民币 10 万元**——完全免费，无需授权。
-- 💼 **商业授权**：连续 12 个月直接商业价值达到或超过人民币 10 万元，需获得商业授权（可免费登记 `yimu@hyipf.com`，亦可阶梯定价）。
+- 🎁 **免费层**：个人学习、研究；非商业用途；以及**团队规模不超过 3 人的团队内部使用**——完全免费，无需授权。
+- 💼 **商业授权**：超出免费层范围的使用，包括**团队规模超过 3 人使用**，或**部署于云端/公网服务器、以 SaaS 形式对外提供服务**，需获得商业授权（登记请联系 `eos@hyipf.com`）。
 - 🔄 **自动转开源**：每版发布满 4 年，自动转为 **Apache License 2.0**。
 
 完整法律文本请阅读 [LICENSE](LICENSE)。
@@ -197,5 +213,5 @@ cd apps/web && npm run test          # 前端 vitest
 ---
 
 <div align="center">
-  <sub>Copyright © 2026 山东阗言密语寅卯辰文化传播有限公司 · All rights reserved.</sub>
+  <sub>Copyright © 2026 eos.hyipf.com · All rights reserved.</sub>
 </div>

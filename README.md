@@ -147,12 +147,25 @@ Open **`http://localhost:3000`**, then **register an account on the login page**
 
 - **macOS**: double-click `packaging/start-mac.sh` (installs deps on first run, snapshots `data/` before start)
 - **Windows**: double-click `packaging/start-win.bat`
+- **Linux**: run `./packaging/start-linux.sh` in a terminal (same standard as macOS: auto-installs deps, snapshots `data/`, appends logs)
 
 ### 🐳 Docker
 
 ```bash
 cd docker && docker compose up -d
 ```
+
+### 🌐 Server One-Click Deployment
+
+On a fresh Linux server (Ubuntu / Debian / CentOS / Rocky / Alpine):
+
+```bash
+git clone https://github.com/yimuhub/ai-eos.git
+cd ai-eos
+chmod +x 服务器一键部署.sh && ./服务器一键部署.sh
+```
+
+The script installs system dependencies, pulls the code (the repo is private — have a GitHub personal access token ready), sets up the backend (`uv sync`, auto-generated `.env` with a random `JWT_SECRET`, `alembic upgrade head`) and the frontend (`npm install && npm run build`), then registers and starts the `ai-eos-api` / `ai-eos-web` systemd services. When finished, open `http://<server-ip>:8000`.
 
 ---
 
@@ -184,12 +197,12 @@ The **2026-10-14 hardening pass** (full report in `CHANGELOG.md`) fixed every P0
 
 ## 📜 License & Copyright Terms
 
-- **Copyright Entity & Licensor**: 山东阗言密语寅卯辰文化传播有限公司
+- **Copyright Entity & Licensor**: eos.hyipf.com
 - **License**: **Business Source License 1.1 (BSL 1.1 / BUSL-1.1)**
 
 ### 📄 Commercial Terms & Use Grant
-- 🎁 **Free tier**: personal learning, research, non-commercial use, personal creator workflows, internal company evaluation, and **any entity whose direct commercial value from the software is below RMB ¥100,000 in any consecutive 12-month period** — 100% free, no authorization needed.
-- 💼 **Commercial licensing**: usage at or above RMB ¥100,000 of direct commercial value in 12 months requires a commercial license (free registration at `yimu@hyipf.com` or tiered agreements available).
+- 🎁 **Free tier**: personal learning and research, non-commercial use, and **internal use by teams of no more than 3 people** — 100% free, no authorization needed.
+- 💼 **Commercial licensing**: use beyond the free tier — including use by **teams larger than 3 people**, or **deploying on cloud/public servers or offering as a SaaS service** — requires a commercial license (register at `eos@hyipf.com`).
 - 🔄 **Automatic open-source conversion**: each version automatically converts to **Apache License 2.0** four years after its release date.
 
 For full legal terms, read [LICENSE](LICENSE).
@@ -197,5 +210,5 @@ For full legal terms, read [LICENSE](LICENSE).
 ---
 
 <div align="center">
-  <sub>Copyright © 2026 山东阗言密语寅卯辰文化传播有限公司 · All rights reserved.</sub>
+  <sub>Copyright © 2026 eos.hyipf.com · All rights reserved.</sub>
 </div>
