@@ -1,0 +1,89 @@
+# AI-EOS 生产级 Compose（PostgreSQL + Redis + API + Web）
+#
+# 首次使用：
+#   cd docker
+#   cp .env.example .env   # 务必填写 POSTGRES_PASSWORD / JWT_SECRET
+#   docker compose up -d --build
+#
+# 约定：
+# - 所有端口只绑 127.0.0.1，不直接暴露到局域网/公网；对外请经反向代理。
+# - PG 密码、JWT 密钥全部走 docker/.env，不再明文写进 compose 文件。
+# - 变量插值依赖 docker/.env（compose v2 自动加载 compose 文件同目录的 .env）。
+# - 升级前务必按 docs/BACKUP_RUNBOOK.md 备份，升级步骤见 docs/UPGRADE_SOP.md。
+
+services:
+  postgres:
+    image: docker.m.daocloud.io/library/postgres:16-alpine
+    container_name: ai-eos-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aieos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请先在 docker/.env 中设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-aieos}
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-aieos}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  redis:
+    image: docker.m.daocloud.io/library/redis:7-alpine
+    container_name: ai-eos-redis
+    restart: unless-stopped
+    # AOF 持久化：容器删除重建不丢数据
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["127.0.0.1:6379:6379"]
+    volumes: [redisdata:/data]
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/api.Dockerfile
+    container_name: ai-eos-api
+    restart: unless-stopped
+    env_file: [".env"]
+    environment:
+      AIEOS_ENV: production
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-aieos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-aieos}
+      REDIS_URL: redis://redis:6379/0
+      AIEOS_LOG_DIR: /var/log/ai-eos
+      STORAGE_DIR: /app/storage
+    ports: ["127.0.0.1:8001:8001"]
+    volumes:
+      - api-storage:/app/storage
+      - api-data:/app/data
+      - api-logs:/var/log/ai-eos
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  web:
+    build:
+      context: ..
+      dockerfile: docker/web.Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8001}
+    container_name: ai-eos-web
+    restart: unless-stopped
+    ports: ["127.0.0.1:8000:8000"]
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
+  api-storage:
+  api-data:
+  api-logs:

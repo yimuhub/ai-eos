@@ -1,0 +1,38 @@
+# 密钥与本地配置（绝不提交）
+.env*
+!.env.example
+*.pem
+*.key
+*credentials*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# 前端
+node_modules/
+.next/
+dist/
+build/
+
+# 运行时数据（本地生成；注意 apps/web/app/(main)/logs 是前端路由页面，不要排除）
+data/
+/logs/
+apps/api/logs/
+storage/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite*
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 打包产物
+packaging/*.zip
+packaging/*.tar.gz

@@ -1,0 +1,147 @@
+SPDX-License-Identifier: BUSL-1.1
+
+Business Source License 1.1
+
+License text copyright (c) 2024 MariaDB plc, All Rights Reserved.
+"Business Source License" is a trademark of MariaDB plc.
+
+================================================================================
+Parameters
+================================================================================
+
+Licensor:             山东阗言密语寅卯辰文化传播有限公司
+
+Licensed Work:        AI-EOS（AI 企业操作系统 / 数字员工平台）
+                      本仓库中的全部源代码。
+                      Copyright (c) 2026 山东阗言密语寅卯辰文化传播有限公司。
+                      All rights reserved.
+
+Additional Use Grant: 在遵守本 License 其他条款的前提下，Licensor 额外授予您
+                      在以下范围内对 Licensed Work 进行生产使用（production use）
+                      的权利（"免费层"）：
+
+                      1. 个人学习、研究；
+                      2. 非商业用途；
+                      3. 个人自媒体创作；
+                      4. 企业内部评估；
+                      5. 任何主体（个人或组织）因使用 Licensed Work 获得的连续
+                         12 个月直接商业价值低于人民币 100,000 元（壹拾万元整）。
+
+                      超出上述范围的生产使用（包括但不限于连续 12 个月直接商业
+                      价值 ≥ 人民币 100,000 元），须另行获得 Licensor 的商业授权。
+                      商业授权可免费登记（联系 yimu@hyipf.com），亦可采用阶梯定价，
+                      具体以 Licensor 公布的方案为准。
+
+                      (English summary: You may use the Licensed Work in production
+                      for personal learning and research, non-commercial use,
+                      personal self-media creation, internal enterprise evaluation,
+                      and any use where the direct commercial value attributable to
+                      the Licensed Work is less than RMB 100,000 in any consecutive
+                      12-month period. Production use beyond this scope requires a
+                      separate commercial license from the Licensor; free
+                      registration is available via yimu@hyipf.com, and tiered
+                      pricing options may apply.)
+
+Change Date:          2030-10-14
+                      （以实际发布日起算：Licensed Work 的每一个版本，自其首次
+                      公开发布之日起满 4 年自动转为 Change License；以 Change Date
+                      与"首次公开发布满 4 周年"二者较早到达者为准。）
+
+Change License:       Apache License, Version 2.0
+
+For information about alternative licensing arrangements for the Licensed Work,
+please contact: yimu@hyipf.com
+
+Notice
+
+The Business Source License (this document, or the "License") is not an Open
+Source license. However, the Licensed Work will eventually be made available
+under an Open Source License, as stated in this License.
+
+================================================================================
+Terms
+================================================================================
+
+The Licensor hereby grants you the right to copy, modify, create derivative
+works, redistribute, and make non-production use of the Licensed Work. The
+Licensor may make an Additional Use Grant, above, permitting limited production
+use.
+
+Effective on the Change Date, or the fourth anniversary of the first publicly
+available distribution of a specific version of the Licensed Work under this
+License, whichever comes first, the Licensor hereby grants you rights under the
+terms of the Change License, and the rights granted in the paragraph above
+terminate.
+
+If your use of the Licensed Work does not comply with the requirements currently
+in effect as described in this License, you must purchase a commercial license
+from the Licensor, its affiliated entities, or authorized resellers, or you must
+refrain from using the Licensed Work.
+
+All copies of the original and modified Licensed Work, and derivative works of
+the Licensed Work, are subject to this License. This License applies separately
+for each version of the Licensed Work and the Change Date may vary for each
+version of the Licensed Work released by Licensor.
+
+You must conspicuously display this License on each original or modified copy of
+the Licensed Work. If you receive the Licensed Work in original or modified form
+from a third party, the terms and conditions set forth in this License apply to
+your use of that work.
+
+Any use of the Licensed Work in violation of this License will automatically
+terminate your rights under this License for the current and all other versions
+of the Licensed Work.
+
+This License does not grant you any right in any trademark or logo of Licensor
+or its affiliates (provided that you may use a trademark or logo of Licensor as
+expressly required by this License).
+
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON AN
+"AS IS" BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS, EXPRESS
+OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND TITLE.
+
+MariaDB hereby grants you permission to use this License's text to license your
+works, and to refer to it using the trademark "Business Source License", as long
+as you comply with the Covenants of Licensor below.
+
+================================================================================
+Covenants of Licensor
+================================================================================
+
+In consideration of the right to use this License's text and the "Business
+Source License" name and trademark, Licensor covenants to MariaDB, and to all
+other recipients of the licensed work to be provided by Licensor:
+
+To specify as the Change License the GPL Version 2.0 or any later version, or a
+license that is compatible with GPL Version 2.0 or a later version, where
+"compatible" means that software provided under the Change License can be
+included in a program with software provided under GPL Version 2.0 or a later
+version. Licensor may specify additional Change Licenses without limitation.
+
+To either: (a) specify an additional grant of rights to use that does not impose
+any additional restriction on the right granted in this License, as the
+Additional Use Grant; or (b) insert the text "None" to specify a Change Date.
+Not to modify this License in any other way.
+
+================================================================================
+Notice
+================================================================================
+
+The Business Source License (this document, or the "License") is not an Open
+Source license. However, the Licensed Work will eventually be made available
+under an Open Source License, as stated in this License.
+
+================================================================================
+中文说明（非正式摘要，不具法律效力；解释以以上英文条款为准）
+================================================================================
+
+- 本项目采用 Business Source License 1.1（SPDX 标识：BUSL-1.1），对外称
+  "source-available"（源码可见）。BSL 1.1 不是 OSI 认证的开源许可证。
+- 免费层：个人学习、研究、非商业用途、个人自媒体创作、企业内部评估，以及
+  任何主体连续 12 个月直接商业价值 < 人民币 10 万元，均可免费使用（含生产使用）。
+- 连续 12 个月直接商业价值 ≥ 人民币 10 万元：须获得商业授权；可免费登记
+  （联系 yimu@hyipf.com），亦可阶梯定价。
+- 每个版本自首次公开发布之日起满 4 年，自动转为 Apache License 2.0。
+- 本许可不授予任何商标权；"AI-EOS" 等商标需另行注册/授权。
+- 许可文本的法律问题请咨询律师；商业授权事宜联系 yimu@hyipf.com。

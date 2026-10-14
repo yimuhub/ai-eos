@@ -1,0 +1,218 @@
+# Changelog
+
+本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的组织方式。
+完整的工程质量改造记录见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
+
+## [2026-10-14] — 五视角代码审查整改升级
+
+> 依据五视角审查报告的 Top 10 + P0/P1/P2 整改项。升级前已全量备份
+> （`~/Documents/张阗/ai-eos-backup-20261014`）。Mac 无 shell，所有改动为静态编辑，
+> Python 文件已过 `py_compile` 语法校验；**上线前请在 Mac 上跑一遍 `pytest` 回归**。
+
+### 任务执行链路（重度用户 P0）
+
+- 后台引擎泄漏修复：`_with_fresh_engine` 的 finally 里 `await engine.dispose()`
+- 超时按任务类型拆分：会议 600s，任务/编排/工作流读 `AIEOS_TASK_TIMEOUT_S`（默认 7200s）；
+  超时先写事件告知用户再标 FAILED
+- 新增 `POST /tasks/{tid}/retry`：FAILED→PLANNING→RUNNING 并重新提交后台工作；
+  前端任务详情 FAILED 状态加「🔁 重试」按钮
+- `resume_execution` 改为真重跑（从 checkpoint 恢复，旧执行标 `superseded`）；
+  暂停按钮旁提示「暂停将在当前步骤完成后生效」
+- lifespan 新增 `recover_stuck_tasks()`：RUNNING/PAUSED 超 30 分钟（`AIEOS_STUCK_TASK_MINUTES` 可配）
+  无心跳标 FAILED 并写事件
+- Task 模型新增 `progress`（Float，默认 0.0）与 `current_stage`（String，可空）；
+  前端任务列表/详情加进度条
+- `schedules.py` pause/resume 补归属校验；`departments_batch.py` cascade 改为真递归删除（已核查外键安全）
+- `automation_engine.py` 新增 `run_workflow` / `call_webhook` / `update_task` 三个真实动作
+- 编排链路补「产出即归档」：CEO 汇总后调 `save_artifact`（此前只写 `parent.result`）
+
+### 模型网关与计量（程序员/运营 P0）
+
+- `record_token_usage` 只 add 不 commit，提交权交还调用方（已审计全部调用方外层均会 commit）
+- `usage_ctx` 改为上下文管理器（退出 finally reset）；training / factory / meeting / chat 补齐 agent / company 维度
+- failover 每次失败记 `logger.warning`，最终异常附全部失败摘要；失败调用记入 token 流水（`success=False`），
+  `model_calls.success_rate` 口径修正
+- 简易熔断/冷却：单模型连续失败 5 次冷却 5 分钟，429 直接短路；猴子补丁转正为类方法
+- `PROVIDERS` 支持 `plugins/providers/*.py` 动态加载（`register()` 约定，单文件失败隔离）
+- `knowledge_engine.retrieve` 加 `limit` 分页（默认 200，SQL 层截断）
+
+### 架构与安全（程序员 P0/P1）
+
+- `plugins/skills/` 真动态加载（`manifest.json` + `importlib`，单 manifest 失败只记 warning）
+- `test_code_quality.py` 静默吞异常检测升级为 AST 级（行尾注释 `pass` 不再逃逸；
+  `agent_runtime.py:64-65` 已同步修复为 `logger.warning(..., exc_info=True)`）
+- `app/sandbox.py` 改名 `app/computer_workspace.py` 消歧（import 已全仓同步）
+- 新建 `app/engines/` 包：新引擎公约 + 渐进迁移文档（现有引擎暂不搬移）
+- RefreshToken：`POST /auth/refresh`（轮换，响应 `{access_token, refresh_token}`）+ `POST /auth/logout`（吊销），
+  库里只存 SHA-256 哈希；附 Alembic 迁移
+- 登录限流 Redis 优先（无 Redis 回退内存 dict，对外行为不变）
+- `ensure_columns` 只在 sqlite 方言下运行（PostgreSQL 交给 Alembic）
+
+### 前端与向导（小白 P0/P1）
+
+- 全局快捷键：`n` 新建任务、`/` 聚焦搜索、`j/k` 列表导航、空格多选、`?` 帮助面板
+  （`lib/shortcuts.ts` + `GlobalShortcuts.tsx`）
+- 术语统一：「＋ 招新员工」、「人设与职责设定」、「OpenAI 兼容地址」、「首选模型」；⌘K 占位与 keywords 对齐
+- 向导步骤 2：每个模型预设加「Key 从哪来」一句话指引；`.env` 指引重写为小白 4 步操作（含便携包无 `.env` 情况）
+- 建员工自动绑定公司首选模型（`governance.create_from_template`）；新增免 Key 纯前端演示模式（零 DB 写入、全程标注「演示」）
+- `lib/api.ts`：401 自动调 `/auth/refresh` 换 token 重试一次；登录页存 `refresh_token`
+- vitest：`vitest.config.ts` + `lib/api.test.ts` + `lib/validate.test.ts`（静态正确，未运行）
+
+### 交付运维（运营 P0/P1）
+
+- **LICENSE**：BSL 1.1（BUSL-1.1）——Licensor 山东阗言密语寅卯辰文化传播有限公司；
+  免费层含个人学习/研究/非商业/个人自媒体/企业内评/连续 12 个月直接商业价值 < 10 万元；
+  ≥10 万需商业授权（免费登记 yimu@hyipf.com）；Change Date 2030-10-14（满 4 年转 Apache-2.0）；
+  对外称 source-available；`pyproject.toml` / `package.json` 同步标识
+- 打包说明：账号三处收敛为「首次使用请在登录页注册」（删弱口令节）；`rm -f data/aieos.db` 改为先备份再重建；
+  Python 要求更正为 3.12+
+- `start-mac.sh`：`cd` 到 `apps/api`、自动装依赖、日志 `>>` 追加、启动前快照（留 5 份）；
+  `start-win.bat` 纯 batch 重写（补 `sqlite+aiosqlite:///` 前缀，修 npm 未加 call 的 bug）
+- 根目录 `.env.example`（中文注释模板）；`/health/db` 异常返 HTTP 503；日志按日轮转（`AIEOS_LOG_DIR` 可配，保留 30 天）
+- `GET /metrics/prometheus`（手写 exposition，无新依赖）；`GET /events/export`（csv/json 流式）；
+  成果删除 + zip 打包下载；资产改相对路径（兼容旧绝对路径）；kb 上传与截屏移出 /tmp
+- `docker-compose.yml` 生产化：api/web 服务与 Dockerfile、`restart: unless-stopped`、healthcheck、
+  PG 密码走 `docker/.env`、redis AOF 持久化卷、端口只绑 127.0.0.1
+- 新建 `docs/BACKUP_RUNBOOK.md`、`docs/UPGRADE_SOP.md`、`docs/DATA_FLOW.md`（默认网关 `https://api.agnes-ai.cn/v1` 数据流向告知）
+
+### 已知局限（本次未覆盖）
+
+- Mac 无 shell：未运行任何测试；vitest / tsc / next build 均未验证。**跑 `pytest` 时不要起本地 Redis**，
+  否则 `test_auth.py` 对 `_login_failures` 内存 dict 的断言会失败（限流走 Redis 通道时）
+- 429 熔断语义实现为「短路 break 不再试后续模型」（同 provider 限流假设）；如需「跳过中间只试最后一个 fallback」可再调
+- 演示模式为纯前端模拟（未落库、未调模型）；如需真实演示任务落库需后端配合新增演示执行路径
+- `resume_execution` 由「状态翻转」改为「真重跑」，属预期内的语义变更；若旧测试断言旧行为需同步更新
+- `start-mac.sh` 仍绑 `0.0.0.0`（有局域网访问需求，未改）；`start-linux.sh` 未动
+
+## [未发布]
+
+### 已新增（端到端试跑 · 无需真实密钥）
+
+- **端到端主链路试跑** `tools/e2e_smoke.py`：起真实 uvicorn 进程 + 临时 SQLite +
+  本地假 OpenAI 兼容模型服务，跑通「注册 → 登录 → 建公司 → 注册模型 → 建员工 → 绑模型 →
+  建项目 → 建任务 → 启动 → 轮询到完成 → 断言成果入库 / 文档落盘 / token 记账 / 模型确实被调用」，
+  **38 项断言全部通过**，已并入 `tools/check.sh` 作为第 7 道关卡
+- 因为 `.env` 的模型密钥为空，起一个本地假模型即可让真实进程跑完整条链路 ——
+  **整条主链路的验证不需要任何真实密钥**
+- **试跑抓出并修复 4 个真实缺陷**：
+  - 模型自检只看 provider 默认环境变量、不看模型自己的 `api_key_env` → 可用模型被误报「缺密钥」
+  - `POST /projects` 只认 query 参数，前端传 body → 422，项目创建不了
+  - 任务失败的证据写在未提交事务里，被上层 rollback 冲掉 → 失败现场查不到
+  - `AgentExecution.completed_at` 运行时在写，但表上没有这一列 → 执行耗时永远是空
+
+### 已修复（权限层 · 12 处跨租户越权）
+
+- **修掉 12 处跨租户越权（IDOR）**：10 个完全没有归属校验的 DELETE 端点 +
+  2 处「伪校验」（拿记录里的 `company_id` 与**调用方自己传进来的** `company_id` 比对 ——
+  攻击者把自己公司 ID 传进去就永远通过，比完全不校验更危险，因为它会让 review 的人放心）
+- **新增权限层** `app/core/permissions.py`：Capability（查看 / 操作 / 管理 / 破坏性 / 管理公司）
+  × Role 矩阵；越权返回 **404 而非 403**（403 会暴露「此 ID 存在但你没权限」，等于帮攻击者枚举租户）
+- **静态扫描护栏**：新增无归属校验的 DELETE 端点会直接让测试变红（已反向验证）
+- **诚实边界**：目前只有 OWNER 角色真正可达；ADMIN / MEMBER / VIEWER 是已声明但尚未接入的语义，
+  需先建「公司成员」表再接入，本轮未假装完成
+
+### 已新增（度量体系）
+
+- **`GET /metrics/overview`**：任务 / 执行 / 模型调用三级成功率、平均耗时与延迟、
+  失败原因归一化（脱敏 UUID）、按员工归因、按天吞吐；前端「绩效中心」已接入
+- **关键设计：无样本返回 `null` 而非 `0`**。「还没跑过任务」显示「—」，
+  「跑了 2 个失败 1 个」显示 50% —— 二者绝不能混为一谈，测试里专门断言了这一点
+- 修掉 `GET /dashboard/{cid}` 用 **200 + `{error}`** 表示失败（HTTP 层完全看不出出错了）
+- **数据库 schema 自动补列** `app/db/migrations.py`：`create_all` 只建表不加列，
+  升级后新字段会静默缺失，现在启动时自动补齐（跳过非空列并告警，绝不删列改列）
+
+### 已修复（工程质量改造 · 详见 UPGRADE_NOTES.md）
+
+- **修复 9 处未定义变量**导致的静默失效。其中「文档风格 + 公文写作」整块能力此前
+  100% 不执行，但接口仍返回 200；三个接口（文档风格删除、技能删除、训练撤销）必然 500
+- **修复 11 处前后端接口契约错配**。最严重的是人工介入页：路径错（404）+ 缺鉴权头（401）
+  + 无视响应无条件提示「已批准」，用户以为成功而实际什么都没发生
+- **治理 28 处静默吞异常**（`except: pass`）。保留「失败不阻塞主流程」的原意，
+  但每处失败都留下可检索、可归因的日志
+- **修复密钥加载链路**：此前全项目 0 处 `load_dotenv()`，只在 `.env` 配密钥会取到空串，
+  导致调用模型报 401
+- **修复任意文件读取**：`FileReaderSkill` 无路径限制，可读取 `.env` 并取走 `JWT_SECRET`
+- **修复命令注入**：`real_run_write` 未过滤 `;` `|` `>` 与换行却用 shell 语义执行
+- **补齐 4 个模块的跨租户归属校验（IDOR）**，含「可替他人公司授权本机 shell 能力」
+- **新增生产环境安全门禁**：`JWT_SECRET` 仍为占位值或 `DEBUG=true` 时拒绝启动
+
+### 已修复（消费者体验收敛）
+
+- **统一二次确认，替代原生 `confirm`**：浏览器可被设置为"不再显示此类对话框"，
+  之后 `confirm()` 恒返回 `true` —— 二次确认会退化成一次点击就执行破坏性操作
+- **为 3 处原本完全没有确认的破坏性操作补上护栏**：批量删除公司（连同项目/员工/成果/日志）、
+  执行离职交接（真实改写归属且不可撤销）、删除经验教训与记忆
+- **14 处原生 `alert` 改为非阻塞 Toast**；其中会议页的上传失败原先被空 `catch {}`
+  静默吞掉，用户会误以为"传上去了但没生效"
+- **修掉两处"点了按钮没反应"**：新建 Agent 时姓名为空直接 return、模型配置格式错误
+  只返回技术性 422
+
+### 已新增（消费者体验收敛）
+
+- **`⌘K` 全局跳转**：35 个页面按标题、说明、英文名、拼音、口语说法全量可搜，
+  支持「最近访问」与全程键盘操作；内部页面改为"藏起来但搜得到"
+- **导航单一事实源 `lib/nav.ts`**：侧边栏与命令面板共用一份定义，新增页面只改一处
+- **统一确认框 `components/ConfirmDialog.tsx`**：主题化、逐条列出影响面、
+  不可逆操作要求逐字输入确认词、Esc/Enter/Tab 全键盘可用、关闭后焦点归位
+- **表单校验体系** `lib/validate.ts` + `lib/useFormValidation.ts` + `components/Field.tsx`：
+  默认不打断用户、提交时一次性列出全部问题、字段级 `aria` 关联
+- **6 条体验护栏测试**：禁止原生弹窗、每个页面必须有入口、导航不得有死链、
+  导航必须带说明与检索词（已反向验证：注入违规探针会让门禁变红）
+- **测试体系重建**：113 → **158** 个离线用例（原 29 个「测试」文件里 28 个无法运行）
+  - 覆盖认证与限流、账号枚举防护、跨租户隔离、沙箱与命令注入、接口契约、
+    schema 迁移、度量、权限与代码质量与体验护栏
+
+### 已新增（前端数据层与类型统一）
+
+- **30+ 处裸 `fetch` 全部收口到 `lib/api.ts`**：此前各页面自己拼
+  `NEXT_PUBLIC_API_URL` 与 `aieos_token`，导致没有超时（后端卡住页面永久转圈）、
+  没有错误规范化（422 显示 `[object Object]`），且**绕过统一层 = 同时绕过契约校验**
+- **收口后挖出 6 个此前从未生效的功能**：
+  - 员工换模型：前端发 PATCH，后端是 `PUT /agents/{id}/switch-model` → 从来没生效过
+  - 外部接入启用/停用：前端 `PUT /external-agents/{id}/ENABLED`，
+    后端只有 `POST .../enable|disable`，且原来连鉴权头都没带
+  - 4 处下载链接点了必然 401 —— 下载接口要 Bearer token，而 `<a href>` 不会带它；
+    改为取回 blob 再本地保存（新增 `fetchBlobURL` / `downloadURL` / `downloadText`）
+  - 日志导出 `window.open(接口地址)` 打开的是 401 的 JSON
+  - 多处 `createObjectURL` 后立刻 revoke，下载有概率失败
+  - 契约扫描被模板里的三元表达式骗过 4 次（引号提前终止捕获）→ 已加「无法静态解析」判定
+- **`lib/types.ts`** 领域类型 + **`lib/useResource.ts`** 轻量数据层
+  （并发去重 / 失效重取 / 乐观更新，约 100 行，**不引第三方依赖**）
+- 全站 `any` 从 136 处降到仅剩 `catch` 子句（TS 无法给 catch 标注类型）与 LLM 自由结构字段
+- **新增护栏**：禁止裸 fetch / 硬编码地址 / 手工取 token（已反向验证：植入探针立刻变红）
+
+### 已新增（工程质量改造）
+
+- **交付前自检门禁** `tools/check.sh`：一条命令跑完静态检查 / 导入 / mapper /
+  接口契约 / 类型检查 / lint / 测试，任一失败即非零退出
+- **接口契约校验工具** `tools/check_api_contract.py`（已接入门禁）
+- **文件访问沙箱** `app/core/sandbox.py`：默认拒绝 + 路径解析 + 敏感文件拦截
+- **集中日志** `app/core/logging_config.py` + 全局异常处理器
+- **环境加载器** `app/core/env_loader.py`
+- **本机能力服务层** `app/services/computer_service.py`：权限校验 / 执行 / 审计收敛为唯一实现
+- **可复用归属校验** `assert_company_owned` / `assert_agent_owned`
+- **前端全局反馈**：Toast、三态布局、`error.tsx` / `loading.tsx` / `not-found.tsx` /
+  `global-error.tsx`、`prefers-reduced-motion` 支持
+- **新用户三步引导向导** + 模型可用性自检接口（只报告密钥是否存在，不返回密钥本身）
+- **前端 API 层重构**：180s 超时、可区分的 `ApiError`、校验错误规范化、泛型响应
+- **版本控制**：此前无 `.git`，现已有基线快照与按问题切分的提交历史
+
+### 已变更（文档校订）
+
+- README / DEVELOPMENT / INTRODUCTION 的数字按实测校正：
+  Phase 1 → **Phase 3**，38 → **354 端点**，18 → **94 张表**，约 2400 行 → **21,554 行**
+- 删除 README / INTRODUCTION 中「测试账号 `boss@aieos.dev` / `Passw0rd!`」的说明 ——
+  该账号在整个代码库中**从未被创建**，属历史遗留；现改为引导用户自行注册
+- 修正 `CHANGELOG.md` 与 `DEVELOPMENT_STATUS.md` 中的字面 `\n` 转义符（此前渲染为单行）
+
+---
+
+## [0.1.0] — 2026-08-23
+
+### 新增（Phase 1 MVP 全量交付）
+
+组织架构 / Agent 管理 / 模型网关 / 技能插件 / 任务引擎 / Agent Runtime /
+多 Agent 协同 / 协作消息 / 资产中心 / 事件日志 / 暂停恢复取消 / 人工介入 / 实时看板
+
+> 上述为历史交付记录。实际代码在后续开发中已推进至 Phase 2、Phase 3，
+> 但本文档此前未同步更新 —— 这也是本次改造中「文档与实现脱节」问题的来源之一。
