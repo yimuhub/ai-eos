@@ -93,9 +93,9 @@ export default function LoginPage() {
         <div className="hidden md:flex flex-col justify-between p-8"
           style={{ background: "linear-gradient(160deg, rgba(99,102,241,0.16), rgba(34,211,238,0.06))" }}>
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">⚡ AI-EOS <span className="text-xs align-top ml-1 px-1.5 py-0.5 rounded-full bg-gradient-to-r from-indigo-500 to-cyan-400 text-white font-semibold">V4.0</span></h1>
+            <h1 className="text-2xl font-bold tracking-tight">⚡ AI-EOS <span className="text-xs align-top ml-1 px-1.5 py-0.5 rounded-full bg-gradient-to-r from-indigo-500 to-cyan-400 text-white font-semibold">V4.2</span></h1>
             <p className="text-sm mt-1.5" style={{ color: "var(--muted)" }}>
-              人工智能企业操作系统 · 一句话指挥版
+              人工智能企业操作系统 · 专家全原创版
             </p>
             <ul className="mt-8 space-y-4 text-sm">
               {[

@@ -9,7 +9,7 @@ type Expert = {
   id: string; source: string; name: string; emoji?: string | null;
   color?: string | null; department: string; tags: string[];
   description: string; deliverables: string[]; enabled: boolean;
-  hired_count: number; prompt_chars: number;
+  hired_count: number; prompt_chars: number; license?: string | null;
 };
 type ExpertDetail = Expert & { raw_md?: string };
 type DeptRow = { department: string; count: number };
@@ -29,6 +29,40 @@ const COLOR_MAP: Record<string, string> = {
   purple: "from-violet-500 to-purple-600", pink: "from-pink-500 to-rose-600",
   blue: "from-blue-500 to-indigo-600", green: "from-emerald-500 to-teal-600",
   orange: "from-amber-500 to-orange-600", red: "from-rose-500 to-red-600",
+};
+
+/** 把人设 raw_md 按 "## " 二级标题拆成有序章节（参考上游"一页一份完整档案"形式）。
+ *  返回 [{ title, body }]，正文已去掉标题行本身。 */
+function parseSections(rawMd?: string): { title: string; body: string }[] {
+  if (!rawMd) return [];
+  const lines = rawMd.split("\n");
+  const out: { title: string; body: string }[] = [];
+  let cur: { title: string; body: string } | null = null;
+  let inFrontmatter = false;
+  for (const ln of lines) {
+    if (ln.trim() === "---") { inFrontmatter = !inFrontmatter; continue; }
+    if (inFrontmatter) continue; // frontmatter 不展示
+    const h = ln.match(/^##\s+(.+)$/);
+    if (h) {
+      if (cur) out.push(cur);
+      cur = { title: h[1].trim(), body: "" };
+    } else if (ln.startsWith("# ") || ln.startsWith("> ")) {
+      // 一级标题(H1)和引言(>)并入第一个章节前的"导语"，单独不成节
+      if (cur) cur.body += ln + "\n";
+      else if (ln.trim()) out.length === 0 && out.push({ title: "导语", body: ln + "\n" });
+    } else if (cur) {
+      cur.body += ln + "\n";
+    }
+  }
+  if (cur) out.push(cur);
+  return out.filter(s => s.body.trim() || s.title !== "导语");
+}
+
+/** 章节标题 → 强调色（对应原玻璃拟态体系） */
+const SECTION_ACCENT: Record<string, string> = {
+  "使命": "text-cyan-300", "规则": "text-amber-300", "交付物": "text-emerald-300",
+  "工作流程": "text-indigo-300", "沟通风格": "text-pink-300", "成功指标": "text-green-300",
+  "进阶能力": "text-violet-300", "身份": "text-sky-300", "记忆": "text-sky-300",
 };
 
 export default function ExpertsPage() {
@@ -84,8 +118,8 @@ export default function ExpertsPage() {
   const doImport = async () => {
     setImporting(true); setMsg("");
     try {
-      const r = await api.post("/experts/import") as any;
-      setMsg(`✅ 导入完成：新增/更新 ${r.imported_or_updated} 个专家（跳过 ${r.skipped}）`);
+      const r = await api.post("/experts/import-original") as any;
+      setMsg(`✅ 原创专家已就位：新增 ${r.created} / 更新 ${r.updated}，下架旧上游 ${r.disabled_legacy} 个（AI-EOS 原创版）`);
       await load();
     } catch (e) { setMsg("❌ " + describeError(e)); }
     setImporting(false);
@@ -130,12 +164,23 @@ export default function ExpertsPage() {
         <h1 className="text-2xl font-bold">📚 专家库</h1>
         <button onClick={doImport} disabled={importing}
           className="btn-primary text-sm py-1.5 px-4 disabled:opacity-50">
-          {importing ? "⏳ 导入中…" : "📥 导入 / 更新专家库"}
+          {importing ? "⏳ 处理中…" : "📥 载入 AI-EOS 原创专家库"}
         </button>
       </div>
-      <p className="text-sm text-[var(--muted)] mb-4">
-        agency-agents-zh 专家角色库（MIT）· 挑人 → 工厂蓝图 → 老板审查 → 验收考试 → 上岗
+      <p className="text-sm text-[var(--muted)] mb-2">
+        {list.length} 位 AI-EOS 原创专家 · 挑人 → 工厂蓝图 → 老板审查 → 验收考试 → 上岗
       </p>
+
+      {/* 原创声明横幅（可折叠） */}
+      <details className="mb-4 card p-3 border-l-4 border-l-emerald-500/60">
+        <summary className="cursor-pointer text-sm font-medium text-emerald-300 select-none">
+          📜 专家库原创声明（AI-EOS 团队独立重写 · 商业化可用）
+        </summary>
+        <div className="mt-2 text-xs text-[var(--muted)] leading-relaxed space-y-1">
+          <p>本库工种划分框架参考开源项目 <a className="text-indigo-300 underline" href="https://github.com/jnMetaCode/agency-agents-zh" target="_blank" rel="noreferrer">jnMetaCode/agency-agents-zh</a>（MIT）之组织方式；工种分类属行业通用概念，不构成复制。</p>
+          <p>本库<b className="text-white">全部专家人设内容</b>（身份 / 使命 / 规则 / 交付物 / 流程 / 风格 / 指标）均由 AI-EOS 团队独立完整重写，为 <b className="text-white">AI-EOS 原创作品</b>，未复制、改写或翻译上游任何原文。上游 LICENSE 已合规保留于 <code className="text-emerald-300">vendor/agency-agents-zh/LICENSE</code>。</p>
+        </div>
+      </details>
 
       {/* P1 找专家 + P2 组队 */}
       <div className="grid md:grid-cols-2 gap-3 mb-5">
@@ -260,7 +305,10 @@ export default function ExpertsPage() {
               <div className="flex-1">
                 <h2 className="text-lg font-bold">{detail.name}</h2>
                 <div className="text-xs text-[var(--muted)]">
-                  {DEPT_LABELS[detail.department] || detail.department} · {detail.source} · MIT 许可
+                  {DEPT_LABELS[detail.department] || detail.department} ·{" "}
+                  {detail.source === "ai-eos-original"
+                    ? <span className="text-emerald-300">AI-EOS 原创</span>
+                    : `${detail.source} · ${detail.license || "MIT"} 许可`}
                 </div>
               </div>
               <button onClick={() => hire(detail.id)} disabled={hiring}
@@ -272,19 +320,34 @@ export default function ExpertsPage() {
 
             <p className="text-sm text-[var(--muted)] mb-3">{detail.description}</p>
 
-            {(detail.deliverables || []).length > 0 && (
-              <div className="mb-3">
-                <b className="text-xs text-indigo-300">📦 核心交付物（验收出题依据）</b>
-                <ul className="mt-1.5 space-y-1">
-                  {detail.deliverables.map((d, i) => (
-                    <li key={i} className="text-xs text-[var(--muted)] flex gap-2"><span className="text-indigo-400">·</span>{d}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
+            {/* 章节化人设档案（参考上游"一页一份完整档案"形式，按 ## 章节结构化呈现） */}
+            {(() => {
+              const secs = parseSections(detail.raw_md);
+              if (secs.length === 0) return null;
+              return (
+                <div className="space-y-2 mb-3">
+                  {secs.map((s, i) => {
+                    const accent = Object.entries(SECTION_ACCENT)
+                      .find(([k]) => s.title.includes(k))?.[1] || "text-indigo-300";
+                    return (
+                      <details key={i} className="card p-3" open={i < 2}>
+                        <summary className={`cursor-pointer select-none text-sm font-semibold ${accent}`}>
+                          {s.title}
+                        </summary>
+                        <pre className="mt-2 text-xs leading-relaxed whitespace-pre-wrap text-[var(--muted)]">
+                          {s.body.trim()}
+                        </pre>
+                      </details>
+                    );
+                  })}
+                </div>
+              );
+            })()}
 
             <details className="mb-3">
-              <summary className="text-xs text-indigo-300 cursor-pointer">📄 查看完整人设原文（{(detail.raw_md || "").length} 字符）</summary>
+              <summary className="text-xs text-indigo-300 cursor-pointer">
+                📄 查看原始 Markdown（{(detail.raw_md || "").length} 字符）
+              </summary>
               <pre className="mt-2 text-xs whitespace-pre-wrap bg-black/30 border border-[var(--border)] rounded-lg p-3 max-h-64 overflow-y-auto">{detail.raw_md}</pre>
             </details>
           </div>

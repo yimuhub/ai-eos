@@ -102,6 +102,104 @@ async def import_experts(
             "files": len(files)}
 
 
+@router.post("/import-original", status_code=201)
+async def import_original_experts(
+    company_id: str = Query(...),
+    disable_uncovered: int = Query(1, description="=1 时把没被原创覆盖的旧 agency-agents-zh 记录自动下架"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """导入 AI-EOS 原创专家（content/experts/，LLM 独立重写，非上游拷贝）。
+
+    - 按 source_slug 原地替换旧记录：内容换新 + source=ai-eos-original +
+      license=AI-EOS 原创 + version=2.0（旧版仍可从 git 回溯）。
+    - source_slug 规则与旧 /experts/import 完全一致（{dept}-{filename}），
+      故能精准命中库里的旧 MIT 记录。
+    - disable_uncovered=1：把"没被本次覆盖"的旧 agency-agents-zh 记录下架
+      （enabled=False），确保专家库内剩下的全部为 AI-EOS 原创，商业化合规。
+    """
+    odir = _original_path()
+    if not os.path.isdir(odir):
+        raise HTTPException(404, "content/experts 不存在（需先跑 tools/rewrite_experts.py 生成）")
+    files = [f for f in os.listdir(odir)
+             if f.endswith(".md") and os.path.isfile(os.path.join(odir, f))]
+    ok, created, updated, skipped = 0, 0, 0, 0
+    covered_slugs = set()
+    for fname in files:
+        base = fname[:-3]
+        try:
+            text = open(os.path.join(odir, fname), encoding="utf-8").read()
+        except Exception:
+            skipped += 1
+            continue
+        rec = parse_expert_md(base, text, _detect_dept(base))
+        if not rec or not rec.get("name"):
+            skipped += 1
+            continue
+        slug = rec["source_slug"]
+        covered_slugs.add(slug)
+        rec.pop("dept_label", None)
+        dept = rec.get("department") or "general"
+        rec.setdefault("tags", [DEPT_NAMES.get(dept, dept)])
+        # 原创标记
+        rec["license"] = "AI-EOS 原创"
+        rec["source"] = "ai-eos-original"
+        rec["version"] = "2.0"
+        rec.pop("source_url", None)  # 原创，不再指向上游
+        q = await db.execute(select(ExpertTemplate).where(
+            ExpertTemplate.company_id == company_id,
+            ExpertTemplate.source_slug == slug))
+        row = q.scalars().first()
+        if row:
+            for k in ("name", "emoji", "color", "department", "description",
+                     "system_prompt", "raw_md", "deliverables", "tags",
+                     "license", "source", "version"):
+                v = rec.get(k)
+                if v is not None:
+                    setattr(row, k, v)
+            row.enabled = True  # 曾被下架的也随本次原创更新重新上架
+            updated += 1
+        else:
+            db.add(ExpertTemplate(company_id=company_id, **rec))
+            created += 1
+        ok += 1
+
+    # 下架没被原创覆盖的旧上游记录（它们 source 仍是 agency-agents-zh）
+    disabled = 0
+    if disable_uncovered:
+        q2 = await db.execute(select(ExpertTemplate).where(
+            ExpertTemplate.company_id == company_id,
+            ExpertTemplate.source == "agency-agents-zh",
+            ExpertTemplate.enabled.is_(True)))
+        for old in q2.scalars().all():
+            if old.source_slug not in covered_slugs:
+                old.enabled = False
+                disabled += 1
+
+    await db.commit()
+    return {
+        "imported_or_updated": ok, "created": created, "updated": updated,
+        "skipped": skipped, "files": len(files),
+        "disabled_legacy": disabled,
+        "note": "专家库已全部替换为 AI-EOS 原创内容（见 docs/EXPERTS_STATEMENT.md）",
+    }
+
+
+def _original_path() -> str:
+    """找 content/experts（AI-EOS 原创专家目录），逐级向上探测。"""
+    cur = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(8):
+        cand = os.path.join(cur, "content", "experts")
+        if os.path.isdir(cand):
+            return cand
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "..", "..", "..", "content", "experts")
+
+
 @router.get("")
 async def list_experts(
     company_id: str = Query(...),

@@ -17,6 +17,24 @@
 - Metro 打包已验证：900 modules → 2.5MB HBC，TypeScript 类型检查归零
 - 签字门真审批 / 呼吸灯动画 / 附件选图 留 V4.2
 
+## [4.2.0] 专家全原创版 — 2026-10-17
+
+### 专家库内容 100% 原创重写（商业化合规）
+- 全部 262 位专家人设由 AI-EOS 团队 LLM 独立完整重写，存 `content/experts/`（source=ai-eos-original，license=AI-EOS 原创）
+- 合规红线：生成时只喂「职业名+部门+emoji」概念层，**绝不喂上游正文**；生成后 10-gram 相似度门对上游原文硬拦截（全量最高 0.0199 < 0.02）
+- 新增 `POST /experts/import-original`：按 source_slug 原地替换旧 MIT 记录 + 自动下架未覆盖的上游记录
+- 三重留痕：`docs/EXPERTS_STATEMENT.md`（完整声明）· 专家库页面原创声明横幅 · 每条记录 source/license 字段
+- vendor 瘦身：上游 266 份原文移入 `vendor/agency-agents-zh-archive/`（本地留档，.gitignore 不进仓库），主目录仅留 LICENSE 等 5 个合规文件
+- 批量生成器 `tools/rewrite_experts.py`（并发 + 429 退避 + 断点续跑 + 相似度门）
+
+### 专家库「完整展示」升级（参考上游一页一份档案形式）
+- 详情弹窗从「截断简介 + raw_md 堆叠」升级为**章节化人设档案**：8 大章节（身份记忆/核心使命/关键规则/交付物/工作流程/沟通风格/成功指标/进阶能力）结构化卡片，前 2 节默认展开
+- 章节标题按类型着色（使命=青 / 规则=琥珀 / 交付物=翠绿 / 指标=绿 …），保留 Portal 居中弹窗 + 玻璃拟态设计体系
+- 卡片「AI-EOS 原创」绿色标识，替代旧的「MIT 许可」字样
+
+### 版本标识
+- 登录页 / 侧边栏 / package.json → V4.2 · 专家全原创版
+
 ## [4.0.0] 一句话指挥台 — 2026-10-17
 
 ### 一句话指挥台（Command Deck）

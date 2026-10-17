@@ -49,7 +49,7 @@ class ExpertTemplate(Base):
         return {
             "id": self.id, "source": self.source, "source_url": self.source_url,
             "source_slug": self.source_slug, "name": self.name,
-            "emoji": self.emoji, "color": self.color,
+            "emoji": self.emoji, "color": self.color, "license": self.license,
             "department": self.department, "tags": self.tags or [],
             "description": (self.description or "")[:300],
             "deliverables": (self.deliverables or [])[:8],

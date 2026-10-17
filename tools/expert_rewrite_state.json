@@ -1,0 +1,2040 @@
+{
+ "done": {
+  "academic-anthropologist": {
+   "chars": 2159,
+   "sha8": "8b8dcd39",
+   "ts": 1792225833,
+   "note": "rebuilt_from_disk"
+  },
+  "academic-geographer": {
+   "chars": 2157,
+   "sha8": "f2911542",
+   "ts": 1792225851,
+   "note": "rebuilt_from_disk"
+  },
+  "academic-historian": {
+   "chars": 2087,
+   "sha8": "cab90ad0",
+   "ts": 1792225908,
+   "note": "rebuilt_from_disk"
+  },
+  "academic-narratologist": {
+   "chars": 2539,
+   "sha8": "053357f1",
+   "ts": 1792225928,
+   "note": "rebuilt_from_disk"
+  },
+  "academic-psychologist": {
+   "chars": 2309,
+   "sha8": "97a2cb76",
+   "ts": 1792225946,
+   "note": "rebuilt_from_disk"
+  },
+  "academic-study-planner": {
+   "chars": 2156,
+   "sha8": "644f89f4",
+   "ts": 1792226027,
+   "note": "rebuilt_from_disk"
+  },
+  "accounts-payable-agent": {
+   "chars": 2396,
+   "sha8": "a48226da",
+   "ts": 1792226022,
+   "note": "rebuilt_from_disk"
+  },
+  "agentic-identity-trust": {
+   "chars": 2207,
+   "sha8": "6b3e3a79",
+   "ts": 1792226024,
+   "note": "rebuilt_from_disk"
+  },
+  "agents-orchestrator": {
+   "chars": 2039,
+   "sha8": "a71d2d28",
+   "ts": 1792226027,
+   "note": "rebuilt_from_disk"
+  },
+  "authenticity-appraiser": {
+   "chars": 3041,
+   "sha8": "3b22cc72",
+   "ts": 1792226023,
+   "note": "rebuilt_from_disk"
+  },
+  "automation-governance-architect": {
+   "chars": 2430,
+   "sha8": "6f248bcc",
+   "ts": 1792226020,
+   "note": "rebuilt_from_disk"
+  },
+  "business-strategist": {
+   "chars": 2132,
+   "sha8": "ae06aa61",
+   "ts": 1792226031,
+   "note": "rebuilt_from_disk"
+  },
+  "change-management-consultant": {
+   "chars": 2545,
+   "sha8": "7b869906",
+   "ts": 1792226044,
+   "note": "rebuilt_from_disk"
+  },
+  "chief-executive-officer": {
+   "chars": 2531,
+   "sha8": "afecd068",
+   "ts": 1792226036,
+   "note": "rebuilt_from_disk"
+  },
+  "chief-financial-officer": {
+   "chars": 2352,
+   "sha8": "2a151e03",
+   "ts": 1792226038,
+   "note": "rebuilt_from_disk"
+  },
+  "chief-marketing-officer": {
+   "chars": 2525,
+   "sha8": "c0294a88",
+   "ts": 1792226044,
+   "note": "rebuilt_from_disk"
+  },
+  "chief-of-staff": {
+   "chars": 2138,
+   "sha8": "154ceb4d",
+   "ts": 1792226058,
+   "note": "rebuilt_from_disk"
+  },
+  "chief-operating-officer": {
+   "chars": 1949,
+   "sha8": "1bf065c0",
+   "ts": 1792226053,
+   "note": "rebuilt_from_disk"
+  },
+  "chief-technology-officer": {
+   "chars": 2538,
+   "sha8": "db535ecb",
+   "ts": 1792226052,
+   "note": "rebuilt_from_disk"
+  },
+  "corporate-training-designer": {
+   "chars": 2659,
+   "sha8": "8ce28381",
+   "ts": 1792226146,
+   "note": "rebuilt_from_disk"
+  },
+  "customer-success-manager": {
+   "chars": 2354,
+   "sha8": "c3c1fb06",
+   "ts": 1792226145,
+   "note": "rebuilt_from_disk"
+  },
+  "data-consolidation-agent": {
+   "chars": 3064,
+   "sha8": "97a1bf47",
+   "ts": 1792226148,
+   "note": "rebuilt_from_disk"
+  },
+  "data-privacy-officer": {
+   "chars": 2863,
+   "sha8": "21d5a7cd",
+   "ts": 1792226145,
+   "note": "rebuilt_from_disk"
+  },
+  "design-brand-guardian": {
+   "chars": 2181,
+   "sha8": "63c56778",
+   "ts": 1792226142,
+   "note": "rebuilt_from_disk"
+  },
+  "design-image-prompt-engineer": {
+   "chars": 2498,
+   "sha8": "8115cc36",
+   "ts": 1792226155,
+   "note": "rebuilt_from_disk"
+  },
+  "design-inclusive-visuals-specialist": {
+   "chars": 2403,
+   "sha8": "5c3b34c0",
+   "ts": 1792226156,
+   "note": "rebuilt_from_disk"
+  },
+  "design-persona-walkthrough": {
+   "chars": 2042,
+   "sha8": "2cd37755",
+   "ts": 1792226199,
+   "note": "rebuilt_from_disk"
+  },
+  "design-ui-designer": {
+   "chars": 2485,
+   "sha8": "1ea8f441",
+   "ts": 1792226178,
+   "note": "rebuilt_from_disk"
+  },
+  "design-ux-architect": {
+   "chars": 2218,
+   "sha8": "caf81b59",
+   "ts": 1792226160,
+   "note": "rebuilt_from_disk"
+  },
+  "design-ux-researcher": {
+   "chars": 2162,
+   "sha8": "66f9a1ea",
+   "ts": 1792226169,
+   "note": "rebuilt_from_disk"
+  },
+  "design-video-prompt-engineer": {
+   "chars": 2690,
+   "sha8": "515846ff",
+   "ts": 1792226181,
+   "note": "rebuilt_from_disk"
+  },
+  "chief-product-officer": {
+   "attempt": 1,
+   "chars": 2149,
+   "gate10gram_hit": 35,
+   "gate_ratio": 0.0153,
+   "sha8": "ee540f4b",
+   "ts": 1792227108
+  },
+  "design-visual-storyteller": {
+   "attempt": 1,
+   "chars": 2244,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0034,
+   "sha8": "4e65d8c8",
+   "ts": 1792227124
+  },
+  "design-whimsy-injector": {
+   "attempt": 1,
+   "chars": 2367,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0011,
+   "sha8": "48f5682c",
+   "ts": 1792227138
+  },
+  "engineering-ai-engineer": {
+   "attempt": 1,
+   "chars": 2437,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0028,
+   "sha8": "d887427d",
+   "ts": 1792227172
+  },
+  "engineering-backend-architect": {
+   "attempt": 1,
+   "chars": 2607,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0018,
+   "sha8": "5c18197d",
+   "ts": 1792227172
+  },
+  "engineering-ai-data-remediation-engineer": {
+   "attempt": 1,
+   "chars": 2682,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0023,
+   "sha8": "eb7c77d1",
+   "ts": 1792227174
+  },
+  "engineering-autonomous-optimization-architect": {
+   "attempt": 1,
+   "chars": 2849,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0032,
+   "sha8": "a42202fe",
+   "ts": 1792227174
+  },
+  "engineering-cms-developer": {
+   "attempt": 1,
+   "chars": 2865,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0008,
+   "sha8": "ce6f282a",
+   "ts": 1792227187
+  },
+  "engineering-code-reviewer": {
+   "attempt": 1,
+   "chars": 3292,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0025,
+   "sha8": "ba7a1656",
+   "ts": 1792227190
+  },
+  "engineering-data-engineer": {
+   "attempt": 1,
+   "chars": 2607,
+   "gate10gram_hit": 11,
+   "gate_ratio": 0.0016,
+   "sha8": "76f1244a",
+   "ts": 1792227195
+  },
+  "engineering-codebase-onboarding-engineer": {
+   "attempt": 1,
+   "chars": 2599,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0037,
+   "sha8": "8f95b55f",
+   "ts": 1792227196
+  },
+  "engineering-devops-automator": {
+   "attempt": 1,
+   "chars": 2747,
+   "gate10gram_hit": 19,
+   "gate_ratio": 0.0037,
+   "sha8": "88ce3149",
+   "ts": 1792227205
+  },
+  "engineering-drupal-shopping-cart": {
+   "attempt": 1,
+   "chars": 2571,
+   "gate10gram_hit": 45,
+   "gate_ratio": 0.005,
+   "sha8": "c4417707",
+   "ts": 1792227209
+  },
+  "engineering-dingtalk-integration-developer": {
+   "attempt": 1,
+   "chars": 2895,
+   "gate10gram_hit": 11,
+   "gate_ratio": 0.0012,
+   "sha8": "d72a37a8",
+   "ts": 1792227209
+  },
+  "engineering-email-intelligence-engineer": {
+   "attempt": 1,
+   "chars": 2683,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0014,
+   "sha8": "e54f32fa",
+   "ts": 1792227221
+  },
+  "engineering-feishu-integration-developer": {
+   "attempt": 1,
+   "chars": 2445,
+   "gate10gram_hit": 21,
+   "gate_ratio": 0.0023,
+   "sha8": "4299feaf",
+   "ts": 1792227251
+  },
+  "engineering-filament-optimization-specialist": {
+   "attempt": 1,
+   "chars": 2128,
+   "gate10gram_hit": 14,
+   "gate_ratio": 0.0025,
+   "sha8": "c1bcdb7c",
+   "ts": 1792227254
+  },
+  "engineering-fpga-digital-design-engineer": {
+   "attempt": 1,
+   "chars": 2975,
+   "gate10gram_hit": 33,
+   "gate_ratio": 0.0084,
+   "sha8": "c999753a",
+   "ts": 1792227266
+  },
+  "engineering-frontend-developer": {
+   "attempt": 1,
+   "chars": 2909,
+   "gate10gram_hit": 17,
+   "gate_ratio": 0.0049,
+   "sha8": "fa662734",
+   "ts": 1792227268
+  },
+  "engineering-embedded-firmware-engineer": {
+   "attempt": 1,
+   "chars": 2232,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.003,
+   "sha8": "a7ee4b21",
+   "ts": 1792227269
+  },
+  "engineering-embedded-linux-driver-engineer": {
+   "attempt": 1,
+   "chars": 3294,
+   "gate10gram_hit": 55,
+   "gate_ratio": 0.0114,
+   "sha8": "f236b835",
+   "ts": 1792227279
+  },
+  "engineering-git-workflow-master": {
+   "attempt": 1,
+   "chars": 2945,
+   "gate10gram_hit": 13,
+   "gate_ratio": 0.0038,
+   "sha8": "484b575f",
+   "ts": 1792227280
+  },
+  "engineering-incident-response-commander": {
+   "attempt": 1,
+   "chars": 2762,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0012,
+   "sha8": "185b3288",
+   "ts": 1792227281
+  },
+  "engineering-iot-solution-architect": {
+   "attempt": 1,
+   "chars": 2665,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0032,
+   "sha8": "a82c9946",
+   "ts": 1792227282
+  },
+  "engineering-it-service-manager": {
+   "attempt": 1,
+   "chars": 2836,
+   "gate10gram_hit": 34,
+   "gate_ratio": 0.0038,
+   "sha8": "001d89fd",
+   "ts": 1792227294
+  },
+  "engineering-minimal-change-engineer": {
+   "attempt": 1,
+   "chars": 2526,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0022,
+   "sha8": "575bc40b",
+   "ts": 1792227294
+  },
+  "engineering-mobile-app-builder": {
+   "attempt": 1,
+   "chars": 3027,
+   "gate10gram_hit": 16,
+   "gate_ratio": 0.0025,
+   "sha8": "e519c4ab",
+   "ts": 1792227295
+  },
+  "engineering-mechanical-design-engineer": {
+   "attempt": 1,
+   "chars": 2757,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0011,
+   "sha8": "4411017c",
+   "ts": 1792227301
+  },
+  "engineering-multi-agent-systems-architect": {
+   "attempt": 1,
+   "chars": 2685,
+   "gate10gram_hit": 60,
+   "gate_ratio": 0.0053,
+   "sha8": "5303f39a",
+   "ts": 1792227361
+  },
+  "engineering-network-engineer-china": {
+   "attempt": 1,
+   "chars": 2391,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0028,
+   "sha8": "3bedc0bf",
+   "ts": 1792227361
+  },
+  "engineering-pc-host-engineer": {
+   "attempt": 1,
+   "chars": 2500,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0013,
+   "sha8": "7671fa9f",
+   "ts": 1792227374
+  },
+  "engineering-rapid-prototyper": {
+   "attempt": 1,
+   "chars": 2585,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.001,
+   "sha8": "5f0c983b",
+   "ts": 1792227375
+  },
+  "engineering-prompt-engineer": {
+   "attempt": 1,
+   "chars": 3244,
+   "gate10gram_hit": 27,
+   "gate_ratio": 0.0057,
+   "sha8": "f33fa782",
+   "ts": 1792227376
+  },
+  "engineering-orgscript-engineer": {
+   "attempt": 1,
+   "chars": 2515,
+   "gate10gram_hit": 21,
+   "gate_ratio": 0.009,
+   "sha8": "8a493452",
+   "ts": 1792227378
+  },
+  "engineering-security-engineer": {
+   "attempt": 1,
+   "chars": 2573,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0013,
+   "sha8": "13b55379",
+   "ts": 1792227387
+  },
+  "engineering-solidity-smart-contract-engineer": {
+   "attempt": 1,
+   "chars": 2687,
+   "gate10gram_hit": 30,
+   "gate_ratio": 0.0031,
+   "sha8": "1b0a15a6",
+   "ts": 1792227390
+  },
+  "engineering-software-architect": {
+   "attempt": 1,
+   "chars": 2787,
+   "gate10gram_hit": 14,
+   "gate_ratio": 0.0044,
+   "sha8": "ace88eb6",
+   "ts": 1792227391
+  },
+  "engineering-senior-developer": {
+   "attempt": 1,
+   "chars": 2312,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0027,
+   "sha8": "64fde118",
+   "ts": 1792227393
+  },
+  "engineering-sre": {
+   "attempt": 1,
+   "chars": 2800,
+   "gate10gram_hit": 15,
+   "gate_ratio": 0.0042,
+   "sha8": "a2e8216b",
+   "ts": 1792227402
+  },
+  "engineering-threat-detection-engineer": {
+   "attempt": 1,
+   "chars": 2440,
+   "gate10gram_hit": 23,
+   "gate_ratio": 0.0023,
+   "sha8": "0f14911e",
+   "ts": 1792227403
+  },
+  "engineering-technical-writer": {
+   "attempt": 1,
+   "chars": 2248,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0016,
+   "sha8": "b015df67",
+   "ts": 1792227406
+  },
+  "engineering-voice-ai-integration-engineer": {
+   "attempt": 1,
+   "chars": 2420,
+   "gate10gram_hit": 11,
+   "gate_ratio": 0.001,
+   "sha8": "dc05835a",
+   "ts": 1792227461
+  },
+  "engineering-wechat-mini-program-developer": {
+   "attempt": 1,
+   "chars": 2367,
+   "gate10gram_hit": 13,
+   "gate_ratio": 0.0031,
+   "sha8": "4438a687",
+   "ts": 1792227473
+  },
+  "engineering-wordpress-shopping-cart": {
+   "attempt": 1,
+   "chars": 2977,
+   "gate10gram_hit": 58,
+   "gate_ratio": 0.0065,
+   "sha8": "b0d36edb",
+   "ts": 1792227474
+  },
+  "esg-sustainability-officer": {
+   "attempt": 1,
+   "chars": 2866,
+   "gate10gram_hit": 47,
+   "gate_ratio": 0.0057,
+   "sha8": "4a8146e1",
+   "ts": 1792227475
+  },
+  "finance-bookkeeper-controller": {
+   "attempt": 1,
+   "chars": 2695,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0019,
+   "sha8": "07886b17",
+   "ts": 1792227478
+  },
+  "finance-financial-analyst": {
+   "attempt": 1,
+   "chars": 2137,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0017,
+   "sha8": "ffc42760",
+   "ts": 1792227485
+  },
+  "finance-financial-forecaster": {
+   "attempt": 1,
+   "chars": 2498,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0024,
+   "sha8": "3c3ad418",
+   "ts": 1792227486
+  },
+  "finance-fraud-detector": {
+   "attempt": 1,
+   "chars": 2502,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0021,
+   "sha8": "daef24fc",
+   "ts": 1792227491
+  },
+  "finance-fpa-analyst": {
+   "attempt": 1,
+   "chars": 2276,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0017,
+   "sha8": "1c0fd2f4",
+   "ts": 1792227499
+  },
+  "finance-investment-researcher": {
+   "attempt": 1,
+   "chars": 2500,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0014,
+   "sha8": "454146d3",
+   "ts": 1792227501
+  },
+  "finance-hk-stock-compliance-reviewer": {
+   "attempt": 1,
+   "chars": 2526,
+   "gate10gram_hit": 13,
+   "gate_ratio": 0.0021,
+   "sha8": "ea242031",
+   "ts": 1792227505
+  },
+  "finance-tax-strategist": {
+   "attempt": 1,
+   "chars": 2250,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0016,
+   "sha8": "c2087cd4",
+   "ts": 1792227509
+  },
+  "finance-invoice-manager": {
+   "attempt": 1,
+   "chars": 2445,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0022,
+   "sha8": "b90fbaa7",
+   "ts": 1792227512
+  },
+  "gis-3d-scene-developer": {
+   "attempt": 1,
+   "chars": 2712,
+   "gate10gram_hit": 13,
+   "gate_ratio": 0.0059,
+   "sha8": "35290d3e",
+   "ts": 1792227549
+  },
+  "game-audio-engineer": {
+   "attempt": 1,
+   "chars": 2601,
+   "gate10gram_hit": 15,
+   "gate_ratio": 0.0032,
+   "sha8": "47257e8a",
+   "ts": 1792227567
+  },
+  "gis-analyst": {
+   "attempt": 1,
+   "chars": 2466,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0073,
+   "sha8": "ea456394",
+   "ts": 1792227568
+  },
+  "game-designer": {
+   "attempt": 1,
+   "chars": 2662,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0033,
+   "sha8": "035c6e04",
+   "ts": 1792227578
+  },
+  "gis-cartography-designer": {
+   "attempt": 1,
+   "chars": 2329,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0045,
+   "sha8": "ec32a036",
+   "ts": 1792227581
+  },
+  "gis-bim-specialist": {
+   "attempt": 1,
+   "chars": 2554,
+   "gate10gram_hit": 13,
+   "gate_ratio": 0.0058,
+   "sha8": "53ef4d4a",
+   "ts": 1792227581
+  },
+  "gaokao-college-advisor": {
+   "attempt": 1,
+   "chars": 2352,
+   "gate10gram_hit": 11,
+   "gate_ratio": 0.0022,
+   "sha8": "14330c36",
+   "ts": 1792227585
+  },
+  "gis-geoai-ml-engineer": {
+   "attempt": 1,
+   "chars": 2504,
+   "gate10gram_hit": 29,
+   "gate_ratio": 0.0145,
+   "sha8": "28d558a3",
+   "ts": 1792227593
+  },
+  "gis-qa-engineer": {
+   "attempt": 1,
+   "chars": 2271,
+   "gate10gram_hit": 22,
+   "gate_ratio": 0.0105,
+   "sha8": "103934e2",
+   "ts": 1792227597
+  },
+  "gis-drone-reality-mapping": {
+   "attempt": 1,
+   "chars": 2790,
+   "gate10gram_hit": 13,
+   "gate_ratio": 0.0054,
+   "sha8": "e341a78d",
+   "ts": 1792227598
+  },
+  "gis-geoprocessing-specialist": {
+   "attempt": 1,
+   "chars": 2327,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0048,
+   "sha8": "b4e6cc68",
+   "ts": 1792227606
+  },
+  "gis-solution-engineer": {
+   "attempt": 1,
+   "chars": 3043,
+   "gate10gram_hit": 11,
+   "gate_ratio": 0.0062,
+   "sha8": "f9a057fe",
+   "ts": 1792227608
+  },
+  "gis-spatial-data-engineer": {
+   "attempt": 1,
+   "chars": 2639,
+   "gate10gram_hit": 14,
+   "gate_ratio": 0.0074,
+   "sha8": "b3f927a4",
+   "ts": 1792227616
+  },
+  "government-digital-presales-consultant": {
+   "attempt": 1,
+   "chars": 2288,
+   "gate10gram_hit": 11,
+   "gate_ratio": 0.0018,
+   "sha8": "49df213a",
+   "ts": 1792227652
+  },
+  "grant-writer": {
+   "attempt": 1,
+   "chars": 2284,
+   "gate10gram_hit": 30,
+   "gate_ratio": 0.0031,
+   "sha8": "e2359c33",
+   "ts": 1792227665
+  },
+  "gis-spatial-data-scientist": {
+   "attempt": 1,
+   "chars": 2528,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0059,
+   "sha8": "68f2677f",
+   "ts": 1792227669
+  },
+  "gis-web-gis-developer": {
+   "attempt": 1,
+   "chars": 2274,
+   "gate10gram_hit": 15,
+   "gate_ratio": 0.0069,
+   "sha8": "e59eccd1",
+   "ts": 1792227677
+  },
+  "healthcare-customer-service": {
+   "attempt": 1,
+   "chars": 2438,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0013,
+   "sha8": "d47a095d",
+   "ts": 1792227680
+  },
+  "gis-technical-consultant": {
+   "attempt": 1,
+   "chars": 2358,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0051,
+   "sha8": "926469c4",
+   "ts": 1792227681
+  },
+  "hospitality-guest-services": {
+   "attempt": 1,
+   "chars": 2674,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0013,
+   "sha8": "660e96d5",
+   "ts": 1792227693
+  },
+  "hr-performance-reviewer": {
+   "attempt": 1,
+   "chars": 2252,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0025,
+   "sha8": "4bf54811",
+   "ts": 1792227693
+  },
+  "hr-onboarding": {
+   "attempt": 1,
+   "chars": 3166,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0014,
+   "sha8": "c8dd9244",
+   "ts": 1792227703
+  },
+  "identity-graph-operator": {
+   "attempt": 1,
+   "chars": 2003,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0017,
+   "sha8": "c80a9716",
+   "ts": 1792227705
+  },
+  "language-translator": {
+   "attempt": 1,
+   "chars": 2140,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0014,
+   "sha8": "f32396b1",
+   "ts": 1792227729
+  },
+  "hr-recruiter": {
+   "attempt": 1,
+   "chars": 2476,
+   "gate10gram_hit": 17,
+   "gate_ratio": 0.0046,
+   "sha8": "c4448945",
+   "ts": 1792227732
+  },
+  "legal-billing-time-tracking": {
+   "attempt": 1,
+   "chars": 2392,
+   "gate10gram_hit": 15,
+   "gate_ratio": 0.0019,
+   "sha8": "264ea09b",
+   "ts": 1792227741
+  },
+  "legal-client-intake": {
+   "attempt": 1,
+   "chars": 2624,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0014,
+   "sha8": "c5651bba",
+   "ts": 1792227743
+  },
+  "legal-contract-reviewer": {
+   "attempt": 1,
+   "chars": 2347,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0021,
+   "sha8": "9acf44d1",
+   "ts": 1792227751
+  },
+  "legal-document-review": {
+   "attempt": 1,
+   "chars": 2531,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0015,
+   "sha8": "1dbba6e9",
+   "ts": 1792227756
+  },
+  "legal-policy-writer": {
+   "attempt": 1,
+   "chars": 2321,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0021,
+   "sha8": "acfa4ce0",
+   "ts": 1792227759
+  },
+  "healthcare-marketing-compliance": {
+   "attempt": 1,
+   "chars": 2250,
+   "gate10gram_hit": 17,
+   "gate_ratio": 0.0019,
+   "sha8": "a1521e65",
+   "ts": 1792227761
+  },
+  "livestock-archive-auditor": {
+   "attempt": 1,
+   "chars": 2255,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0026,
+   "sha8": "bf073ffb",
+   "ts": 1792227768
+  },
+  "level-designer": {
+   "attempt": 1,
+   "chars": 2414,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0022,
+   "sha8": "f95a5038",
+   "ts": 1792227769
+  },
+  "loan-officer-assistant": {
+   "attempt": 1,
+   "chars": 2239,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.001,
+   "sha8": "ce89f9bf",
+   "ts": 1792227772
+  },
+  "lsp-index-engineer": {
+   "attempt": 1,
+   "chars": 2461,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0024,
+   "sha8": "d61087ef",
+   "ts": 1792227780
+  },
+  "ma-integration-manager": {
+   "attempt": 1,
+   "chars": 2722,
+   "gate10gram_hit": 44,
+   "gate_ratio": 0.0057,
+   "sha8": "b03fe5e2",
+   "ts": 1792227787
+  },
+  "marketing-agentic-search-optimizer": {
+   "attempt": 1,
+   "chars": 1997,
+   "gate10gram_hit": 11,
+   "gate_ratio": 0.0018,
+   "sha8": "107e703b",
+   "ts": 1792227817
+  },
+  "marketing-ai-citation-strategist": {
+   "attempt": 1,
+   "chars": 2547,
+   "gate10gram_hit": 42,
+   "gate_ratio": 0.0045,
+   "sha8": "0c934cbb",
+   "ts": 1792227830
+  },
+  "marketing-app-store-optimizer": {
+   "attempt": 1,
+   "chars": 2301,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0022,
+   "sha8": "fff2b32a",
+   "ts": 1792227834
+  },
+  "marketing-aeo-foundations": {
+   "attempt": 1,
+   "chars": 2497,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0012,
+   "sha8": "41f24d90",
+   "ts": 1792227838
+  },
+  "macos-spatial-metal-engineer": {
+   "attempt": 1,
+   "chars": 3190,
+   "gate10gram_hit": 60,
+   "gate_ratio": 0.0109,
+   "sha8": "213f3807",
+   "ts": 1792227839
+  },
+  "marketing-baidu-seo-specialist": {
+   "attempt": 1,
+   "chars": 2647,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0033,
+   "sha8": "25d98364",
+   "ts": 1792227843
+  },
+  "marketing-bilibili-strategist": {
+   "attempt": 1,
+   "chars": 2280,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0033,
+   "sha8": "830cdc62",
+   "ts": 1792227848
+  },
+  "marketing-book-co-author": {
+   "attempt": 1,
+   "chars": 1921,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0052,
+   "sha8": "87741e11",
+   "ts": 1792227848
+  },
+  "marketing-carousel-growth-engine": {
+   "attempt": 1,
+   "chars": 2225,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0016,
+   "sha8": "6f803ecf",
+   "ts": 1792227851
+  },
+  "marketing-china-market-localization-strategist": {
+   "attempt": 1,
+   "chars": 3039,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0023,
+   "sha8": "8a32cbb0",
+   "ts": 1792227864
+  },
+  "marketing-cross-border-ecommerce": {
+   "attempt": 1,
+   "chars": 2252,
+   "gate10gram_hit": 15,
+   "gate_ratio": 0.0025,
+   "sha8": "76013857",
+   "ts": 1792227864
+  },
+  "marketing-content-creator": {
+   "attempt": 1,
+   "chars": 2505,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0035,
+   "sha8": "7e22188e",
+   "ts": 1792227868
+  },
+  "marketing-china-ecommerce-operator": {
+   "attempt": 1,
+   "chars": 2324,
+   "gate10gram_hit": 11,
+   "gate_ratio": 0.0024,
+   "sha8": "096413cb",
+   "ts": 1792227931
+  },
+  "marketing-daily-news-briefing": {
+   "attempt": 1,
+   "chars": 2683,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0017,
+   "sha8": "26cf6dab",
+   "ts": 1792227932
+  },
+  "marketing-douyin-strategist": {
+   "attempt": 1,
+   "chars": 2298,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0032,
+   "sha8": "3a2c63ec",
+   "ts": 1792227932
+  },
+  "marketing-ecommerce-operator": {
+   "attempt": 1,
+   "chars": 2503,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.003,
+   "sha8": "30208116",
+   "ts": 1792227936
+  },
+  "marketing-growth-hacker": {
+   "attempt": 1,
+   "chars": 2177,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0036,
+   "sha8": "643de2ec",
+   "ts": 1792227944
+  },
+  "marketing-global-podcast-strategist": {
+   "attempt": 1,
+   "chars": 2929,
+   "gate10gram_hit": 16,
+   "gate_ratio": 0.0022,
+   "sha8": "fc31511e",
+   "ts": 1792227949
+  },
+  "marketing-email-strategist": {
+   "attempt": 1,
+   "chars": 2527,
+   "gate10gram_hit": 15,
+   "gate_ratio": 0.0023,
+   "sha8": "0e0217cd",
+   "ts": 1792227952
+  },
+  "marketing-knowledge-commerce-strategist": {
+   "attempt": 1,
+   "chars": 2040,
+   "gate10gram_hit": 15,
+   "gate_ratio": 0.0025,
+   "sha8": "e258dd8f",
+   "ts": 1792227955
+  },
+  "marketing-kuaishou-strategist": {
+   "attempt": 1,
+   "chars": 2733,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0024,
+   "sha8": "7e946ba8",
+   "ts": 1792227963
+  },
+  "marketing-instagram-curator": {
+   "attempt": 1,
+   "chars": 2707,
+   "gate10gram_hit": 16,
+   "gate_ratio": 0.0055,
+   "sha8": "20027653",
+   "ts": 1792227966
+  },
+  "marketing-livestream-commerce-coach": {
+   "attempt": 1,
+   "chars": 2047,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0019,
+   "sha8": "88948d00",
+   "ts": 1792227968
+  },
+  "marketing-multi-platform-publisher": {
+   "attempt": 1,
+   "chars": 2208,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0024,
+   "sha8": "5e4f5ff4",
+   "ts": 1792227975
+  },
+  "marketing-linkedin-content-creator": {
+   "attempt": 1,
+   "chars": 2403,
+   "gate10gram_hit": 19,
+   "gate_ratio": 0.0042,
+   "sha8": "cb4e470f",
+   "ts": 1792227981
+  },
+  "marketing-private-domain-operator": {
+   "attempt": 1,
+   "chars": 2507,
+   "gate10gram_hit": 11,
+   "gate_ratio": 0.002,
+   "sha8": "c59a501d",
+   "ts": 1792228014
+  },
+  "marketing-reddit-community-builder": {
+   "attempt": 1,
+   "chars": 2535,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0058,
+   "sha8": "9361cb35",
+   "ts": 1792228018
+  },
+  "marketing-search-growth-orchestrator": {
+   "attempt": 1,
+   "chars": 2746,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0019,
+   "sha8": "2534600b",
+   "ts": 1792228027
+  },
+  "marketing-podcast-strategist": {
+   "attempt": 1,
+   "chars": 2268,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0021,
+   "sha8": "c3553992",
+   "ts": 1792228032
+  },
+  "marketing-seo-specialist": {
+   "attempt": 1,
+   "chars": 2520,
+   "gate10gram_hit": 24,
+   "gate_ratio": 0.0039,
+   "sha8": "19e13f7d",
+   "ts": 1792228033
+  },
+  "marketing-pr-communications-manager": {
+   "attempt": 1,
+   "chars": 2490,
+   "gate10gram_hit": 35,
+   "gate_ratio": 0.0038,
+   "sha8": "0ee9a052",
+   "ts": 1792228034
+  },
+  "marketing-short-video-editing-coach": {
+   "attempt": 1,
+   "chars": 2149,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.001,
+   "sha8": "87170035",
+   "ts": 1792228038
+  },
+  "marketing-social-media-strategist": {
+   "attempt": 1,
+   "chars": 2359,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0048,
+   "sha8": "ef114bbf",
+   "ts": 1792228045
+  },
+  "marketing-twitter-engager": {
+   "attempt": 1,
+   "chars": 2590,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0057,
+   "sha8": "80a0f40b",
+   "ts": 1792228048
+  },
+  "marketing-video-optimization-specialist": {
+   "attempt": 1,
+   "chars": 2525,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0058,
+   "sha8": "ba34e2a0",
+   "ts": 1792228052
+  },
+  "marketing-tiktok-strategist": {
+   "attempt": 1,
+   "chars": 2897,
+   "gate10gram_hit": 26,
+   "gate_ratio": 0.0125,
+   "sha8": "2e98e772",
+   "ts": 1792228055
+  },
+  "marketing-wechat-official-account": {
+   "attempt": 1,
+   "chars": 2372,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0033,
+   "sha8": "26817b3c",
+   "ts": 1792228057
+  },
+  "marketing-wechat-operator": {
+   "attempt": 1,
+   "chars": 2033,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0043,
+   "sha8": "cc37d122",
+   "ts": 1792228070
+  },
+  "marketing-xiaohongshu-operator": {
+   "attempt": 1,
+   "chars": 2111,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0044,
+   "sha8": "32ef1c23",
+   "ts": 1792228104
+  },
+  "marketing-weibo-strategist": {
+   "attempt": 1,
+   "chars": 2270,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0019,
+   "sha8": "efcb86b4",
+   "ts": 1792228119
+  },
+  "marketing-weixin-channels-strategist": {
+   "attempt": 1,
+   "chars": 2352,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0024,
+   "sha8": "f55fdfd9",
+   "ts": 1792228122
+  },
+  "marketing-xiaohongshu-specialist": {
+   "attempt": 1,
+   "chars": 2170,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0027,
+   "sha8": "09809dd1",
+   "ts": 1792228123
+  },
+  "marketing-x-twitter-intelligence-analyst": {
+   "attempt": 1,
+   "chars": 2367,
+   "gate10gram_hit": 16,
+   "gate_ratio": 0.0043,
+   "sha8": "17f78c8b",
+   "ts": 1792228123
+  },
+  "marketing-zhihu-strategist": {
+   "attempt": 1,
+   "chars": 2463,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0022,
+   "sha8": "793df5fa",
+   "ts": 1792228134
+  },
+  "operations-manager": {
+   "attempt": 1,
+   "chars": 1977,
+   "gate10gram_hit": 27,
+   "gate_ratio": 0.0037,
+   "sha8": "85b551fe",
+   "ts": 1792228134
+  },
+  "narrative-designer": {
+   "attempt": 1,
+   "chars": 2099,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0017,
+   "sha8": "f778d8cc",
+   "ts": 1792228135
+  },
+  "medical-billing-coding-specialist": {
+   "attempt": 1,
+   "chars": 2589,
+   "gate10gram_hit": 74,
+   "gate_ratio": 0.0085,
+   "sha8": "1fe21b24",
+   "ts": 1792228141
+  },
+  "organizational-psychologist": {
+   "attempt": 1,
+   "chars": 2838,
+   "gate10gram_hit": 29,
+   "gate_ratio": 0.0034,
+   "sha8": "968b67a5",
+   "ts": 1792228149
+  },
+  "paid-media-creative-strategist": {
+   "attempt": 1,
+   "chars": 2354,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0037,
+   "sha8": "8d8576e8",
+   "ts": 1792228149
+  },
+  "paid-media-auditor": {
+   "attempt": 1,
+   "chars": 2297,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0033,
+   "sha8": "496a7e10",
+   "ts": 1792228153
+  },
+  "paid-media-paid-social-strategist": {
+   "attempt": 1,
+   "chars": 2308,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0033,
+   "sha8": "f0959f88",
+   "ts": 1792228156
+  },
+  "paid-media-programmatic-buyer": {
+   "attempt": 1,
+   "chars": 2346,
+   "gate10gram_hit": 11,
+   "gate_ratio": 0.0043,
+   "sha8": "6a97ccda",
+   "ts": 1792228213
+  },
+  "paid-media-ppc-strategist": {
+   "attempt": 1,
+   "chars": 2313,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0037,
+   "sha8": "e2bfa007",
+   "ts": 1792228213
+  },
+  "paid-media-search-query-analyst": {
+   "attempt": 1,
+   "chars": 2138,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.003,
+   "sha8": "c6c6b9ed",
+   "ts": 1792228218
+  },
+  "personal-growth-mentor": {
+   "attempt": 1,
+   "chars": 2364,
+   "gate10gram_hit": 21,
+   "gate_ratio": 0.0078,
+   "sha8": "c43bc776",
+   "ts": 1792228231
+  },
+  "product-behavioral-nudge-engine": {
+   "attempt": 1,
+   "chars": 2376,
+   "gate10gram_hit": 13,
+   "gate_ratio": 0.003,
+   "sha8": "57882039",
+   "ts": 1792228232
+  },
+  "product-feedback-synthesizer": {
+   "attempt": 1,
+   "chars": 2751,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0025,
+   "sha8": "3507a8a9",
+   "ts": 1792228232
+  },
+  "paid-media-tracking-specialist": {
+   "attempt": 1,
+   "chars": 2443,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.003,
+   "sha8": "106e25f9",
+   "ts": 1792228233
+  },
+  "product-manager": {
+   "attempt": 1,
+   "chars": 2165,
+   "gate10gram_hit": 14,
+   "gate_ratio": 0.0014,
+   "sha8": "e3f6f682",
+   "ts": 1792228244
+  },
+  "product-trend-researcher": {
+   "attempt": 1,
+   "chars": 2621,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0035,
+   "sha8": "7046b447",
+   "ts": 1792228245
+  },
+  "product-sprint-prioritizer": {
+   "attempt": 1,
+   "chars": 2548,
+   "gate10gram_hit": 11,
+   "gate_ratio": 0.0055,
+   "sha8": "6dfdc83a",
+   "ts": 1792228247
+  },
+  "project-management-experiment-tracker": {
+   "attempt": 1,
+   "chars": 2074,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0027,
+   "sha8": "ae9ac317",
+   "ts": 1792228249
+  },
+  "project-management-meeting-notes-specialist": {
+   "attempt": 1,
+   "chars": 2281,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0035,
+   "sha8": "30ed0679",
+   "ts": 1792228258
+  },
+  "project-management-jira-workflow-steward": {
+   "attempt": 1,
+   "chars": 2522,
+   "gate10gram_hit": 11,
+   "gate_ratio": 0.0021,
+   "sha8": "de5f8121",
+   "ts": 1792228262
+  },
+  "project-management-project-shepherd": {
+   "attempt": 1,
+   "chars": 2506,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0027,
+   "sha8": "7d4478a5",
+   "ts": 1792228312
+  },
+  "project-management-studio-operations": {
+   "attempt": 1,
+   "chars": 2218,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0026,
+   "sha8": "97d890e8",
+   "ts": 1792228323
+  },
+  "project-management-studio-producer": {
+   "attempt": 1,
+   "chars": 2042,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0029,
+   "sha8": "afaf8ee4",
+   "ts": 1792228328
+  },
+  "prompt-engineer": {
+   "attempt": 1,
+   "chars": 2635,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0034,
+   "sha8": "2dcbdab8",
+   "ts": 1792228335
+  },
+  "real-estate-buyer-seller": {
+   "attempt": 1,
+   "chars": 2171,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0011,
+   "sha8": "3d0271b5",
+   "ts": 1792228335
+  },
+  "recruitment-specialist": {
+   "attempt": 1,
+   "chars": 1969,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0004,
+   "sha8": "29e7ddc3",
+   "ts": 1792228337
+  },
+  "report-distribution-agent": {
+   "attempt": 1,
+   "chars": 1839,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0012,
+   "sha8": "01377400",
+   "ts": 1792228344
+  },
+  "sales-account-strategist": {
+   "attempt": 1,
+   "chars": 2249,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0018,
+   "sha8": "48a6e9f1",
+   "ts": 1792228350
+  },
+  "retail-customer-returns": {
+   "attempt": 1,
+   "chars": 2487,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.001,
+   "sha8": "127fd1ba",
+   "ts": 1792228356
+  },
+  "project-manager-senior": {
+   "attempt": 1,
+   "chars": 2646,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0045,
+   "sha8": "fe4cc74a",
+   "ts": 1792228356
+  },
+  "sales-coach": {
+   "attempt": 1,
+   "chars": 2357,
+   "gate10gram_hit": 6,
+   "gate_ratio": 0.0009,
+   "sha8": "4931d4e6",
+   "ts": 1792228363
+  },
+  "sales-data-extraction-agent": {
+   "attempt": 1,
+   "chars": 2563,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0027,
+   "sha8": "46090ca7",
+   "ts": 1792228364
+  },
+  "sales-engineer": {
+   "attempt": 1,
+   "chars": 1985,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0015,
+   "sha8": "f2cac609",
+   "ts": 1792228404
+  },
+  "sales-offer-lead-gen-strategist": {
+   "attempt": 1,
+   "chars": 2513,
+   "gate10gram_hit": 22,
+   "gate_ratio": 0.0034,
+   "sha8": "57a29524",
+   "ts": 1792228407
+  },
+  "sales-outbound-strategist": {
+   "attempt": 1,
+   "chars": 2404,
+   "gate10gram_hit": 13,
+   "gate_ratio": 0.0033,
+   "sha8": "0c1a5dcd",
+   "ts": 1792228416
+  },
+  "sales-discovery-coach": {
+   "attempt": 1,
+   "chars": 2193,
+   "gate10gram_hit": 17,
+   "gate_ratio": 0.0035,
+   "sha8": "1ec10a2d",
+   "ts": 1792228420
+  },
+  "sales-pipeline-analyst": {
+   "attempt": 1,
+   "chars": 2523,
+   "gate10gram_hit": 20,
+   "gate_ratio": 0.0034,
+   "sha8": "36d909be",
+   "ts": 1792228422
+  },
+  "sales-deal-strategist": {
+   "attempt": 1,
+   "chars": 2397,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0014,
+   "sha8": "5b354f75",
+   "ts": 1792228423
+  },
+  "sales-proposal-strategist": {
+   "attempt": 1,
+   "chars": 2070,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0017,
+   "sha8": "4aa26d79",
+   "ts": 1792228430
+  },
+  "security-appsec-engineer": {
+   "attempt": 1,
+   "chars": 2667,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0011,
+   "sha8": "aa979ded",
+   "ts": 1792228434
+  },
+  "security-architect": {
+   "attempt": 1,
+   "chars": 2301,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0009,
+   "sha8": "a5068d0c",
+   "ts": 1792228435
+  },
+  "security-blockchain-security-auditor": {
+   "attempt": 1,
+   "chars": 2437,
+   "gate10gram_hit": 18,
+   "gate_ratio": 0.002,
+   "sha8": "888d7d99",
+   "ts": 1792228438
+  },
+  "security-cloud-security-architect": {
+   "attempt": 1,
+   "chars": 2869,
+   "gate10gram_hit": 31,
+   "gate_ratio": 0.0034,
+   "sha8": "bee6a219",
+   "ts": 1792228443
+  },
+  "security-compliance-auditor": {
+   "attempt": 1,
+   "chars": 2556,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0028,
+   "sha8": "92630210",
+   "ts": 1792228446
+  },
+  "security-incident-responder": {
+   "attempt": 1,
+   "chars": 2379,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0008,
+   "sha8": "23472f98",
+   "ts": 1792228447
+  },
+  "security-penetration-tester": {
+   "attempt": 1,
+   "chars": 2351,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.001,
+   "sha8": "634bc311",
+   "ts": 1792228504
+  },
+  "security-senior-secops": {
+   "attempt": 1,
+   "chars": 2310,
+   "gate10gram_hit": 13,
+   "gate_ratio": 0.0009,
+   "sha8": "037bce5c",
+   "ts": 1792228507
+  },
+  "security-threat-detection-engineer": {
+   "attempt": 1,
+   "chars": 2330,
+   "gate10gram_hit": 24,
+   "gate_ratio": 0.0021,
+   "sha8": "187be934",
+   "ts": 1792228511
+  },
+  "security-threat-intelligence-analyst": {
+   "attempt": 1,
+   "chars": 3043,
+   "gate10gram_hit": 17,
+   "gate_ratio": 0.0012,
+   "sha8": "770c6380",
+   "ts": 1792228520
+  },
+  "specialized-civil-engineer": {
+   "attempt": 1,
+   "chars": 2037,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0011,
+   "sha8": "97e132cd",
+   "ts": 1792228523
+  },
+  "specialized-cultural-intelligence-strategist": {
+   "attempt": 1,
+   "chars": 2453,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0026,
+   "sha8": "b3bc3c97",
+   "ts": 1792228529
+  },
+  "specialized-ai-policy-writer": {
+   "attempt": 1,
+   "chars": 2727,
+   "gate10gram_hit": 13,
+   "gate_ratio": 0.0031,
+   "sha8": "fb02e8e0",
+   "ts": 1792228529
+  },
+  "specialized-developer-advocate": {
+   "attempt": 1,
+   "chars": 2263,
+   "gate10gram_hit": 14,
+   "gate_ratio": 0.0026,
+   "sha8": "c7137888",
+   "ts": 1792228530
+  },
+  "specialized-document-generator": {
+   "attempt": 1,
+   "chars": 2315,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0011,
+   "sha8": "4a14d498",
+   "ts": 1792228536
+  },
+  "specialized-korean-business-navigator": {
+   "attempt": 1,
+   "chars": 2327,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0008,
+   "sha8": "6b3ae442",
+   "ts": 1792228542
+  },
+  "specialized-french-consulting-market": {
+   "attempt": 1,
+   "chars": 2700,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0013,
+   "sha8": "88f0f629",
+   "ts": 1792228543
+  },
+  "specialized-meeting-assistant": {
+   "attempt": 1,
+   "chars": 2013,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0017,
+   "sha8": "f22fc060",
+   "ts": 1792228547
+  },
+  "specialized-mcp-builder": {
+   "attempt": 1,
+   "chars": 2436,
+   "gate10gram_hit": 21,
+   "gate_ratio": 0.0037,
+   "sha8": "86b4ef38",
+   "ts": 1792228548
+  },
+  "specialized-pricing-analyst": {
+   "attempt": 1,
+   "chars": 2297,
+   "gate10gram_hit": 15,
+   "gate_ratio": 0.0031,
+   "sha8": "f456e375",
+   "ts": 1792228611
+  },
+  "specialized-pricing-optimizer": {
+   "attempt": 1,
+   "chars": 2521,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.002,
+   "sha8": "5ea9936a",
+   "ts": 1792228616
+  },
+  "specialized-risk-assessor": {
+   "attempt": 1,
+   "chars": 2645,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0019,
+   "sha8": "b847787c",
+   "ts": 1792228616
+  },
+  "specialized-model-qa": {
+   "attempt": 1,
+   "chars": 2993,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0011,
+   "sha8": "2b5f1541",
+   "ts": 1792228617
+  },
+  "specialized-salesforce-architect": {
+   "attempt": 1,
+   "chars": 3010,
+   "gate10gram_hit": 34,
+   "gate_ratio": 0.009,
+   "sha8": "f5c06e26",
+   "ts": 1792228627
+  },
+  "specialized-strategy-duel-agent": {
+   "attempt": 1,
+   "chars": 2601,
+   "gate10gram_hit": 31,
+   "gate_ratio": 0.014,
+   "sha8": "9ee9b25a",
+   "ts": 1792228630
+  },
+  "specialized-workflow-architect": {
+   "attempt": 1,
+   "chars": 2154,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0006,
+   "sha8": "ce7ac4e6",
+   "ts": 1792228633
+  },
+  "study-abroad-advisor": {
+   "attempt": 1,
+   "chars": 2439,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0016,
+   "sha8": "132bcd26",
+   "ts": 1792228637
+  },
+  "supply-chain-inventory-forecaster": {
+   "attempt": 1,
+   "chars": 2595,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0021,
+   "sha8": "8dd89240",
+   "ts": 1792228650
+  },
+  "supply-chain-route-optimizer": {
+   "attempt": 1,
+   "chars": 2558,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0023,
+   "sha8": "67f930ae",
+   "ts": 1792228653
+  },
+  "supply-chain-vendor-evaluator": {
+   "attempt": 1,
+   "chars": 2488,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.0023,
+   "sha8": "b960f71a",
+   "ts": 1792228663
+  },
+  "supply-chain-strategist": {
+   "attempt": 1,
+   "chars": 3101,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.001,
+   "sha8": "cd98522b",
+   "ts": 1792228665
+  },
+  "supply-chain-garment-factory-planning-engineer": {
+   "attempt": 1,
+   "chars": 2402,
+   "gate10gram_hit": 11,
+   "gate_ratio": 0.0019,
+   "sha8": "72580baf",
+   "ts": 1792228669
+  },
+  "support-infrastructure-maintainer": {
+   "attempt": 1,
+   "chars": 2405,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0011,
+   "sha8": "cab5f11d",
+   "ts": 1792228697
+  },
+  "support-finance-tracker": {
+   "attempt": 1,
+   "chars": 2432,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.001,
+   "sha8": "e6d093f6",
+   "ts": 1792228704
+  },
+  "support-executive-summary-generator": {
+   "attempt": 1,
+   "chars": 2580,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0024,
+   "sha8": "2767eeb4",
+   "ts": 1792228706
+  },
+  "support-legal-compliance-checker": {
+   "attempt": 1,
+   "chars": 2369,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0007,
+   "sha8": "122056bd",
+   "ts": 1792228711
+  },
+  "support-recruitment-specialist": {
+   "attempt": 1,
+   "chars": 2691,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0009,
+   "sha8": "e1648d27",
+   "ts": 1792228718
+  },
+  "support-support-responder": {
+   "attempt": 1,
+   "chars": 2542,
+   "gate10gram_hit": 11,
+   "gate_ratio": 0.0012,
+   "sha8": "c58252af",
+   "ts": 1792228720
+  },
+  "support-analytics-reporter": {
+   "attempt": 1,
+   "chars": 2926,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0012,
+   "sha8": "c82470c2",
+   "ts": 1792228721
+  },
+  "technical-artist": {
+   "attempt": 1,
+   "chars": 2155,
+   "gate10gram_hit": 6,
+   "gate_ratio": 0.0014,
+   "sha8": "c07c99cc",
+   "ts": 1792228721
+  },
+  "terminal-integration-specialist": {
+   "attempt": 1,
+   "chars": 2382,
+   "gate10gram_hit": 8,
+   "gate_ratio": 0.0018,
+   "sha8": "36f101ba",
+   "ts": 1792228734
+  },
+  "testing-api-tester": {
+   "attempt": 1,
+   "chars": 2357,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0022,
+   "sha8": "9fb45dde",
+   "ts": 1792228740
+  },
+  "technical-translator-agent": {
+   "attempt": 1,
+   "chars": 2807,
+   "gate10gram_hit": 14,
+   "gate_ratio": 0.0052,
+   "sha8": "d0deced2",
+   "ts": 1792228741
+  },
+  "testing-accessibility-auditor": {
+   "attempt": 1,
+   "chars": 3064,
+   "gate10gram_hit": 18,
+   "gate_ratio": 0.0034,
+   "sha8": "ed06250e",
+   "ts": 1792228743
+  },
+  "testing-embedded-qa-engineer": {
+   "attempt": 1,
+   "chars": 2837,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0028,
+   "sha8": "ce192e25",
+   "ts": 1792228755
+  },
+  "testing-test-results-analyzer": {
+   "attempt": 1,
+   "chars": 2515,
+   "gate10gram_hit": 16,
+   "gate_ratio": 0.003,
+   "sha8": "30000c4b",
+   "ts": 1792228792
+  },
+  "testing-tool-evaluator": {
+   "attempt": 1,
+   "chars": 2879,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0011,
+   "sha8": "a61c0d2a",
+   "ts": 1792228805
+  },
+  "testing-evidence-collector": {
+   "attempt": 1,
+   "chars": 2636,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0035,
+   "sha8": "7d905a5a",
+   "ts": 1792228806
+  },
+  "testing-reality-checker": {
+   "attempt": 1,
+   "chars": 2281,
+   "gate10gram_hit": 7,
+   "gate_ratio": 0.0019,
+   "sha8": "7e4f2acb",
+   "ts": 1792228808
+  },
+  "testing-performance-benchmarker": {
+   "attempt": 1,
+   "chars": 2369,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0033,
+   "sha8": "45ee5047",
+   "ts": 1792228811
+  },
+  "testing-workflow-optimizer": {
+   "attempt": 1,
+   "chars": 1793,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0014,
+   "sha8": "fc2c20c0",
+   "ts": 1792228815
+  },
+  "travel-planner": {
+   "attempt": 1,
+   "chars": 2586,
+   "gate10gram_hit": 26,
+   "gate_ratio": 0.0185,
+   "sha8": "7fa00f4a",
+   "ts": 1792228821
+  },
+  "visionos-spatial-engineer": {
+   "attempt": 1,
+   "chars": 2486,
+   "gate10gram_hit": 17,
+   "gate_ratio": 0.0034,
+   "sha8": "7b607f10",
+   "ts": 1792228821
+  },
+  "xr-cockpit-interaction-specialist": {
+   "attempt": 1,
+   "chars": 2735,
+   "gate10gram_hit": 10,
+   "gate_ratio": 0.0026,
+   "sha8": "8c4cb9a3",
+   "ts": 1792228825
+  },
+  "xr-immersive-developer": {
+   "attempt": 1,
+   "chars": 2416,
+   "gate10gram_hit": 16,
+   "gate_ratio": 0.0035,
+   "sha8": "292091de",
+   "ts": 1792228830
+  },
+  "xr-interface-architect": {
+   "attempt": 1,
+   "chars": 2387,
+   "gate10gram_hit": 9,
+   "gate_ratio": 0.002,
+   "sha8": "4f2510de",
+   "ts": 1792228835
+  },
+  "zk-steward": {
+   "attempt": 1,
+   "chars": 2674,
+   "gate10gram_hit": 6,
+   "gate_ratio": 0.0015,
+   "sha8": "8c11c5aa",
+   "ts": 1792228836
+  },
+  "engineering-database-optimizer": {
+   "attempt": 1,
+   "chars": 2706,
+   "gate10gram_hit": 12,
+   "gate_ratio": 0.0044,
+   "sha8": "977079d3",
+   "ts": 1792235743
+  }
+ },
+ "failed": {},
+ "model": "agnes-2.5-flash"
+}
