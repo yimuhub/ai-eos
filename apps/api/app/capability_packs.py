@@ -91,6 +91,43 @@ AGENT_BACKENDS: dict[str, dict] = {
     },
 }
 
+# 专家↔技能包推荐映射（V5.0.2）：按专家部门预配"上岗即开箱"的技能包。
+# 从专家库招聘时若未手选技能包，后端自动按此推荐填入 —— 专家与技能包从此有对应关系。
+DEPT_CAPABILITY_PACKS: dict[str, list[str]] = {
+    "company": ["persistent_memory", "self_learning"],
+    "engineering": ["computer_use", "persistent_memory", "self_learning"],
+    "design": ["web_browsing", "persistent_memory"],
+    "marketing": ["web_browsing", "persistent_memory"],
+    "paid-media": ["web_browsing", "scheduled_work"],
+    "sales": ["web_browsing", "persistent_memory", "self_learning"],
+    "finance": ["persistent_memory", "scheduled_work"],
+    "hr": ["persistent_memory", "scheduled_work"],
+    "legal": ["persistent_memory", "web_browsing"],
+    "supply-chain": ["persistent_memory", "scheduled_work"],
+    "product": ["persistent_memory", "self_learning"],
+    "project-management": ["persistent_memory", "scheduled_work"],
+    "testing": ["computer_use", "self_learning"],
+    "support": ["persistent_memory", "scheduled_work"],
+    "specialized": ["persistent_memory"],
+    "spatial-computing": ["computer_use", "self_learning"],
+    "game-development": ["computer_use", "self_learning"],
+    "academic": ["web_browsing", "persistent_memory"],
+    "gis": ["web_browsing", "persistent_memory"],
+    "security": ["computer_use", "persistent_memory"],
+    "strategy": ["persistent_memory", "self_learning"],
+    "integrations": ["computer_use", "persistent_memory"],
+}
+
+DEFAULT_CAPABILITY_PACKS: list[str] = ["persistent_memory"]
+
+
+def recommended_packs_for_dept(department: str | None) -> list[str]:
+    """部门 → 推荐技能包（未知部门给通用默认，保证推荐永远非空）。"""
+    if department in DEPT_CAPABILITY_PACKS:
+        return list(DEPT_CAPABILITY_PACKS[department])
+    return list(DEFAULT_CAPABILITY_PACKS)
+
+
 
 @dataclass
 class ResolvedCapabilities:

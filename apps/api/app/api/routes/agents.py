@@ -1,7 +1,7 @@
 """Agent CRUD."""
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, text
+from sqlalchemy import select, text, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -91,6 +91,7 @@ async def create_agent(data: AgentIn, db: AsyncSession = Depends(get_db),
     capabilities = payload.pop("capabilities", [])
     backend = payload.pop("backend", None)
     # V5.0：绑定专家库专家 — 未填姓名/人设时自动取专家内容回填
+    # V5.0.2：专家↔技能包 — 未手选技能包时按专家推荐自动配备
     if payload.get("expert_template_id"):
         from app.models.expert_template import ExpertTemplate
         tpl = await db.get(ExpertTemplate, payload["expert_template_id"])
@@ -101,6 +102,8 @@ async def create_agent(data: AgentIn, db: AsyncSession = Depends(get_db),
                 payload["system_prompt"] = tpl.system_prompt
             if not payload.get("description"):
                 payload["description"] = tpl.description
+            if not capabilities:
+                capabilities = tpl.recommended_packs()
     agent = Agent(**payload, status=AgentStatus.IDLE)
     _apply_capabilities(agent, capabilities, backend)
     db.add(agent)
@@ -318,22 +321,36 @@ async def batch_create_agents(data: BatchCreateIn,
         raise HTTPException(404, "Company not found")
 
     created = []
-    # V5.0：预取专家库（按 slug），供批量项按 expert_slug 绑定专家
+    # V5.0：预取专家库（按 slug / id），供批量项按 expert_slug 或 expert_template_id 绑定专家
+    # V5.0.2：专家↔技能包 — 批量项未指定技能包时按专家推荐自动配备
     from app.models.expert_template import ExpertTemplate
     wanted_slugs = [it.get("expert_slug") for it in data.agents if it.get("expert_slug")]
+    wanted_ids = [it.get("expert_template_id") for it in data.agents if it.get("expert_template_id")]
     slug_map: dict[str, ExpertTemplate] = {}
-    if wanted_slugs:
+    id_map: dict[str, ExpertTemplate] = {}
+    if wanted_slugs or wanted_ids:
+        conds = [ExpertTemplate.company_id == data.company_id,
+                 ExpertTemplate.enabled.is_(True)]
+        ors = []
+        if wanted_slugs:
+            ors.append(ExpertTemplate.source_slug.in_(wanted_slugs))
+        if wanted_ids:
+            ors.append(ExpertTemplate.id.in_(wanted_ids))
+        # 至少一个条件成立（want slugs 或 ids），构造 OR
+        where = conds + ([ors[0]] if len(ors) == 1 else [or_(*ors)])
         rows = (await db.execute(
-            select(ExpertTemplate).where(
-                ExpertTemplate.company_id == data.company_id,
-                ExpertTemplate.enabled.is_(True),
-                ExpertTemplate.source_slug.in_(wanted_slugs)))).scalars().all()
-        slug_map = {r.source_slug: r for r in rows}
+            select(ExpertTemplate).where(*where)
+        )).scalars().all()
+        for r in rows:
+            slug_map[r.source_slug] = r
+            id_map[r.id] = r
     for item in data.agents:
         name = (item.get("name") or "").strip()
         if not name:
             continue
         tpl = slug_map.get(item.get("expert_slug") or "")
+        if not tpl:
+            tpl = id_map.get(item.get("expert_template_id") or "")
         agent = Agent(
             company_id=data.company_id,
             department_id=item.get("department_id") or data.department_id,
@@ -345,6 +362,12 @@ async def batch_create_agents(data: BatchCreateIn,
             expert_template_id=item.get("expert_template_id") or (tpl.id if tpl else None),
             status=AgentStatus.IDLE,
         )
+        # 专家↔技能包：项里没带 capabilities 且绑了专家 → 按专家推荐配备
+        item_caps = item.get("capabilities") or []
+        if not item_caps and tpl:
+            item_caps = tpl.recommended_packs()
+        if item_caps:
+            _apply_capabilities(agent, item_caps, None)
         db.add(agent)
         created.append((agent, item))
     await db.flush()

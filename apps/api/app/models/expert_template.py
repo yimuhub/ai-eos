@@ -41,9 +41,18 @@ class ExpertTemplate(Base):
     raw_md: Mapped[str | None] = mapped_column(Text)               # 完整原文（详情页查看）
     # 交付物清单（从正文 "交付物" 章节提取，供验收出题用）
     deliverables: Mapped[list] = mapped_column(JSON, default=list)
+    # V5.0.2 专家↔技能包：显式指定的推荐技能包（空则按部门映射 DEPT_CAPABILITY_PACKS 派生）
+    capability_packs: Mapped[list | None] = mapped_column(JSON, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     hired_count: Mapped[int] = mapped_column(Integer, default=0)   # 被雇佣次数
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    def recommended_packs(self) -> list:
+        """推荐技能包：显式指定优先，否则按部门映射兜底（保证非空）。"""
+        if self.capability_packs:
+            return list(self.capability_packs)
+        from app.capability_packs import recommended_packs_for_dept
+        return recommended_packs_for_dept(self.department)
 
     def public_dict(self):
         return {
@@ -53,6 +62,7 @@ class ExpertTemplate(Base):
             "department": self.department, "tags": self.tags or [],
             "description": (self.description or "")[:300],
             "deliverables": (self.deliverables or [])[:8],
+            "recommended_packs": self.recommended_packs(),
             "enabled": self.enabled, "hired_count": self.hired_count,
             "prompt_chars": len(self.system_prompt or ""),
             "has_raw_md": bool(self.raw_md),

@@ -46,6 +46,7 @@ export default function AgentsPage() {
   type ExpertRow = {
     id: string; name: string; emoji?: string | null;
     department: string; description?: string;
+    recommended_packs?: string[];
   };
   const [experts, setExperts] = useState<ExpertRow[]>([]);
   const [expertSel, setExpertSel] = useState("");       // 单个招聘时选中的专家
@@ -126,7 +127,7 @@ export default function AgentsPage() {
   }, [cid]);
   useEffect(() => { loadExperts(); }, [loadExperts]);
 
-  /** 单个招聘：选中某专家 → 自动回填 姓名/岗位/人设/部门 */
+  /** 单个招聘：选中某专家 → 自动回填 姓名/岗位/人设/部门/技能包 */
   function pickExpert(id: string) {
     setExpertSel(id);
     const ex = experts.find((e) => e.id === id);
@@ -138,6 +139,8 @@ export default function AgentsPage() {
         department_id: ex.department || f.department_id,
         system_prompt: f.system_prompt, // 后端会用专家 system_prompt 回填（留空时）
       }));
+      // V5.0.2 专家↔技能包：预勾选该专家的推荐技能包（用户仍可手动增减）
+      if (ex.recommended_packs?.length) setSelCaps(new Set(ex.recommended_packs));
     }
   }
 

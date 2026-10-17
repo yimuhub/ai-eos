@@ -10,10 +10,20 @@ type Expert = {
   color?: string | null; department: string; tags: string[];
   description: string; deliverables: string[]; enabled: boolean;
   hired_count: number; prompt_chars: number; license?: string | null;
+  recommended_packs?: string[];
 };
 type ExpertDetail = Expert & { raw_md?: string };
 type DeptRow = { department: string; count: number };
 type JobBrief = { job_id: string; template: Expert; task: string };
+
+/** 技能包 key → 中文标签（与后端 capability_packs 对齐，用于"推荐技能包"徽章） */
+const PACK_LABELS: Record<string, string> = {
+  computer_use: "🖥 电脑操作",
+  web_browsing: "🌐 网页浏览",
+  persistent_memory: "🧠 持久记忆",
+  self_learning: "📈 自我学习",
+  scheduled_work: "⏰ 周期性工作",
+};
 
 const DEPT_LABELS: Record<string, string> = {
   company: "公司高管", engineering: "工程", design: "设计", marketing: "营销",
@@ -383,6 +393,20 @@ export default function ExpertsPage() {
             </div>
 
             <p className="text-sm text-[var(--muted)] mb-3">{detail.description}</p>
+
+            {/* V5.0.2 专家↔技能包：推荐技能包（招聘/上岗时自动按此预配） */}
+            {(detail.recommended_packs || []).length > 0 && (
+              <div className="mb-3">
+                <p className="text-[11px] text-[var(--muted)] mb-1.5">🧩 推荐技能包（上岗自动预配）</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {detail.recommended_packs!.map((k) => (
+                    <span key={k} className="px-2 py-0.5 rounded-full text-[11px] bg-white/[0.05] border border-[var(--border)]">
+                      {PACK_LABELS[k] || k}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* 章节化人设档案（参考上游"一页一份完整档案"形式，按 ## 章节结构化呈现） */}
             {(() => {
