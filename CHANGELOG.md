@@ -3,6 +3,13 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的组织方式。
 完整的工程质量改造记录见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
 
+### 桌面客户端（V4.0-P1）
+- 新增 `desktop/`：Electron 壳（main.cjs + preload.cjs）把便携后端(FastAPI/SQLite@8001) + Web 前端(Next.js@8000) 装进原生窗口，不重写任何 UI
+- 主进程平台感知：dev 场景复用已监听端口，双击便携场景自拉起子进程（uvicorn + next start）并等待就绪
+- 数据单文件 `data/aieos.db`；API 端口烘焙一致性检查（.next 不对就自动重建）
+- electron-builder 三平台打包配置（mac dmg/zip、win nsis/portable、linux AppImage/deb）
+- 修复：Electron 关闭路径递归死锁（will-quit preventDefault 死循环）；冒烟测试模式 `AI_EOS_DESKTOP_SMOKE=1`
+
 ## [4.0.0] 一句话指挥台 — 2026-10-17
 
 ### 一句话指挥台（Command Deck）
