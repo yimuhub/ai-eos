@@ -13,7 +13,32 @@
 //    由全局 Toast 统一提示——避免"点了没反应"。
 // 5. **类型化**：api.get<T>() 支持泛型，逐步替代 any。
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+/**
+ * 后端基地址。**运行时**推导，不再编译期写死。
+ *
+ * 背景（v5.0.1 根治）：此前是 `process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"`
+ * 的编译期常量——浏览器在**任何设备**打开页面时，`localhost` 都指向"该设备自己"，
+ * 用局域网 IP / 手机 / 另一台电脑访问前端时，fetch 指向本机的 :8000（无服务）
+ * → 网络层失败 → 报「无法连接后端服务」。
+ *
+ * 推导规则：
+ * 1. 显式 `NEXT_PUBLIC_API_URL`（生产/特殊部署）→ 原样使用
+ * 2. 浏览器环境 → 跟随**当前页面的 host**（你从哪台机器的 IP 打开前端，
+ *    服务就跑在那台机器上）：
+ *    - 便携版前端 :8000（后端 :8001）
+ *    - 开发版前端 :3000（后端 :8000）
+ * 3. SSR/构建期 → 回退 localhost:8000（仅 Next.js 服务端渲染用，不发请求）
+ */
+function resolveApiBase(): string {
+  const envUrl = process.env.NEXT_PUBLIC_API_URL;
+  if (envUrl) return envUrl;
+  if (typeof window === "undefined") return "http://localhost:8000";
+  const host = window.location.hostname || "localhost";
+  const port = window.location.port === "8000" ? "8001" : "8000";
+  return `${window.location.protocol}//${host}:${port}`;
+}
+
+const API = resolveApiBase();
 
 /**
  * 后端基地址。页面需要"直接指向后端的 URL"时用它——

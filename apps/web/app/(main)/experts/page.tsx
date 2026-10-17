@@ -49,7 +49,7 @@ function parseSections(rawMd?: string): { title: string; body: string }[] {
     } else if (ln.startsWith("# ") || ln.startsWith("> ")) {
       // 一级标题(H1)和引言(>)并入第一个章节前的"导语"，单独不成节
       if (cur) cur.body += ln + "\n";
-      else if (ln.trim()) out.length === 0 && out.push({ title: "导语", body: ln + "\n" });
+      else if (ln.trim() && out.length === 0) out.push({ title: "导语", body: ln + "\n" });
     } else if (cur) {
       cur.body += ln + "\n";
     }
