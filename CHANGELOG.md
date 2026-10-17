@@ -3,6 +3,42 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的组织方式。
 完整的工程质量改造记录见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
 
+## [5.0.0] 专家 × 组织形态版 — 2026-10-17
+
+> 大版本：新增数据模型（agent 绑定专家）+ 跨模块能力（专家库管理 / 数字员工联动 / 行业组织形态一键落地）。
+
+### 专家库补全到 302（缺口 40）
+- 起初 vendor 导入漏抓上游子目录，缺 40 个专家（游戏系 Unity/Unreal/Godot/Roblox/Blender、工程深水区 RAG/隐私/WebAssembly/支付/实时协同、安全审计、测试自动化等），非表面的「10 个」
+- `tools/rewrite_experts.py` 后台补齐 40 位，全部过 10-gram 相似度门（最高 0.0150 < 0.02），概念简报仅喂「职业名+部门+emoji」
+- 专家库 262 → **302**，`import-original` 全量入库，前端可见 302 位
+
+### 专家库三大操作能力（编辑 / 复制 / 手动新建）
+- `PUT /experts/{id}` 编辑专家：改 姓名/emoji/部门/简介/system_prompt，重提交付物章节
+- `POST /experts/{id}/copy` 复制专家：生成「名称（副本）」，继承人设章节
+- `POST /experts/manual` 手动新建专家：不依赖 302 预设，凭空定义人设（`source_slug=custom-*` 与预设隔离），**表单必带 📎 附件口**
+- 前端：详情弹窗加「✏️ 编辑」「📋 复制」；页头「＋ 手动添加专家」弹窗（玻璃拟态 + 附件选择器）
+
+### 数字员工 × 专家库打通
+- `agents` 表新增 `expert_template_id` 列（关联 expert_templates.id）
+- 「招新员工」：📚 从专家库选择（可搜索 302 位）→ 自动回填姓名/岗位/部门/人设；也可纯手动，两者共存
+- 「批量添加」双模式：✍️ 手动输入 / 📚 专家库勾选（多选一键批量生成，带 expert_template_id）
+- 后端 `create_agent` / `batch_create` 绑定专家时自动取 system_prompt 作人设 + 雇佣计数
+
+### 行业组织形态预设 + 一键引入
+- `content/org_presets/*.json`：内置 8 行业（互联网/制造/零售电商/医疗/教育/金融/建筑地产/政府），共 56 岗位，每岗位推荐对应专家
+- 新增 `org_presets.py` 路由：`GET /org-presets` 列表 · `GET /org-presets/{id}` 预览 · `POST /org-presets/{id}/apply` 一键落地（部门树 + 配备专家的数字员工）
+- 支持 dry_run 预览、按部门勾选引入、幂等（已存在自动跳过）、统一模型绑定
+- 前端组织架构页：🏢 组织形态 选择器 → 预览弹窗（部门可勾选 + 已存在数提示）→ 一键引入
+
+### 文案清理（展示层去原创字样，合规底裤保留）
+- 删专家库「📜 原创声明横幅」+「AI-EOS 原创版」「AI-EOS 原创」展示文案（登录页/副标题同步改「专家 × 组织形态版」）
+- **保留** `docs/EXPERTS_STATEMENT.md`（法务/审计看）· `vendor/.../LICENSE`（MIT 合规）· DB 的 source/license 字段（数据层留痕，不展示）
+
+### 版本标识
+- package.json / 登录页 / 侧边栏 → V5.0 · 专家 × 组织形态版
+
+## [4.2.0] 专家全原创版 — 2026-10-17
+
 ### 桌面客户端（V4.0-P1）
 - 新增 `desktop/`：Electron 壳（main.cjs + preload.cjs）把便携后端(FastAPI/SQLite@8001) + Web 前端(Next.js@8000) 装进原生窗口，不重写任何 UI
 - 主进程平台感知：dev 场景复用已监听端口，双击便携场景自拉起子进程（uvicorn + next start）并等待就绪

@@ -1,0 +1,56 @@
+{
+  "id": "finance",
+  "industry": "金融",
+  "emoji": "📈",
+  "departments": [
+    {
+      "name": "分析",
+      "desc": "金融·分析核心职能",
+      "agents": [
+        {
+          "name": "财务分析师",
+          "role": "财务分析",
+          "expert_slug": "finance-financial-analyst"
+        },
+        {
+          "name": "财务预测",
+          "role": "预测建模",
+          "expert_slug": "finance-financial-forecaster"
+        }
+      ]
+    },
+    {
+      "name": "风控",
+      "desc": "金融·风控核心职能",
+      "agents": [
+        {
+          "name": "欺诈检测",
+          "role": "反欺诈",
+          "expert_slug": "finance-fraud-detector"
+        }
+      ]
+    },
+    {
+      "name": "投研",
+      "desc": "金融·投研核心职能",
+      "agents": [
+        {
+          "name": "投资研究员",
+          "role": "投研",
+          "expert_slug": "finance-investment-researcher"
+        }
+      ]
+    },
+    {
+      "name": "合规",
+      "desc": "金融·合规核心职能",
+      "agents": [
+        {
+          "name": "港股合规",
+          "role": "合规",
+          "expert_slug": "finance-hk-stock-compliance-reviewer"
+        }
+      ]
+    }
+  ]
+}

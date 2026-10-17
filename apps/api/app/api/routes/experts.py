@@ -9,6 +9,7 @@
   POST   /experts/team              P2 一句话组建专家团队（批量蓝图）
 """
 import os
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -381,7 +382,119 @@ async def expert_detail(eid: str, company_id: str = Query(...),
     t = await db.get(ExpertTemplate, eid)
     if not t or t.company_id != company_id:
         raise HTTPException(404, "not found")
-    return {**t.public_dict(), "raw_md": t.raw_md or ""}
+    return {**t.public_dict(), "raw_md": t.raw_md or "",
+            "system_prompt": t.system_prompt or ""}
+
+
+# ---------------------------------------------------------------------------
+# V5.0 专家管理三件套：编辑 / 复制 / 手动新建
+# ---------------------------------------------------------------------------
+class ExpertEditIn(BaseModel):
+    name: str | None = None
+    emoji: str | None = None
+    color: str | None = None
+    department: str | None = None
+    description: str | None = None
+    system_prompt: str | None = None
+    raw_md: str | None = None
+    enabled: bool | None = None
+
+
+@router.put("/{eid}")
+async def expert_edit(eid: str, data: ExpertEditIn,
+                      company_id: str = Query(...),
+                      db: AsyncSession = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    """编辑专家：已发布专家的修改即时生效（source 仍为 ai-eos-original）。"""
+    t = await db.get(ExpertTemplate, eid)
+    if not t or t.company_id != company_id:
+        raise HTTPException(404, "not found")
+    for k in ("name", "emoji", "color", "department", "description",
+              "system_prompt", "raw_md", "enabled"):
+        v = getattr(data, k)
+        if v is not None:
+            setattr(t, k, v)
+    if data.raw_md is not None:
+        # 重提交付物章节（验收出题用）
+        rec = parse_expert_md(t.source_slug, data.raw_md, t.department or "general")
+        if rec:
+            t.deliverables = rec.get("deliverables") or []
+            if not (t.description or "") and rec.get("description"):
+                t.description = rec["description"]
+    await db.commit()
+    return {**t.public_dict(), "raw_md": t.raw_md or "",
+            "system_prompt": t.system_prompt or ""}
+
+
+@router.post("/{eid}/copy", status_code=201)
+async def expert_copy(eid: str, company_id: str = Query(...),
+                      db: AsyncSession = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    """复制专家：生成「名称（副本）」新记录，继承人设/章节，可继续编辑。"""
+    t = await db.get(ExpertTemplate, eid)
+    if not t or t.company_id != company_id:
+        raise HTTPException(404, "not found")
+    slug = f"custom-copy-{uuid.uuid4().hex[:8]}"
+    clone = ExpertTemplate(
+        id=str(uuid.uuid4()), company_id=company_id,
+        source="ai-eos-original", source_slug=slug,
+        license="AI-EOS 原创", version="1.0",
+        name=f"{t.name}（副本）", emoji=t.emoji, color=t.color,
+        department=t.department, tags=list(t.tags or []),
+        description=t.description, system_prompt=t.system_prompt,
+        raw_md=t.raw_md, deliverables=list(t.deliverables or []),
+        enabled=True)
+    db.add(clone)
+    await db.commit()
+    return {**clone.public_dict(), "raw_md": clone.raw_md or "",
+            "system_prompt": clone.system_prompt or ""}
+
+
+class ExpertManualIn(BaseModel):
+    name: str                                  # 必须
+    emoji: str | None = None
+    color: str | None = None
+    department: str | None = "general"
+    description: str | None = None
+    system_prompt: str | None = None           # 人设正文（8 章节或自由文本）
+    attachments: list[str] | None = None      # 📎 附件引用（上传后的文件 URL/路径）
+    tags: list[str] | None = None
+
+
+@router.post("/manual", status_code=201)
+async def expert_manual(data: ExpertManualIn,
+                       company_id: str = Query(...),
+                       db: AsyncSession = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    """手动新建专家：不依赖 302 预设，老板凭空定义专家人设（带附件）。
+
+    附件在创建前已单独上传（files 端点），这里只登记引用。
+    source_slug=custom-<8hex>，与预设专家隔离。"""
+    if not data.name.strip():
+        raise HTTPException(400, "专家名称不能为空")
+    slug = f"custom-{uuid.uuid4().hex[:8]}"
+    text = data.system_prompt or data.description or ""
+    rec = parse_expert_md(slug, f"# {data.name}\n\n{text}", data.department or "general") \
+        if text.strip() else None
+    t = ExpertTemplate(
+        id=str(uuid.uuid4()), company_id=company_id,
+        source="ai-eos-original", source_slug=slug,
+        license="AI-EOS 原创", version="1.0",
+        name=data.name.strip(),
+        emoji=data.emoji or "🧑‍💼", color=data.color or "#6366f1",
+        department=data.department or "general",
+        tags=data.tags or [data.department or "general"],
+        description=data.description,
+        system_prompt=data.system_prompt or "",
+        raw_md=data.system_prompt or "",
+        deliverables=(rec or {}).get("deliverables") or [],
+        enabled=True)
+    if data.attachments:
+        t.tags = list(dict.fromkeys((data.tags or []) + data.attachments))
+    db.add(t)
+    await db.commit()
+    return {**t.public_dict(), "raw_md": t.raw_md or "",
+            "system_prompt": t.system_prompt or ""}
 
 
 @router.post("/{eid}/to-blueprint")

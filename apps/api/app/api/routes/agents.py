@@ -24,6 +24,7 @@ class AgentIn(BaseModel):
     manager_agent_id: str | None = None
     capabilities: list[str] = []      # 能力包: computer_use / web_browsing / ...
     backend: str | None = None        # 执行底座: native_llm / hermes / codex
+    expert_template_id: str | None = None  # V5.0：绑定专家库专家（取其 system_prompt）
 
 
 def _apply_capabilities(agent: Agent, capabilities: list[str], backend: str | None):
@@ -89,12 +90,24 @@ async def create_agent(data: AgentIn, db: AsyncSession = Depends(get_db),
     payload = data.model_dump()
     capabilities = payload.pop("capabilities", [])
     backend = payload.pop("backend", None)
+    # V5.0：绑定专家库专家 — 未填姓名/人设时自动取专家内容回填
+    if payload.get("expert_template_id"):
+        from app.models.expert_template import ExpertTemplate
+        tpl = await db.get(ExpertTemplate, payload["expert_template_id"])
+        if tpl and tpl.company_id == data.company_id:
+            if not payload.get("name"):
+                payload["name"] = tpl.name
+            if not payload.get("system_prompt"):
+                payload["system_prompt"] = tpl.system_prompt
+            if not payload.get("description"):
+                payload["description"] = tpl.description
     agent = Agent(**payload, status=AgentStatus.IDLE)
     _apply_capabilities(agent, capabilities, backend)
     db.add(agent)
     await log_event(db, "agent.created", "agent", None, "user", user.id,
                     {"name": data.name, "capabilities": capabilities,
-                     "backend": backend or "native_llm"})
+                     "backend": backend or "native_llm",
+                     "expert_template_id": data.expert_template_id})
     await db.commit()
     await db.refresh(agent)
 
@@ -305,18 +318,31 @@ async def batch_create_agents(data: BatchCreateIn,
         raise HTTPException(404, "Company not found")
 
     created = []
+    # V5.0：预取专家库（按 slug），供批量项按 expert_slug 绑定专家
+    from app.models.expert_template import ExpertTemplate
+    wanted_slugs = [it.get("expert_slug") for it in data.agents if it.get("expert_slug")]
+    slug_map: dict[str, ExpertTemplate] = {}
+    if wanted_slugs:
+        rows = (await db.execute(
+            select(ExpertTemplate).where(
+                ExpertTemplate.company_id == data.company_id,
+                ExpertTemplate.enabled.is_(True),
+                ExpertTemplate.source_slug.in_(wanted_slugs)))).scalars().all()
+        slug_map = {r.source_slug: r for r in rows}
     for item in data.agents:
         name = (item.get("name") or "").strip()
         if not name:
             continue
+        tpl = slug_map.get(item.get("expert_slug") or "")
         agent = Agent(
             company_id=data.company_id,
             department_id=item.get("department_id") or data.department_id,
             manager_agent_id=item.get("manager_agent_id") or data.manager_agent_id,
             name=name,
             role=item.get("role"),
-            description=item.get("description"),
-            system_prompt=item.get("system_prompt"),
+            description=item.get("description") or (tpl.description if tpl else None),
+            system_prompt=item.get("system_prompt") or (tpl.system_prompt if tpl else None),
+            expert_template_id=item.get("expert_template_id") or (tpl.id if tpl else None),
             status=AgentStatus.IDLE,
         )
         db.add(agent)

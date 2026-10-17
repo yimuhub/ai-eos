@@ -1,0 +1,76 @@
+{
+  "id": "tech",
+  "industry": "互联网 / 科技公司",
+  "emoji": "💻",
+  "departments": [
+    {
+      "name": "产品部",
+      "desc": "互联网 / 科技公司·产品部核心职能",
+      "agents": [
+        {
+          "name": "产品经理",
+          "role": "产品规划",
+          "expert_slug": "product-manager"
+        },
+        {
+          "name": "增长黑客",
+          "role": "用户增长",
+          "expert_slug": "marketing-growth-hacker"
+        }
+      ]
+    },
+    {
+      "name": "工程部",
+      "desc": "互联网 / 科技公司·工程部核心职能",
+      "agents": [
+        {
+          "name": "AI 工程师",
+          "role": "LLM 应用",
+          "expert_slug": "engineering-ai-engineer"
+        },
+        {
+          "name": "后端架构师",
+          "role": "系统架构",
+          "expert_slug": "engineering-backend-architect"
+        },
+        {
+          "name": "前端开发",
+          "role": "Web 前端",
+          "expert_slug": "engineering-frontend-developer"
+        },
+        {
+          "name": "数据工程师",
+          "role": "数据管线",
+          "expert_slug": "engineering-data-engineer"
+        }
+      ]
+    },
+    {
+      "name": "设计部",
+      "desc": "互联网 / 科技公司·设计部核心职能",
+      "agents": [
+        {
+          "name": "UI 设计师",
+          "role": "界面设计",
+          "expert_slug": "design-ui-designer"
+        },
+        {
+          "name": "UX 研究员",
+          "role": "用户研究",
+          "expert_slug": "design-ux-researcher"
+        }
+      ]
+    },
+    {
+      "name": "运维",
+      "desc": "互联网 / 科技公司·运维核心职能",
+      "agents": [
+        {
+          "name": "DevOps",
+          "role": "持续交付",
+          "expert_slug": "engineering-devops-automator"
+        }
+      ]
+    }
+  ]
+}

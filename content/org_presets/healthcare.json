@@ -1,0 +1,40 @@
+{
+  "id": "healthcare",
+  "industry": "医疗健康",
+  "emoji": "🏥",
+  "departments": [
+    {
+      "name": "医疗编码",
+      "desc": "医疗健康·医疗编码核心职能",
+      "agents": [
+        {
+          "name": "医疗编码",
+          "role": "病案编码",
+          "expert_slug": "medical-billing-coding-specialist"
+        }
+      ]
+    },
+    {
+      "name": "患者服务",
+      "desc": "医疗健康·患者服务核心职能",
+      "agents": [
+        {
+          "name": "医疗客服",
+          "role": "患者接待",
+          "expert_slug": "healthcare-customer-service"
+        }
+      ]
+    },
+    {
+      "name": "合规",
+      "desc": "医疗健康·合规核心职能",
+      "agents": [
+        {
+          "name": "医疗营销合规",
+          "role": "合规审查",
+          "expert_slug": "healthcare-marketing-compliance"
+        }
+      ]
+    }
+  ]
+}

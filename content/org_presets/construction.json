@@ -1,0 +1,50 @@
+{
+  "id": "construction",
+  "industry": "建筑 / 地产",
+  "emoji": "🏗️",
+  "departments": [
+    {
+      "name": "工程",
+      "desc": "建筑 / 地产·工程核心职能",
+      "agents": [
+        {
+          "name": "土木工程师",
+          "role": "结构",
+          "expert_slug": "specialized-civil-engineer"
+        },
+        {
+          "name": "项目工程师",
+          "role": "项目管理",
+          "expert_slug": "project-management-project-shepherd"
+        }
+      ]
+    },
+    {
+      "name": "BIM / GIS",
+      "desc": "建筑 / 地产·BIM / GIS核心职能",
+      "agents": [
+        {
+          "name": "BIM 专家",
+          "role": "建筑信息",
+          "expert_slug": "gis-bim-specialist"
+        },
+        {
+          "name": "空间数据",
+          "role": "GIS",
+          "expert_slug": "gis-spatial-data-engineer"
+        }
+      ]
+    },
+    {
+      "name": "物业",
+      "desc": "建筑 / 地产·物业核心职能",
+      "agents": [
+        {
+          "name": "设施运维",
+          "role": "运维",
+          "expert_slug": "support-infrastructure-maintainer"
+        }
+      ]
+    }
+  ]
+}

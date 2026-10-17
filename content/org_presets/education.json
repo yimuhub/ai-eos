@@ -1,0 +1,45 @@
+{
+  "id": "education",
+  "industry": "教育培训",
+  "emoji": "📚",
+  "departments": [
+    {
+      "name": "课程",
+      "desc": "教育培训·课程核心职能",
+      "agents": [
+        {
+          "name": "知识商务战略师",
+          "role": "课程体系",
+          "expert_slug": "marketing-knowledge-commerce-strategist"
+        },
+        {
+          "name": "学习规划师",
+          "role": "学习路径",
+          "expert_slug": "academic-study-planner"
+        }
+      ]
+    },
+    {
+      "name": "招生",
+      "desc": "教育培训·招生核心职能",
+      "agents": [
+        {
+          "name": "增长黑客",
+          "role": "招生增长",
+          "expert_slug": "marketing-growth-hacker"
+        }
+      ]
+    },
+    {
+      "name": "学员运营",
+      "desc": "教育培训·学员运营核心职能",
+      "agents": [
+        {
+          "name": "客户成功",
+          "role": "学员留存",
+          "expert_slug": "customer-success-manager"
+        }
+      ]
+    }
+  ]
+}

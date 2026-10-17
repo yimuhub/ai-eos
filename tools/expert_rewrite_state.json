@@ -2033,6 +2033,326 @@
    "gate_ratio": 0.0044,
    "sha8": "977079d3",
    "ts": 1792235743
+  },
+  "engineering-data-visualization-engineer": {
+   "attempt": 1,
+   "chars": 2056,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "9e4549f9",
+   "ts": 1792237721
+  },
+  "engineering-database-reliability-engineer": {
+   "attempt": 1,
+   "chars": 2496,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "94cb1b03",
+   "ts": 1792237724
+  },
+  "blender-addon-engineer": {
+   "attempt": 1,
+   "chars": 3186,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "764dca6c",
+   "ts": 1792237725
+  },
+  "engineering-api-platform-engineer": {
+   "attempt": 1,
+   "chars": 2547,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "9ee8ab61",
+   "ts": 1792237725
+  },
+  "engineering-desktop-app-engineer": {
+   "attempt": 1,
+   "chars": 2819,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "c73ab395",
+   "ts": 1792237733
+  },
+  "engineering-developer-tooling-engineer": {
+   "attempt": 1,
+   "chars": 2760,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "b2fb1725",
+   "ts": 1792237736
+  },
+  "engineering-embedded-algorithm-engineer": {
+   "attempt": 1,
+   "chars": 2723,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "12abb5c7",
+   "ts": 1792237739
+  },
+  "engineering-embedded-application-engineer": {
+   "attempt": 1,
+   "chars": 2345,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "d5fb71d0",
+   "ts": 1792237741
+  },
+  "engineering-finops-engineer": {
+   "attempt": 1,
+   "chars": 2412,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "0121f72a",
+   "ts": 1792237745
+  },
+  "engineering-i18n-engineer": {
+   "attempt": 1,
+   "chars": 2895,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "9e9dcde1",
+   "ts": 1792237749
+  },
+  "engineering-identity-access-engineer": {
+   "attempt": 1,
+   "chars": 2381,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "08a24713",
+   "ts": 1792237751
+  },
+  "engineering-knowledge-graph-engineer": {
+   "attempt": 1,
+   "chars": 2504,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "088634a9",
+   "ts": 1792237806
+  },
+  "engineering-llm-post-training-engineer": {
+   "attempt": 1,
+   "chars": 2379,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "f737faea",
+   "ts": 1792237809
+  },
+  "engineering-mobile-release-engineer": {
+   "attempt": 1,
+   "chars": 2564,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "3f35bdbf",
+   "ts": 1792237817
+  },
+  "engineering-platform-engineer": {
+   "attempt": 1,
+   "chars": 2821,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "af9211a9",
+   "ts": 1792237820
+  },
+  "engineering-privacy-engineer": {
+   "attempt": 1,
+   "chars": 2218,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "be7e42d1",
+   "ts": 1792237821
+  },
+  "engineering-payments-billing-engineer": {
+   "attempt": 1,
+   "chars": 2716,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "fe06e9f0",
+   "ts": 1792237827
+  },
+  "engineering-rag-pipeline-engineer": {
+   "attempt": 1,
+   "chars": 2591,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "15f7516d",
+   "ts": 1792237830
+  },
+  "engineering-realtime-collaboration-engineer": {
+   "attempt": 1,
+   "chars": 2474,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "405e9380",
+   "ts": 1792237831
+  },
+  "engineering-search-relevance-engineer": {
+   "attempt": 1,
+   "chars": 2746,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "4789e4d1",
+   "ts": 1792237836
+  },
+  "engineering-video-streaming-engineer": {
+   "attempt": 1,
+   "chars": 2490,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "df95234f",
+   "ts": 1792237842
+  },
+  "godot-gameplay-scripter": {
+   "attempt": 1,
+   "chars": 2291,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "72a12616",
+   "ts": 1792237843
+  },
+  "engineering-webassembly-engineer": {
+   "attempt": 1,
+   "chars": 2669,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "eaf5824f",
+   "ts": 1792237848
+  },
+  "godot-multiplayer-engineer": {
+   "attempt": 1,
+   "chars": 2609,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "a3cdeac0",
+   "ts": 1792237901
+  },
+  "godot-shader-developer": {
+   "attempt": 1,
+   "chars": 3460,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "0f530b8d",
+   "ts": 1792237908
+  },
+  "roblox-experience-designer": {
+   "attempt": 1,
+   "chars": 2387,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "67fb5249",
+   "ts": 1792237911
+  },
+  "nexus-strategy": {
+   "attempt": 1,
+   "chars": 2384,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "80c0bdb0",
+   "ts": 1792237915
+  },
+  "roblox-avatar-creator": {
+   "attempt": 1,
+   "chars": 2362,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "3d8cbda1",
+   "ts": 1792237917
+  },
+  "roblox-systems-scripter": {
+   "attempt": 1,
+   "chars": 2443,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "60099db1",
+   "ts": 1792237918
+  },
+  "security-ai-generated-code-auditor": {
+   "attempt": 1,
+   "chars": 2480,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "443ac0f5",
+   "ts": 1792237922
+  },
+  "security-secrets-credential-engineer": {
+   "attempt": 1,
+   "chars": 2483,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "5deaac36",
+   "ts": 1792237927
+  },
+  "unity-architect": {
+   "attempt": 1,
+   "chars": 2805,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "9a6d9d4b",
+   "ts": 1792237930
+  },
+  "unity-editor-tool-developer": {
+   "attempt": 1,
+   "chars": 3216,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "4e9cbcd1",
+   "ts": 1792237935
+  },
+  "unity-shader-graph-artist": {
+   "attempt": 1,
+   "chars": 2682,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "7f22fa9c",
+   "ts": 1792237940
+  },
+  "unity-multiplayer-engineer": {
+   "attempt": 1,
+   "chars": 2175,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "1eb7c9ef",
+   "ts": 1792237947
+  },
+  "unreal-multiplayer-architect": {
+   "attempt": 1,
+   "chars": 2825,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "dac22406",
+   "ts": 1792237997
+  },
+  "unreal-systems-engineer": {
+   "attempt": 1,
+   "chars": 2658,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "840166c8",
+   "ts": 1792238001
+  },
+  "unreal-technical-artist": {
+   "attempt": 1,
+   "chars": 2968,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "79a84c2f",
+   "ts": 1792238005
+  },
+  "unreal-world-builder": {
+   "attempt": 1,
+   "chars": 2631,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "517fb232",
+   "ts": 1792238016
+  },
+  "testing-test-automation-engineer": {
+   "attempt": 1,
+   "chars": 2747,
+   "gate10gram_hit": 0,
+   "gate_ratio": 0.0,
+   "sha8": "34fa5693",
+   "ts": 1792238506
   }
  },
  "failed": {},

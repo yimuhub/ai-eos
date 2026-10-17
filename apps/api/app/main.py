@@ -8,6 +8,7 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             agent_chat, delivery, departments_batch, kb2, offboarding, task_dispatch,
                             test_console,
                             career,
+                            org_presets,
                             companies, collaboration, computer_agent, context,
                             dashboard, events, health, intervention, knowledge,
                             learning, meetings, memory, messages, metrics, models_api,
@@ -16,7 +17,7 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             automation, governance,
                             schedules, skill_growth,
                             app_alias, skills, tasks, team_builder, training, workflows, war_room, team_generator, company_manage,
-                            tokens, experts, command, prometheus_metrics)
+                            tokens, experts, command, org_presets, prometheus_metrics)
 from app.core.config import settings
 from app.core.logging_config import get_logger, setup_logging
 
@@ -96,6 +97,6 @@ for r in (health, auth, companies, agents, agent_chat, models_api, skills, tasks
           performance, team_builder, browser_agent, computer_agent, app_alias,
           schedules, learning, training, reflection, skill_growth, career,
           review, factory, external_agents, sandbox, automation, governance,
-          offboarding, departments_batch, task_dispatch, test_console, war_room, team_generator, company_manage, tokens, experts, command,
+          offboarding, departments_batch, task_dispatch, test_console, war_room, team_generator, company_manage, tokens, experts, command, org_presets,
           access, prometheus_metrics):
     app.include_router(r.router)

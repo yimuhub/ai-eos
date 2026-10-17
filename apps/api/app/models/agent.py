@@ -66,6 +66,8 @@ class Agent(TimestampMixin, Base):
     manager_agent_id: Mapped[str | None] = mapped_column(String(36))
     memory_config: Mapped[dict | None] = mapped_column(JSON, default=dict)
     doc_style_id: Mapped[str | None] = mapped_column(String(36), nullable=True)  # 绑定的文档风格
+    # V5.0：绑定的专家库专家（expert_templates.id），激活时取其 system_prompt 作人设
+    expert_template_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 
     department: Mapped["Department | None"] = relationship(back_populates="agents")
     model_configs: Mapped[list["AgentModelConfig"]] = relationship(

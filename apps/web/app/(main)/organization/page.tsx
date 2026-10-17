@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, describeError } from "@/lib/api";
 import { confirmAction } from "@/components/ConfirmDialog";
@@ -53,10 +53,65 @@ export default function OrganizationPage() {
   // 排序模式
   const [sortMode, setSortMode] = useState(false);
 
+  // V5.0 行业组织形态预设一键引入
+  type PresetRow = { id: string; industry: string; emoji: string; department_count: number; agent_count: number };
+  type PresetDetail = { id: string; industry: string; emoji: string;
+    departments: { name: string; desc: string; agents: { name: string; role: string; expert_slug: string }[] }[] };
+  const [showPresets, setShowPresets] = useState(false);
+  const [presets, setPresets] = useState<PresetRow[]>([]);
+  const [presetDetail, setPresetDetail] = useState<PresetDetail | null>(null);
+  const [presetChecked, setPresetChecked] = useState<Set<string>>(new Set());
+  const [presetApplying, setPresetApplying] = useState(false);
+  const [presetDry, setPresetDry] = useState<{ departments: number; agents: number; note: string } | null>(null);
+  const cidRef = useRef<string>("");  // 当前公司 id（load 里赋值，供预设引入用）
+
+  const loadPresets = useCallback(async () => {
+    try { setPresets(await api.get<PresetRow[]>("/org-presets")); } catch {}
+  }, []);
+  useEffect(() => { loadPresets(); }, [loadPresets]);
+
+  async function previewPreset(p: PresetRow) {
+    setShowPresets(false);
+    setPresetDry(null);
+    try {
+      const d: PresetDetail = await api.get(`/org-presets/${p.id}`);
+      setPresetDetail(d);
+      setPresetChecked(new Set(d.departments.map((x) => x.name)));
+      setMsg("");
+      // 立即 dry_run 预览
+      const r = await api.post<{ created_departments: number; created_agents: number; skipped_agents: number; note: string }>(
+        `/org-presets/${p.id}/apply`,
+        { company_id: firstCompanyId(), departments: d.departments.map((x) => x.name), dry_run: true } as any,
+      ) as any;
+      setPresetDry({ departments: r.created_departments, agents: r.created_agents, note: `将建 ${r.created_departments} 部门 / ${r.created_agents} 员工，跳过已存在 ${r.skipped_agents} 个` });
+    } catch (e) { setMsg(`❌ ${describeError(e, "加载预设失败")}`); }
+  }
+
+  async function applyPreset() {
+    if (!presetDetail) return;
+    setPresetApplying(true); setMsg("");
+    try {
+      const r = await api.post<{ created_departments: number; created_agents: number; skipped_agents: number; skipped_departments: number }>(
+        `/org-presets/${presetDetail.id}/apply`,
+        { company_id: firstCompanyId(), departments: Array.from(presetChecked) } as any,
+      ) as any;
+      setMsg(`✅ 已引入「${presetDetail.industry}」：${r.created_departments} 部门 / ${r.created_agents} 员工（跳过 ${r.skipped_departments} 部门 / ${r.skipped_agents} 员工）`);
+      setPresetDetail(null);
+      await load();
+    } catch (e) { setMsg(`❌ ${describeError(e, "引入失败")}`); }
+    setPresetApplying(false);
+  }
+
+  function firstCompanyId(): string {
+    // 组织架构页以公司首个 cid 为准（load 里赋值到 cidRef）
+    return cidRef.current;
+  }
+
   const load = useCallback(async () => {
     const cs = await api.get<Company[]>("/companies");
     if (!cs.length) return;
     const cid = cs[0].id;
+    cidRef.current = cid;
     const ds: Dept[] = await api.get(`/companies/${cid}/departments`);
     setDepts(ds);
     setAgents(await api.get(`/agents?company_id=${cid}`));
@@ -232,6 +287,7 @@ export default function OrganizationPage() {
             </p>
           </div>
           <div className="flex gap-2">
+            <button onClick={() => setShowPresets(!showPresets)} className="btn-ghost">🏢 组织形态</button>
             <button onClick={sortMode ? saveSort : startSort}
               className={sortMode ? "btn-primary" : "btn-ghost"}>
               {sortMode ? "✓ 保存排序" : "⇅ 排序"}
@@ -259,6 +315,34 @@ export default function OrganizationPage() {
         </p>
       )}
       {msg && <p className="mb-3 text-sm text-indigo-300">{msg}</p>}
+
+      {/* V5.0 行业组织形态预设：选行业 → 预览部门树 → 一键引入（自动配专家） */}
+      {showPresets && (
+        <div className="card mb-5 space-y-3 animate-fade-up">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-medium text-sm">🏢 行业组织形态预设（一键引入）</h3>
+              <p className="text-xs mt-0.5" style={{ color: "var(--muted)" }}>
+                选一个行业 → 自动建部门 + 配好专家的数字员工；已存在的自动跳过，可反复引入
+              </p>
+            </div>
+            <button onClick={() => setShowPresets(false)} className="text-[var(--muted)] hover:text-white text-lg px-1">✕</button>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
+            {presets.map((p) => (
+              <button key={p.id} onClick={() => previewPreset(p)}
+                className="text-left p-3 rounded-xl border transition-all hover:-translate-y-0.5"
+                style={{ borderColor: "var(--border)", background: "rgba(255,255,255,0.02)" }}>
+                <div className="text-2xl mb-1.5">{p.emoji}</div>
+                <div className="text-sm font-semibold">{p.industry}</div>
+                <div className="text-[11px] mt-0.5" style={{ color: "var(--muted)" }}>
+                  {p.department_count} 部门 · {p.agent_count} 岗位（配专家）
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* 批量添加面板 */}
       {showBatchAdd && (
@@ -673,6 +757,70 @@ export default function OrganizationPage() {
                   🗑 删除此部门
                 </button>
               )}
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* V5.0 组织形态预设预览弹窗：部门可勾选 → dry_run 预览 → 一键引入 */}
+      {presetDetail && createPortal(
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setPresetDetail(null)} />
+          <div className="relative w-full max-w-3xl max-h-[90vh] bg-[var(--card)] backdrop-blur-xl border border-[var(--border)] rounded-2xl shadow-2xl overflow-y-auto p-6 animate-fade-up">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-lg font-bold">{presetDetail.emoji} {presetDetail.industry}</h2>
+                <p className="text-xs text-[var(--muted)] mt-0.5">
+                  勾选要引入的部门 → 一键引入：自动建部门 + 配好专家的数字员工
+                </p>
+              </div>
+              <button onClick={() => setPresetDetail(null)} className="text-[var(--muted)] hover:text-white text-xl px-2">✕</button>
+            </div>
+
+            {presetDry && (
+              <div className="mb-3 text-xs px-3 py-2 rounded-lg bg-cyan-500/10 border border-cyan-400/25 text-cyan-300">
+                📊 {presetDry.note}（部门可增减，引入前先预览，已存在的自动跳过）
+              </div>
+            )}
+
+            <div className="space-y-2.5">
+              {presetDetail.departments.map((d) => {
+                const on = presetChecked.has(d.name);
+                return (
+                  <div key={d.name} className="rounded-xl border p-3"
+                    style={{ borderColor: on ? "rgba(99,102,241,0.4)" : "var(--border)", background: on ? "rgba(99,102,241,0.06)" : "transparent" }}>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" checked={on}
+                        onChange={() => setPresetChecked((prev) => {
+                          const n = new Set(prev);
+                          if (n.has(d.name)) n.delete(d.name); else n.add(d.name);
+                          return n;
+                        })}
+                        className="accent-indigo-500" />
+                      <span className="text-sm font-semibold">{d.name}</span>
+                      <span className="text-[11px]" style={{ color: "var(--muted)" }}>{d.desc}</span>
+                    </label>
+                    {on && d.agents.length > 0 && (
+                      <div className="mt-2 pl-5 flex flex-wrap gap-1.5">
+                        {d.agents.map((a, i) => (
+                          <span key={i} className="text-[11px] px-2 py-0.5 rounded-full bg-white/[0.04] border border-[var(--border)]">
+                            👤 {a.name} <span className="text-[var(--muted)]">· {a.role}</span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 mt-5">
+              <button onClick={() => setPresetDetail(null)} className="btn-ghost text-sm">取消</button>
+              <button onClick={applyPreset} disabled={presetApplying || presetChecked.size === 0}
+                className="btn-primary text-sm disabled:opacity-40">
+                {presetApplying ? "引入中…" : `📥 一键引入（${presetChecked.size} 部门）`}
+              </button>
             </div>
           </div>
         </div>,

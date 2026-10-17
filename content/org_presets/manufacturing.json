@@ -1,0 +1,61 @@
+{
+  "id": "manufacturing",
+  "industry": "制造业",
+  "emoji": "🏭",
+  "departments": [
+    {
+      "name": "供应链",
+      "desc": "制造业·供应链核心职能",
+      "agents": [
+        {
+          "name": "供应链战略师",
+          "role": "全链规划",
+          "expert_slug": "supply-chain-strategist"
+        },
+        {
+          "name": "库存预测",
+          "role": "需求预测",
+          "expert_slug": "supply-chain-inventory-forecaster"
+        }
+      ]
+    },
+    {
+      "name": "生产",
+      "desc": "制造业·生产核心职能",
+      "agents": [
+        {
+          "name": "生产计划",
+          "role": "排程",
+          "expert_slug": "operations-manager"
+        },
+        {
+          "name": "机械工程师",
+          "role": "工艺设备",
+          "expert_slug": "engineering-mechanical-design-engineer"
+        }
+      ]
+    },
+    {
+      "name": "质量",
+      "desc": "制造业·质量核心职能",
+      "agents": [
+        {
+          "name": "测试自动化",
+          "role": "质检自动化",
+          "expert_slug": "testing-test-automation-engineer"
+        }
+      ]
+    },
+    {
+      "name": "工程",
+      "desc": "制造业·工程核心职能",
+      "agents": [
+        {
+          "name": "工艺工程师",
+          "role": "工艺优化",
+          "expert_slug": "engineering-embedded-application-engineer"
+        }
+      ]
+    }
+  ]
+}

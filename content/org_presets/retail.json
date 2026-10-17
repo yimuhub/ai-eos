@@ -1,0 +1,61 @@
+{
+  "id": "retail",
+  "industry": "零售 / 电商",
+  "emoji": "🛒",
+  "departments": [
+    {
+      "name": "增长营销",
+      "desc": "零售 / 电商·增长营销核心职能",
+      "agents": [
+        {
+          "name": "跨境电商运营",
+          "role": "海外电商",
+          "expert_slug": "marketing-cross-border-ecommerce"
+        },
+        {
+          "name": "小红书运营",
+          "role": "种草",
+          "expert_slug": "marketing-xiaohongshu-operator"
+        }
+      ]
+    },
+    {
+      "name": "运营",
+      "desc": "零售 / 电商·运营核心职能",
+      "agents": [
+        {
+          "name": "电商运营",
+          "role": "店铺运营",
+          "expert_slug": "marketing-ecommerce-operator"
+        },
+        {
+          "name": "直播电商教练",
+          "role": "直播带货",
+          "expert_slug": "marketing-livestream-commerce-coach"
+        }
+      ]
+    },
+    {
+      "name": "客服",
+      "desc": "零售 / 电商·客服核心职能",
+      "agents": [
+        {
+          "name": "支持响应",
+          "role": "客户服务",
+          "expert_slug": "support-support-responder"
+        }
+      ]
+    },
+    {
+      "name": "库存",
+      "desc": "零售 / 电商·库存核心职能",
+      "agents": [
+        {
+          "name": "库存预测",
+          "role": "补货",
+          "expert_slug": "supply-chain-inventory-forecaster"
+        }
+      ]
+    }
+  ]
+}

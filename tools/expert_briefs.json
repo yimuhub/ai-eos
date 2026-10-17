@@ -1832,5 +1832,285 @@
   "name": "ZK 管家",
   "emoji": "🔐",
   "desc": "秉承 Niklas Luhmann 卡片盒笔记法精神的知识库管家。默认视角为 Luhmann；按任务切换领域专家（Feynman、Munger、Ogilvy 等）。强制原子笔记、连接性和验证闭环。适用于知识库建设、笔记链接、复杂任务分解和跨领域决策支持。"
+ },
+ {
+  "slug": "engineering-api-platform-engineer",
+  "dept": "engineering",
+  "name": "API 平台工程师",
+  "emoji": "🔌",
+  "desc": "对外 API 网关、开发者门户、版本管理与 SDK 生态专家"
+ },
+ {
+  "slug": "engineering-data-visualization-engineer",
+  "dept": "engineering",
+  "name": "数据可视化工程师",
+  "emoji": "📊",
+  "desc": "图表、仪表盘与数据故事设计，让决策层一眼看懂数据"
+ },
+ {
+  "slug": "engineering-database-reliability-engineer",
+  "dept": "engineering",
+  "name": "数据库可靠性工程师",
+  "emoji": "🗄️",
+  "desc": "高可用数据库、备份恢复、性能与故障演练专家"
+ },
+ {
+  "slug": "engineering-desktop-app-engineer",
+  "dept": "engineering",
+  "name": "桌面应用工程师",
+  "emoji": "🖥️",
+  "desc": "Electron/Tauri/原生桌面应用架构与打包发布专家"
+ },
+ {
+  "slug": "engineering-developer-tooling-engineer",
+  "dept": "engineering",
+  "name": "开发者工具工程师",
+  "emoji": "🛠️",
+  "desc": "CLI、脚手架、内部开发工具与开发者体验专家"
+ },
+ {
+  "slug": "engineering-embedded-algorithm-engineer",
+  "dept": "engineering",
+  "name": "嵌入式算法工程师",
+  "emoji": "🧮",
+  "desc": "嵌入式目标上的算法优化：定点化、量化、低延迟实现"
+ },
+ {
+  "slug": "engineering-embedded-application-engineer",
+  "dept": "engineering",
+  "name": "嵌入式应用工程师",
+  "emoji": "⚙️",
+  "desc": "嵌入式应用层开发、资源受限系统上的软件架构"
+ },
+ {
+  "slug": "engineering-finops-engineer",
+  "dept": "engineering",
+  "name": "FinOps 工程师",
+  "emoji": "💰",
+  "desc": "云成本治理：预算、优化与成本可观测性"
+ },
+ {
+  "slug": "engineering-i18n-engineer",
+  "dept": "engineering",
+  "name": "国际化工程师",
+  "emoji": "🌐",
+  "desc": "多语言、本地化工程与 RTL/时区/货币适配"
+ },
+ {
+  "slug": "engineering-identity-access-engineer",
+  "dept": "engineering",
+  "name": "身份与访问工程师",
+  "emoji": "🔐",
+  "desc": "IAM、SSO、零信任与最小权限访问治理"
+ },
+ {
+  "slug": "engineering-knowledge-graph-engineer",
+  "dept": "engineering",
+  "name": "知识图谱工程师",
+  "emoji": "🕸️",
+  "desc": "实体关系建模、图数据库与语义检索"
+ },
+ {
+  "slug": "engineering-llm-post-training-engineer",
+  "dept": "engineering",
+  "name": "大模型后训练工程师",
+  "emoji": "🧠",
+  "desc": "SFT/RLHF/DPO 微调管线与评测"
+ },
+ {
+  "slug": "engineering-mobile-release-engineer",
+  "dept": "engineering",
+  "name": "移动端发布工程师",
+  "emoji": "📱",
+  "desc": "应用商店发布、灰度、崩溃监控与发布治理"
+ },
+ {
+  "slug": "engineering-payments-billing-engineer",
+  "dept": "engineering",
+  "name": "支付结算工程师",
+  "emoji": "💳",
+  "desc": "支付网关、订阅计费、对账与退款工程"
+ },
+ {
+  "slug": "engineering-platform-engineer",
+  "dept": "engineering",
+  "name": "平台工程师",
+  "emoji": "🏗️",
+  "desc": "内部开发者平台（IDP）、CI/CD 与环境自助服务"
+ },
+ {
+  "slug": "engineering-privacy-engineer",
+  "dept": "engineering",
+  "name": "隐私工程师",
+  "emoji": "🛡️",
+  "desc": "PII 数据流治理、DLP 与合规工程化"
+ },
+ {
+  "slug": "engineering-rag-pipeline-engineer",
+  "dept": "engineering",
+  "name": "RAG 管线工程师",
+  "emoji": "📚",
+  "desc": "检索增强生成管线：切分、向量化、召回与引用"
+ },
+ {
+  "slug": "engineering-realtime-collaboration-engineer",
+  "dept": "engineering",
+  "name": "实时协同工程师",
+  "emoji": "🤝",
+  "desc": "CRDT/OT、多人协同编辑与低延迟同步"
+ },
+ {
+  "slug": "engineering-search-relevance-engineer",
+  "dept": "engineering",
+  "name": "搜索相关性工程师",
+  "emoji": "🔎",
+  "desc": "检索排序、查询理解与相关性评测体系"
+ },
+ {
+  "slug": "engineering-video-streaming-engineer",
+  "dept": "engineering",
+  "name": "视频流媒体工程师",
+  "emoji": "🎬",
+  "desc": "转码、CDN、低延迟直播与自适应码率"
+ },
+ {
+  "slug": "engineering-webassembly-engineer",
+  "dept": "engineering",
+  "name": "WebAssembly 工程师",
+  "emoji": "📦",
+  "desc": "Wasm 模块开发、边界语言与浏览器侧性能"
+ },
+ {
+  "slug": "blender-addon-engineer",
+  "dept": "game-development",
+  "name": "Blender 插件工程师",
+  "emoji": "🌀",
+  "desc": "Blender 扩展开发：工具链、自动化管线与节点图"
+ },
+ {
+  "slug": "godot-gameplay-scripter",
+  "dept": "game-development",
+  "name": "Godot 玩法脚本工程师",
+  "emoji": "🎲",
+  "desc": "Godot GDScript 玩法逻辑与事件系统"
+ },
+ {
+  "slug": "godot-multiplayer-engineer",
+  "dept": "game-development",
+  "name": "Godot 多人网络工程师",
+  "emoji": "🌐",
+  "desc": "Godot 多人同步、权威模型与延迟补偿"
+ },
+ {
+  "slug": "godot-shader-developer",
+  "dept": "game-development",
+  "name": "Godot Shader 工程师",
+  "emoji": "🎨",
+  "desc": "Godot 着色器与材质管线"
+ },
+ {
+  "slug": "roblox-avatar-creator",
+  "dept": "game-development",
+  "name": "Roblox 形象设计师",
+  "emoji": "🧍",
+  "desc": "Roblox 虚拟形象、装扮与角色系统"
+ },
+ {
+  "slug": "roblox-experience-designer",
+  "dept": "game-development",
+  "name": "Roblox 体验设计师",
+  "emoji": "🏞️",
+  "desc": "Roblox 世界/体验设计与留存循环"
+ },
+ {
+  "slug": "roblox-systems-scripter",
+  "dept": "game-development",
+  "name": "Roblox 系统脚本工程师",
+  "emoji": "🧩",
+  "desc": "Roblox Luau 服务端系统：数据、匹配与反作弊"
+ },
+ {
+  "slug": "unity-architect",
+  "dept": "game-development",
+  "name": "Unity 架构师",
+  "emoji": "🏛️",
+  "desc": "Unity 大型项目架构：模块划分、脚本体系与热更新"
+ },
+ {
+  "slug": "unity-editor-tool-developer",
+  "dept": "game-development",
+  "name": "Unity 编辑器工具工程师",
+  "emoji": "🔧",
+  "desc": "Unity 编辑器扩展与工具链开发"
+ },
+ {
+  "slug": "unity-multiplayer-engineer",
+  "dept": "game-development",
+  "name": "Unity 多人网络工程师",
+  "emoji": "🌐",
+  "desc": "Unity 网络同步（Netcode/TNet）与多人架构"
+ },
+ {
+  "slug": "unity-shader-graph-artist",
+  "dept": "game-development",
+  "name": "Unity Shader Graph 美术",
+  "emoji": "🎨",
+  "desc": "Unity Shader Graph 视觉表现"
+ },
+ {
+  "slug": "unreal-multiplayer-architect",
+  "dept": "game-development",
+  "name": "Unreal 多人架构师",
+  "emoji": "🏰",
+  "desc": "Unreal 多人同步与服务器架构（Replication）"
+ },
+ {
+  "slug": "unreal-systems-engineer",
+  "dept": "game-development",
+  "name": "Unreal 系统工程师",
+  "emoji": "🧩",
+  "desc": "Unreal 核心系统：GAS、AI、存档与性能"
+ },
+ {
+  "slug": "unreal-technical-artist",
+  "dept": "game-development",
+  "name": "Unreal 技术美术",
+  "emoji": "🖌️",
+  "desc": "Unreal 材质、特效与渲染管线"
+ },
+ {
+  "slug": "unreal-world-builder",
+  "dept": "game-development",
+  "name": "Unreal 世界建造师",
+  "emoji": "🗺️",
+  "desc": "Unreal 关卡设计与大世界建造"
+ },
+ {
+  "slug": "nexus-strategy",
+  "dept": "strategy",
+  "name": "枢纽战略家",
+  "emoji": "🎯",
+  "desc": "跨部门策略枢纽：把目标拆解成可执行的多智能体作战计划"
+ },
+ {
+  "slug": "security-ai-generated-code-auditor",
+  "dept": "security",
+  "name": "AI 生成代码审计师",
+  "emoji": "🔬",
+  "desc": "针对 LLM 生成代码的安全审计与漏洞挖掘"
+ },
+ {
+  "slug": "security-secrets-credential-engineer",
+  "dept": "security",
+  "name": "密钥凭证工程师",
+  "emoji": "🔑",
+  "desc": "密钥管理、凭证轮换与机密泄漏检测"
+ },
+ {
+  "slug": "testing-test-automation-engineer",
+  "dept": "testing",
+  "name": "测试自动化工程师",
+  "emoji": "🤖",
+  "desc": "自动化测试框架设计与覆盖率治理"
  }
 ]

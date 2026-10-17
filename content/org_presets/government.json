@@ -1,0 +1,45 @@
+{
+  "id": "government",
+  "industry": "政府 / 公共事业",
+  "emoji": "🏛️",
+  "departments": [
+    {
+      "name": "数字化",
+      "desc": "政府 / 公共事业·数字化核心职能",
+      "agents": [
+        {
+          "name": "政务数字化售前",
+          "role": "政务方案",
+          "expert_slug": "government-digital-presales-consultant"
+        },
+        {
+          "name": "RAG 管线",
+          "role": "知识检索",
+          "expert_slug": "engineering-rag-pipeline-engineer"
+        }
+      ]
+    },
+    {
+      "name": "公共服务",
+      "desc": "政府 / 公共事业·公共服务核心职能",
+      "agents": [
+        {
+          "name": "ESG 可持续",
+          "role": "公共可持续",
+          "expert_slug": "esg-sustainability-officer"
+        }
+      ]
+    },
+    {
+      "name": "战略",
+      "desc": "政府 / 公共事业·战略核心职能",
+      "agents": [
+        {
+          "name": "枢纽战略家",
+          "role": "跨部门统筹",
+          "expert_slug": "nexus-strategy"
+        }
+      ]
+    }
+  ]
+}

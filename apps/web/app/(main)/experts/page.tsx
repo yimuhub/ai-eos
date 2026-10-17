@@ -89,6 +89,15 @@ export default function ExpertsPage() {
   const [detail, setDetail] = useState<ExpertDetail | null>(null);
   const [hiring, setHiring] = useState(false);
 
+  // V5.0 专家管理：复制 / 编辑 / 手动新建
+  const [copying, setCopying] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editingBusy, setEditingBusy] = useState(false);
+  const [editForm, setEditForm] = useState<Record<string, string>>({});
+  const [showManual, setShowManual] = useState(false);
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualForm, setManualForm] = useState<Record<string, string>>({});
+
   const load = useCallback(async () => {
     try {
       const [e, d] = await Promise.all([
@@ -119,7 +128,7 @@ export default function ExpertsPage() {
     setImporting(true); setMsg("");
     try {
       const r = await api.post("/experts/import-original") as any;
-      setMsg(`✅ 原创专家已就位：新增 ${r.created} / 更新 ${r.updated}，下架旧上游 ${r.disabled_legacy} 个（AI-EOS 原创版）`);
+      setMsg(`✅ 专家库已就位：新增 ${r.created} / 更新 ${r.updated}，下架旧上游 ${r.disabled_legacy} 个`);
       await load();
     } catch (e) { setMsg("❌ " + describeError(e)); }
     setImporting(false);
@@ -158,29 +167,83 @@ export default function ExpertsPage() {
     setHiring(false);
   };
 
+  // V5.0 复制专家
+  const doCopy = async () => {
+    if (!detail) return;
+    setCopying(true);
+    try {
+      const r = await api.post(`/experts/${detail.id}/copy`) as any;
+      setMsg(`✅ 已复制为「${r.name}」，可继续编辑`);
+      await load();
+      setDetail({ ...detail, id: r.id, name: r.name });
+    } catch (e) { setMsg("❌ " + describeError(e)); }
+    setCopying(false);
+  };
+
+  // V5.0 编辑专家
+  const openEdit = (id: string) => {
+    setEditing(id);
+    setEditForm({});
+    api.get(`/experts/${id}`).then((d: any) => {
+      setEditForm({
+        name: d.name || "", emoji: d.emoji || "", department: d.department || "",
+        description: d.description || "", system_prompt: d.system_prompt || "",
+        raw_md: d.raw_md || "",
+      });
+    }).catch(err => setMsg("❌ " + describeError(err)));
+  };
+  const saveEdit = async () => {
+    if (!editing) return;
+    setEditingBusy(true);
+    try {
+      const payload: Record<string, string> = {};
+      (["name", "emoji", "department", "description", "system_prompt", "raw_md"] as string[]).forEach(k => {
+        if (editForm[k] !== undefined) payload[k] = editForm[k];
+      });
+      await api.put(`/experts/${editing}`, payload);
+      setMsg("✅ 专家已更新");
+      setEditing(null); setDetail(null);
+      load();
+    } catch (e) { setMsg("❌ " + describeError(e)); }
+    setEditingBusy(false);
+  };
+
+  // V5.0 手动新建专家
+  const openManual = () => {
+    setManualForm({});
+    setShowManual(true);
+  };
+  const saveManual = async () => {
+    setManualBusy(true);
+    try {
+      const payload: Record<string, unknown> = { name: (manualForm.name || "").trim() };
+      (["emoji", "department", "description", "system_prompt"] as string[]).forEach(k => {
+        if ((manualForm[k] || "").trim()) payload[k] = manualForm[k];
+      });
+      if (attachments.length) payload.attachments = attachments.map(a => a.name);
+      await api.post("/experts/manual", payload);
+      setMsg("✅ 新专家已创建");
+      setShowManual(false); setAttachments([]);
+      load();
+    } catch (e) { setMsg("❌ " + describeError(e)); }
+    setManualBusy(false);
+  };
+
   return (
     <div className="p-6 max-w-[1400px] mx-auto animate-fade-up">
       <div className="flex items-end justify-between mb-1">
         <h1 className="text-2xl font-bold">📚 专家库</h1>
-        <button onClick={doImport} disabled={importing}
-          className="btn-primary text-sm py-1.5 px-4 disabled:opacity-50">
-          {importing ? "⏳ 处理中…" : "📥 载入 AI-EOS 原创专家库"}
-        </button>
+        <div className="flex gap-2">
+          <button onClick={openManual} className="btn-ghost text-sm py-1.5 px-3">＋ 手动添加专家</button>
+          <button onClick={doImport} disabled={importing}
+            className="btn-primary text-sm py-1.5 px-4 disabled:opacity-50">
+            {importing ? "⏳ 处理中…" : "📥 载入专家库"}
+          </button>
+        </div>
       </div>
       <p className="text-sm text-[var(--muted)] mb-2">
-        {list.length} 位 AI-EOS 原创专家 · 挑人 → 工厂蓝图 → 老板审查 → 验收考试 → 上岗
+        {list.length} 位专家 · 挑人 → 工厂蓝图 → 老板审查 → 验收考试 → 上岗
       </p>
-
-      {/* 原创声明横幅（可折叠） */}
-      <details className="mb-4 card p-3 border-l-4 border-l-emerald-500/60">
-        <summary className="cursor-pointer text-sm font-medium text-emerald-300 select-none">
-          📜 专家库原创声明（AI-EOS 团队独立重写 · 商业化可用）
-        </summary>
-        <div className="mt-2 text-xs text-[var(--muted)] leading-relaxed space-y-1">
-          <p>本库工种划分框架参考开源项目 <a className="text-indigo-300 underline" href="https://github.com/jnMetaCode/agency-agents-zh" target="_blank" rel="noreferrer">jnMetaCode/agency-agents-zh</a>（MIT）之组织方式；工种分类属行业通用概念，不构成复制。</p>
-          <p>本库<b className="text-white">全部专家人设内容</b>（身份 / 使命 / 规则 / 交付物 / 流程 / 风格 / 指标）均由 AI-EOS 团队独立完整重写，为 <b className="text-white">AI-EOS 原创作品</b>，未复制、改写或翻译上游任何原文。上游 LICENSE 已合规保留于 <code className="text-emerald-300">vendor/agency-agents-zh/LICENSE</code>。</p>
-        </div>
-      </details>
 
       {/* P1 找专家 + P2 组队 */}
       <div className="grid md:grid-cols-2 gap-3 mb-5">
@@ -305,12 +368,13 @@ export default function ExpertsPage() {
               <div className="flex-1">
                 <h2 className="text-lg font-bold">{detail.name}</h2>
                 <div className="text-xs text-[var(--muted)]">
-                  {DEPT_LABELS[detail.department] || detail.department} ·{" "}
-                  {detail.source === "ai-eos-original"
-                    ? <span className="text-emerald-300">AI-EOS 原创</span>
-                    : `${detail.source} · ${detail.license || "MIT"} 许可`}
+                  {DEPT_LABELS[detail.department] || detail.department}
                 </div>
               </div>
+              <button onClick={doCopy} disabled={copying}
+                className="btn-ghost text-sm disabled:opacity-50">📋 复制</button>
+              <button onClick={() => openEdit(detail.id)} disabled={editingBusy}
+                className="btn-ghost text-sm disabled:opacity-50">✏️ 编辑</button>
               <button onClick={() => hire(detail.id)} disabled={hiring}
                 className="btn-primary text-sm disabled:opacity-50">
                 {hiring ? "创建中…" : "🏭 雇佣（进工厂蓝图）"}
@@ -350,6 +414,120 @@ export default function ExpertsPage() {
               </summary>
               <pre className="mt-2 text-xs whitespace-pre-wrap bg-black/30 border border-[var(--border)] rounded-lg p-3 max-h-64 overflow-y-auto">{detail.raw_md}</pre>
             </details>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* V5.0 编辑专家弹窗 */}
+      {editing && createPortal(
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setEditing(null)} />
+          <div className="relative w-full max-w-2xl max-h-[90vh] bg-[var(--card)] backdrop-blur-xl border border-[var(--border)] rounded-2xl shadow-2xl overflow-y-auto p-6 animate-fade-up">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-bold">✏️ 编辑专家</h2>
+              <button onClick={() => setEditing(null)} className="text-[var(--muted)] hover:text-white text-xl px-2">✕</button>
+            </div>
+            <div className="grid grid-cols-3 gap-2.5">
+              <label className="col-span-2 text-xs space-y-1">
+                <span className="text-[var(--muted)]">姓名</span>
+                <input className="input" value={editForm.name || ""}
+                  onChange={e => setEditForm({ ...editForm, name: e.target.value })} />
+              </label>
+              <label className="text-xs space-y-1">
+                <span className="text-[var(--muted)]">Emoji</span>
+                <input className="input" value={editForm.emoji || ""}
+                  onChange={e => setEditForm({ ...editForm, emoji: e.target.value })} />
+              </label>
+              <label className="text-xs space-y-1 col-span-3">
+                <span className="text-[var(--muted)]">部门</span>
+                <select className="input" value={editForm.department || ""}
+                  onChange={e => setEditForm({ ...editForm, department: e.target.value })}>
+                  {Object.entries(DEPT_LABELS).map(([k, v]) => (
+                    <option key={k} value={k}>{v}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-xs space-y-1 col-span-3">
+                <span className="text-[var(--muted)]">简介</span>
+                <textarea rows={2} className="input" value={editForm.description || ""}
+                  onChange={e => setEditForm({ ...editForm, description: e.target.value })} />
+              </label>
+              <label className="text-xs space-y-1 col-span-3">
+                <span className="text-[var(--muted)]">人设正文（system prompt，支持 8 章节 Markdown）</span>
+                <textarea rows={8} className="input font-mono text-xs" value={editForm.system_prompt || ""}
+                  onChange={e => setEditForm({ ...editForm, system_prompt: e.target.value })} />
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => setEditing(null)} className="btn-ghost text-sm">取消</button>
+              <button onClick={saveEdit} disabled={editingBusy} className="btn-primary text-sm disabled:opacity-50">
+                {editingBusy ? "保存中…" : "保存修改"}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* V5.0 手动新建专家弹窗（必带 📎 附件口） */}
+      {showManual && createPortal(
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setShowManual(false)} />
+          <div className="relative w-full max-w-2xl max-h-[90vh] bg-[var(--card)] backdrop-blur-xl border border-[var(--border)] rounded-2xl shadow-2xl overflow-y-auto p-6 animate-fade-up">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h2 className="text-lg font-bold">＋ 手动添加专家</h2>
+                <p className="text-xs text-[var(--muted)] mt-0.5">凭空定义一位专家人设，可附参考材料/能力包</p>
+              </div>
+              <button onClick={() => setShowManual(false)} className="text-[var(--muted)] hover:text-white text-xl px-2">✕</button>
+            </div>
+            <div className="grid grid-cols-3 gap-2.5">
+              <label className="col-span-2 text-xs space-y-1">
+                <span className="text-[var(--muted)]">姓名 <b className="text-red-400">*</b></span>
+                <input className="input" placeholder="如：文旅策划总监"
+                  value={manualForm.name || ""}
+                  onChange={e => setManualForm({ ...manualForm, name: e.target.value })} />
+              </label>
+              <label className="text-xs space-y-1">
+                <span className="text-[var(--muted)]">Emoji</span>
+                <input className="input" placeholder="🏞️" value={manualForm.emoji || ""}
+                  onChange={e => setManualForm({ ...manualForm, emoji: e.target.value })} />
+              </label>
+              <label className="text-xs space-y-1 col-span-3">
+                <span className="text-[var(--muted)]">部门</span>
+                <select className="input" value={manualForm.department || ""}
+                  onChange={e => setManualForm({ ...manualForm, department: e.target.value })}>
+                  <option value="">通用</option>
+                  {Object.entries(DEPT_LABELS).map(([k, v]) => (
+                    <option key={k} value={k}>{v}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-xs space-y-1 col-span-3">
+                <span className="text-[var(--muted)]">简介</span>
+                <textarea rows={2} className="input" placeholder="一句话说明这位专家擅长什么"
+                  value={manualForm.description || ""}
+                  onChange={e => setManualForm({ ...manualForm, description: e.target.value })} />
+              </label>
+              <label className="text-xs space-y-1 col-span-3">
+                <span className="text-[var(--muted)]">人设正文（身份/使命/规则/交付物/流程，支持 8 章节 Markdown）</span>
+                <textarea rows={8} className="input font-mono text-xs"
+                  placeholder={"## 🧠 你的身份与记忆\n你是一位…\n## 🎯 核心使命\n…"}
+                  value={manualForm.system_prompt || ""}
+                  onChange={e => setManualForm({ ...manualForm, system_prompt: e.target.value })} />
+              </label>
+            </div>
+            <div className="mt-3">
+              <AttachmentPicker value={attachments} onChange={setAttachments} label="📎 附参考材料 / 能力包 / 知识库文档" />
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => setShowManual(false)} className="btn-ghost text-sm">取消</button>
+              <button onClick={saveManual} disabled={manualBusy || !(manualForm.name || "").trim()}
+                className="btn-primary text-sm disabled:opacity-50">
+                {manualBusy ? "创建中…" : "创建专家"}
+              </button>
+            </div>
           </div>
         </div>,
         document.body

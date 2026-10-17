@@ -42,6 +42,16 @@ export default function AgentsPage() {
   const [batchDept, setBatchDept] = useState("");
   const [batchMgr, setBatchMgr] = useState("");
   const [batchModel, setBatchModel] = useState("");
+  // V5.0 专家库联动：招聘 / 批量 都可从专家库直接选专家员工
+  type ExpertRow = {
+    id: string; name: string; emoji?: string | null;
+    department: string; description?: string;
+  };
+  const [experts, setExperts] = useState<ExpertRow[]>([]);
+  const [expertSel, setExpertSel] = useState("");       // 单个招聘时选中的专家
+  const [expertSearch, setExpertSearch] = useState("");  // 专家搜索框
+  const [batchExperts, setBatchExperts] = useState<Set<string>>(new Set()); // 批量勾选的专家
+  const [batchMode, setBatchMode] = useState<"text" | "experts">("text");
   // 编辑弹窗
   const [editing, setEditing] = useState<Agent | null>(null);
   const [editForm, setEditForm] = useState({
@@ -105,6 +115,42 @@ export default function AgentsPage() {
     invalidate("models:");
     await refresh();
   }, [refresh]);
+
+  /* ---------- V5.0 专家库：加载 + 选择回填 ---------- */
+  const loadExperts = useCallback(() => {
+    if (!cid) return;
+    api.get<{ id: string; name: string; emoji?: string | null; department: string; description?: string }[]>(
+      "/experts?company_id=" + cid)
+      .then((rows) => setExperts(rows || []))
+      .catch(() => {});
+  }, [cid]);
+  useEffect(() => { loadExperts(); }, [loadExperts]);
+
+  /** 单个招聘：选中某专家 → 自动回填 姓名/岗位/人设/部门 */
+  function pickExpert(id: string) {
+    setExpertSel(id);
+    const ex = experts.find((e) => e.id === id);
+    if (ex) {
+      setForm((f) => ({
+        ...f,
+        name: f.name || ex.name,
+        role: f.role || ex.name,
+        department_id: ex.department || f.department_id,
+        system_prompt: f.system_prompt, // 后端会用专家 system_prompt 回填（留空时）
+      }));
+    }
+  }
+
+  /** 批量专家 → 组装批量创建 items（带 expert_template_id，后端回填人设） */
+  function batchExpertItems() {
+    return experts
+      .filter((e) => batchExperts.has(e.id))
+      .map((e) => ({
+        name: e.name, role: e.name,
+        department_id: undefined,
+        expert_template_id: e.id,
+      }));
+  }
 
   const shown = useMemo(
     () => (filter === "ALL" ? agents : agents.filter((a) => a.status === filter)),
@@ -200,12 +246,14 @@ export default function AgentsPage() {
       return;
     }
     try {
+      const selExpert = expertSel ? experts.find((e) => e.id === expertSel) : undefined;
       const res = await api.post<{ id: string }>("/agents", {
         company_id: cid, name: form.name, role: form.role || null,
         department_id: form.department_id || null,
         system_prompt: form.system_prompt || null,
         capabilities: Array.from(selCaps),
         backend: form.backend,
+        expert_template_id: selExpert?.id || null,  // V5.0：绑定专家，后端自动回填人设
       });
       if (form.model_id) {
         await api.post(`/agents/${res.id}/models`, { role: "primary", model_id: form.model_id });
@@ -213,6 +261,7 @@ export default function AgentsPage() {
       notify("success", `已创建员工「${form.name}」`);
       setShowForm(false);
       setForm({ name: "", role: "", department_id: "", system_prompt: "", model_id: "", backend: "native_llm" });
+      setExpertSel(""); setExpertSearch("");
       setSelCaps(new Set());
       agentForm.reset();
       await load();
@@ -224,11 +273,17 @@ export default function AgentsPage() {
 
   /* ---------- 批量创建 ---------- */
   async function batchCreate() {
-    const items = batchText.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => {
-      const [name, role] = line.split(/[,，]/).map((s) => s.trim());
-      return { name, role: role || undefined };
-    }).filter((i) => i.name);
-    if (!items.length) return;
+    // V5.0 双模式：专家勾选 或 手动输入
+    let items: { name: string; role?: string; expert_template_id?: string; department_id?: string }[];
+    if (batchMode === "experts") {
+      items = batchExpertItems();
+    } else {
+      items = batchText.split("\n").map((line) => line.trim()).filter(Boolean).map((line) => {
+        const [name, role] = line.split(/[,，]/).map((s) => s.trim());
+        return { name, role: role || undefined };
+      }).filter((i) => i.name);
+    }
+    if (!items.length) { setMsg("⚠️ " + (batchMode === "experts" ? "请勾选至少一位专家" : "请填写至少一名员工")); return; }
     try {
       const r = await api.post<{ created_count: number }>("/agents/batch-create", {
         company_id: cid,
@@ -237,9 +292,10 @@ export default function AgentsPage() {
         model_id: batchModel || undefined,
         agents: items,
       });
-      setMsg(`✅ 批量创建 ${r.created_count} 名员工`);
+      setMsg(`✅ 批量创建 ${r.created_count} 名员工${batchMode === "experts" ? "（来自专家库）" : ""}`);
       setShowBatchForm(false);
       setBatchText("");
+      setBatchExperts(new Set());
       await load();
     } catch (e) { setMsg(`❌ ${describeError(e, "批量创建失败")}`); }
   }
@@ -455,6 +511,36 @@ export default function AgentsPage() {
       {showForm && (
         <div className="card mb-4 space-y-2.5">
           <h3 className="font-medium text-sm mb-1">招新员工</h3>
+
+          {/* V5.0 从专家库直接选专家员工（自动回填姓名/岗位/人设） */}
+          {experts.length > 0 && (
+            <div className="rounded-xl p-3 border border-[var(--border)] bg-white/[0.02] space-y-2">
+              <p className="text-xs font-medium text-indigo-300">📚 从专家库选择（自动回填人设）</p>
+              <input value={expertSearch} onChange={(e) => setExpertSearch(e.target.value)}
+                placeholder={`搜索 ${experts.length} 位专家（如：数据 / 营销 / 测试）…`} className="input text-xs" />
+              <div className="grid grid-cols-3 gap-1.5 max-h-36 overflow-y-auto pr-1">
+                {experts
+                  .filter((ex) => !expertSearch.trim() ||
+                    ex.name.toLowerCase().includes(expertSearch.toLowerCase()) ||
+                    (ex.description || "").toLowerCase().includes(expertSearch.toLowerCase()))
+                  .slice(0, 30).map((ex) => {
+                    const on = expertSel === ex.id;
+                    return (
+                      <button key={ex.id} type="button"
+                        onClick={() => pickExpert(on ? "" : ex.id)}
+                        className={`text-left px-2.5 py-1.5 rounded-lg text-xs transition-all border ${
+                          on ? "border-emerald-400/60 bg-emerald-500/15" : "hover:bg-white/[0.04]"}`}
+                        style={on ? {} : { borderColor: "var(--border)" }}>
+                        <span className="font-medium">{ex.emoji || "🧑‍💼"} {ex.name}</span>
+                        <div className="text-[10px] opacity-60 truncate" style={{ color: "var(--muted)" }}>{ex.description}</div>
+                      </button>
+                    );
+                  })}
+              </div>
+              {expertSel && <p className="text-[11px] text-emerald-300">✓ 已选「{experts.find((e) => e.id === expertSel)?.name}」，可手动微调下方字段</p>}
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-2.5">
             <Field label="姓名" required error={agentForm.errors.name} hint="员工在组织里的称呼" htmlFor="ag-name">
               <input id="ag-name" placeholder="如：战略分析师" value={form.name}
@@ -541,12 +627,75 @@ export default function AgentsPage() {
       {/* 批量创建表单 */}
       {showBatchForm && (
         <div className="card mb-4 space-y-2.5">
-          <h3 className="font-medium text-sm mb-1">⚡ 批量添加员工</h3>
-          <p className="text-xs" style={{ color: "var(--muted)" }}>
-            每行一名员工，格式：<code>姓名, 岗位</code>（岗位可省略）
-          </p>
-          <textarea rows={5} value={batchText} onChange={(e) => setBatchText(e.target.value)}
-            placeholder={"市场总监, 市场负责人\n文案策划, 内容创作\n数据分析师"} className="input font-mono" />
+          <div className="flex items-center justify-between">
+            <h3 className="font-medium text-sm">⚡ 批量添加员工</h3>
+            {/* V5.0 双模式切换 */}
+            <div className="flex rounded-lg overflow-hidden border border-[var(--border)] text-xs">
+              <button type="button" onClick={() => setBatchMode("text")}
+                className={`px-3 py-1 transition-colors ${batchMode === "text" ? "bg-indigo-500/30 text-white" : "text-[var(--muted)] hover:text-white"}`}>
+                ✍️ 手动输入
+              </button>
+              <button type="button" onClick={() => setBatchMode("experts")}
+                className={`px-3 py-1 transition-colors ${batchMode === "experts" ? "bg-emerald-500/30 text-white" : "text-[var(--muted)] hover:text-white"}`}>
+                📚 专家库勾选
+              </button>
+            </div>
+          </div>
+
+          {batchMode === "text" ? (
+            <>
+              <p className="text-xs" style={{ color: "var(--muted)" }}>
+                每行一名员工，格式：<code>姓名, 岗位</code>（岗位可省略）
+              </p>
+              <textarea rows={5} value={batchText} onChange={(e) => setBatchText(e.target.value)}
+                placeholder={"市场总监, 市场负责人\n文案策划, 内容创作\n数据分析师"} className="input font-mono" />
+            </>
+          ) : (
+            /* V5.0 专家库勾选：从 302 位专家里多选，一键批量生成数字员工 */
+            <>
+              <div className="flex items-center gap-2">
+                <input value={expertSearch} onChange={(e) => setExpertSearch(e.target.value)}
+                  placeholder={`搜索专家（${experts.length} 位）…`} className="input text-xs flex-1" />
+                <button type="button" className="btn-ghost text-xs px-2 py-1"
+                  onClick={() => setBatchExperts(new Set(batchExperts.size === experts.length ? [] : experts.map((e) => e.id)))}>
+                  {batchExperts.size === experts.length ? "取消全选" : "全选"}
+                </button>
+                <span className="text-xs px-2 py-1 rounded-lg bg-emerald-500/15 text-emerald-300 border border-emerald-400/30">
+                  已选 {batchExperts.size}
+                </span>
+              </div>
+              <div className="grid grid-cols-3 lg:grid-cols-4 gap-1.5 max-h-52 overflow-y-auto pr-1">
+                {experts
+                  .filter((ex) => !expertSearch.trim() ||
+                    ex.name.toLowerCase().includes(expertSearch.toLowerCase()) ||
+                    (ex.description || "").toLowerCase().includes(expertSearch.toLowerCase()))
+                  .slice(0, 60).map((ex) => {
+                    const on = batchExperts.has(ex.id);
+                    return (
+                      <button key={ex.id} type="button"
+                        onClick={() => setBatchExperts((prev) => {
+                          const n = new Set(prev);
+                          if (n.has(ex.id)) n.delete(ex.id); else n.add(ex.id);
+                          return n;
+                        })}
+                        className={`text-left px-2.5 py-1.5 rounded-lg text-xs transition-all border ${
+                          on ? "border-emerald-400/60 bg-emerald-500/15" : "hover:bg-white/[0.04]"}`}
+                        style={on ? {} : { borderColor: "var(--border)" }}>
+                        <div className="font-medium flex items-center gap-1">
+                          {on && <span className="text-emerald-300">✓</span>}
+                          {ex.emoji || "🧑‍💼"} {ex.name}
+                        </div>
+                        <div className="text-[10px] opacity-60 truncate" style={{ color: "var(--muted)" }}>{ex.description}</div>
+                      </button>
+                    );
+                  })}
+              </div>
+              <p className="text-[11px]" style={{ color: "var(--muted)" }}>
+                勾选的专家会自动带出人设，创建为数字员工；统一部门/上级/模型见下方
+              </p>
+            </>
+          )}
+
           <div className="grid grid-cols-3 gap-2.5">
             <select value={batchDept} onChange={(e) => setBatchDept(e.target.value)} className="input">
               <option value="">统一部门（可选）</option>
@@ -561,8 +710,10 @@ export default function AgentsPage() {
               {models.map((m) => (<option key={m.id} value={m.id}>{m.name}</option>))}
             </select>
           </div>
-          <button onClick={batchCreate} disabled={!batchText.trim()} className="btn-primary disabled:opacity-40">
-            批量创建
+          <button onClick={batchCreate}
+            disabled={batchMode === "text" ? !batchText.trim() : batchExperts.size === 0}
+            className="btn-primary disabled:opacity-40">
+            {batchMode === "experts" ? `批量创建 ${batchExperts.size} 名专家员工` : "批量创建"}
           </button>
         </div>
       )}

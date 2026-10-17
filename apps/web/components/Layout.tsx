@@ -88,7 +88,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               ⚡
             </div>
             <div>
-              <h1 className="text-base font-bold tracking-wide">AI-EOS <span className="text-[10px] ml-1 px-1.5 py-px rounded-full bg-gradient-to-r from-indigo-500 to-cyan-400 text-white">V4.2</span></h1>
+              <h1 className="text-base font-bold tracking-wide">AI-EOS <span className="text-[10px] ml-1 px-1.5 py-px rounded-full bg-gradient-to-r from-indigo-500 to-cyan-400 text-white">V5.0</span></h1>
               <p className="text-[10px] mt-0.5" style={{ color: "var(--muted)" }}>人工智能企业操作系统</p>
             </div>
           </div>
