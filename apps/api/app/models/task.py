@@ -39,7 +39,7 @@ class Task(TimestampMixin, Base):
     __tablename__ = "tasks"
     __table_args__ = (Index("ix_tasks_company_status", "company_id", "status"),)
 
-    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id"), index=True)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), index=True)
     parent_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"), index=True)
     title: Mapped[str] = mapped_column(String(500))

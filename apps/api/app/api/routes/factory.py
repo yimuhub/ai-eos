@@ -18,6 +18,7 @@ router = APIRouter(prefix="/factory", tags=["factory"])
 
 class BlueprintIn(BaseModel):
     goal: str
+    attachments: list[dict] | None = None  # 📎 附件口：蓝图参考材料 [{id,name,size}]
 
 
 @router.post("/blueprint", status_code=201)
@@ -34,9 +35,13 @@ async def create_blueprint(
         bp = await generate_blueprint(db, company_id, data.goal)
     except Exception as e:
         raise HTTPException(502, f"蓝图生成失败: {e}")
+    # 📎 参考附件随蓝图入库，供后续验收/复盘调用出材料
+    if data.attachments:
+        bp["reference_attachments"] = data.attachments
     job = AgentFactoryJob(id=str(__import__("uuid").uuid4()),
                           company_id=company_id, goal=data.goal,
-                          blueprint=bp, created_by=user.id)
+                          blueprint=bp, created_by=user.id,
+                          attachments=data.attachments or [])
     db.add(job)
     await db.commit()
     return {"job_id": job.id, "status": "BLUEPRINT", "blueprint": bp}
@@ -205,6 +210,7 @@ async def list_jobs(
     return [{"id": j.id, "goal": j.goal[:80], "status": j.status.value,
              "agent_id": j.agent_id, "blueprint_name":
                  (j.blueprint or {}).get("name"),
+             "attachments": j.attachments or [],
              "created_at": j.created_at.isoformat()} for j in rows]
 
 

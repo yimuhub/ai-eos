@@ -41,7 +41,7 @@ class ActionItemStatus(str, enum.Enum):
 class Meeting(TimestampMixin, Base):
     __tablename__ = "meetings"
 
-    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id"), index=True)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), index=True)
     title: Mapped[str] = mapped_column(String(300))
     meeting_type: Mapped[str] = mapped_column(String(50), default=MeetingType.PROJECT_MEETING.value)

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, describeError } from "@/lib/api";
 import type { Company } from "@/lib/types";
+import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
 
 type Blueprint = {
       name?: string; role?: string; responsibilities?: string[];
@@ -15,6 +16,7 @@ type Blueprint = {
 export default function FactoryPage() {
   const [jobs, setJobs] = useState<FactoryJob[]>([]);
   const [goal, setGoal] = useState("");
+  const [blueprintAttachments, setBlueprintAttachments] = useState<Attachment[]>([]); // 📎 蓝图参考附件
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [confirmJob, setConfirmJob] = useState<string | null>(null);   // 批准前确认
@@ -43,10 +45,14 @@ export default function FactoryPage() {
     setBusy(true);
     setMsg("⏳ AI 正在设计组织蓝图（约需 30~90 秒），请勿关闭页面…");
     try {
-      const d = await api.post(`/factory/blueprint?company_id=${cid}`, { goal });
+      const d = await api.post(`/factory/blueprint?company_id=${cid}`, {
+        goal,
+        attachments: blueprintAttachments.length ? blueprintAttachments : undefined, // 📎
+      });
       setMsg("✅ 蓝图已生成，请查看详情后批准创建");
       api.get(`/factory/jobs?company_id=${cid}`).then(setJobs).catch(() => {});
       setGoal("");
+      setBlueprintAttachments([]);
       void d;
     } catch (e: any) {
       setMsg(e.message || String(e));
@@ -75,6 +81,8 @@ export default function FactoryPage() {
         <h3 className="font-medium text-[var(--foreground)]">输入目标，AI 生成蓝图</h3>
         <textarea value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="例如：创建一位擅长抖音短视频内容创作的 Agent"
           className="input" />
+        <AttachmentPicker value={blueprintAttachments} onChange={setBlueprintAttachments}
+          label="📎 参考材料（岗位 JD / 业务规范 / 参考资料）" />
         <button onClick={createBlueprint} disabled={busy || !goal}
           className="btn-primary disabled:opacity-40">{busy ? "设计中…" : "生成蓝图"}</button>
       </div>

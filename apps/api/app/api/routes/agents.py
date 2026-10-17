@@ -25,6 +25,7 @@ class AgentIn(BaseModel):
     capabilities: list[str] = []      # 能力包: computer_use / web_browsing / ...
     backend: str | None = None        # 执行底座: native_llm / hermes / codex
     expert_template_id: str | None = None  # V5.0：绑定专家库专家（取其 system_prompt）
+    attachments: list[dict] | None = None  # 📎 附件口：[{id,name,size}]（上传后的资产）
 
 
 def _apply_capabilities(agent: Agent, capabilities: list[str], backend: str | None):
@@ -90,6 +91,7 @@ async def create_agent(data: AgentIn, db: AsyncSession = Depends(get_db),
     payload = data.model_dump()
     capabilities = payload.pop("capabilities", [])
     backend = payload.pop("backend", None)
+    attachments = payload.pop("attachments", None)  # 📎 附件口（Agent 无此列，落 memory_config）
     # V5.0：绑定专家库专家 — 未填姓名/人设时自动取专家内容回填
     # V5.0.2：专家↔技能包 — 未手选技能包时按专家推荐自动配备
     if payload.get("expert_template_id"):
@@ -106,6 +108,10 @@ async def create_agent(data: AgentIn, db: AsyncSession = Depends(get_db),
                 capabilities = tpl.recommended_packs()
     agent = Agent(**payload, status=AgentStatus.IDLE)
     _apply_capabilities(agent, capabilities, backend)
+    # 📎 附件口：附件资产 id 落到 memory_config（Agent 无独立附件列），
+    # 后续员工详情页/验收可据此调出参考材料
+    if attachments:
+        agent.memory_config = {**(agent.memory_config or {}), "attachments": attachments}
     db.add(agent)
     await log_event(db, "agent.created", "agent", None, "user", user.id,
                     {"name": data.name, "capabilities": capabilities,

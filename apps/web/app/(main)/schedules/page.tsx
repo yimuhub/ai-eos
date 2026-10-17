@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, describeError } from "@/lib/api";
 import { notify } from "@/components/Toast";
 import type { Company } from "@/lib/types";
+import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
 
 type Schedule = { id: string; name: string; trigger_type: string; action_type: string;
   status: string; next_run_at?: string; last_run_at?: string; run_count: number };
@@ -15,6 +16,7 @@ export default function SchedulesPage() {
   const [seconds, setSeconds] = useState("3600");
   const [dailyTime, setDailyTime] = useState("09:00");
   const [actionType, setActionType] = useState("snapshot_performance");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -61,8 +63,9 @@ export default function SchedulesPage() {
         action_type: actionType };
       if (trigger === "interval") body.seconds = Number(seconds);
       else body.time = dailyTime;
+      if (attachments.length) body.attachments = attachments;
       await api.post(`/schedules?company_id=${cid}`, body);
-      setName(""); setMsg("调度已创建"); reload();
+      setName(""); setAttachments([]); setMsg("调度已创建"); reload();
     } catch (e) { setMsg(`创建失败：${describeError(e)}`); }
   };
   const toggle = async (s: Schedule) => {
@@ -102,6 +105,7 @@ export default function SchedulesPage() {
             <option value="start_workflow">启动工作流</option>
           </select>
         </div>
+        <AttachmentPicker value={attachments} onChange={setAttachments} label="📎 关联附件（任务说明 / 数据文件）" />
         <button onClick={create} disabled={!name}
           className="btn-primary disabled:opacity-40">创建调度</button>
       </div>

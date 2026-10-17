@@ -19,6 +19,7 @@ class DefinitionIn(BaseModel):
     steps: list[dict]
     mode: str = "TEST"          # TEST / SIMULATION / PRODUCTION
     max_runs_per_day: int = 10
+    attachments: list[dict] | None = None  # 📎 附件口
 
 
 @router.post("", status_code=201)
@@ -39,6 +40,7 @@ async def create_automation(
                              trigger_config=data.trigger_config,
                              steps=data.steps, mode=data.mode,
                              max_runs_per_day=data.max_runs_per_day,
+                             attachments=data.attachments or [],
                              created_by=user.id)
     db.add(d)
     await db.commit()
@@ -54,7 +56,7 @@ async def list_automations(company_id: str = Query(...),
         AutomationDefinition.created_at.desc()))
     return [{"id": a.id, "name": a.name, "trigger_type": a.trigger_type,
              "mode": a.mode, "steps_count": len(a.steps or []),
-             "status": a.status} for a in q.scalars().all()]
+             "status": a.status, "attachments": a.attachments or []} for a in q.scalars().all()]
 
 
 @router.post("/{aid}/run")

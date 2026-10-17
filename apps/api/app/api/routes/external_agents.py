@@ -19,6 +19,7 @@ class ConnectionIn(BaseModel):
     endpoint: str | None = None
     auth_env_var: str | None = None      # 环境变量名，非明文 key
     capabilities: list[str] | None = None
+    attachments: list[dict] | None = None  # 📎 附件口
 
 
 @router.post("", status_code=201)
@@ -35,6 +36,7 @@ async def register(
         name=data.name, provider_type=data.provider_type,
         endpoint=data.endpoint, auth_env_var=data.auth_env_var,
         capabilities=data.capabilities or [],
+        attachments=data.attachments or [],
         supported_actions=["execute", "get_status", "pause", "resume",
                            "cancel"])
     db.add(conn)
@@ -56,6 +58,7 @@ async def list_connections(
     return [{"id": c.id, "name": c.name, "provider": c.provider_type.value,
              "endpoint": c.endpoint, "auth_env_var": c.auth_env_var,
              "capabilities": c.capabilities, "status": c.status.value,
+             "attachments": c.attachments or [],
              "last_test_ok": c.last_test_ok} for c in rows]
 
 

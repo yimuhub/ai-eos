@@ -2,8 +2,9 @@
 import { useMemo, useState } from "react";
 import { api, describeError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
+import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
 
-type Conn = { id: string; name: string; provider: string; endpoint?: string; auth_env_var?: string; capabilities?: string[]; status?: string };
+type Conn = { id: string; name: string; provider: string; endpoint?: string; auth_env_var?: string; capabilities?: string[]; status?: string; attachments?: Attachment[] };
 
 export default function ExternalAgentsPage() {
   const cid = useActiveCompanyId();
@@ -11,6 +12,7 @@ export default function ExternalAgentsPage() {
   const [provider, setProvider] = useState("API");
   const [endpoint, setEndpoint] = useState("");
   const [envVar, setEnvVar] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [msg, setMsg] = useState("");
 
   const { data, refresh } = useResource(
@@ -23,11 +25,12 @@ export default function ExternalAgentsPage() {
     if (!name || !cid) return;
     try {
       await api.post(`/external-agents?company_id=${cid}`, {
-        name, provider, endpoint: endpoint || undefined,
+        name, provider_type: provider, endpoint: endpoint || undefined,
         auth_env_var: envVar || undefined,
+        attachments: attachments.length ? attachments : undefined,
       });
       setMsg("✅ 已注册");
-      setName(""); setEndpoint(""); setEnvVar("");
+      setName(""); setEndpoint(""); setEnvVar(""); setAttachments([]);
       await refresh();
     } catch (e) { setMsg(`❌ ${describeError(e, "注册失败")}`); }
   }
@@ -72,6 +75,7 @@ export default function ExternalAgentsPage() {
             className="input" />
           <input value={envVar} onChange={(e) => setEnvVar(e.target.value)} placeholder="API Key 环境变量名"
             className="input" />
+          <AttachmentPicker value={attachments} onChange={setAttachments} label="📎 关联附件（接入文档 / 密钥说明）" />
           <button onClick={register} disabled={!name}
             className="btn-primary disabled:opacity-40">注册</button>
         </div>
@@ -83,7 +87,10 @@ export default function ExternalAgentsPage() {
               <div>
                 <span className="font-medium text-[var(--foreground)]">{c.name}</span>
                 <span className="ml-2 text-xs text-[var(--muted)]">{c.provider}</span>
-                {c.endpoint && <span className="ml-1 text-xs text-[var(--muted)]">{c.endpoint}</span>}
+                {(c.endpoint) && <span className="ml-1 text-xs text-[var(--muted)]">{c.endpoint}</span>}
+                {!!c.attachments?.length && (
+                  <span className="ml-1.5 text-xs px-1.5 py-0.5 rounded bg-purple-900/40 text-purple-300">📎 {c.attachments!.length}</span>
+                )}
                 <span className={`ml-2 text-xs px-1.5 py-0.5 rounded ${c.status === "ENABLED" ? "bg-green-900/40 text-green-300" : "bg-white/[0.04] text-[var(--muted)]"}`}>
                   {c.status === "ENABLED" ? "启用" : "停用"}
                 </span>

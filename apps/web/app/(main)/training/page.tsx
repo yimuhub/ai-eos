@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, getCompanies } from "@/lib/api";
 import { notify } from "@/components/Toast";
 import { confirmAction } from "@/components/ConfirmDialog";
+import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
 
 // ## 改造说明
 //
@@ -77,6 +78,7 @@ export default function TrainingPage() {
   const [title, setTitle] = useState("");
   const [content, setContent] = useState("");
   const [trainType, setTrainType] = useState("CONVERSATION");
+  const [trainAttachments, setTrainAttachments] = useState<Attachment[]>([]); // 📎 训练参考材料
 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -143,11 +145,13 @@ export default function TrainingPage() {
     try {
       const r = await api.post<{ id: string; points: number; summary?: string }>(
         `/training/sessions?agent_id=${agentId}`,
-        { training_type: trainType, title: title.trim(), raw_input: content },
+        { training_type: trainType, title: title.trim(), raw_input: content,
+          attachments: trainAttachments.length ? trainAttachments : undefined },
       );
       notify("success", `训练完成：提取 ${r?.points ?? 0} 个学习点，待你确认`);
       setTitle("");
       setContent("");
+      setTrainAttachments([]);
       await loadSessions(agentId);
       if (r?.id) await openSession(r.id);
     } catch (e) {
@@ -298,6 +302,8 @@ export default function TrainingPage() {
               placeholder="要教给它的内容、规范、案例……"
               className="input h-24"
             />
+            <AttachmentPicker value={trainAttachments} onChange={setTrainAttachments}
+              label="📎 参考材料（规范文档 / 案例 / SOP）" />
             <div className="flex items-center gap-3">
               <button
                 onClick={startNew}

@@ -38,6 +38,7 @@ class SessionIn(BaseModel):
     title: str
     raw_input: str | None = None
     source_url: str | None = None
+    attachments: list[dict] | None = None  # 📎 附件口
 
 
 @router.post("/sessions", status_code=201)
@@ -52,6 +53,7 @@ async def create_session(
     s = TrainingSession(id=new_id(), agent_id=a.id, company_id=a.company_id,
                         training_type=data.training_type, title=data.title,
                         raw_input=data.raw_input, source_url=data.source_url,
+                        attachments=data.attachments or [],
                         created_by=user.id)
     db.add(s)
     await db.commit()
@@ -83,6 +85,7 @@ async def list_sessions(
         q.order_by(TrainingSession.created_at.desc()))).scalars().all()
     return [{"id": s.id, "title": s.title, "type": s.training_type.value,
              "status": s.status.value, "summary": s.summary,
+             "attachments": s.attachments or [],
              "created_at": s.created_at.isoformat()} for s in rows]
 
 

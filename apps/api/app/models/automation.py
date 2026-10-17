@@ -41,6 +41,7 @@ class AutomationDefinition(Base):
     max_runs_per_day: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     created_by: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[datetime] = mapped_column(default=_now)
+    attachments: Mapped[list] = mapped_column(JSON, default=list)  # 📎 附件引用
 
 
 class AutomationRunRecord(Base):

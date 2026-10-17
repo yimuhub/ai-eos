@@ -34,7 +34,7 @@ class Model(TimestampMixin, Base):
     """A registered LLM endpoint (provider adapter config)."""
     __tablename__ = "models"
 
-    company_id: Mapped[str | None] = mapped_column(ForeignKey("companies.id"), index=True)
+    company_id: Mapped[str | None] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(200))
     provider_type: Mapped[ModelProviderType] = mapped_column(Enum(ModelProviderType, native_enum=False, length=50))
     base_url: Mapped[str | None] = mapped_column(String(500))
@@ -55,7 +55,7 @@ class AgentModelConfig(TimestampMixin, Base):
 class Agent(TimestampMixin, Base):
     __tablename__ = "agents"
 
-    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id"), index=True)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     department_id: Mapped[str | None] = mapped_column(ForeignKey("departments.id"), index=True)
     name: Mapped[str] = mapped_column(String(200))
     avatar: Mapped[str | None] = mapped_column(String(500))

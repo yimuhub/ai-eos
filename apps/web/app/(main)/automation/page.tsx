@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import type { Company } from "@/lib/types";
+import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
 
 type TriggerType = "TIME" | "EVENT" | "FILE" | "PROJECT" | "TASK" | "AGENT" | "WEBHOOK" | "HUMAN" | "MANUAL";
 type Mode = "TEST" | "SIMULATION" | "PRODUCTION";
@@ -54,6 +55,7 @@ export default function AutomationsPage() {
   const [mode, setMode] = useState<Mode>("TEST");
   const [steps, setSteps] = useState("");
   const [maxRuns, setMaxRuns] = useState("10");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
 
   useEffect(() => {
     api.get<Company[]>("/companies").then((cs) => {
@@ -91,8 +93,9 @@ export default function AutomationsPage() {
       await api.post(`/automations?company_id=${cid}`, {
         name, trigger_type: trigger, mode, steps: parsed,
         max_runs_per_day: Number(maxRuns) || 10,
+        attachments: attachments.length ? attachments : undefined,
       });
-      setName(""); setSteps(""); setMsg("✅ 自动化规则已创建"); reload();
+      setName(""); setSteps(""); setAttachments([]); setMsg("✅ 自动化规则已创建"); reload();
     } catch (e) { setMsg(String(e)); }
   };
 
@@ -150,6 +153,7 @@ export default function AutomationsPage() {
           placeholder={`执行步骤（每行一条，格式：动作:配置JSON，示例）\nlog:{"message":"执行开始"}\nchat:{"agent_id":"xxx","message":"请汇报"}\narchive:{"task_id":"xxx"}`}
           rows={4} className="input-glow w-full font-mono text-xs resize-y" />
         <div className="flex items-center gap-3">
+          <AttachmentPicker value={attachments} onChange={setAttachments} label="📎 关联附件（规则说明 / 触发数据）" />
           <button onClick={create} disabled={!name} className="btn-primary disabled:opacity-40">
             ➕ 创建规则
           </button>

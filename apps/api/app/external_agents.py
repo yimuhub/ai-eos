@@ -50,6 +50,7 @@ class ExternalAgentConnection(Base):
     last_test_at: Mapped[datetime | None] = mapped_column(nullable=True)
     last_test_ok: Mapped[bool | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_now)
+    attachments: Mapped[list] = mapped_column(JSON, default=list)  # 📎 附件引用
 
 
 # ---------- Adapter 抽象接口（所有 Provider 必须实现） ----------

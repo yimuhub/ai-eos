@@ -46,6 +46,7 @@ class AgentFactoryJob(Base):
     error: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[datetime] = mapped_column(default=_now)
+    attachments: Mapped[list] = mapped_column(JSON, default=list)  # 📎 附件引用
 
 
 # 每公司每日创建上限（防无限创建）

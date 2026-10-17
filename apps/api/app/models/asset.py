@@ -20,7 +20,7 @@ class AssetType(str, enum.Enum):
 class Asset(TimestampMixin, Base):
     __tablename__ = "assets"
 
-    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id"), index=True)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(500))
     type: Mapped[AssetType] = mapped_column(Enum(AssetType, native_enum=False, length=50), default=AssetType.OTHER)
     path: Mapped[str] = mapped_column(String(1000))

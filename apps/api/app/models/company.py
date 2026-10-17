@@ -18,14 +18,17 @@ class Company(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[str | None] = mapped_column(Text)
     logo: Mapped[str | None] = mapped_column(String(500))
+    attachments: Mapped[list] = mapped_column(JSON, default=list)  # 📎 附件引用 [{id,name,size}]
 
-    departments: Mapped[list["Department"]] = relationship(back_populates="company")
+    departments: Mapped[list["Department"]] = relationship(
+        back_populates="company",
+        cascade="all, delete-orphan")  # 删公司时级联删部门（company_id 为 NOT NULL，不能置 null）
 
 
 class Department(TimestampMixin, Base):
     __tablename__ = "departments"
 
-    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id"), index=True)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     parent_department_id: Mapped[str | None] = mapped_column(
         ForeignKey("departments.id"), nullable=True
     )
@@ -36,6 +39,7 @@ class Department(TimestampMixin, Base):
     pinned: Mapped[bool] = mapped_column(Boolean, default=False)     # 置顶
     skill_ids: Mapped[list] = mapped_column(JSON, default=list)      # 部门专属技能
     kb_document_ids: Mapped[list] = mapped_column(JSON, default=list)  # 部门专属知识库文档
+    attachments: Mapped[list] = mapped_column(JSON, default=list)  # 📎 附件引用
 
     company: Mapped["Company"] = relationship(back_populates="departments")
     agents: Mapped[list["Agent"]] = relationship(back_populates="department")

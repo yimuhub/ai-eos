@@ -29,7 +29,7 @@ class MilestoneStatus(str, enum.Enum):
 class Project(TimestampMixin, Base):
     __tablename__ = "projects"
 
-    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id"), index=True)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(300))
     description: Mapped[str | None] = mapped_column(Text)
     status: Mapped[ProjectStatus] = mapped_column(

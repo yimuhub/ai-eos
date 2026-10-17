@@ -56,6 +56,7 @@ class TrainingSession(Base):
     created_by: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[datetime] = mapped_column(default=_now)
     decided_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    attachments: Mapped[list] = mapped_column(JSON, default=list)  # 📎 附件引用
 
 
 class TrainingLearningPoint(Base):

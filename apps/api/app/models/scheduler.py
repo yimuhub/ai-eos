@@ -47,6 +47,7 @@ class AutomationSchedule(Base):
     run_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_by: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[datetime] = mapped_column(default=_now)
+    attachments: Mapped[list] = mapped_column(JSON, default=list)  # 📎 附件引用
 
 
 class AutomationRun(Base):

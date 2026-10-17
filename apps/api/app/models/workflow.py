@@ -42,7 +42,7 @@ class RunStatus(str, enum.Enum):
 class WorkflowDefinition(TimestampMixin, Base):
     __tablename__ = "workflow_definitions"
 
-    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id"), index=True)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), index=True)
     name: Mapped[str] = mapped_column(String(300))
     description: Mapped[str | None] = mapped_column(Text)

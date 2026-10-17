@@ -6,6 +6,7 @@ import { api, describeError } from "@/lib/api";
 import { invalidate, useActiveCompanyId, useResource } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
 import Field from "@/components/Field";
+import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
 import { useFormValidation } from "@/lib/useFormValidation";
 import { V } from "@/lib/validate";
 import { notify } from "@/components/Toast";
@@ -37,6 +38,7 @@ export default function AgentsPage() {
   useEffect(() => { setMounted(true); }, []);
   const [form, setForm] = useState({ name: "", role: "", department_id: "", system_prompt: "", model_id: "", backend: "native_llm" });
   const [selCaps, setSelCaps] = useState<Set<string>>(new Set());
+  const [agentAttachments, setAgentAttachments] = useState<Attachment[]>([]); // 📎 新建员工附件口
   // 批量创建
   const [batchText, setBatchText] = useState("");
   const [batchDept, setBatchDept] = useState("");
@@ -257,6 +259,7 @@ export default function AgentsPage() {
         capabilities: Array.from(selCaps),
         backend: form.backend,
         expert_template_id: selExpert?.id || null,  // V5.0：绑定专家，后端自动回填人设
+        attachments: agentAttachments.length ? agentAttachments : undefined, // 📎 附件口
       });
       if (form.model_id) {
         await api.post(`/agents/${res.id}/models`, { role: "primary", model_id: form.model_id });
@@ -266,6 +269,7 @@ export default function AgentsPage() {
       setForm({ name: "", role: "", department_id: "", system_prompt: "", model_id: "", backend: "native_llm" });
       setExpertSel(""); setExpertSearch("");
       setSelCaps(new Set());
+      setAgentAttachments([]);
       agentForm.reset();
       await load();
     } catch (e) {
@@ -573,6 +577,10 @@ export default function AgentsPage() {
               onChange={(e) => { setForm({ ...form, system_prompt: e.target.value }); agentForm.clear("system_prompt"); }}
               className="input" aria-invalid={!!agentForm.errors.system_prompt} />
           </Field>
+
+          {/* 📎 附件口：给新员工挂参考材料（制度、SOP、参考文档） */}
+          <AttachmentPicker value={agentAttachments} onChange={setAgentAttachments}
+            label="📎 挂参考材料（制度 / SOP / 培训文档）" />
 
           {/* 执行底座 */}
           <div>

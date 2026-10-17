@@ -18,6 +18,7 @@ class CompanyIn(BaseModel):
     name: str
     description: str | None = None
     logo: str | None = None
+    attachments: list[dict] | None = None  # 📎 附件口
 
 
 class DepartmentIn(BaseModel):
@@ -28,6 +29,7 @@ class DepartmentIn(BaseModel):
     pinned: bool | None = None
     skill_ids: list[str] | None = None       # 部门专属技能（skills.id 列表）
     kb_document_ids: list[str] | None = None  # 部门专属知识库文档
+    attachments: list[dict] | None = None      # 📎 附件口
 
 
 @router.get("/companies")
@@ -92,6 +94,7 @@ async def list_departments(cid: str, db: AsyncSession = Depends(get_db),
         "parent_department_id": d.parent_department_id,
         "sort_order": d.sort_order, "pinned": d.pinned,
         "skill_ids": d.skill_ids or [], "kb_document_ids": d.kb_document_ids or [],
+        "attachments": d.attachments or [],
     } for d in rows]
 
 

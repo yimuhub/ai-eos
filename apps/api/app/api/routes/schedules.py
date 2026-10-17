@@ -23,6 +23,7 @@ class ScheduleIn(BaseModel):
     time: str | None = None      # daily 用 HH:MM
     action_type: str             # snapshot_performance / send_message / start_workflow
     action_params: dict | None = None
+    attachments: list[dict] | None = None  # 📎 附件口
 
 
 def _out(s: AutomationSchedule):
@@ -31,7 +32,7 @@ def _out(s: AutomationSchedule):
             "action_params": s.action_params, "status": s.status,
             "next_run_at": s.next_run_at.isoformat() if s.next_run_at else None,
             "last_run_at": s.last_run_at.isoformat() if s.last_run_at else None,
-            "run_count": s.run_count}
+            "run_count": s.run_count, "attachments": s.attachments or []}
 
 
 @router.post("")
@@ -59,6 +60,7 @@ async def create_schedule(
         id=str(uuid.uuid4()), company_id=company_id, name=data.name,
         trigger_type=data.trigger_type, trigger_config=config,
         action_type=data.action_type, action_params=data.action_params,
+        attachments=data.attachments or [],
         created_by=user.id)
     sched.next_run_at = compute_next_run(data.trigger_type, config, now)
     # interval 类型的首个触发立即生效（方便测试）

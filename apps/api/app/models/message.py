@@ -21,7 +21,7 @@ class MessageType(str, enum.Enum):
 class Conversation(TimestampMixin, Base):
     __tablename__ = "conversations"
 
-    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id"), index=True)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     task_id: Mapped[str | None] = mapped_column(String(36), index=True)
     title: Mapped[str | None] = mapped_column(String(300))
     participants: Mapped[list | None] = mapped_column(JSON, default=list)  # [agent ids]
