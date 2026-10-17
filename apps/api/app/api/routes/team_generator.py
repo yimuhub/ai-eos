@@ -23,6 +23,7 @@ class GenerateIn(BaseModel):
     industry: str = ""                     # 行业
     blueprint: str                         # 老板填写的范本内容（自由文本）
     model_id: str | None = None            # 新 Agent 绑定的模型
+    attachments: list[dict] | None = None  # 📎 附件口：建团参考材料 [{id,name,size}]
 
 
 async def _llm_plan(db: AsyncSession, system: str, user: str) -> dict:
@@ -190,7 +191,8 @@ async def generate_team(data: GenerateIn,
     import uuid as _uuid
     company = Company(id=_uuid.uuid4().hex, name=plan.get("company_name") or data.company_name or "新公司",
                       owner_id=user.id,
-                      description=plan.get("intro"))
+                      description=plan.get("intro"),
+                      attachments=data.attachments or [])  # 📎 建团参考材料
     db.add(company)
     await db.flush()
 

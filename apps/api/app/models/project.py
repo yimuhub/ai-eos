@@ -39,6 +39,7 @@ class Project(TimestampMixin, Base):
     manager_agent_id: Mapped[str | None] = mapped_column(ForeignKey("agents.id"))
     start_date: Mapped[str | None] = mapped_column(String(20))
     target_date: Mapped[str | None] = mapped_column(String(20))
+    attachments: Mapped[list] = mapped_column(JSON, default=list)  # 📎 附件引用 [{id,name,size}]
 
     milestones: Mapped[list["Milestone"]] = relationship(
         back_populates="project", cascade="all, delete-orphan")

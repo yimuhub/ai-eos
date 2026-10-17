@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { api, describeError } from "@/lib/api";
 import { confirmAction } from "@/components/ConfirmDialog";
 import type { Company } from "@/lib/types";
+import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
 
 /* ============================================================
    组织架构 v3：卡片排序/置顶 · 部门技能 · 部门专属知识库
@@ -15,6 +16,7 @@ type Dept = {
   description: string | null;
   sort_order?: number; pinned?: boolean;
   skill_ids?: string[]; kb_document_ids?: string[];
+  attachments?: Attachment[];
 };
 type Agent = { id: string; name: string; role: string | null; department_id: string | null };
 type SkillRow = { id: string; name: string; slug: string };
@@ -44,6 +46,7 @@ export default function OrganizationPage() {
     name: "", description: "", parent_department_id: "",
     skills: new Set<string>(), kbDocs: new Set<string>(),
   });
+  const [deptAttachments, setDeptAttachments] = useState<Attachment[]>([]); // 📎 部门附件口
   const [showBatchAdd, setShowBatchAdd] = useState(false);
   const [batchParent, setBatchParent] = useState("");
   const [batchText, setBatchText] = useState("");
@@ -141,6 +144,7 @@ export default function OrganizationPage() {
   function openCreate(parentId: string | null = null) {
     setEditing({ id: "__new__", name: "", parent_department_id: parentId, description: null });
     setEditForm({ name: "", description: "", parent_department_id: parentId || "", skills: new Set(), kbDocs: new Set() });
+    setDeptAttachments([]);
   }
   function openEdit(d: Dept) {
     setEditing(d);
@@ -151,6 +155,7 @@ export default function OrganizationPage() {
       skills: new Set(d.skill_ids || []),
       kbDocs: new Set(d.kb_document_ids || []),
     });
+    setDeptAttachments(d.attachments || []); // 📎 载入已有附件，避免 PATCH 覆盖丢失
   }
 
   async function saveDept() {
@@ -162,8 +167,10 @@ export default function OrganizationPage() {
           name: editForm.name.trim(),
           description: editForm.description || null,
           parent_department_id: editForm.parent_department_id || null,
+          attachments: deptAttachments.length ? deptAttachments : undefined, // 📎
         });
         setMsg(`✅ 已创建部门「${editForm.name}」`);
+        setDeptAttachments([]);
       } else if (editing) {
         await api.patch(`/departments/${editing.id}`, {
           name: editForm.name.trim(),
@@ -171,6 +178,7 @@ export default function OrganizationPage() {
           parent_department_id: editForm.parent_department_id || null,
           skill_ids: Array.from(editForm.skills),
           kb_document_ids: Array.from(editForm.kbDocs),
+          attachments: deptAttachments, // 📎 带上当前附件列表（含载入的已有附件）
         });
         setMsg(`✅ 部门「${editForm.name}」已更新`);
       }
@@ -665,6 +673,12 @@ export default function OrganizationPage() {
               <textarea rows={2} value={editForm.description}
                 onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
                 placeholder="这个部门是干什么的？" className="input" />
+            </div>
+
+            {/* 📎 部门附件口 */}
+            <div>
+              <AttachmentPicker value={deptAttachments} onChange={setDeptAttachments}
+                label="📎 挂参考材料（部门制度 / 规范 / 说明）" />
             </div>
 
             {/* 部门专属技能 */}

@@ -21,6 +21,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, setActiveCompanyId } from "@/lib/api";
 import { notify } from "@/components/Toast";
 import DemoMode from "@/components/DemoMode";
+import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
 
 type Diagnostics = {
   model_count: number;
@@ -87,6 +88,7 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
   // ---- 步骤 1：公司 ----
   const [companyName, setCompanyName] = useState("");
   const [company, setCompany] = useState<Company | null>(null);
+  const [companyAttachments, setCompanyAttachments] = useState<Attachment[]>([]); // 📎 公司资料
 
   // ---- 步骤 2：模型 ----
   const [diag, setDiag] = useState<Diagnostics | null>(null);
@@ -133,7 +135,10 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
     }
     setBusy(true);
     try {
-      const c = await api.post<Company>("/companies", { name });
+      const c = await api.post<Company>("/companies", {
+        name,
+        attachments: companyAttachments.length ? companyAttachments : undefined, // 📎 公司资料
+      });
       setCompany(c);
       setActiveCompanyId(c.id);
       notify("success", `公司「${c.name}」已创建`);
@@ -254,6 +259,8 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
             placeholder="例如：星河文化传媒"
             className="input"
           />
+          <AttachmentPicker value={companyAttachments} onChange={setCompanyAttachments}
+            label="📎 挂公司资料（营业执照 / 业务规划 / 品牌手册，可选）" />
           <div className="flex justify-end">
             <button onClick={createCompany} disabled={busy || !companyName.trim()}
               className="btn-primary disabled:opacity-40">

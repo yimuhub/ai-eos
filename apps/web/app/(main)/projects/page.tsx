@@ -201,6 +201,7 @@ export default function ProjectsPage() {
         description: form.description || null,
         manager_agent_id: form.manager_agent_id || null,
         priority: form.priority,
+        attachments: projAttach.length ? projAttach : undefined, // 📎 项目立项资料
       });
       // 批量添加项目成员
       const pid = created?.id || created?.project?.id;

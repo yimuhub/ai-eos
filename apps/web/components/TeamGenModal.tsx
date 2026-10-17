@@ -3,6 +3,7 @@ import { useState } from "react";
 import { createPortal } from "react-dom";
 import { api } from "@/lib/api";
 import { notify } from "@/components/Toast";
+import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
 
 /* ============================================================
    创建新团队向导弹窗（指挥中心 / 公司管理 共用）
@@ -30,6 +31,7 @@ export default function TeamGenModal({ open, onClose, onCreated }: {
   const [name, setName] = useState("");
   const [industry, setIndustry] = useState("");
   const [blueprint, setBlueprint] = useState("");
+  const [teamAttachments, setTeamAttachments] = useState<Attachment[]>([]); // 📎 建团参考材料
   const [preview, setPreview] = useState<any | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -55,9 +57,10 @@ export default function TeamGenModal({ open, onClose, onCreated }: {
       const d = await api.post("/team-generator/generate", {
         company_name: name.trim() || null,
         industry, blueprint,
+        attachments: teamAttachments.length ? teamAttachments : undefined, // 📎 参考材料
       });
       onClose(); setStep(1); setPreview(null);
-      setBlueprint(""); setIndustry(""); setName("");
+      setBlueprint(""); setIndustry(""); setName(""); setTeamAttachments([]);
       onCreated?.(`${d.company_name}（${d.departments} 部门 · ${d.agents.length} Agent）`);
     } catch (e: any) { notify("error", `团队生成失败：${e.message || e}`); }
     setBusy(false);
@@ -89,6 +92,8 @@ export default function TeamGenModal({ open, onClose, onCreated }: {
           <textarea rows={8} value={blueprint} onChange={(e) => setBlueprint(e.target.value)}
             placeholder={"【组织架构】…\n【需要哪些 Agent】…\n【各自能力要求】…"}
             className="input resize-none font-mono !text-[11px]" />
+          <AttachmentPicker value={teamAttachments} onChange={setTeamAttachments}
+            label="📎 挂参考材料（业务规范 / 岗位 JD / 制度文件，供生成团队参考）" />
           <div className="flex justify-end gap-2 pt-1">
             <button onClick={onClose} className="px-4 py-2 rounded-xl text-xs hover:bg-white/[0.06]"
               style={{ border: "1px solid var(--border)" }}>取消</button>

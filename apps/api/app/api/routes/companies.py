@@ -120,6 +120,7 @@ class DepartmentPatchIn(BaseModel):
     pinned: bool | None = None
     skill_ids: list[str] | None = None
     kb_document_ids: list[str] | None = None
+    attachments: list[dict] | None = None  # 📎 附件口
 
 
 @router.patch("/departments/{did}")

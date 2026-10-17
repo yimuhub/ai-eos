@@ -33,6 +33,7 @@ class ProjectIn(BaseModel):
     # 这里原先只接受查询参数，属于历史不一致——现在两种写法都接受，
     # 既保持向后兼容，也让 API 有一致的形状。
     company_id: str | None = None
+    attachments: list[dict] | None = None  # 📎 附件口（项目立项资料）
 
 
 class MilestoneIn(BaseModel):
