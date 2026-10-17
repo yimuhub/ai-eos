@@ -3,6 +3,28 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的组织方式。
 完整的工程质量改造记录见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
 
+## [5.0.2] 全系统附件口 + 级联删除修复 — 2026-10-17
+
+> 输入表单全系统接通📎附件口（创建时真实落库、列表回传）；修删公司 500、外部接入注册 422 两个 P0。
+
+### 全系统输入表单接通 📎 附件口
+- 数据层：`companies / departments / automation_definitions / automation_schedules / training_sessions / external_agent_connections / agent_factory_jobs` 7 张表统一加 `attachments JSON` 列
+- ORM：7 个模型类 + 7 个路由入参模型（`CompanyIn`/`DepartmentIn`/`DefinitionIn`/`ScheduleIn`/`SessionIn`/`ConnectionIn`/`BlueprintIn`/`AgentIn`）接收 `attachments`，创建时落库、列表端点回传
+- `Agent` 无附件列 → 走已有 `memory_config` JSON 列存引用（零 DDL）
+- 前端 6 页接入通用 `AttachmentPicker`（真实上传）：数字员工 / 自动化规则 / 调度 / 训练 / 外部接入 / 蓝图画布
+
+### 修 P0：删公司 500（级联缺口）
+- 根因：指向 `companies.id` 的 9 张子表外键全为 `NO ACTION`，删公司时子行残留 → `IntegrityError`；且 `Company.departments` 缺级联，ORM 把子行 `company_id` 置 NULL 撞 NOT NULL
+- 数据库层 10 张子表外键改 `ON DELETE CASCADE` + ORM `ForeignKey(ondelete="CASCADE")` + `Company.departments` 加 `cascade="all, delete-orphan"`
+- 实测：删带部门的公司 `500 → 204`，子行父行全清
+
+### 修契约错位：外部接入注册 422
+- 前端发 `provider`，后端 `ConnectionIn` 必填 `provider_type`（claude/codex/hermes 实际为 API/LOCAL/REMOTE 枚举）→ 字段名对齐，注册 `422 → 201`
+
+### 验证
+- 前端 `tsc --noEmit` 0 错误；后端全文件 import OK
+- 7 类资源「带附件创建 → 读回 attachments 落库 → 级联删除」全链路回归通过，测试数据已清理
+
 ## [5.0.0] 专家 × 组织形态版 — 2026-10-17
 
 > 大版本：新增数据模型（agent 绑定专家）+ 跨模块能力（专家库管理 / 数字员工联动 / 行业组织形态一键落地）。
