@@ -225,7 +225,7 @@ export default function CommandDeckPage() {
       {plan && confirmOpen && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setConfirmOpen(false)} />
-          <div className="relative w-full max-w-lg bg-[var(--card)] backdrop-blur-xl border border-[var(--border)] rounded-2xl shadow-2xl p-6 animate-fade-up">
+          <div className="relative w-full max-w-lg max-h-[90vh] overflow-y-auto bg-[var(--card)] backdrop-blur-xl border border-[var(--border)] rounded-2xl shadow-2xl p-6 animate-fade-up">
             <div className="flex items-center gap-3 mb-4">
               <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-indigo-500 to-cyan-500 flex items-center justify-center text-xl">
                 {PATH_META[plan.path]?.icon}

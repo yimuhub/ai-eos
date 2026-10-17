@@ -531,7 +531,7 @@ export default function ProjectsPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center px-4"
           style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)" }}
           onClick={() => setConfirmTarget(null)}>
-          <div className="w-full max-w-sm rounded-2xl p-5 space-y-4 animate-fade-up"
+          <div className="w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-2xl p-5 space-y-4 animate-fade-up"
             style={{ background: "linear-gradient(180deg,#15151f,#101018)", border: confirmTarget.action === "delete" ? "1px solid rgba(239,68,68,0.45)" : "1px solid rgba(99,102,241,0.35)" }}
             onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center gap-3">
@@ -568,7 +568,7 @@ export default function ProjectsPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center px-4"
           style={{ background: "rgba(0,0,0,0.65)", backdropFilter: "blur(6px)" }}
           onClick={() => { setShowBatchDelete(false); setBatchSel(new Set()); }}>
-          <div className="w-full max-w-2xl rounded-2xl overflow-hidden animate-fade-up"
+          <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl overflow-hidden animate-fade-up"
             style={{ background: "linear-gradient(180deg,#15151f,#101018)", border: "1px solid rgba(248,113,113,0.25)" }}
             onClick={(e) => e.stopPropagation()}>
             <div className="px-5 pt-5 pb-3 border-b flex items-center justify-between" style={{ borderColor: "var(--border)" }}>
