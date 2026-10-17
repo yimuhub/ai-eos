@@ -40,6 +40,7 @@ export const NAV_GROUPS: NavGroup[] = [
     hint: "每天先看这里：现在在打什么仗、仗打到哪了",
     items: [
       { href: "/", label: "指挥中心", icon: "◈", desc: "全局总览：公司、员工、任务与今日动向", keywords: ["dashboard", "home", "zhihuizhongxin", "首页", "总览", "概览"] },
+      { href: "/command", label: "一句话指挥台", icon: "📣", desc: "说一句话，AI 判断派活/专家组队/作战室立项，每步都有你的确认点", keywords: ["command", "zhichutai", "指挥台", "一句话", "下达", "派活", "组队", "立项", "orchestrator"] },
       { href: "/projects", label: "项目中心", icon: "▤", desc: "按项目组织目标：建项目、拉团队、下目标", keywords: ["project", "xiangmu", "项目", "目标"] },
       { href: "/warroom", label: "作战室", icon: "🎯", desc: "盯单个目标的实时执行过程与产出", keywords: ["warroom", "zuozhanshi", "作战", "盯盘"] },
       { href: "/tasks", label: "任务", icon: "◉", desc: "所有任务的统一列表：状态、负责人、产物", keywords: ["task", "renwu", "ren wu", "任务", "待办"] },

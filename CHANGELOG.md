@@ -3,6 +3,17 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的组织方式。
 完整的工程质量改造记录见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
 
+## [4.0.0] 一句话指挥台 — 2026-10-17
+
+### 一句话指挥台（Command Deck）
+- 新增 `POST /command/plan`：一句话 → LLM 判断走 DIRECT（直接派活）/ EXPERT（专家库组队）/ PROJECT（作战室立项），方案不落库
+- 新增 `POST /command/execute`：老板确认后执行，三路全部复用既有引擎（task_dispatch / experts / war_room）
+- 新增 `GET /command/report/{ref}`：执行摘要 + 单文件 HTML 报告（可直接发群分享，含 token 费用）
+- 新增 `POST /command/notify`：报告推钉钉/飞书/企微 webhook（按域名自适应消息体）
+- 前端「📣 一句话指挥台」页（指挥中枢分组）：一句话输入 + 📎附件口 + 方案确认弹窗（含预计耗时/分工/理由，可改可拒）+ 执行结果控制台 + 报告分享 + 群推送
+- 修复：Postgres 模式 tasks.progress / current_stage、agent_executions.completed_at 缺列（补 tools/ensure_columns.py 一键补列脚本）
+- 登录页/侧边栏版本标识 → V4.0 · 一句话指挥版
+
 ## [3.0.0] 专家融合版 — 2026-10-17
 
 ### 专家库融合（agency-agents-zh · MIT）
