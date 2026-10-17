@@ -1,0 +1,17 @@
+.git
+.gitignore
+README.md
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+*.sqlite*
+data/
+logs/
+storage/
+node_modules
+.next
+__pycache__
+*.pyc
+.DS_Store

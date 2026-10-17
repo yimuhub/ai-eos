@@ -13,11 +13,35 @@ import asyncio
 import os
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from app.computer_agent import ComputerActionLog
 
-SCREENSHOT_DIR = "/tmp/ai-eos-screens"
-os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
+def _resolve_screenshot_dir() -> str:
+    """截屏保存目录。
+
+    /tmp 重启即清空，不再使用。可配（AIEOS_SCREENSHOT_DIR），
+    默认 storage/screenshots（与 assets.py 同一 storage 根）。
+    """
+    raw = os.environ.get("AIEOS_SCREENSHOT_DIR", "").strip()
+    if raw:
+        target = raw
+    else:
+        try:
+            from app.core.config import settings as _settings
+            root = _settings.storage_dir
+        except Exception:
+            root = "./storage"
+        base = Path(root)
+        if not base.is_absolute():
+            base = Path(__file__).resolve().parents[1] / root
+        target = str(base / "screenshots")
+    os.makedirs(target, exist_ok=True)
+    return target
+
+
+SCREENSHOT_DIR = _resolve_screenshot_dir()
 
 
 def _now():

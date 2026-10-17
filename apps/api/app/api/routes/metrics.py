@@ -170,6 +170,9 @@ async def overview(
         u for u in usage_rows
         if (_as_naive_utc(u.created_at) or cutoff) >= cutoff
     ]
+    # 模型调用成功率口径：失败调用也进 token 流水（TokenUsage.success=False，
+    # 由 model_gateway 在 failover except 分支记录），成功率 = success 为真 / 总数；
+    # 无样本时 _rate() 返回 None（诚实口径："没数据"不是"全失败"）。
     call_ok = sum(1 for u in usage_in_window if u.success)
     call_bad = len(usage_in_window) - call_ok
     latencies = [u.latency_ms for u in usage_in_window if (u.latency_ms or 0) > 0]

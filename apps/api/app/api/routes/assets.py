@@ -34,6 +34,24 @@ def storage_root() -> Path:
     return p
 
 
+def _resolve_asset_path(stored: str) -> Path:
+    """把 DB 里存的 path 还原为文件系统路径，兼容新旧两种格式：
+    - 新数据：相对路径（如 artifacts/ab12_xxx.md）→ 拼 storage 根；
+    - 旧数据：绝对路径且文件还在 → 直接用；
+    - 旧数据：绝对路径但文件已不在（换机器）→ 尽力在 storage 下按文件名找回。
+    """
+    p = Path(stored)
+    if p.is_absolute() and p.is_file():
+        return p
+    if p.is_absolute():
+        for sub in ("artifacts", "uploads"):
+            cand = storage_root() / sub / p.name
+            if cand.is_file():
+                return cand
+        return p  # 找不到，上层报 404
+    return storage_root() / stored
+
+
 async def save_artifact(db: AsyncSession, company_id: str, name: str, content: str,
                         task_id: str | None = None, agent_id: str | None = None) -> Asset:
     """Called by Agent Runtime to auto-save text results into the Asset Center."""
@@ -44,7 +62,9 @@ async def save_artifact(db: AsyncSession, company_id: str, name: str, content: s
     ext = fpath.suffix.lower()
     atype = AssetType.REPORT if any(h in name.lower() for h in REPORT_HINTS) \
         else EXT_TYPE.get(ext, AssetType.OTHER)
-    asset = Asset(company_id=company_id, name=name, type=atype, path=str(fpath),
+    # 存相对路径：换机器/换目录后仍能定位（读取时拼 storage 根）
+    rel_path = str(fpath.relative_to(root))
+    asset = Asset(company_id=company_id, name=name, type=atype, path=rel_path,
                   mime_type=mimetypes.guess_type(name)[0], size=len(content.encode()),
                   created_by=agent_id or "", creator_type="agent" if agent_id else "user",
                   task_id=task_id, agent_id=agent_id)
@@ -84,7 +104,8 @@ async def upload(company_id: str, file: UploadFile,
     fpath.write_bytes(data)
     ext = fpath.suffix.lower()
     asset = Asset(company_id=company_id, name=file.filename,
-                  type=EXT_TYPE.get(ext, AssetType.OTHER), path=str(fpath),
+                  type=EXT_TYPE.get(ext, AssetType.OTHER),
+                  path=str(fpath.relative_to(root)),
                   mime_type=file.content_type, size=len(data), created_by=user.id,
                   creator_type="user")
     db.add(asset)
@@ -105,7 +126,10 @@ async def download(aid: str, db: AsyncSession = Depends(get_db),
     c = await db.get(Company, a.company_id)
     if not c or c.owner_id != user.id:
         raise HTTPException(404, "Asset not found")
-    return FileResponse(a.path, filename=a.name)
+    fpath = _resolve_asset_path(a.path)
+    if not fpath.is_file():
+        raise HTTPException(404, "Asset file missing")
+    return FileResponse(fpath, filename=a.name)
 
 
 @router.get("/{aid}")
@@ -117,7 +141,9 @@ async def read_asset(aid: str, db: AsyncSession = Depends(get_db),
     c = await db.get(Company, a.company_id)
     if not c or c.owner_id != user.id:
         raise HTTPException(404, "Asset not found")
-    p = Path(a.path)
+    p = _resolve_asset_path(a.path)
+    if not p.is_file():
+        raise HTTPException(404, "Asset file missing")
     if p.suffix.lower() in (".md", ".txt", ".json", ".csv", ".py"):
         return {"id": a.id, "name": a.name, "content": p.read_text(encoding="utf-8",
                                                                  errors="replace")[:100000]}

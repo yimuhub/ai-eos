@@ -1,14 +1,19 @@
 """Artifact Collaboration API (P2-09): Draft -> Review -> Approve."""
+import io
+import json
 import uuid
+import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.models.artifact import (ALLOWED_TRANSITIONS, Artifact, ArtifactStatus,
                                  ArtifactVersion, can_transition)
+from app.models.company import Company
 from app.models.user import User
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
@@ -222,3 +227,58 @@ async def review_artifact(
     await db.commit()
     return {"id": artifact_id, "status": art.status.value,
             "reviewer": data.reviewer_agent_id or user.id}
+
+
+async def _owned_artifact(artifact_id: str, db: AsyncSession, user: User) -> Artifact:
+    """取成果并做归属校验：只能操作自己公司的成果（防 IDOR，404 而非 403）。"""
+    art = await db.get(Artifact, artifact_id)
+    if not art:
+        raise HTTPException(404, "Artifact not found")
+    c = await db.get(Company, art.company_id)
+    if not c or c.owner_id != user.id:
+        raise HTTPException(404, "Artifact not found")
+    return art
+
+
+@router.delete("/{artifact_id}")
+async def delete_artifact(
+    artifact_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """删除成果（含全部版本）。"""
+    art = await _owned_artifact(artifact_id, db, user)
+    await db.execute(delete(ArtifactVersion).where(
+        ArtifactVersion.artifact_id == artifact_id))
+    await db.delete(art)
+    await db.commit()
+    return {"id": artifact_id, "deleted": True}
+
+
+@router.get("/{artifact_id}/download.zip")
+async def download_artifact_zip(
+    artifact_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """打包下载：全部版本内容（vN.txt）+ meta.json，zip 流式返回。"""
+    art = await _owned_artifact(artifact_id, db, user)
+    vq = await db.execute(select(ArtifactVersion).where(
+        ArtifactVersion.artifact_id == artifact_id).order_by(
+        ArtifactVersion.version.asc()))
+    versions = vq.scalars().all()
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for v in versions:
+            zf.writestr(f"v{v.version}.txt", v.content or "")
+        zf.writestr("meta.json", json.dumps({
+            "id": art.id, "name": art.name, "type": art.artifact_type,
+            "status": art.status.value, "current_version": art.current_version,
+            "versions": len(versions),
+        }, ensure_ascii=False, indent=2))
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/zip",
+        headers={"Content-Disposition":
+                 f'attachment; filename="artifact-{artifact_id}.zip"'})

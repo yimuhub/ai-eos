@@ -1,5 +1,9 @@
 """Computer Agent Runtime + Sandbox (P3-10 & P3-11).
 
+曾用名 app.sandbox，2026-10-14 改名为 app.computer_workspace 以消歧：
+app/core/sandbox.py 是"文件访问沙箱"，与本模块（Computer 工作区模型）
+同名不同义，import 极易拿错。路由模块 app/api/routes/sandbox.py 保持不变。
+
 Sandbox：隔离工作区（Mock Provider，未来可接 Docker/Cloud VM）。
 Computer Session：Observe → Reason → Act → Verify 循环，
 每步记录 before/after 截图（Mock），可暂停/取消/恢复。

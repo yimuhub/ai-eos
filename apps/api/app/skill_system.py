@@ -1,6 +1,17 @@
-"""Skill plugin system — Skills are plugins, never hardcoded into Runtime."""
+"""Skill plugin system — Skills are plugins, never hardcoded into Runtime.
+
+插件约定（真动态加载，见底部的 load_plugin_skills）：
+`<仓库根>/plugins/skills/<skill_name>/manifest.json`，字段
+name / version / description / module；module 是该插件目录内的
+Python 模块名（该目录会被临时加入 sys.path），模块内需定义
+BaseSkill 子类（id 建议与 manifest.name 一致）。
+"""
+import importlib
+import json
 import re
+import sys
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -187,3 +198,90 @@ async def execute_skill(skill_slug: str, input_data: dict) -> dict[str, Any]:
     if not cls:
         raise ValueError(f"Unknown skill: {skill_slug}")
     return await cls().execute(input_data)
+
+
+# ---- plugins/skills/ 真动态加载 -----------------------------------------
+# 之前这里只有一句注释 "future skills can be installed from
+# plugins/skills/"，但没有任何代码真的扫描该目录（审查 P1-④）。
+# 现在启动期（本模块随路由被 app.main 导入时）扫描一次：
+# 每个子目录的 manifest.json → import 对应模块 → 注册技能类。
+# 单个插件失败只记 warning，不中断其它插件与内置技能。
+PLUGINS_DIR = Path(__file__).resolve().parents[3] / "plugins" / "skills"
+_MANIFEST_FIELDS = ("name", "version", "description", "module")
+
+
+def _skill_class_from_module(module, manifest_name: str) -> type[BaseSkill] | None:
+    """在已导入的插件模块里找出技能类（本模块内定义的 BaseSkill 子类）。"""
+    candidates = [
+        obj for obj in vars(module).values()
+        if isinstance(obj, type) and issubclass(obj, BaseSkill)
+        and obj is not BaseSkill and obj.__module__ == module.__name__
+    ]
+    if not candidates:
+        return None
+    for cls in candidates:
+        if cls.id == manifest_name:
+            return cls
+    if len(candidates) == 1:
+        return candidates[0]
+    logger.warning("技能插件模块 %s 内有多个技能类且 id 均不等于 manifest name=%r，取第一个",
+                   module.__name__, manifest_name)
+    return candidates[0]
+
+
+def load_plugin_skills() -> list[str]:
+    """扫描 plugins/skills/*/manifest.json 并注册到 _registry。
+
+    返回成功加载的技能 id 列表。目录不存在（纯内置部署）时静默返回 []。
+    """
+    loaded: list[str] = []
+    if not PLUGINS_DIR.is_dir():
+        return loaded
+    for plugin_dir in sorted(PLUGINS_DIR.iterdir()):
+        manifest_path = plugin_dir / "manifest.json"
+        if not plugin_dir.is_dir() or not manifest_path.is_file():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("技能插件 %s: manifest.json 解析失败，已跳过：%s",
+                           plugin_dir.name, exc)
+            continue
+        missing = [f for f in _MANIFEST_FIELDS if not manifest.get(f)]
+        if missing:
+            logger.warning("技能插件 %s: manifest 缺字段 %s，已跳过",
+                           plugin_dir.name, missing)
+            continue
+        try:
+            plugin_path = str(plugin_dir)
+            if plugin_path not in sys.path:
+                sys.path.insert(0, plugin_path)
+            module = importlib.import_module(manifest["module"])
+            cls = _skill_class_from_module(module, manifest["name"])
+            if cls is None:
+                logger.warning("技能插件 %s: 模块 %s 内未找到 BaseSkill 子类，已跳过",
+                               plugin_dir.name, manifest["module"])
+                continue
+            if not cls.id:
+                logger.warning("技能插件 %s: 技能类 %s 未设置 id，已跳过",
+                               plugin_dir.name, cls.__name__)
+                continue
+            if cls.id != manifest["name"]:
+                logger.warning("技能插件 %s: manifest name=%r 与类 id=%r 不一致，按类 id 注册",
+                               plugin_dir.name, manifest["name"], cls.id)
+            if cls.id in _registry:
+                logger.warning("技能插件 %s: id=%r 已存在，将覆盖原注册",
+                               plugin_dir.name, cls.id)
+            register_skill(cls)
+            loaded.append(cls.id)
+            logger.info("技能插件已加载：%s（%s v%s）",
+                        cls.id, plugin_dir.name, manifest["version"])
+        except Exception as exc:
+            logger.warning("技能插件 %s 加载失败，已跳过：%s",
+                           plugin_dir.name, exc, exc_info=True)
+    return loaded
+
+
+# 启动时加载一次：本模块随 app.api.routes 被 app.main 导入，
+# 等价于应用启动期执行；失败不抛异常（load_plugin_skills 内部已消化）。
+load_plugin_skills()

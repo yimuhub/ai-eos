@@ -3,6 +3,98 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的组织方式。
 完整的工程质量改造记录见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
 
+## [3.0.0] 专家融合版 — 2026-10-17
+
+### 专家库融合（agency-agents-zh · MIT）
+- 新增 `expert_templates` 表 + 导入器（vendor/agency-agents-zh，265 位专家）
+- 专家 API：`/experts/import`（幂等导入）、列表/详情/部门统计、
+  `POST /experts/search`（P1 自然语言找专家）、`POST /experts/team`（P2 一句话组队）
+- 专家 → 工厂蓝图：`POST /experts/{id}/to-blueprint`，走既有 审查→验收→上岗 确认链
+- 前端「📚 专家库」页（组织与智能体分组）：部门筛选、卡片、详情弹窗、雇佣、找专家、组队
+- 登录页/侧边栏版本标识 → V3.0 · 专家融合版
+
+## [2026-10-14] — 五视角代码审查整改升级
+
+> 依据五视角审查报告的 Top 10 + P0/P1/P2 整改项。升级前已全量备份
+> （`~/Documents/张阗/ai-eos-backup-20261014`）。Mac 无 shell，所有改动为静态编辑，
+> Python 文件已过 `py_compile` 语法校验；**上线前请在 Mac 上跑一遍 `pytest` 回归**。
+
+### 任务执行链路（重度用户 P0）
+
+- 后台引擎泄漏修复：`_with_fresh_engine` 的 finally 里 `await engine.dispose()`
+- 超时按任务类型拆分：会议 600s，任务/编排/工作流读 `AIEOS_TASK_TIMEOUT_S`（默认 7200s）；
+  超时先写事件告知用户再标 FAILED
+- 新增 `POST /tasks/{tid}/retry`：FAILED→PLANNING→RUNNING 并重新提交后台工作；
+  前端任务详情 FAILED 状态加「🔁 重试」按钮
+- `resume_execution` 改为真重跑（从 checkpoint 恢复，旧执行标 `superseded`）；
+  暂停按钮旁提示「暂停将在当前步骤完成后生效」
+- lifespan 新增 `recover_stuck_tasks()`：RUNNING/PAUSED 超 30 分钟（`AIEOS_STUCK_TASK_MINUTES` 可配）
+  无心跳标 FAILED 并写事件
+- Task 模型新增 `progress`（Float，默认 0.0）与 `current_stage`（String，可空）；
+  前端任务列表/详情加进度条
+- `schedules.py` pause/resume 补归属校验；`departments_batch.py` cascade 改为真递归删除（已核查外键安全）
+- `automation_engine.py` 新增 `run_workflow` / `call_webhook` / `update_task` 三个真实动作
+- 编排链路补「产出即归档」：CEO 汇总后调 `save_artifact`（此前只写 `parent.result`）
+
+### 模型网关与计量（程序员/运营 P0）
+
+- `record_token_usage` 只 add 不 commit，提交权交还调用方（已审计全部调用方外层均会 commit）
+- `usage_ctx` 改为上下文管理器（退出 finally reset）；training / factory / meeting / chat 补齐 agent / company 维度
+- failover 每次失败记 `logger.warning`，最终异常附全部失败摘要；失败调用记入 token 流水（`success=False`），
+  `model_calls.success_rate` 口径修正
+- 简易熔断/冷却：单模型连续失败 5 次冷却 5 分钟，429 直接短路；猴子补丁转正为类方法
+- `PROVIDERS` 支持 `plugins/providers/*.py` 动态加载（`register()` 约定，单文件失败隔离）
+- `knowledge_engine.retrieve` 加 `limit` 分页（默认 200，SQL 层截断）
+
+### 架构与安全（程序员 P0/P1）
+
+- `plugins/skills/` 真动态加载（`manifest.json` + `importlib`，单 manifest 失败只记 warning）
+- `test_code_quality.py` 静默吞异常检测升级为 AST 级（行尾注释 `pass` 不再逃逸；
+  `agent_runtime.py:64-65` 已同步修复为 `logger.warning(..., exc_info=True)`）
+- `app/sandbox.py` 改名 `app/computer_workspace.py` 消歧（import 已全仓同步）
+- 新建 `app/engines/` 包：新引擎公约 + 渐进迁移文档（现有引擎暂不搬移）
+- RefreshToken：`POST /auth/refresh`（轮换，响应 `{access_token, refresh_token}`）+ `POST /auth/logout`（吊销），
+  库里只存 SHA-256 哈希；附 Alembic 迁移
+- 登录限流 Redis 优先（无 Redis 回退内存 dict，对外行为不变）
+- `ensure_columns` 只在 sqlite 方言下运行（PostgreSQL 交给 Alembic）
+
+### 前端与向导（小白 P0/P1）
+
+- 全局快捷键：`n` 新建任务、`/` 聚焦搜索、`j/k` 列表导航、空格多选、`?` 帮助面板
+  （`lib/shortcuts.ts` + `GlobalShortcuts.tsx`）
+- 术语统一：「＋ 招新员工」、「人设与职责设定」、「OpenAI 兼容地址」、「首选模型」；⌘K 占位与 keywords 对齐
+- 向导步骤 2：每个模型预设加「Key 从哪来」一句话指引；`.env` 指引重写为小白 4 步操作（含便携包无 `.env` 情况）
+- 建员工自动绑定公司首选模型（`governance.create_from_template`）；新增免 Key 纯前端演示模式（零 DB 写入、全程标注「演示」）
+- `lib/api.ts`：401 自动调 `/auth/refresh` 换 token 重试一次；登录页存 `refresh_token`
+- vitest：`vitest.config.ts` + `lib/api.test.ts` + `lib/validate.test.ts`（静态正确，未运行）
+
+### 交付运维（运营 P0/P1）
+
+- **LICENSE**：BSL 1.1（BUSL-1.1）——Licensor eos.hyipf.com（2026-10-14 晚由
+  山东阗言密语寅卯辰文化传播有限公司变更）；免费层：个人学习/研究、非商业用途、
+  团队规模不超过 3 人的团队内部使用；超 3 人使用或云端/公网/SaaS 部署须商业授权
+  （登记 eos@hyipf.com）；Change Date 2030-10-14（满 4 年转 Apache-2.0）；
+  对外称 source-available；`pyproject.toml` / `package.json` 同步标识
+- 打包说明：账号三处收敛为「首次使用请在登录页注册」（删弱口令节）；`rm -f data/aieos.db` 改为先备份再重建；
+  Python 要求更正为 3.12+
+- `start-mac.sh`：`cd` 到 `apps/api`、自动装依赖、日志 `>>` 追加、启动前快照（留 5 份）；
+  `start-win.bat` 纯 batch 重写（补 `sqlite+aiosqlite:///` 前缀，修 npm 未加 call 的 bug）
+- 根目录 `.env.example`（中文注释模板）；`/health/db` 异常返 HTTP 503；日志按日轮转（`AIEOS_LOG_DIR` 可配，保留 30 天）
+- `GET /metrics/prometheus`（手写 exposition，无新依赖）；`GET /events/export`（csv/json 流式）；
+  成果删除 + zip 打包下载；资产改相对路径（兼容旧绝对路径）；kb 上传与截屏移出 /tmp
+- `docker-compose.yml` 生产化：api/web 服务与 Dockerfile、`restart: unless-stopped`、healthcheck、
+  PG 密码走 `docker/.env`、redis AOF 持久化卷、端口只绑 127.0.0.1
+- 新建 `docs/BACKUP_RUNBOOK.md`、`docs/UPGRADE_SOP.md`、`docs/DATA_FLOW.md`（默认网关 `https://api.agnes-ai.cn/v1` 数据流向告知）
+
+### 已知局限（本次未覆盖）
+
+- Mac 无 shell：未运行任何测试；vitest / tsc / next build 均未验证。**跑 `pytest` 时不要起本地 Redis**，
+  否则 `test_auth.py` 对 `_login_failures` 内存 dict 的断言会失败（限流走 Redis 通道时）
+- 429 熔断语义实现为「短路 break 不再试后续模型」（同 provider 限流假设）；如需「跳过中间只试最后一个 fallback」可再调
+- 演示模式为纯前端模拟（未落库、未调模型）；如需真实演示任务落库需后端配合新增演示执行路径
+- `resume_execution` 由「状态翻转」改为「真重跑」，属预期内的语义变更；若旧测试断言旧行为需同步更新
+- `start-mac.sh` 仍绑 `0.0.0.0`（有局域网访问需求，未改）；`start-linux.sh` 未动
+
 ## [未发布]
 
 ### 已新增（端到端试跑 · 无需真实密钥）

@@ -109,6 +109,18 @@ def _run_in_background(task_id: str, agent_id: str):
     """Run agent in a worker thread with a fresh engine (asyncpg is loop-bound)."""
     import app.background_jobs as background_jobs
 
+    async def _on_timeout(session, timeout_s: float):
+        # 超时先写事件告知用户（事件先落库，避免被回滚吞掉），再标 FAILED
+        from app.models.task import TaskStatus as TS
+        await log_event(session, "task.timeout", "task", task_id,
+                        "system", None,
+                        {"agent_id": agent_id, "timeout_s": timeout_s,
+                         "hint": "如需更长执行时间，可调大环境变量 AIEOS_TASK_TIMEOUT_S"})
+        t = await session.get(Task, task_id)
+        if t and t.status == TS.RUNNING:
+            t.status = TS.FAILED
+        await session.commit()
+
     async def _job(session):
         agent = await session.get(Agent, agent_id)
         task = await session.get(Task, task_id)
@@ -147,7 +159,7 @@ def _run_in_background(task_id: str, agent_id: str):
                 logger.error("任务失败状态落库失败 task=%s: %s",
                              task_id, mark_err, exc_info=True)
 
-    background_jobs.submit_async(_job)
+    background_jobs.submit_async(_job, on_timeout=_on_timeout)
 
 
 @router.post("/{tid}/start")
@@ -193,6 +205,27 @@ async def resume_task(tid: str, db: AsyncSession = Depends(get_db),
     for e in q.scalars():
         await resume_execution(db, e)
     return {"detail": "resumed"}
+
+
+@router.post("/{tid}/retry")
+async def retry_task(tid: str, background: BackgroundTasks,
+                     db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
+    """失败任务重试：FAILED→PLANNING→RUNNING，重新提交后台执行。
+
+    前端任务详情页 FAILED 状态的"重试"按钮调用此端点。
+    """
+    t = await _task_owned(db, user.id, tid)
+    if t.status != TaskStatus.FAILED:
+        raise HTTPException(409, f"只有 FAILED 状态的任务可以重试，当前状态：{t.status.value}")
+    if not t.assigned_agent_id:
+        raise HTTPException(400, "Task has no assigned agent")
+    try:
+        await transition(db, t, TaskStatus.PLANNING, "user", user.id)
+        await transition(db, t, TaskStatus.RUNNING, "user", user.id)
+    except IllegalTransition as e:
+        raise HTTPException(409, str(e))
+    background.add_task(_run_in_background, tid, t.assigned_agent_id)
+    return {"detail": "retrying", "task_id": tid}
 
 
 @router.post("/{tid}/cancel")

@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     jwt_secret: str = _DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 1440
+    jwt_refresh_expire_days: int = 30  # refresh token 有效期（可吊销，存 DB）
 
     storage_dir: str = "./storage"
     doc_convert_model_id: str = ""   # 专用文档转换大模型（低成本）

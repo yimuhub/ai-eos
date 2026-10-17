@@ -1,53 +1,38 @@
-# === 依赖（可重建，不入库） ===
-node_modules/
-**/node_modules/
-.venv/
-**/.venv/
-venv/
-
-# === 构建产物 ===
-.next/
-**/.next/
-out/
-dist/
-build/
-*.tsbuildinfo
-__pycache__/
-**/__pycache__/
-*.py[cod]
-*.so
-
-# === 运行期数据（含用户数据，绝不入库） ===
-data/
-storage/
-logs/
-*.db
-*.db-journal
-*.sqlite
-*.sqlite3
-.pytest_cache/
-.coverage
-htmlcov/
-*.log
-
-# === 环境与密钥（安全红线） ===
-.env
-.env.*
+# 密钥与本地配置（绝不提交）
+.env*
 !.env.example
 *.pem
 *.key
-*.p12
+*credentials*
 
-# === 打包产物 ===
-packaging/dist/
-packaging/build/
-*.dmg
-*.app/
-*.zip
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
 
-# === 操作系统 ===
+# 前端
+node_modules/
+.next/
+dist/
+build/
+
+# 运行时数据（本地生成；注意 apps/web/app/(main)/logs 是前端路由页面，不要排除）
+data/
+/logs/
+apps/api/logs/
+storage/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite*
+
+# 系统
 .DS_Store
-**/.DS_Store
 Thumbs.db
-*.swp
-*~
+
+# 打包产物
+packaging/*.zip
+packaging/*.tar.gz

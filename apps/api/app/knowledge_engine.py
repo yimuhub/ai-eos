@@ -86,8 +86,13 @@ async def ingest_document(db: AsyncSession, doc: KBDocument) -> int:
 
 
 async def retrieve(db: AsyncSession, company_id: str, query: str,
-                   top_k: int = 5, project_id: str | None = None) -> list[dict]:
-    """关键词重合度检索，返回 top_k 块。向量检索可在此替换。"""
+                   top_k: int = 5, project_id: str | None = None,
+                   limit: int | None = 200) -> list[dict]:
+    """关键词重合度检索，返回 top_k 块。向量检索可在此替换。
+
+    limit：在 SQL 层截断候选 chunk 数（默认 200），避免全表 chunk 拉进
+    Python 做 bigram 打分导致内存爆炸；不做 pgvector 的轻方案。
+    """
     q = select(KBChunk).where(KBChunk.company_id == company_id)
     if project_id:
         doc_ids_q = await db.execute(select(KBDocument.id).where(
@@ -96,6 +101,8 @@ async def retrieve(db: AsyncSession, company_id: str, query: str,
         if not doc_ids:
             return []
         q = q.where(KBChunk.document_id.in_(doc_ids))
+    if limit:
+        q = q.limit(limit)
 
     rows = (await db.execute(q)).scalars().all()
     if not rows:
@@ -122,9 +129,11 @@ async def retrieve(db: AsyncSession, company_id: str, query: str,
 
 async def rag_context(db: AsyncSession, company_id: str, query: str,
                       top_k: int = 5, max_chars: int = 3000,
-                      project_id: str | None = None) -> str:
+                      project_id: str | None = None,
+                      limit: int | None = 200) -> str:
     """RAG 接口：检索并拼装可直接注入 prompt 的知识上下文。"""
-    hits = await retrieve(db, company_id, query, top_k=top_k, project_id=project_id)
+    hits = await retrieve(db, company_id, query, top_k=top_k,
+                          project_id=project_id, limit=limit)
     parts, used = [], 0
     for h in hits:
         if used + len(h["content"]) > max_chars:

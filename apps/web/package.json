@@ -1,12 +1,14 @@
 {
   "name": "web",
-  "version": "0.1.0",
+  "version": "3.0.0",
   "private": true,
+  "license": "BUSL-1.1",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "vitest run"
   },
   "dependencies": {
     "react": "^18",
@@ -15,6 +17,7 @@
   },
   "devDependencies": {
     "typescript": "^5",
+    "vitest": "^2",
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",

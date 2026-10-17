@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.core.config import settings
 from app.core.logging_config import get_logger
 from app.kb_engine import (COST_PROFILES, cache_invalidate,
                            cost_optimized_rag)
@@ -27,8 +28,26 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/kb2", tags=["knowledge-p4"])
 
-UPLOAD_DIR = Path("/tmp/ai-eos-kb-originals")
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+def _resolve_upload_dir() -> Path:
+    """知识库原文上传目录。
+
+    /tmp 重启即清空，不再使用。可配（AIEOS_KB_UPLOAD_DIR），
+    默认 storage/kb-originals（与 assets.py 同一 storage 根）。
+    """
+    raw = os.environ.get("AIEOS_KB_UPLOAD_DIR", "").strip()
+    if raw:
+        base = Path(raw)
+    else:
+        root = Path(settings.storage_dir)
+        if not root.is_absolute():
+            root = Path(__file__).resolve().parents[3] / settings.storage_dir
+        base = root / "kb-originals"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+UPLOAD_DIR = _resolve_upload_dir()
 
 
 def _now():

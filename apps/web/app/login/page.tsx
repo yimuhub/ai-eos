@@ -16,7 +16,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { api, setToken } from "@/lib/api";
+import { api, setToken, setRefreshToken } from "@/lib/api";
 
 const MIN_PW = 8;
 
@@ -62,11 +62,13 @@ export default function LoginPage() {
           password,
         });
       }
-      const res = await api.post<{ access_token: string }>("/auth/login", {
+      const res = await api.post<{ access_token: string; refresh_token?: string }>("/auth/login", {
         identity: mode === "register" ? email.trim() : identity.trim(),
         password,
       });
       setToken(res.access_token);
+      // 后端返回 refresh_token 时存下，供 401 自动续期用；没有也不影响
+      if (res.refresh_token) setRefreshToken(res.refresh_token);
       // 用 replace 避免用户回退时又落回登录页
       router.replace("/");
     } catch (err: any) {
@@ -91,9 +93,9 @@ export default function LoginPage() {
         <div className="hidden md:flex flex-col justify-between p-8"
           style={{ background: "linear-gradient(160deg, rgba(99,102,241,0.16), rgba(34,211,238,0.06))" }}>
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">⚡ AI-EOS</h1>
+            <h1 className="text-2xl font-bold tracking-tight">⚡ AI-EOS <span className="text-xs align-top ml-1 px-1.5 py-0.5 rounded-full bg-gradient-to-r from-indigo-500 to-cyan-400 text-white font-semibold">V3.0</span></h1>
             <p className="text-sm mt-1.5" style={{ color: "var(--muted)" }}>
-              人工智能企业操作系统
+              人工智能企业操作系统 · 专家融合版
             </p>
             <ul className="mt-8 space-y-4 text-sm">
               {[

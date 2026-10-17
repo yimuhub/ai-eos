@@ -3,7 +3,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
@@ -359,6 +359,20 @@ async def create_from_template(
     db.add(job)
 
     created_agents = []
+    # ---- 步骤3后自动绑定首选模型 ----
+    # 「公司默认模型」字段目前不存在，退化为取该公司可见的第一个登记模型
+    # （向导步骤2登记的即为第一个；向导登记时 company_id 为空即共享模型，
+    # 故一并纳入候选）。写法紧贴 agents.py 批量创建：AgentModelConfig(role="primary")。
+    from app.models.agent import AgentModelConfig, Model as ModelCfg
+    mq = await db.execute(
+        select(ModelCfg)
+        .where(or_(ModelCfg.company_id == owner_company_id,
+                   ModelCfg.company_id.is_(None)))
+        .order_by(ModelCfg.created_at)
+        .limit(1))
+    first_model = mq.scalars().first()
+    default_model_id = first_model.id if first_model else None
+    bound_count = 0
     try:
         # 创建 CEO
         ceo = Agent(company_id=owner_company_id, name=tpl["ceo"]["name"],
@@ -366,6 +380,10 @@ async def create_from_template(
         db.add(ceo)
         await db.flush()
         created_agents.append({"name": ceo.name, "role": ceo.role})
+        if default_model_id:
+            db.add(AgentModelConfig(agent_id=ceo.id, role="primary",
+                                    model_id=default_model_id))
+            bound_count += 1
         job.steps_done = list(job.steps_done or []) + ["创建CEO"]
 
         # 创建部门与 Agent
@@ -380,13 +398,20 @@ async def create_from_template(
                               department_id=department.id,
                               name=ag["name"], role=ag["role"], status="IDLE")
                 db.add(agent)
+                await db.flush()  # id 是 Python-side default，flush 后才有值，绑定要用
                 created_agents.append({"name": agent.name, "role": agent.role})
+                if default_model_id:
+                    db.add(AgentModelConfig(agent_id=agent.id, role="primary",
+                                            model_id=default_model_id))
+                    bound_count += 1
             job.steps_done = list(job.steps_done or []) + [f"创建部门 {dep['name']}"]
 
         job.status = "SUCCESS"
         await db.commit()
         return {"job_id": job.id, "status": "SUCCESS",
-                "created_agents": created_agents}
+                "created_agents": created_agents,
+                "auto_bound_model": first_model.name if first_model else None,
+                "auto_bound_count": bound_count}
     except Exception as e:
         job.status = "FAILED"
         job.error = str(e)[:300]

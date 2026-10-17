@@ -1,9 +1,10 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createPortal } from "react-dom";
 import Link from "next/link";
 import { api, describeError } from "@/lib/api";
+import { SHORTCUT_EVENTS, onShortcut } from "@/lib/shortcuts";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
 import { TASK_STATUS_ZH, zh } from "@/lib/i18n";
@@ -51,8 +52,11 @@ export default function TasksPage() {
   const [dim, setDim] = useState<Dim>("status");
   const [dimValue, setDimValue] = useState("全部");
   const [search, setSearch] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
+  // 键盘导航高亮位（j/k 移动，空格多选，回车打开）
+  const [kbIndex, setKbIndex] = useState(0);
 
   // 批量操作
   const [showBatchDelete, setShowBatchDelete] = useState(false);
@@ -253,6 +257,43 @@ export default function TasksPage() {
     });
   }
 
+  /* ---------- 全局快捷键（n / / j k / 空格 / 回车）----------
+   *
+   * n：打开新建任务弹窗；/：聚焦搜索框；
+   * j/k：在当前筛选列表里移动高亮；空格：批量删除模式下勾选高亮项；
+   * 回车：打开高亮任务的详情页。
+   * 放在 filtered/toggleBatchSel 定义之后，避免 TDZ。
+   */
+  useEffect(() => {
+    const clampIdx = (i: number) =>
+      filtered.length ? Math.min(filtered.length - 1, Math.max(0, i)) : 0;
+    const offs = [
+      onShortcut(SHORTCUT_EVENTS.newTask, () => setShowCreate(true)),
+      onShortcut(SHORTCUT_EVENTS.focusSearch, () => searchRef.current?.focus()),
+      onShortcut(SHORTCUT_EVENTS.move, ({ dir }: { dir: 1 | -1 }) =>
+        setKbIndex((i) => clampIdx(i + dir))),
+      onShortcut(SHORTCUT_EVENTS.toggleSelect, () => {
+        const t = filtered[clampIdx(kbIndex)];
+        if (showBatchDelete && t) toggleBatchSel(t.id);
+      }),
+      onShortcut(SHORTCUT_EVENTS.openItem, () => {
+        const t = filtered[clampIdx(kbIndex)];
+        if (t && !showBatchDelete) router.push(`/tasks/${t.id}`);
+      }),
+    ];
+    return () => offs.forEach((off) => off());
+  }, [filtered, kbIndex, showBatchDelete, router]);
+
+  // 筛选条件变了，高亮位归零，避免停在一个不存在的位置
+  useEffect(() => { setKbIndex(0); }, [search, dim, dimValue]);
+
+  // 高亮卡片滚入可视区（j/k 键盘导航时）
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.querySelector(`[data-task-idx="${kbIndex}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [kbIndex]);
+
   const agentOf = (id: string | null) =>
     id ? (agents.find((a) => a.id === id)?.name ?? "已离职") : null;
 
@@ -316,12 +357,13 @@ export default function TasksPage() {
             {dimOptions.map((o) => (<option key={o} value={o}>{o}</option>))}
           </select>
         )}
-        <input placeholder="搜索…" value={search} onChange={(e) => setSearch(e.target.value)}
+        <input placeholder="搜索…（按 / 快速聚焦）" value={search} ref={searchRef}
+          onChange={(e) => setSearch(e.target.value)}
           className="input w-40 !py-1.5 text-xs" />
       </div>
 
       {/* 卡片网格 */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 items-start">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 items-start" data-task-list>
         {filtered.map((t, i) => {
           const st = STATUS_STYLE[t.status] || STATUS_STYLE.TODO;
           const prio = PRIORITY_META[t.priority];
@@ -334,10 +376,13 @@ export default function TasksPage() {
 
           return (
             <div key={t.id}
+              data-task-idx={i}
               className={`card group relative overflow-hidden cursor-pointer flex flex-col ${
                 inBatch ? "!border-red-500/60" : ""}`}
               style={{
                 ...(inBatch ? { boxShadow: "0 0 0 1px rgba(239,68,68,0.4)" } : {}),
+                // j/k 键盘导航的高亮位
+                ...(i === kbIndex && !inBatch ? { boxShadow: "0 0 0 1px rgba(99,102,241,0.55)" } : {}),
               }}
               onClick={() => {
                 if (showBatchDelete) {
@@ -384,6 +429,31 @@ export default function TasksPage() {
                 </div>
               </div>
 
+              {/* 进度：读后端任务模型的 progress(0.0-1.0)/current_stage；
+                  旧版本后端不返回该字段时整块隐藏 */}
+              {typeof t.progress === "number" && (
+                <div className="mt-2">
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 h-1 rounded-full overflow-hidden"
+                      style={{ background: "rgba(255,255,255,0.06)" }}>
+                      <div className="h-full rounded-full"
+                        style={{
+                          width: `${Math.min(100, Math.max(0, t.progress * 100))}%`,
+                          background: "linear-gradient(90deg,#6366f1,#22d3ee)",
+                        }} />
+                    </div>
+                    <span className="text-[10px] tabular-nums shrink-0" style={{ color: "var(--muted)" }}>
+                      {Math.round(Math.min(1, Math.max(0, t.progress)) * 100)}%
+                    </span>
+                  </div>
+                  {t.current_stage && (
+                    <p className="text-[10px] mt-1 truncate" style={{ color: "var(--muted)" }}>
+                      {t.current_stage}
+                    </p>
+                  )}
+                </div>
+              )}
+
               {/* 执行者 */}
               <div className="mt-3 flex items-center gap-2 min-h-6">
                 <span className="text-[10px] shrink-0" style={{ color: "var(--muted)" }}>👤</span>
@@ -410,6 +480,7 @@ export default function TasksPage() {
                       style={{ border: "1px solid rgba(16,185,129,0.3)" }}>▶ 恢复</button>
                   ) : (
                     <button onClick={() => canPause && control(t.id, "pause")} disabled={!canPause}
+                      title="暂停将在当前步骤完成后生效"
                       className={`flex-1 text-[11px] py-1.5 rounded-lg transition-colors ${
                         canPause ? "hover:bg-amber-500/12 text-amber-300" : "opacity-30 cursor-not-allowed text-[var(--muted)]"}`}
                       style={{ border: "1px solid var(--border)" }}>⏸ 暂停</button>

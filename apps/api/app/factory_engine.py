@@ -81,13 +81,14 @@ async def generate_blueprint(db: AsyncSession, company_id: str,
         '"system_prompt":"该Agent的系统提示词","knowledge_scope":["知识领域"],'
         '"permission_level":"standard"}\n只输出JSON。')
     gw = ModelGateway(db)
-    from app.model_gateway import set_usage_context
-    set_usage_context(scenario="FACTORY", detail={"factory": True})
-    result = await gw.chat_with_agent_models(
-        [m.model_id],
-        [{"role": "system", "content": sys_prompt},
-         {"role": "user", "content": f"部门/项目目标：{goal}"}],
-        config={"max_tokens": 1000})
+    from app.model_gateway import usage_context
+    with usage_context(company_id=company_id, scenario="FACTORY",
+                       detail={"factory": True}):
+        result = await gw.chat_with_agent_models(
+            [m.model_id],
+            [{"role": "system", "content": sys_prompt},
+             {"role": "user", "content": f"部门/项目目标：{goal}"}],
+            config={"max_tokens": 1000})
     raw = result.get("content") or "{}"
     start, end = raw.find("{"), raw.rfind("}")
     data = json.loads(raw[start:end + 1]) if start >= 0 else {}

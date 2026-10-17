@@ -74,14 +74,14 @@ async def _chat(db: AsyncSession, agent: Agent, system_prompt: str,
 
     try:
         gw = ModelGateway(db)
-        from app.model_gateway import set_usage_context
-        set_usage_context(agent=agent, scenario="MEETING",
-                          detail={"meeting": True})
-        result = await gw.chat_with_agent_models(
-            model_ids,
-            [{"role": "system", "content": system_prompt},
-             {"role": "user", "content": user_prompt}],
-            config={"max_tokens": 500})
+        from app.model_gateway import usage_context
+        with usage_context(agent=agent, scenario="MEETING",
+                           detail={"meeting": True}):
+            result = await gw.chat_with_agent_models(
+                model_ids,
+                [{"role": "system", "content": system_prompt},
+                 {"role": "user", "content": user_prompt}],
+                config={"max_tokens": 500})
         return (result.get("content") or "").strip()
     except Exception as e:
         return f"（{agent.name} 发言失败：{str(e)[:120]}）"
@@ -207,9 +207,7 @@ async def _finalize(db: AsyncSession, meeting: Meeting, history: list[dict]):
                    "只输出JSON。")
     try:
         gw = ModelGateway(db)
-        from app.model_gateway import set_usage_context
-        set_usage_context(agent=agents[0] if agents else None,
-                          scenario="MEETING", detail={"meeting_extract": True})
+        from app.model_gateway import usage_context
         # 复用 _agents_of 预加载好的 agents 列表
         _first_agent = agents[0] if agents else None
         _first_m = await db.get(AgentModelConfig, _first_agent.model_configs[0].id) \
@@ -217,11 +215,14 @@ async def _finalize(db: AsyncSession, meeting: Meeting, history: list[dict]):
         extract_model_ids = [_first_m.id] if _first_m else []
         if not extract_model_ids:
             raise RuntimeError("no model available for meeting extraction")
-        result = await gw.chat_with_agent_models(
-            extract_model_ids,
-            [{"role": "system", "content": extract_sys},
-             {"role": "user", "content": transcript[:4000]}],
-            config={"max_tokens": 800})
+        with usage_context(agent=agents[0] if agents else None,
+                           scenario="MEETING",
+                           detail={"meeting_extract": True}):
+            result = await gw.chat_with_agent_models(
+                extract_model_ids,
+                [{"role": "system", "content": extract_sys},
+                 {"role": "user", "content": transcript[:4000]}],
+                config={"max_tokens": 800})
         raw = result.get("content") or ""
         import json as _json
         start, end = raw.find("{"), raw.rfind("}")

@@ -90,6 +90,9 @@ async def pause_schedule(
     sched = await db.get(AutomationSchedule, sid)
     if not sched:
         raise HTTPException(404, "not found")
+    # 归属校验：与 archive 一致，防止跨公司暂停他人的调度
+    from app.api.deps import assert_company_owned
+    await assert_company_owned(db, user.id, sched.company_id)
     sched.status = "PAUSED"
     await db.commit()
     return {"id": sid, "status": "PAUSED"}
@@ -104,6 +107,9 @@ async def resume_schedule(
     sched = await db.get(AutomationSchedule, sid)
     if not sched:
         raise HTTPException(404, "not found")
+    # 归属校验：与 archive 一致，防止跨公司恢复他人的调度
+    from app.api.deps import assert_company_owned
+    await assert_company_owned(db, user.id, sched.company_id)
     sched.status = "ACTIVE"
     sched.next_run_at = datetime.now(timezone.utc).replace(tzinfo=None)
     await db.commit()

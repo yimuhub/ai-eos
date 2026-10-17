@@ -18,6 +18,8 @@
 * 只自动补**可空列**。非空且无默认值的列会被跳过并告警——
   这类改动需要人工决策（老行填什么值），不该由启动流程替用户判断。
 * 不删除、不改类型、不改约束。它不是迁移框架，只是「让升级不炸」。
+* **只在 SQLite 方言下运行**。PostgreSQL 的结构变更统一走 Alembic
+  迁移，避免两套机制双轨打架（同一列被两边各加一次）。
 """
 from __future__ import annotations
 
@@ -31,6 +33,12 @@ logger = get_logger(__name__)
 
 async def ensure_columns(engine) -> list[str]:
     """补齐模型里新增、但数据库里还缺的可空列。返回补出的列名列表。"""
+    # 双轨熔断：PostgreSQL 的 schema 演进走 Alembic；这个函数只服务
+    # SQLite 便携形态。两边同时跑会在 PG 上打架（列被各加一次/锁表）。
+    if engine.dialect.name != "sqlite":
+        logger.info("[migrate] 跳过自动补列（方言=%s）：PostgreSQL 交给 Alembic 管理",
+                    engine.dialect.name)
+        return []
     added: list[str] = []
     dialect = engine.dialect
 

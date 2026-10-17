@@ -126,7 +126,7 @@ async def diagnostics(db: AsyncSession = Depends(get_db),
 
     missing_hint = ""
     if not rows:
-        missing_hint = "还没有配置任何模型。请添加一个模型（推荐 OpenAI 兼容协议）。"
+        missing_hint = "还没有配置任何模型。请添加一个模型（推荐 OpenAI 兼容地址）。"
     elif not ready_models:
         names = "、".join(
             sorted({m.api_key_env or PROVIDER_ENV_VARS.get(m.provider_type.value, "")

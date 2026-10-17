@@ -5,6 +5,7 @@ import Layout from "@/components/Layout";
 import ToastHost from "@/components/Toast";
 import ConfirmHost from "@/components/ConfirmDialog";
 import CommandPalette from "@/components/CommandPalette";
+import GlobalShortcuts from "@/components/GlobalShortcuts";
 import { api, ApiError, getToken } from "@/lib/api";
 
 /**
@@ -77,6 +78,8 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
       <ConfirmHost />
       {/* ⌘K 全局跳转：34 个页面规模下，"找得到"比"列得全"更重要 */}
       <CommandPalette />
+      {/* 全局快捷键（n / / j k / 空格 / ?）：与命令面板互不干扰 */}
+      <GlobalShortcuts />
       <Layout>{children}</Layout>
     </>
   );

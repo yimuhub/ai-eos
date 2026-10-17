@@ -1,7 +1,7 @@
 """Task engine + runtime execution state (P1-07/08/14/15)."""
 import enum
 
-from sqlalchemy import JSON, Enum, ForeignKey, Index, String, Text
+from sqlalchemy import JSON, Enum, Float, ForeignKey, Index, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -51,6 +51,10 @@ class Task(TimestampMixin, Base):
     result: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[str | None] = mapped_column(String(50))
     completed_at: Mapped[str | None] = mapped_column(String(50))
+    # 任务进度（0.0~1.0）与当前阶段：前端进度条读取。
+    # 启动时 ensure_columns 会自动给老表补上这两列（可空），无需手写迁移。
+    progress: Mapped[float | None] = mapped_column(Float, default=0.0)
+    current_stage: Mapped[str | None] = mapped_column(String(200))
 
 
 class TaskEvent(TimestampMixin, Base):
@@ -71,7 +75,7 @@ class AgentExecution(TimestampMixin, Base):
     agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id"), index=True)
     task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id"), index=True)
     project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), index=True)
-    status: Mapped[str] = mapped_column(String(20), default="running", index=True)  # running|completed|failed|paused|cancelled
+    status: Mapped[str] = mapped_column(String(20), default="running", index=True)  # running|completed|failed|paused|cancelled|superseded
     input: Mapped[str | None] = mapped_column(Text)
     output: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)

@@ -103,6 +103,10 @@ export interface Task {
   parent_task_id?: ID | null;
   result?: string | null;
   executions?: TaskExecution[];
+  /** Worker A 在后端任务模型新增：0.0-1.0 执行进度；旧版本后端不返回 */
+  progress?: number | null;
+  /** Worker A 在后端任务模型新增：当前阶段文案；可空 */
+  current_stage?: string | null;
 }
 
 export interface Project {

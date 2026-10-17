@@ -61,8 +61,10 @@ async def build_context(db: AsyncSession, agent: Agent, task: Task) -> tuple[lis
                     "role": "system",
                     "content": f"你的长期记忆（相关历史经验）：\n{mem_lines}",
                 })
-        except Exception:
-            pass  # 记忆召回失败不阻塞任务
+        except Exception as mem_recall_err:
+            # 记忆召回失败不阻塞任务，但必须留痕（否则静默降级）
+            logger.warning("记忆召回失败，任务继续 task=%s agent=%s: %s",
+                           task.id, agent.id, mem_recall_err, exc_info=True)
 
     # Installed skills described to the model
     result = await db.execute(
@@ -312,16 +314,70 @@ async def pause_execution(db: AsyncSession, execution: AgentExecution) -> AgentE
 
 
 async def resume_execution(db: AsyncSession, execution: AgentExecution) -> AgentExecution:
-    """Resume from latest checkpoint."""
+    """从最新 checkpoint 真正恢复：重新提交后台工作，而不是只翻状态。
+
+    旧实现只把 execution.status 置回 running：如果暂停发生在 LLM 调用中，
+    旧调用结束后尝试 PAUSED→COMPLETED 非法转移被外层吞掉，任务永久卡死，
+    且没有任何 worker 在跑（假恢复）。这里把旧执行标记为 superseded，
+    另起一次真正的后台执行（checkpoint 类型记入事件，保证可追溯）。
+    """
     q = await db.execute(
         select(ExecutionCheckpoint)
         .where(ExecutionCheckpoint.execution_id == execution.id)
         .order_by(ExecutionCheckpoint.step_index.desc())
     )
     cp = q.scalars().first()
-    snapshot = cp.context_snapshot if cp else {}
-    execution.status = "running"
+    from_checkpoint = cp.checkpoint_type if cp else None
+    execution.status = "superseded"
+    execution.completed_at = utcnow_iso()
     await log_event(db, "execution.resumed", "execution", execution.id, "system", None,
-                    {"from_checkpoint": cp.checkpoint_type if cp else None})
+                    {"from_checkpoint": from_checkpoint,
+                     "note": "旧执行 superseded，重新提交后台工作真正恢复"})
     await db.commit()
+
+    from app.background_jobs import submit_async
+    agent_id, task_id, execution_id = execution.agent_id, execution.task_id, execution.id
+
+    async def _resume_job(session):
+        from app.models.task import TaskStatus as TS
+        agent = await session.get(Agent, agent_id)
+        task = await session.get(Task, task_id)
+        if not agent or not task:
+            logger.error("恢复执行失败：agent/task 不存在 execution=%s", execution_id)
+            return
+        try:
+            new_exec = await run_agent_on_task(session, agent, task, actor_type="system")
+            if task.status == TS.RUNNING:
+                await transition(session, task, TS.COMPLETED,
+                                 actor_type="agent", actor_id=agent_id)
+            else:
+                # 恢复期间任务状态又被人工干预（如再次暂停）：尊重最新状态，不硬转
+                logger.warning("恢复执行完成但任务状态已变为 %s，不自动转 COMPLETED task=%s",
+                               task.status, task_id)
+                await session.commit()
+        except Exception as exc:
+            # 与 tasks._run_in_background 同策略：失败证据落库 + 任务标 FAILED
+            logger.error("恢复执行失败 execution=%s task=%s: %s",
+                         execution_id, task_id, exc, exc_info=True)
+            await session.rollback()
+            t2 = await session.get(Task, task_id)
+            if t2 and t2.status == TS.RUNNING:
+                t2.status = TS.FAILED
+            try:
+                await log_event(session, "task.failed", "task", task_id,
+                                "system", None,
+                                {"agent_id": agent_id, "resumed_from": execution_id,
+                                 "error": f"{type(exc).__name__}: {exc}"[:800]})
+                await session.commit()
+            except Exception as mark_err:
+                await session.rollback()
+                logger.error("恢复失败状态落库失败 execution=%s: %s",
+                             execution_id, mark_err, exc_info=True)
+            return
+        await log_event(session, "execution.resumed_done", "execution", new_exec.id,
+                        "system", None, {"supersedes": execution_id,
+                                         "from_checkpoint": from_checkpoint})
+        await session.commit()
+
+    submit_async(_resume_job)
     return execution

@@ -93,8 +93,25 @@ export function setToken(token: string) {
   localStorage.setItem("aieos_token", token);
 }
 
+/** refresh_token 的本地存储 key（Worker C 新增 POST /auth/refresh 约定） */
+const REFRESH_KEY = "aieos_refresh_token";
+
+export function getRefreshToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(REFRESH_KEY);
+}
+
+export function setRefreshToken(token: string) {
+  localStorage.setItem(REFRESH_KEY, token);
+}
+
+export function clearRefreshToken() {
+  localStorage.removeItem(REFRESH_KEY);
+}
+
 export function clearToken() {
   localStorage.removeItem("aieos_token");
+  clearRefreshToken();
 }
 
 /* ---------- 多公司上下文 ---------- */
@@ -137,6 +154,55 @@ function broadcastError(err: ApiError) {
 }
 
 /**
+ * 401 时尝试用 refresh_token 续期并重放原请求。
+ *
+ * Worker C 新增 `POST /auth/refresh`（请求体 {refresh_token}，
+ * 响应约定 {access_token, refresh_token}）。
+ *
+ * - 成功：换上新 token，重放原请求一次（调用处传 _isRetry=true，
+ *   新 token 若再 401 就直接走过期逻辑，不循环）。
+ * - 失败/无 refresh_token：返回 null，调用处走原有的"登录已过期"逻辑。
+ * - 并发 401：模块级 promise 去重，同一时刻只换一次。
+ * - /auth/* 自身 401：不再套娃。
+ */
+let refreshPromise: Promise<boolean> | null = null;
+
+async function tryRefreshAndReplay(
+  path: string,
+  options: RequestInit,
+  config: RequestOptions,
+): Promise<Response | null> {
+  if (typeof window === "undefined") return null;
+  if (path.startsWith("/auth/")) return null;
+  const rt = getRefreshToken();
+  if (!rt) return null;
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      try {
+        const r = await fetch(`${API}/auth/refresh`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: rt }),
+        });
+        if (!r.ok) return false;
+        const body = await r.json().catch(() => ({} as any));
+        if (!body?.access_token) return false;
+        setToken(body.access_token);
+        if (body.refresh_token) setRefreshToken(body.refresh_token);
+        return true;
+      } catch {
+        return false;
+      } finally {
+        refreshPromise = null;
+      }
+    })();
+  }
+  const ok = await refreshPromise;
+  if (!ok) return null;
+  return raw(path, options, config, true);
+}
+
+/**
  * 底层：发出请求并返回原始 Response（已完成鉴权/超时/错误规范化）。
  * `request` 在它之上做 JSON 解析；`fetchText`/`fetchBlobURL` 需要原始流。
  */
@@ -144,6 +210,7 @@ async function raw(
   path: string,
   options: RequestInit = {},
   config: RequestOptions = {},
+  _isRetry = false,
 ): Promise<Response> {
   const token = getToken();
   // /companies 列表本身不替换
@@ -192,6 +259,12 @@ async function raw(
   }
 
   if (res.status === 401) {
+    // 先尝试用 refresh_token 续期并重放原请求一次；
+    // 续期失败或根本没有 refresh_token 时，才走原有的"登录已过期"逻辑。
+    if (!_isRetry) {
+      const replayed = await tryRefreshAndReplay(path, options, config);
+      if (replayed) return replayed;
+    }
     clearToken();
     const err = new ApiError("登录已过期，请重新登录", 401, scoped);
     broadcastError(err);

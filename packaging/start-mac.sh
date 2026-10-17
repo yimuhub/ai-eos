@@ -40,16 +40,53 @@ check_node() {
   log "Node:   $(node -v)"
 }
 
+# 首次运行自动装依赖：检测不到 fastapi 说明依赖从未安装
+ensure_deps() {
+  if python3 -c "import fastapi" 2>/dev/null; then
+    return 0
+  fi
+  warn "未检测到 Python 依赖，首次运行自动安装（约 1-3 分钟）..."
+  cd "$WORK_DIR/apps/api"
+  if command -v uv &>/dev/null; then
+    log "使用 uv 安装依赖..."
+    uv sync 2>&1 | tail -5
+  else
+    log "使用 pip 安装依赖..."
+    pip3 install . 2>&1 | tail -5
+  fi
+  if ! python3 -c "import fastapi" 2>/dev/null; then
+    err "依赖安装失败，请查看上方输出后重试"
+    exit 1
+  fi
+  log "依赖安装完成"
+}
+
+# 启动前自动快照 data/（只保留最近 5 份）
+snapshot_data() {
+  [ -d "$WORK_DIR/data" ] || return 0
+  local ts old
+  ts=$(date +%Y%m%d-%H%M%S)
+  log "快照数据目录 data/ → data-backup-$ts"
+  cp -R "$WORK_DIR/data" "$WORK_DIR/data-backup-$ts"
+  # 只保留最近 5 份快照
+  ls -dt "$WORK_DIR"/data-backup-* 2>/dev/null | tail -n +6 | while read -r old; do
+    rm -rf "$old" && log "清理旧快照：$(basename "$old")"
+  done || true
+}
+
 # 启动后端（uvicorn）
 start_api() {
   log "启动后端 (SQLite + FastAPI) 端口 $API_PORT ..."
   export PYTHONUNBUFFERED=1
   export DATABASE_URL="sqlite+aiosqlite:///$WORK_DIR/data/aieos.db"
+  ensure_deps
   # 首次启动建表：用内置脚本
   python3 "$WORK_DIR/apps/api/app/initializers/__init__.py" "$WORK_DIR/data/aieos.db" 2>&1 | tail -20
-  # 启动 uvicorn
+  # uvicorn 必须以 apps/api 为工作目录启动，app.main 才能被 import
+  cd "$WORK_DIR/apps/api"
+  # 启动 uvicorn（日志追加 >>，保留历史，不再截断）
   python3 -m uvicorn app.main:app --host 0.0.0.0 --port $API_PORT --log-level info \
-    > "$WORK_DIR/logs/api.log" 2>&1 &
+    >> "$WORK_DIR/logs/api.log" 2>&1 &
   API_PID=$!
   log "后端 PID: $API_PID"
 }
@@ -80,7 +117,7 @@ start_front() {
     npx next build --no-lint 2>&1 | tail -3
   fi
   npx next start -p $FRONT_PORT --log-level warn \
-    > "$WORK_DIR/logs/front.log" 2>&1 &
+    >> "$WORK_DIR/logs/front.log" 2>&1 &
   FRONT_PID=$!
   log "前端 PID: $FRONT_PID"
 }
@@ -109,6 +146,8 @@ main() {
   [ -n "$old" ] && kill $old 2>/dev/null && log "关闭旧后端 ($old)"
   old=$(lsof -ti :$FRONT_PORT 2>/dev/null)
   [ -n "$old" ] && kill $old 2>/dev/null && log "关闭旧前端 ($old)"
+
+  snapshot_data
 
   start_api
   wait_api_ready || exit 1

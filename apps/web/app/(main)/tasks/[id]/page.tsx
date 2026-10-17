@@ -20,6 +20,10 @@ type Detail = {
   priority: string; result: string | null; assigned_agent_id: string | null;
   project_id: string | null; company_id?: string;
   subtasks: string[]; executions: any[]; events: any[]; interventions: any[];
+  /** Worker A 在后端任务模型新增：0.0-1.0 执行进度；缺失时界面降级隐藏 */
+  progress?: number | null;
+  /** Worker A 在后端任务模型新增：当前阶段文案；可空，缺失时不展示 */
+  current_stage?: string | null;
 };
 type Agent = { id: string; name: string; role: string | null };
 type ModelRow = { id: string; name: string; provider_type: string; model_id: string };
@@ -142,11 +146,12 @@ export default function TaskDetailPage() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatLog]);
 
-  async function control(action: "pause" | "resume" | "cancel" | "start") {
+  async function control(action: "pause" | "resume" | "cancel" | "start" | "retry") {
     if (!id) return;
     setBusy(true);
     const zhLabel: Record<string, string> = {
       pause: "已暂停（进度保留）", resume: "已恢复执行", cancel: "已停止（成果保留）",
+      start: "已启动", retry: "已发起重试（从失败处重新执行）",
     };
     try {
       await api.post(`/tasks/${id}/${action}`);
@@ -274,7 +279,8 @@ export default function TaskDetailPage() {
             </div>
 
             {/* 生命周期按钮组 */}
-            <div className="flex gap-2 flex-wrap">
+            <div>
+              <div className="flex gap-2 flex-wrap">
               {canResume && (
                 <button onClick={() => control(d.status === "PAUSED" ? "resume" : "start")} disabled={busy}
                   className="px-4 py-2 rounded-lg text-sm font-medium transition-all hover:bg-emerald-500/15 text-emerald-300 disabled:opacity-40"
@@ -282,18 +288,58 @@ export default function TaskDetailPage() {
                   ▶ {d.status === "PAUSED" ? "恢复执行" : "启动"}
                 </button>
               )}
+              {d.status === "FAILED" && (
+                <button onClick={() => control("retry")} disabled={busy}
+                  title="从失败处重新执行该任务"
+                  className="px-4 py-2 rounded-lg text-sm font-medium transition-all hover:bg-rose-500/15 text-rose-300 disabled:opacity-40"
+                  style={{ background: "rgba(244,63,94,0.12)", border: "1px solid rgba(244,63,94,0.35)" }}>
+                  🔁 重试
+                </button>
+              )}
               {canPause && (
                 <button onClick={() => control("pause")} disabled={busy}
+                  title="暂停将在当前步骤完成后生效"
                   className="btn-ghost disabled:opacity-40">⏸ 暂停</button>
               )}
               {canStop && (
                 <button onClick={() => control("cancel")} disabled={busy}
                   className="btn-ghost disabled:opacity-40">⏹ 停止</button>
               )}
+              </div>
+              {canPause && (
+                <p className="text-[11px] mt-1.5 text-right" style={{ color: "var(--muted)" }}>
+                  暂停将在当前步骤完成后生效
+                </p>
+              )}
             </div>
           </div>
         </div>
       </div>
+
+      {/* 执行进度：读后端任务模型的 progress(0.0-1.0) 与 current_stage；
+          后端未返回该字段时（旧版本）整块隐藏，不打扰 */}
+      {typeof d.progress === "number" && (
+        <div className="card card-static mb-5 !py-3">
+          <div className="flex items-center justify-between text-xs mb-1.5">
+            <span style={{ color: "var(--muted)" }}>执行进度</span>
+            <span className="tabular-nums font-medium">
+              {Math.round(Math.min(1, Math.max(0, d.progress)) * 100)}%
+            </span>
+          </div>
+          <div className="h-2 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.06)" }}>
+            <div className="h-full rounded-full transition-all duration-500"
+              style={{
+                width: `${Math.min(100, Math.max(0, d.progress * 100))}%`,
+                background: "linear-gradient(90deg,#6366f1,#22d3ee)",
+              }} />
+          </div>
+          {d.current_stage && (
+            <p className="text-[11px] mt-1.5" style={{ color: "var(--muted)" }}>
+              当前阶段：{d.current_stage}
+            </p>
+          )}
+        </div>
+      )}
 
       {msg && <p className="mb-3 text-sm text-indigo-300">{msg}</p>}
 

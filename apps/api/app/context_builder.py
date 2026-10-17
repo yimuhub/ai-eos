@@ -75,7 +75,7 @@ async def build_project_context(db: AsyncSession, project_id: str,
         from app.knowledge_engine import rag_context
         kb_text = await rag_context(db, project.company_id, kb_query,
                                     top_k=3, max_chars=max_kb_chars,
-                                    project_id=project_id)
+                                    project_id=project_id, limit=200)
         if kb_text:
             ctx["knowledge"] = kb_text
 

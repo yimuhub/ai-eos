@@ -1,0 +1,314 @@
+"""Expert Library API (V3.0 专家库融合).
+
+/experts:
+  POST   /experts/import            全量导入 vendor 专家库（幂等）
+  GET    /experts                   列表（department / q 筛选）
+  GET    /experts/{id}              详情（含完整 raw_md）
+  POST   /experts/{id}/to-blueprint 专家 → 工厂蓝图（走既有确认链）
+  POST   /experts/search            P1 自然语言找专家（LLM 检索 Top3）
+  POST   /experts/team              P2 一句话组建专家团队（批量蓝图）
+"""
+import os
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import or_, select, func
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_user, get_db
+from app.expert_library import SOURCE_URL, DEPT_NAMES, parse_expert_md
+from app.models.expert_template import ExpertTemplate
+from app.models.user import User
+
+router = APIRouter(prefix="/experts", tags=["experts"])
+
+VENDOR_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                          "..", "..", "..", "..", "vendor", "agency-agents-zh")
+SOURCE_DIR_PREFIXES = list(DEPT_NAMES.keys()) + ["examples"]
+
+
+def _vendor_path() -> str:
+    """从本文件向上逐级找 vendor/agency-agents-zh（项目根目录）。
+    便携包/开发环境布局不同，逐级探测比写死层级稳。"""
+    cur = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(8):
+        cand = os.path.join(cur, "vendor", "agency-agents-zh")
+        if os.path.isdir(cand):
+            return cand
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    # 兜底：项目根目录
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "..", "..", "..", "..", "vendor", "agency-agents-zh")
+
+
+def _detect_dept(fname: str) -> str:
+    for p in sorted(SOURCE_DIR_PREFIXES, key=len, reverse=True):
+        if fname.startswith(p + "-"):
+            return p
+    return "specialized"
+
+
+@router.post("/import", status_code=201)
+async def import_experts(
+    company_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """从 vendor 目录全量导入专家模板（按 source_slug 幂等更新）。"""
+    vdir = _vendor_path()
+    if not os.path.isdir(vdir):
+        raise HTTPException(404, "vendor/agency-agents-zh 不存在（需先 git clone 或解压）")
+    files = [f for f in os.listdir(vdir)
+             if f.endswith(".md") and os.path.isfile(os.path.join(vdir, f))]
+    ok, skipped = 0, 0
+    for fname in files:
+        base = fname[:-3]  # 去 .md
+        if base.startswith("examples"):
+            continue
+        try:
+            with open(os.path.join(vdir, fname), encoding="utf-8") as fh:
+                text = fh.read()
+        except Exception:
+            skipped += 1
+            continue
+        rec = parse_expert_md(base, text, _detect_dept(base))
+        if not rec:
+            skipped += 1
+            continue
+        rec.pop("dept_label", None)  # 展示用，非持久字段
+        dept = rec.get("department") or "general"
+        rec.setdefault("tags", [DEPT_NAMES.get(dept, dept)])
+        rec["source_url"] = SOURCE_URL
+        # 幂等：同 slug 已存在则更新人设
+        q = await db.execute(select(ExpertTemplate).where(
+            ExpertTemplate.company_id == company_id,
+            ExpertTemplate.source_slug == rec["source_slug"]))
+        row = q.scalars().first()
+        if row:
+            for k in ("name", "emoji", "color", "department", "description",
+                      "system_prompt", "raw_md", "deliverables", "tags"):
+                v = rec.get(k)
+                if v is not None:
+                    setattr(row, k, v)
+        else:
+            db.add(ExpertTemplate(company_id=company_id, license="MIT",
+                                  source="agency-agents-zh", **rec))
+        ok += 1
+    await db.commit()
+    return {"imported_or_updated": ok, "skipped": skipped,
+            "files": len(files)}
+
+
+@router.get("")
+async def list_experts(
+    company_id: str = Query(...),
+    department: str = Query(None),
+    q: str = Query(None),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    conds = [ExpertTemplate.company_id == company_id,
+             ExpertTemplate.enabled.is_(True)]
+    if department and department not in ("all", ""):
+        conds.append(ExpertTemplate.department == department)
+    if q:
+        like = f"%{q}%"
+        conds.append(or_(ExpertTemplate.name.ilike(like),
+                         ExpertTemplate.description.ilike(like),
+                         ExpertTemplate.tags.ilike(like)))
+    rows = (await db.execute(select(ExpertTemplate).where(*conds)
+                             .order_by(ExpertTemplate.department,
+                                       ExpertTemplate.name))).scalars().all()
+    return [r.public_dict() for r in rows]
+
+
+@router.get("/departments")
+async def expert_departments(company_id: str = Query(...),
+                            db: AsyncSession = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    q = await db.execute(
+        select(ExpertTemplate.department, func.count())
+        .where(ExpertTemplate.company_id == company_id)
+        .group_by(ExpertTemplate.department))
+    return [{"department": d, "count": n}
+            for d, n in q.all() if d and d != "examples"]
+
+
+class SearchIn(BaseModel):
+    query: str
+    limit: int = 3
+
+
+@router.post("/search")
+async def search_experts(
+    data: SearchIn,
+    company_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """P1：自然语言找专家 — 列全量人设摘要 → LLM 选最匹配的 Top N。"""
+    from app.model_gateway import ModelGateway, set_usage_context
+    rows = (await db.execute(select(ExpertTemplate).where(
+        ExpertTemplate.company_id == company_id,
+        ExpertTemplate.enabled.is_(True)))).scalars().all()
+    if not rows:
+        raise HTTPException(404, "专家库为空，请先导入")
+    catalog = "\n".join(
+        f"{i+1}. {r.name}（{DEPT_NAMES.get(r.department, r.department)}）："
+        f"{(r.description or '')[:80]}" for i, r in enumerate(rows[:300]))
+
+    from app.models.agent import AgentModelConfig
+    mq = await db.execute(select(AgentModelConfig).limit(1))
+    m0 = mq.scalars().first()
+    if not m0:
+        raise HTTPException(503, "没有可用模型，请先在模型配置页接入")
+    model_ids = [m0.model_id]
+    gw = ModelGateway(db)
+    set_usage_context(company_id=company_id, scenario="EXPERT_SEARCH")
+    result = await gw.chat_with_agent_models(
+        model_ids,
+        [{"role": "system", "content":
+          "你是专家匹配引擎。根据老板需求从编号列表中挑出最匹配的专家，"
+          "只输出 JSON：{\"picks\":[{\"id\":编号,\"reason\":\"一句理由\"}]}"},
+         {"role": "user",
+          "content": f"老板需求：{data.query}\n\n候选专家目录：\n{catalog}"}],
+        config={"max_tokens": 400})
+    import json
+    raw = (result.get("content") or "{}").strip()
+    s, e = raw.find("["), raw.rfind("]")
+    picks = []
+    if s >= 0:
+        try:
+            arr = json.loads(raw[s:e + 1])
+            for p in arr[:data.limit]:
+                idx = int(p.get("id", 0)) - 1
+                if 0 <= idx < len(rows):
+                    r = rows[idx]
+                    picks.append({**r.public_dict(), "reason": p.get("reason", "")})
+        except Exception:
+            pass
+    return picks or [{"id": None, "message": "LLM 未返回有效结果，请改关键词重试"}]
+
+
+class TeamIn(BaseModel):
+    goal: str          # 一句话，如"组建新品上市小组"
+    headcount: int = 5
+
+
+@router.post("/team")
+async def build_team(
+    data: TeamIn,
+    company_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """P2：一句话组建专家团队 — LLM 从专家库选 N 个工种 → 批量建工厂蓝图 Job。"""
+    from app.model_gateway import ModelGateway, set_usage_context
+    rows = (await db.execute(select(ExpertTemplate).where(
+        ExpertTemplate.company_id == company_id,
+        ExpertTemplate.enabled.is_(True)))).scalars().all()
+    if not rows:
+        raise HTTPException(404, "专家库为空，请先导入")
+    catalog = "\n".join(
+        f"{i+1}. {r.name}（{DEPT_NAMES.get(r.department, r.department)}）"
+        for i, r in enumerate(rows[:300]))
+    from app.models.agent import AgentModelConfig
+    mq = await db.execute(select(AgentModelConfig).limit(1))
+    m0 = mq.scalars().first()
+    if not m0:
+        raise HTTPException(503, "没有可用模型，请先在模型配置页接入")
+    model_ids = [m0.model_id]
+    gw = ModelGateway(db)
+    set_usage_context(company_id=company_id, scenario="EXPERT_TEAM")
+    result = await gw.chat_with_agent_models(
+        model_ids,
+        [{"role": "system", "content":
+          "你是团队组建引擎。根据老板目标从编号列表选互补的团队（不重复编号），"
+          "只输出 JSON：{\"team\":[{\"id\":编号,\"task\":\"该成员负责的事\"}]}"},
+         {"role": "user",
+          "content": (f"老板目标：{data.goal}\n\n请组建 {data.headcount} 人团队。\n\n"
+                      f"候选专家：\n{catalog}")}],
+        config={"max_tokens": 500})
+    import json
+    raw = (result.get("content") or "{}").strip()
+    s, e = raw.find("["), raw.rfind("]")
+    team = []
+    if s >= 0:
+        try:
+            for p in json.loads(raw[s:e + 1])[:data.headcount]:
+                idx = int(p.get("id", 0)) - 1
+                if 0 <= idx < len(rows):
+                    team.append({"template": rows[idx].public_dict(),
+                                "task": p.get("task", "")})
+        except Exception:
+            pass
+    # 批量建蓝图 Job（每个模板走既有确认链：审查→验收→上岗）
+    from app.factory_engine import AgentFactoryJob
+    jobs = []
+    for t in team:
+        tpl = t["template"]
+        bp = {"name": tpl["name"], "role": tpl["name"],
+              "source_expert": tpl["id"],
+              "responsibilities": [t["task"] or tpl["description"][:100]],
+              "required_skills": [], "knowledge_scope": [],
+              "system_prompt": next((r.system_prompt for r in rows
+                                     if r.id == tpl["id"]), ""),
+              "knowledge_base_hint": "expert-template",
+              "permission_level": "standard"}
+        job = AgentFactoryJob(id=str(__import__("uuid").uuid4()),
+                              company_id=company_id,
+                              goal=f"专家库雇佣：{tpl['name']}（{data.goal}）",
+                              blueprint=bp, created_by=user.id)
+        db.add(job)
+        jobs.append({"template": tpl, "task": t["task"], "job_id": job.id})
+    await db.commit()
+    # 雇佣计数
+    for t in team:
+        row = await db.get(ExpertTemplate, t["template"]["id"])
+        if row:
+            row.hired_count = (row.hired_count or 0) + 1
+    await db.commit()
+    return {"goal": data.goal, "team_size": len(jobs),
+            "jobs": jobs,
+            "note": "团队蓝图已创建，请在工厂页逐个审查批准"}
+
+
+@router.get("/{eid}")
+async def expert_detail(eid: str, company_id: str = Query(...),
+                       db: AsyncSession = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    t = await db.get(ExpertTemplate, eid)
+    if not t or t.company_id != company_id:
+        raise HTTPException(404, "not found")
+    return {**t.public_dict(), "raw_md": t.raw_md or ""}
+
+
+@router.post("/{eid}/to-blueprint")
+async def expert_to_blueprint(eid: str, company_id: str = Query(...),
+                             db: AsyncSession = Depends(get_db),
+                             user: User = Depends(get_current_user)):
+    """专家模板 → 工厂蓝图 Job（走既有审查→验收→上岗确认链）。"""
+    import uuid as _uuid
+    t = await db.get(ExpertTemplate, eid)
+    if not t or t.company_id != company_id:
+        raise HTTPException(404, "not found")
+    from app.factory_engine import AgentFactoryJob
+    bp = {"name": t.name, "role": t.name, "source_expert": t.id,
+          "responsibilities": (t.deliverables or [])[:4] or
+          [(t.description or "")[:150]],
+          "required_skills": [d[:40] for d in (t.deliverables or [])[:3]],
+          "knowledge_scope": (t.tags or [])[:4] or [t.department],
+          "system_prompt": t.system_prompt or "",
+          "knowledge_base_hint": "expert-template",
+          "permission_level": "standard"}
+    job = AgentFactoryJob(id=str(_uuid.uuid4()), company_id=company_id,
+                          goal=f"专家库雇佣：{t.name}",
+                          blueprint=bp, created_by=user.id)
+    db.add(job)
+    t.hired_count = (t.hired_count or 0) + 1
+    await db.commit()
+    return {"job_id": job.id, "template": t.public_dict(),
+            "note": "蓝图已创建，请在工厂页审查批准后上岗"}

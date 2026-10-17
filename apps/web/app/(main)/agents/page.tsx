@@ -187,7 +187,7 @@ export default function AgentsPage() {
       () => ({
         name: [V.required("姓名"), V.maxLen(50, "姓名")],
         role: [V.maxLen(50, "岗位")],
-        system_prompt: [V.maxLen(4000, "System Prompt")],
+        system_prompt: [V.maxLen(4000, "人设与职责设定")],
       }),
       [],
     ),
@@ -435,7 +435,7 @@ export default function AgentsPage() {
           </select>
           <button onClick={() => setShowBatchForm(!showBatchForm)} className="btn-ghost">⚡ 批量添加</button>
           <button onClick={() => router.push("/agent-offboarding")} className="btn-ghost">🗂 离职交接</button>
-          <button onClick={() => setShowForm(!showForm)} className="btn-primary">＋ 创建 Agent</button>
+          <button onClick={() => setShowForm(!showForm)} className="btn-primary">＋ 招新员工</button>
         </div>
       </div>
 
@@ -454,7 +454,7 @@ export default function AgentsPage() {
       {/* 单个创建表单 */}
       {showForm && (
         <div className="card mb-4 space-y-2.5">
-          <h3 className="font-medium text-sm mb-1">创建新 Agent</h3>
+          <h3 className="font-medium text-sm mb-1">招新员工</h3>
           <div className="grid grid-cols-2 gap-2.5">
             <Field label="姓名" required error={agentForm.errors.name} hint="员工在组织里的称呼" htmlFor="ag-name">
               <input id="ag-name" placeholder="如：战略分析师" value={form.name}
@@ -477,7 +477,7 @@ export default function AgentsPage() {
               ))}
             </select>
           </div>
-          <Field label="System Prompt" error={agentForm.errors.system_prompt}
+          <Field label="人设与职责设定" error={agentForm.errors.system_prompt}
             hint="人格与职责设定；留空则使用该岗位的默认设定" htmlFor="ag-prompt">
             <textarea id="ag-prompt" placeholder="例如：你是一位谨慎的战略分析师，先给结论再给论据…" rows={2}
               value={form.system_prompt}
@@ -773,7 +773,7 @@ export default function AgentsPage() {
 
             {/* System Prompt */}
             <div>
-              <label className="text-xs block mb-1" style={{ color: "var(--muted)" }}>📝 System Prompt（人格与职责）</label>
+              <label className="text-xs block mb-1" style={{ color: "var(--muted)" }}>📝 人设与职责设定</label>
               <textarea rows={2} value={editForm.system_prompt}
                 onChange={(e) => setEditForm({ ...editForm, system_prompt: e.target.value })}
                 placeholder="留空使用默认人格" className="input" />

@@ -47,7 +47,8 @@ async def batch_create_departments(data: BatchCreateIn,
 
 class BatchDeleteIn(BaseModel):
     department_ids: list[str]
-    mode: str = "promote"  # promote=子部门上提+员工改为未分配 | cascade=级联删除子部门（员工一律未分配）
+    # promote=子部门上提到顶层+员工改为未分配 | cascade=递归删除全部子孙部门（员工一律改为未分配）
+    mode: str = "promote"
 
 
 @router.post("/batch-delete")
@@ -76,11 +77,38 @@ async def batch_delete_departments(data: BatchDeleteIn,
             async with db.begin_nested():
                 # 子部门处理
                 if data.mode == "cascade":
-                    # 级联：子部门递归归入待删集合（简化为直接提升其子部门到顶层后删本部门）
-                    await db.execute(text(
-                        "UPDATE departments SET parent_department_id = NULL "
-                        "WHERE CAST(parent_department_id AS varchar) = CAST(:did AS varchar)"),
-                        {"did": did})
+                    # 真级联：BFS 递归收集该部门的全部子孙部门，一并删除；
+                    # 集合内所有部门的员工一律改为未分配。
+                    # 外键风险核查（2026-10-14）：指向 departments 的外键只有
+                    # agents.department_id（可空，已先置 NULL）与自引用的
+                    # parent_department_id；Department.manager_agent_id 只是
+                    # String(36) 非外键。递归删除无约束风险，保留 cascade 语义。
+                    doomed: list[str] = [did]
+                    _i = 0
+                    while _i < len(doomed):
+                        _cur = doomed[_i]
+                        _i += 1
+                        _rows = await db.execute(text(
+                            "SELECT id, company_id FROM departments "
+                            "WHERE CAST(parent_department_id AS varchar) = CAST(:cur AS varchar)"),
+                            {"cur": _cur})
+                        for _rid, _rcomp in _rows.all():
+                            _cid = str(_rid)
+                            # 防御：只收同公司的子孙（防脏数据串公司），已收过的跳过（防环）
+                            if _cid not in doomed and str(_rcomp) == str(d.company_id):
+                                doomed.append(_cid)
+                    for _cid in doomed:
+                        await db.execute(text(
+                            "UPDATE agents SET department_id = NULL "
+                            "WHERE CAST(department_id AS varchar) = CAST(:cid AS varchar)"),
+                            {"cid": _cid})
+                    # 先删子孙（BFS 顺序反转即由深及浅），本部门由下面的 db.delete(d) 删除
+                    for _cid in reversed(doomed):
+                        if _cid == did:
+                            continue
+                        _sub = await db.get(Department, _cid)
+                        if _sub is not None:
+                            await db.delete(_sub)
                 else:
                     await db.execute(text(
                         "UPDATE departments SET parent_department_id = NULL "

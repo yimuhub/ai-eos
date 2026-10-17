@@ -16,7 +16,7 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             automation, governance,
                             schedules, skill_growth,
                             app_alias, skills, tasks, team_builder, training, workflows, war_room, team_generator, company_manage,
-                            tokens)
+                            tokens, experts, prometheus_metrics)
 from app.core.config import settings
 from app.core.logging_config import get_logger, setup_logging
 
@@ -55,9 +55,12 @@ async def lifespan(app: FastAPI):
     try:
         import app.background_jobs as background_jobs
         background_jobs.recover_stuck_meetings()
+        # 启动时恢复卡在 RUNNING/PAUSED 的任务（自愈）：
+        # 重启后不再留下永远"执行中"的僵尸任务行
+        background_jobs.recover_stuck_tasks()
     except Exception as e:
         # 自愈失败要让运维看得见，但不能阻止服务启动
-        logger.error("[startup] 恢复卡住的会议失败：%s", e, exc_info=True)
+        logger.error("[startup] 恢复卡住的会议/任务失败：%s", e, exc_info=True)
     yield
     stop_scheduler()
 
@@ -93,6 +96,6 @@ for r in (health, auth, companies, agents, agent_chat, models_api, skills, tasks
           performance, team_builder, browser_agent, computer_agent, app_alias,
           schedules, learning, training, reflection, skill_growth, career,
           review, factory, external_agents, sandbox, automation, governance,
-          offboarding, departments_batch, task_dispatch, test_console, war_room, team_generator, company_manage, tokens,
-          access):
+          offboarding, departments_batch, task_dispatch, test_console, war_room, team_generator, company_manage, tokens, experts,
+          access, prometheus_metrics):
     app.include_router(r.router)

@@ -276,7 +276,7 @@ export default function CommandPalette() {
             ref={inputRef}
             className="flex-1 bg-transparent outline-none text-sm placeholder:text-[#55555f]"
             style={{ color: "var(--foreground)" }}
-            placeholder="搜索页面或操作…  试试「模型」「token」「ren wu」"
+            placeholder="搜索页面或操作…  试试「模型」「token」「renwu」"
             value={q}
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={(e) => {

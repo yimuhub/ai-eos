@@ -37,13 +37,14 @@ async def extract_learning(db: AsyncSession, session: TrainingSession) -> dict:
     m = mq.scalars().first()
     if not m:
         raise RuntimeError("没有可用模型")
-    from app.model_gateway import set_usage_context
-    set_usage_context(scenario="TRAINING", detail={"training": True})
-    result = await gw.chat_with_agent_models(
-        [m.model_id],
-        [{"role": "system", "content": sys_prompt},
-         {"role": "user", "content": user_prompt}],
-        config={"max_tokens": 1200})
+    from app.model_gateway import usage_context
+    with usage_context(agent_id=session.agent_id, company_id=session.company_id,
+                       scenario="TRAINING", detail={"training": True}):
+        result = await gw.chat_with_agent_models(
+            [m.model_id],
+            [{"role": "system", "content": sys_prompt},
+             {"role": "user", "content": user_prompt}],
+            config={"max_tokens": 1200})
     raw = result.get("content") or "{}"
     start, end = raw.find("{"), raw.rfind("}")
     data = json.loads(raw[start:end + 1]) if start >= 0 else {}

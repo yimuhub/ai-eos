@@ -74,25 +74,63 @@ def test_no_undefined_names():
                        + "\n".join(fatal))
 
 
+def _is_docstring(node: ast.stmt) -> bool:
+    """字符串表达式语句（docstring 位）——语义上不是"处理逻辑"。"""
+    return (isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str))
+
+
+def _handler_source(handler: ast.ExceptHandler, lines: list[str]) -> str:
+    """取 except 处理器的源码文本（用于查找豁免标记）。"""
+    start = handler.lineno - 1
+    end = getattr(handler, "end_lineno", None) or handler.lineno
+    return "\n".join(lines[start:end])
+
+
+_LOGGING_ATTRS = {"debug", "info", "warning", "error", "exception",
+                  "critical", "log"}
+
+
+def _handler_logs(handler: ast.ExceptHandler) -> bool:
+    """处理器内是否有 logging 调用（logger.xxx / logging.xxx）。"""
+    for node in ast.walk(handler):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in _LOGGING_ATTRS:
+            owner = func.value
+            if isinstance(owner, ast.Name) and "log" in owner.id.lower():
+                return True
+    return False
+
+
 def _silent_exception_sites() -> list[str]:
-    """找出 `except ...:` 之后紧跟 `pass`（中间只有注释）的位置。"""
+    """AST 级检测：`except` 处理器的 body 仅为 `pass` 且无 logging 调用即违规。
+
+    升级原因：老实现逐行比对 `lines[cursor].strip() == "pass"`，
+    行尾带注释的 `pass  # xxx` 直接逃逸（真实实例见 agent_runtime.py，
+    注释写着"记忆召回失败不阻塞任务"却没有任何日志）。
+    AST 只看语义不看注释文本——注释再也藏不住 `pass`。
+    """
     hits: list[str] = []
     for path in _python_files():
         lines = path.read_text(encoding="utf-8").splitlines()
-        for idx, line in enumerate(lines):
-            if not re.match(r"^\s*except\b.*:\s*$", line):
-                # 同行写法 `except X: pass`
-                if re.match(r"^\s*except\b.*:\s*pass\s*(#.*)?$", line):
-                    if _SILENT_EXEMPT_MARKER not in line:
-                        hits.append(f"{path.relative_to(API_ROOT)}:{idx + 1}")
+        try:
+            tree = ast.parse("\n".join(lines))
+        except SyntaxError:
+            continue  # 语法错误由 test_every_module_parses 负责报告
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ExceptHandler):
                 continue
-            cursor = idx + 1
-            while cursor < len(lines) and not lines[cursor].strip():
-                cursor += 1
-            if cursor < len(lines) and lines[cursor].strip() == "pass":
-                context = "\n".join(lines[idx:cursor + 1])
-                if _SILENT_EXEMPT_MARKER not in context:
-                    hits.append(f"{path.relative_to(API_ROOT)}:{idx + 1}")
+            body = [n for n in node.body if not _is_docstring(n)]
+            if len(body) != 1 or not isinstance(body[0], ast.Pass):
+                continue
+            if _handler_logs(node):
+                continue
+            if _SILENT_EXEMPT_MARKER in _handler_source(node, lines):
+                continue
+            hits.append(f"{path.relative_to(API_ROOT)}:{node.lineno}")
     return hits
 
 

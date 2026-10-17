@@ -2,6 +2,7 @@
 from app.db.base import Base  # noqa: F401
 from .base import TimestampMixin  # noqa: F401
 from .user import User  # noqa: F401
+from .refresh_token import RefreshToken  # noqa: F401
 from .company import Company, Department  # noqa: F401
 from .agent import Agent, AgentModelConfig, Model  # noqa: F401
 from .skill import AgentSkill, Skill  # noqa: F401
@@ -39,12 +40,13 @@ from .skill_growth import (AgentSkillNode, SkillEvaluation, SkillLevel,  # noqa:
 from .career import (AgentCareerRecord, CareerPosition,  # noqa: F401
                      CareerProposal, TrialAssignment)
 from .token_usage import PricingConfig, TokenUsage  # noqa: F401
+from .expert_template import ExpertTemplate  # noqa: F401
 from .review import AgentReview, ReviewCycle  # noqa: F401
 from app.factory_engine import AgentFactoryJob  # noqa: F401
 from .war_room import WarRoomSession, WarRoomTask  # noqa: F401
 from app.external_agents import ExternalAgentConnection  # noqa: F401
-from app.sandbox import (ComputerSession, ComputerWorkspace,  # noqa: F401
-                         SessionAction, WorkspaceFile)
+from app.computer_workspace import (ComputerSession, ComputerWorkspace,  # noqa: F401
+                                 SessionAction, WorkspaceFile)
 from .automation import AutomationDefinition, AutomationRunRecord  # noqa: F401
 from app.models.p3_governance import (AgentSandbox, AgentVersion,  # noqa: F401
                                       AutonomousExecutionLog,

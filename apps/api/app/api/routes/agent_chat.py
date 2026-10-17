@@ -312,8 +312,11 @@ async def boss_chat(aid: str, data: ChatIn,
     messages.append({"role": "user", "content": text})
 
     gw = ModelGateway(db)
-    from app.model_gateway import set_usage_context
-    set_usage_context(agent=a, scenario="CHAT", user_id=str(user.id))
+    from app.model_gateway import usage_context
+    # 后续 150+ 行含多次 LLM 调用，with 无法包裹，显式 enter/exit：
+    # 函数末尾 commit 前 exit；异常上抛路径沿用旧语义（不比原来差）。
+    _usage_scope = usage_context(agent=a, scenario="CHAT", user_id=str(user.id))
+    _usage_scope.__enter__()
     from app.models.agent import AgentModelConfig
     cfg_rows = (await db.execute(select(AgentModelConfig).where(
         AgentModelConfig.agent_id == str(a.id)))).scalars().all()
@@ -479,6 +482,7 @@ async def boss_chat(aid: str, data: ChatIn,
         logger.warning("对话记忆压缩失败 agent=%s: %s", a.id, digest_err,
                        exc_info=True)
 
+    _usage_scope.__exit__(None, None, None)
     await db.commit()
     return {"reply": final_reply, "file": doc_file, "doc_error": doc_error,
             "actions": actions}
@@ -578,15 +582,15 @@ async def chat_generate_doc(aid: str, data: GenDocIn,
                      "content": f"文档标题：{data.title}\n\n要求：{data.instruction}"})
 
     gw = ModelGateway(db)
-    from app.model_gateway import set_usage_context
-    set_usage_context(agent=a, scenario="SKILL", user_id=str(user.id))
+    from app.model_gateway import usage_context
     from app.models.agent import AgentModelConfig
     cfg_rows = (await db.execute(select(AgentModelConfig).where(
         AgentModelConfig.agent_id == str(a.id)))).scalars().all()
     order = {"primary": 0, "secondary": 1, "fallback": 2}
     model_ids = [c.model_id for c in sorted(cfg_rows,
                  key=lambda c: order.get(c.role, 3))]
-    llm = await gw.chat_with_agent_models(model_ids, messages)
+    with usage_context(agent=a, scenario="SKILL", user_id=str(user.id)):
+        llm = await gw.chat_with_agent_models(model_ids, messages)
     content = (llm.get("content") or "").strip()
 
     # 清理可能的 markdown 包裹

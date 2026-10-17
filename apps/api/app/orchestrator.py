@@ -99,7 +99,7 @@ async def orchestrate(db: AsyncSession, parent: Task, coordinator: Agent) -> Tas
     # 2. Execute subtasks in parallel (own sessions per worker);
     #    each worker returns its result text so no cross-session object reads.
     async def run_one(task_id: str, agent_id: str, agent_name: str, title: str) -> dict:
-        from app.background_jobs import _make_session_factory
+        from app.background_jobs import _make_session_factory, dispose_factory_engine
         factory = _make_session_factory()
         try:
             async with factory() as session:
@@ -124,6 +124,9 @@ async def orchestrate(db: AsyncSession, parent: Task, coordinator: Agent) -> Tas
                              task_id, agent_id, exc, mark_err, exc_info=True)
             return {"task": title, "agent": agent_name, "status": "FAILED",
                     "output": "", "error": str(exc)[:500]}
+        finally:
+            # 每个子任务一个独立引擎：用完即 dispose，避免连接池泄漏
+            await dispose_factory_engine(factory)
 
     outcomes = await asyncio.gather(
         *[run_one(t.id, a.id, a.name, t.title) for t, a in subtasks],
@@ -156,6 +159,16 @@ async def orchestrate(db: AsyncSession, parent: Task, coordinator: Agent) -> Tas
         report += ", ".join(f"{f['task']}（{f['agent']}，状态 {f['status']}）" for f in failed)
 
     parent.result = report
+    # 产出即归档：CEO 汇总报告自动存入资产中心（与单任务完成自动归档一致）
+    try:
+        from app.api.routes.assets import save_artifact
+        await save_artifact(db, parent.company_id,
+                            f"CEO汇总报告-{(parent.title or 'orchestration')[:40]}.md",
+                            report, task_id=parent.id, agent_id=coordinator.id)
+        await db.flush()
+    except Exception as e:
+        # 归档失败不影响编排结果本身，但必须留痕
+        logger.warning("编排报告自动归档失败 task=%s: %s", parent.id, e, exc_info=True)
     await db.commit()
     await db.refresh(parent)
     return parent

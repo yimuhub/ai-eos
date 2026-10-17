@@ -20,6 +20,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, setActiveCompanyId } from "@/lib/api";
 import { notify } from "@/components/Toast";
+import DemoMode from "@/components/DemoMode";
 
 type Diagnostics = {
   model_count: number;
@@ -38,7 +39,8 @@ type Template = { key: string; name: string; builtin: boolean; departments: numb
 
 type Company = { id: string; name: string };
 
-/** 常见模型服务预设，降低"该填什么"的门槛 */
+/** 常见模型服务预设，降低"该填什么"的门槛。
+ *  key_hint：一句话告诉小白"Key 从哪来"，否则默认用户已有 Key 是天堑。 */
 const PRESETS = [
   {
     label: "Agnes（推荐 · 国内可用）",
@@ -47,6 +49,7 @@ const PRESETS = [
     base_url: "https://api.agnes-ai.cn/v1",
     model_id: "agnes-2.5-flash",
     api_key_env: "OPENAI_COMPAT_API_KEY",
+    key_hint: "去 agnes-ai.cn 注册账号 → 控制台「API 密钥」页面复制 Key，新用户有免费额度可先试。",
   },
   {
     label: "OpenAI 官方",
@@ -55,6 +58,7 @@ const PRESETS = [
     base_url: "https://api.openai.com/v1",
     model_id: "gpt-4o-mini",
     api_key_env: "OPENAI_COMPAT_API_KEY",
+    key_hint: "去 platform.openai.com 注册 → 右上角头像「API keys」新建并复制 Key（需境外网络）。",
   },
   {
     label: "DeepSeek",
@@ -63,6 +67,7 @@ const PRESETS = [
     base_url: "https://api.deepseek.com/v1",
     model_id: "deepseek-chat",
     api_key_env: "OPENAI_COMPAT_API_KEY",
+    key_hint: "去 platform.deepseek.com 注册 → 左侧「API keys」创建并复制 Key，价格相对便宜。",
   },
   {
     label: "Anthropic Claude",
@@ -71,6 +76,7 @@ const PRESETS = [
     base_url: "https://api.anthropic.com",
     model_id: "claude-3-5-sonnet-latest",
     api_key_env: "ANTHROPIC_API_KEY",
+    key_hint: "去 console.anthropic.com 注册 → 「API Keys」页面创建并复制 Key（需境外网络）。",
   },
 ];
 
@@ -88,6 +94,9 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
   const [presetIdx, setPresetIdx] = useState(0);
   const [mForm, setMForm] = useState({ ...PRESETS[0] });
   const [modelCreated, setModelCreated] = useState(false);
+
+  // ---- 演示模式（免 Key）----
+  const [demoOpen, setDemoOpen] = useState(false);
 
   // ---- 步骤 3：团队 ----
   const [templates, setTemplates] = useState<Template[]>([]);
@@ -191,7 +200,11 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
         <p className="text-sm mt-2" style={{ color: "var(--muted)" }}>
           三步之后，你就拥有一支能替你干活的数字员工团队。全程约 1 分钟。
         </p>
+        <button onClick={() => setDemoOpen(true)} className="btn-ghost text-xs mt-3">
+          🎭 先体验演示（免密钥，约 30 秒）
+        </button>
       </div>
+      {demoOpen && <DemoMode onClose={() => setDemoOpen(false)} />}
 
       {/* 步骤指示 */}
       <div className="flex items-center justify-center gap-2 mb-8">
@@ -286,12 +299,17 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
                         <span className="ml-1">（环境变量 <code>{p.default_env_var}</code>）</span>
                       </div>
                     ))}
-                    <div className="mt-2 rounded-lg p-2" style={{ background: "rgba(0,0,0,0.3)", color: "var(--muted)" }}>
-                      在文件 <code>apps/api/.env</code> 中添加一行：
-                      <br />
-                      <code>{mForm.api_key_env}=你的密钥</code>
-                      <br />
-                      保存后重启后端服务，再点下方「重新检测」。
+                    <div className="mt-2 rounded-lg p-2.5 space-y-1.5 text-[11px] leading-relaxed"
+                      style={{ background: "rgba(0,0,0,0.3)", color: "var(--muted)" }}>
+                      <p className="font-medium" style={{ color: "var(--foreground)" }}>
+                        按这 4 步把密钥交给后端（密钥只存在你自己机器上，不会上传）：
+                      </p>
+                      <p>1️⃣ 打开 <code>apps/api</code> 文件夹，找 <code>.env</code> 文件——便携包里如果没有，就新建一个空白文本文档，把文件名改成 <code>.env</code>（前面有个点，不要带 .txt 后缀）。</p>
+                      <p>2️⃣ 用记事本 / 文本编辑打开它，另起一行粘贴：<br />
+                        <code>{mForm.api_key_env}=你的密钥</code>
+                        （等号两边不要加空格，「你的密钥」换成刚才复制的那一串）。</p>
+                      <p>3️⃣ 保存文件，然后重启后端：关掉运行后端的那个黑窗口，再重新双击启动脚本，等它重新出现启动成功的提示。</p>
+                      <p>4️⃣ 回到这个页面，点下方的「重新检测」，看到 ✅ 就说明通了。</p>
                     </div>
                   </div>
                 )}
@@ -322,6 +340,11 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
                     </button>
                   ))}
                 </div>
+                {mForm.key_hint && (
+                  <p className="text-[11px] mt-1.5 leading-relaxed" style={{ color: "var(--muted)" }}>
+                    🔑 Key 从哪来：{mForm.key_hint}
+                  </p>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -368,7 +391,8 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
             <h2 className="font-semibold text-lg">组建你的初始团队</h2>
             <p className="text-xs mt-1.5 leading-relaxed" style={{ color: "var(--muted)" }}>
               选一个模板，一键生成对应的部门与数字员工（含职责与人格设定）。
-              之后可以随时增删调整。
+              新建的员工已自动绑定首选模型（你在上一步登记的第一个模型），
+              可在员工页随时调整。之后也可以随时增删调整团队。
             </p>
           </div>
 

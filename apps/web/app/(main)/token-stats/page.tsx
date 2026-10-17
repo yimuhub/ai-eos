@@ -28,6 +28,7 @@ const SCENARIOS: Record<string, string> = {
   FACTORY: "Agent工厂", TRAINING: "培训", LEARNING: "学习成长",
   REFLECTION: "复盘反思", ORCHESTRATION: "编排调度", TEAM_GEN: "团队生成",
   SKILL: "技能", OTHER: "其他",
+  EXPERT_SEARCH: "找专家", EXPERT_TEAM: "专家组队",
 };
 
 function fmtTokens(n: number): string {
