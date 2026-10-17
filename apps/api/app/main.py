@@ -70,8 +70,10 @@ app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:8000",
-                   "http://127.0.0.1:3000", "http://127.0.0.1:8000"],
+    # 白名单 = 本地回环 + 局域网常见地址。用 regex 放开 LAN IP（如 192.168.x.x:3000）：
+    # 前端若经局域网 IP 访问，Origin 不在白名单时带 Authorization 的 POST/PUT 预检
+    # 会被浏览器拦截，fetch 抛网络异常，前端只看到「无法连接后端服务」——误导性极强。
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

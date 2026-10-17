@@ -243,12 +243,15 @@ async function raw(
       },
     });
   } catch (e: any) {
-    // 区分"超时"与"网络不通"：两者给用户的下一步动作完全不同
+    // 区分"超时"与"网络不通"：两者给用户的下一步动作完全不同。
+    // 网络层失败既可能是后端没起，也可能是跨域（CORS）被浏览器拦截——
+    // 把请求目标地址带上，用户可对照 DevTools Network 判断。
     const aborted = e?.name === "AbortError";
+    const netMsg = `无法连接后端服务（${API}）。若后端确实已启动，多为跨域（CORS）被浏览器拦截，请看浏览器 DevTools → Network 里的 CORS/预检请求，并确认访问前端的地址与后端 CORS 白名单一致。`;
     const err = new ApiError(
       aborted
         ? `请求超时（${Math.round(timeoutMs / 1000)} 秒无响应）。后端可能仍在处理，请稍后刷新查看结果。`
-        : "无法连接后端服务，请确认服务已启动。",
+        : netMsg,
       0,
       scoped,
     );
