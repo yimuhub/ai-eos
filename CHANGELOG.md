@@ -3,6 +3,19 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的组织方式。
 完整的工程质量改造记录见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
 
+## [5.0.3] 附件口补全（建团队 / 冷启动 / 部门 / 项目）— 2026-10-18
+
+> 延续 V5.0.2 全系统附件口：把剩余输入表单的📎接通，并修掉一处「附件口在 UI 但 payload 漏发」的假成功。
+
+### 附件口补全
+- **建团队（TeamGenModal）/ 冷启动向导（OnboardingWizard）**：建公司入口接📎挂资料，`team_generator.GenerateIn` 收 `attachments` 并落库到新公司
+- **组织架构页（部门）**：新建/编辑接📎；`DepartmentPatchIn` 加 `attachments`，编辑时载入已有附件、PATCH 带回，避免把附件覆盖成空
+- **项目页**：建项目表单早已有📎口但创建 payload 漏发 `attachments`（用户挂了文件却不入库，属假成功）——`projects` 表 + ORM + `ProjectIn` + 前端 payload 全链路补上
+
+### 验证
+- 前端 `tsc` 0 错、`next build` 0 错
+- 后端：projects 带附件创建 + 读回 200；team-generator preview 收 attachments 200；测试数据已清理
+
 ## [5.0.2] 全系统附件口 + 级联删除修复 — 2026-10-17
 
 > 输入表单全系统接通📎附件口（创建时真实落库、列表回传）；修删公司 500、外部接入注册 422 两个 P0。
