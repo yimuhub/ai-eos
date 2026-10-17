@@ -10,6 +10,13 @@
 - electron-builder 三平台打包配置（mac dmg/zip、win nsis/portable、linux AppImage/deb）
 - 修复：Electron 关闭路径递归死锁（will-quit preventDefault 死循环）；冒烟测试模式 `AI_EOS_DESKTOP_SMOKE=1`
 
+### 移动端（V4.1 · 老板视角）
+- 新增 `mobile/`：Expo Router + React Native 老板随身 App（KPI / 一句话下达 / 签字门 / 服务连接 四 Tab）
+- 一句话下达含📎附件口，方案必须老板"确认执行"才真跑（延续可视化确认点哲学）
+- 共用与桌面壳/后端同一套 API（`/auth` `/command` `/experts` `/dashboard`）；token 走 expo-secure-store 加密持久化
+- Metro 打包已验证：900 modules → 2.5MB HBC，TypeScript 类型检查归零
+- 签字门真审批 / 呼吸灯动画 / 附件选图 留 V4.2
+
 ## [4.0.0] 一句话指挥台 — 2026-10-17
 
 ### 一句话指挥台（Command Deck）

@@ -1,0 +1,24 @@
+{
+  "expo": {
+    "name": "AI-EOS",
+    "slug": "ai-eos-mobile",
+    "version": "4.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0b0e14"
+    },
+    "ios": {
+      "bundleIdentifier": "com.aieos.mobile",
+      "supportsTablet": false
+    },
+    "android": {
+      "package": "com.aieos.mobile"
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": ["expo-router", "expo-secure-store"]
+  }
+}
