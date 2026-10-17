@@ -29,7 +29,48 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getActiveCompanyId } from "@/lib/api";
+import { getActiveCompanyId, setActiveCompanyId, getToken } from "@/lib/api";
+
+/**
+ * 激活公司自愈：校验缓存 cid 是否属于当前登录账号。
+ *
+ * 背景：localStorage 的 aieos_active_cid 是**跨账号**持久化的——换账号登录、
+ * 或开发期用测试账号污染过缓存，都会让缓存 cid 指向"当前账号名下的不存在"，
+ * 后端 owner 校验直接 404，各列表页整页报"加载失败：Company not found"。
+ *
+ * 缓存键 = 登录 token：同账号复用结果（防页面并发风暴），SPA 内换账号
+ * 登录时 token 变化 → 自动重新校验。
+ */
+let ensurePromise: Promise<void> | null = null;
+let ensureToken: string | null | undefined = undefined;
+export function ensureActiveCompanyId(): Promise<void> {
+  if (typeof window === "undefined") return Promise.resolve();
+  const token = getToken() || "";
+  if (ensurePromise && ensureToken === token) return ensurePromise;
+  ensureToken = token;
+  ensurePromise = (async () => {
+    const current = getActiveCompanyId();
+    try {
+      const { api } = await import("@/lib/api");
+      const companies = await api.get<{ id: string }[]>("/companies");
+      const list = companies || [];
+      const valid = !!current && list.some((c) => c.id === current);
+      if (!valid) {
+        const fallback = list[0]?.id;
+        if (fallback) {
+          setActiveCompanyId(fallback); // 内部派发 company-changed，各页自动重取
+        } else {
+          localStorage.removeItem("aieos_active_cid");
+          window.dispatchEvent(new CustomEvent("aieos-company-changed", { detail: null }));
+          // 名下无公司 → 各页走"该走引导流程"（useActiveCompanyId 返回 null）
+        }
+      }
+    } catch {
+      // 校验请求本身失败（未登录 / 网络）→ 不动原流程，避免误清
+    }
+  })();
+  return ensurePromise;
+}
 
 interface CacheEntry {
   data: unknown;
@@ -216,9 +257,17 @@ export function useResource<T>(
  */
 export function useActiveCompanyId(): string | null | undefined {
   const [cid, setCid] = useState<string | null | undefined>(undefined);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    setCid(getActiveCompanyId());
+    // 不再立即出缓存值：先等 ensureActiveCompanyId 完成归属校验/纠正，
+    // 再读纠正后的 localStorage。这样"跨账号污染 cid → 404"的窗口彻底消失。
+    // ensureActiveCompanyId 是模块级单例（全应用只发一次 /companies），
+    // 首个页面等一次往返，后续页面几乎立即 resolve。
+    ensureActiveCompanyId().then(() => {
+      setCid(getActiveCompanyId());
+      setReady(true);
+    });
     const onChange = (e: Event) => {
       const detail = (e as CustomEvent<string>).detail;
       setCid(detail || getActiveCompanyId());
@@ -236,7 +285,9 @@ export function useActiveCompanyId(): string | null | undefined {
     };
   }, []);
 
-  return cid;
+  // 校验完成前一律返回 undefined（= "还在确认用哪家公司，先别发请求"），
+  // 避免用未校验的缓存 cid 打出 404。
+  return ready ? cid : undefined;
 }
 
 /**
