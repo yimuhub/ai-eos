@@ -229,9 +229,14 @@ jobs:
           python3 -c "import json,os,urllib.request as u,sys; body=open('release-notes.md').read(); payload={'tag_name':'$TAG_NAME','name':'AI-EOS V5.1 客户端（Mac/Windows/Linux/Android）','body':body,'draft':False,'prerelease':False}; req=u.Request('$API'+'/releases',data=json.dumps(payload).encode(),method='POST',headers={'Authorization':'token '+os.environ['GH_TOKEN'],'Content-Type':'application/json'}); rel=u.urlopen(req).read(); open('/tmp/release_id.txt','w').write(str(json.loads(rel)['id'])); print(rel[:300])"
           RID=$(cat /tmp/release_id.txt)
           echo "release id: $RID"
-          # 逐个上传 assets（API 上传，文件名带空格也能处理）
+          # 逐个上传 assets（必须走 release 的 upload_url：uploads.github.com；
+          # api.github.com/.../releases/{id}/assets 会 404）
+          UPURL=$(curl -s "$API/releases/$RID" -H "Authorization: token $GH_TOKEN" \
+            | python3 -c "import sys,json;print(json.load(sys.stdin)['upload_url'].split('{')[0])")
+          echo "upload url: $UPURL"
           for f in release-files/*; do
-            curl -s -X POST "$API/releases/$RID/assets?name=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$(basename "$f")")" \
+            ENC=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$(basename "$f")")
+            curl -s -X POST "$UPURL?name=$ENC" \
               -H "Authorization: token $GH_TOKEN" -H "Content-Type: application/octet-stream" \
               --data-binary "@$f" -o /dev/null -w "upload $(basename "$f"): %{http_code}\n"
           done
