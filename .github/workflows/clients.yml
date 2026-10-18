@@ -65,7 +65,7 @@ jobs:
       - name: 收集产物
         run: |
           New-Item -ItemType Directory -Force out/win | Out-Null
-          Copy-Item desktop/dist/*Setup*.exe, desktop/dist/*portable*.exe out/win/ -ErrorAction SilentlyContinue
+          Copy-Item desktop\dist\*.exe out/win/ -ErrorAction SilentlyContinue
           Get-ChildItem out/win | Format-Table Name, Length
       - uses: actions/upload-artifact@v4
         with:
@@ -186,25 +186,52 @@ jobs:
       - name: 创建 Release 并附安装包
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: yimuhub/ai-eos
+          TAG_NAME: ${{ steps.tag.outputs.tag }}
         run: |
+          API="https://api.github.com/repos/$REPO"
           # 展平产物到 release-files/（文件名去重）
           mkdir -p release-files
           find artifacts -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.apk" \) \
-            -exec sh -c 'f="${1}"; b="$(basename "$f")"; n=1; while [ -e "release-files/$b" ]; do b="$(basename "$f" .${b##*.})-${n}.${b##*.}"; n=$((n+1)); done; cp "$f" "release-files/$b"' _ {} \;
+            -exec sh -c 'f="${1}"; b="$(basename "$f")"; n=1; while [ -e "release-files/$b" ]; do base="${b%.${b##*.}}"; ext="${b##*.}"; b="${base}-${n}.${ext}"; n=$((n+1)); done; cp "$f" "release-files/$b"' _ {} \;
           ls -lh release-files/
-          # 若同名 Release 已存在则先删
-          gh release delete "${{ steps.tag.outputs.tag }}" --cleanup-tag --yes 2>/dev/null || true
-          BODY="## AI-EOS V5.1 客户端
+          # 组装 notes 文件
+          cat > release-notes.md <<'EOF'
+          ## AI-EOS V5.1 客户端
 
           | 平台 | 文件 | 安装方式 |
           |---|---|---|
-          | macOS (Apple Silicon / Intel) | .dmg / .zip | 拖入 应用 目录即可；首次打开右键→打开（自签） |
-          | Windows | *Setup.exe (NSIS) / *portable.exe | 双击安装 / 绿色版直接运行 |
-          | Linux | .AppImage（自包含）/ .deb | chmod +x 后双击 / dpkg -i |
+          | macOS (Apple Silicon / Intel) | .dmg / .zip | 拖入「应用程序」；自签需右键→打开（或 系统设置→隐私与安全性→仍要打开） |
+          | Windows | AI-EOS Setup *.exe (NSIS) / AI-EOS-*.exe (绿色版) | 双击安装 / 解压直接运行；SmartScreen 点「仍要运行」 |
+          | Linux | .AppImage（自包含）/ .deb | chmod +x 双击 / sudo dpkg -i |
           | Android | AI-EOS-Android-v5.1.0.apk | 传到手机，允许「未知来源」后安装 |
 
-          **说明**
-          - 桌面客户端是 Electron 壳：它负责把 AI-EOS 前端装进原生窗口。安装后首次打开若显示「服务未检测到」引导页，按引导连接你的 AI-EOS 服务（本机便携版 / 一键部署 / 远程服务器），或点「更换服务器」填地址。
-          - 开发机场景（仓库内 `npm start`）仍会自动拉起本地服务，行为不变。
-          - 安装包均为内部自签（未做 Apple/Windows 公证），分发给自己/团队设备时按系统提示放行即可。"
-          gh release create "${{ steps.tag.outputs.tag }}" --title "AI-EOS V5.1 客户端（Mac/Windows/Linux/Android）" --notes "$BODY" --latest --verify release-files/*
+          **桌面客户端使用说明**
+          - Electron 壳：把 AI-EOS 前端装进原生窗口（界面与网页版完全一致，含全部功能页）。
+          - 首次打开若显示「服务未检测到」引导页：先在你的服务器上启动 AI-EOS（便携版 / 一键部署），再点「重试连接」；远程服务点「更换服务器」填 `http://服务器IP:8000`。
+          - 开发机仓库内 `npm start` 仍是自动拉起本地服务的原行为。
+
+          **Android 使用说明**
+          - 老板视角 App：KPI / 一句话下达（含📎）/ 签字门 / 服务连接。
+          - 打开后到「连接」Tab 填服务器地址并登录（连接信息加密保存在手机里）。
+
+          安装包均为内部自签（未做 Apple/Windows 公证），分发给自己/团队设备时按系统提示放行即可。
+          EOF
+          # 若同名 Release 已存在则先删（API）
+          EXIST=$(curl -s -o /dev/null -w "%{http_code}" "$API/releases/tags/$TAG_NAME" -H "Authorization: token $GH_TOKEN")
+          if [ "$EXIST" = "200" ]; then
+            RID=$(curl -s "$API/releases/tags/$TAG_NAME" -H "Authorization: token $GH_TOKEN" | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+            curl -s -X DELETE "$API/releases/$RID" -H "Authorization: token $GH_TOKEN" -o /dev/null
+            git tag -d "$TAG_NAME" 2>/dev/null || true
+            git push origin ":$TAG_NAME" 2>/dev/null || true
+          fi
+          # 创建 Release（body 从 release-notes.md 内嵌进 JSON，避免 API 不支持 body_file）
+          python3 -c "import json,os,urllib.request as u,sys; body=open('release-notes.md').read(); payload={'tag_name':os.environ['TAG_NAME'],'name':'AI-EOS V5.1 客户端（Mac/Windows/Linux/Android）','body':body,'draft':False,'prerelease':False}; req=u.Request(os.environ['API']+'/releases',data=json.dumps(payload).encode(),method='POST',headers={'Authorization':'token '+os.environ['GH_TOKEN'],'Content-Type':'application/json'}); rel=u.urlopen(req).read(); open('/tmp/release_id.txt','w').write(str(json.loads(rel)['id'])); print(rel[:300])"
+          RID=$(cat /tmp/release_id.txt)
+          echo "release id: $RID"
+          # 逐个上传 assets（API 上传，文件名带空格也能处理）
+          for f in release-files/*; do
+            curl -s -X POST "$API/releases/$RID/assets?name=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$(basename "$f")")" \
+              -H "Authorization: token $GH_TOKEN" -H "Content-Type: application/octet-stream" \
+              --data-binary "@$f" -o /dev/null -w "upload $(basename "$f"): %{http_code}\n"
+          done
