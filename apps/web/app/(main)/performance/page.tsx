@@ -57,6 +57,20 @@ export default function PerformancePage() {
   const [ranked, setRanked] = useState<Ranked[]>([]);
   const [history, setHistory] = useState<Snapshot[]>([]);
   const [busy, setBusy] = useState(false);
+  // V5.5 C1：HR 看板（编制 / 成本 / 产出 / 考核分）
+  const [hr, setHr] = useState<{
+    headcount: { total: number; by_status: Record<string, number> };
+    cost_month: { tokens: number; cost: number; top: { agent: string; tokens: number; cost: number }[] };
+    output_30d: { total_tasks: number; top: { agent: string; tasks: number }[] };
+    assessment_top: { agent: string; score: number }[];
+    health: number;
+  } | null>(null);
+  const loadHr = () => {
+    if (!cid) return;
+    api.get(`/performance/company/${cid}/hr-overview`).then(setHr).catch(() => {});
+  };
+  loadHr();
+  const hrRefresh = () => { loadHr(); };
 
   const { data: m, error: mErr, loading: mLoading, refresh: refreshMetrics } =
     useResource<MetricsOverview>(
@@ -107,6 +121,54 @@ export default function PerformancePage() {
       </div>
 
       {!cid && <p className="text-sm" style={{ color: "var(--muted)" }}>加载中…</p>}
+
+      {/* V5.5 C1：HR 看板（一人公司老板视角：编制/成本/产出/考核） */}
+      {hr && (
+        <div className="card card-static p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h3 className="font-medium text-sm">🏛 HR 看板（公司四象限）</h3>
+              <p className="text-xs mt-0.5" style={{ color: "var(--muted)" }}>
+                编制 / 本月成本 / 30 天产出 / 考核分 · 健康度 {Math.round(hr.health * 100)}%
+              </p>
+            </div>
+            <button onClick={hrRefresh} className="text-xs text-[var(--muted)] hover:text-[var(--accent)]">⟳ 刷新</button>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <div className="rounded-lg p-3" style={{ background: "rgba(16,185,129,0.06)", border: "1px solid rgba(16,185,129,0.18)" }}>
+              <div className="text-xs font-semibold mb-2" style={{ color: "#34d399" }}>👥 编制</div>
+              <div className="text-xl font-bold">{hr.headcount.total} 人</div>
+              <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
+                {Object.entries(hr.headcount.by_status).map(([k, v]) => `${k} ${v}`).join(" · ") || "—"}
+              </div>
+            </div>
+            <div className="rounded-lg p-3" style={{ background: "rgba(245,158,11,0.06)", border: "1px solid rgba(245,158,11,0.18)" }}>
+              <div className="text-xs font-semibold mb-2" style={{ color: "#fbbf24" }}>💰 本月成本</div>
+              <div className="text-xl font-bold">¥{hr.cost_month.cost}</div>
+              <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
+                {hr.cost_month.tokens} token · Top：{hr.cost_month.top[0]?.agent || "—"}
+              </div>
+            </div>
+            <div className="rounded-lg p-3" style={{ background: "rgba(34,211,238,0.06)", border: "1px solid rgba(34,211,238,0.18)" }}>
+              <div className="text-xs font-semibold mb-2" style={{ color: "#22d3ee" }}>📦 30 天产出</div>
+              <div className="text-xl font-bold">{hr.output_30d.total_tasks} 任务</div>
+              <div className="text-[11px] mt-1" style={{ color: "var(--muted)" }}>
+                Top：{hr.output_30d.top[0] ? `${hr.output_30d.top[0].agent}（${hr.output_30d.top[0].tasks}）` : "—"}
+              </div>
+            </div>
+            <div className="rounded-lg p-3" style={{ background: "rgba(99,102,241,0.08)", border: "1px solid rgba(99,102,241,0.2)" }}>
+              <div className="text-xs font-semibold mb-2" style={{ color: "#a5b4fc" }}>🏆 考核 Top</div>
+              <div className="space-y-0.5">
+                {(hr.assessment_top.length ? hr.assessment_top : [{ agent: "暂无快照", score: 0 }]).map((s, i) => (
+                  <div key={i} className="text-[11px]" style={{ color: "var(--foreground)" }}>
+                    {i + 1}. {s.agent} <span style={{ color: "var(--muted)" }}>{Math.round(s.score)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {mErr && (
         <div className="flex items-center gap-2.5 px-4 py-3 rounded-xl text-sm"

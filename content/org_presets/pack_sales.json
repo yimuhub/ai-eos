@@ -1,0 +1,18 @@
+{
+  "id": "pack_sales",
+  "industry": "一人公司·销售岗位包（Lindy $300/月 付费点验证）",
+  "emoji": "💼",
+  "kind": "position_pack",
+  "departments": [
+    {
+      "name": "销售部",
+      "desc": "一人公司销售岗位包：线索→商机→成交→客户成功全链路",
+      "agents": [
+        {"name": "商机策略师", "role": "销售漏斗/报价策略", "expert_slug": "sales-deal-strategist"},
+        {"name": "线索开发专家", "role": "外呼获客/首响转化", "expert_slug": "sales-outbound-strategist"},
+        {"name": "客户成功经理", "role": "续约/健康度/增购", "expert_slug": "customer-success-manager"},
+        {"name": "成交教练", "role": "销售话术/异议处理", "expert_slug": "sales-coach"}
+      ]
+    }
+  ]
+}

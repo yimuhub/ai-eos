@@ -9,6 +9,7 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             test_console,
                             career,
                             clients, pairing, diagnostics, briefing, budgets,
+                            mcp, mailboxes,
                             org_presets,
                             companies, collaboration, computer_agent, context,
                             dashboard, events, health, intervention, knowledge,
@@ -122,5 +123,5 @@ for r in (health, auth, companies, agents, agent_chat, models_api, skills, tasks
           review, factory, external_agents, sandbox, automation, governance,
           offboarding, departments_batch, task_dispatch, test_console, war_room, team_generator, company_manage, tokens, experts, command, org_presets,
           access, prometheus_metrics, clients, pairing, diagnostics, briefing,
-          budgets):
+          budgets, mcp, mailboxes):
     app.include_router(r.router)

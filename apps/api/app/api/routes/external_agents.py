@@ -131,17 +131,62 @@ class ExecuteIn(BaseModel):
 async def execute(cid: str, data: ExecuteIn,
                   db: AsyncSession = Depends(get_db),
                   user: User = Depends(get_current_user)):
-    """通过统一 Adapter 执行外部 Agent（业务代码不直接绑定 Provider）。"""
+    """通过统一 Adapter 执行外部 Agent（业务代码不直接绑定 Provider）。
+
+    V5.5 A3 审批门：公司策略开启「外部 Agent 外发」审批时，
+    先建 external_agent 审批单挂起，老板批准后自动执行。
+    """
     conn = await db.get(ExternalAgentConnection, cid)
     if not conn:
         raise HTTPException(404, "not found")
     if conn.status != ConnectionStatus.ENABLED:
         raise HTTPException(409, f"连接未启用（{conn.status.value}）")
+    if await _external_send_needs_approval(db, conn.company_id):
+        import uuid
+        from app.models.intervention import ApprovalRequest
+        req = ApprovalRequest(
+            id=str(uuid.uuid4()),
+            company_id=conn.company_id,
+            action_type="external_agent",
+            payload={"connection_id": conn.id,
+                     "connection_name": conn.name,
+                     "task_input": data.task_input,
+                     "config": data.config,
+                     "awaiting_execution": True},
+            reason=(f"外部 Agent「{conn.name}」收到外发执行请求："
+                    f"{(data.task_input or '')[:100]}"))
+        db.add(req)
+        await db.commit()
+        return {"status": "pending_approval", "approval_id": req.id,
+                "message": "已生成审批单，等待老板批准后执行"}
+    out = await _run_external(conn, data, db)
+    if "_error" in out:
+        code = out.pop("_code", 500)
+        raise HTTPException(code, out.pop("_error"))
+    return out
+
+
+async def _run_external(conn, data: "ExecuteIn", db: AsyncSession) -> dict:
+    """真正执行外部 Agent（A3 抽离：审批批准后复用同一入口）。"""
     try:
         adapter = get_adapter(conn)
         result = await adapter.execute(data.task_input, data.config)
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        return {"_error": str(e), "_code": 400}
     except Exception as e:
-        raise HTTPException(502, f"执行失败: {str(e)[:200]}")
+        return {"_error": f"执行失败: {str(e)[:200]}", "_code": 502}
     return {"connection": conn.name, **result}
+
+
+async def _external_send_needs_approval(db: AsyncSession, company_id: str) -> bool:
+    """公司审批策略是否要求「外部 Agent 外发」过审批门。"""
+    from sqlalchemy import select
+    from app.models.intervention import InterventionPolicy
+    pol = (await db.execute(
+        select(InterventionPolicy).where(
+            InterventionPolicy.company_id == company_id,
+            InterventionPolicy.level >= 1))).scalars().first()
+    if not pol:
+        return False
+    acts = pol.approval_actions or []
+    return "external_agent" in acts

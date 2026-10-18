@@ -240,6 +240,97 @@ async def _owned_artifact(artifact_id: str, db: AsyncSession, user: User) -> Art
     return art
 
 
+@router.post("/{artifact_id}/publish")
+async def publish_artifact(
+    artifact_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """V5.5 C2 交付流水线三分离：计划/执行 → 审批（review approve）→ 发布。
+
+    APPROVED 的成果点"发布"才离开内网：
+    - 公司策略 approval_actions 含 "artifact_publish" → 建发布审批单，
+      老板批准后自动标记 published_at（双确认）
+    - 否则直接发布（小公司单人模式，不增加流程负担）
+    """
+    import uuid as _uuid
+    art = await _owned_artifact(artifact_id, db, user)
+    if art.status.value != "APPROVED":
+        raise HTTPException(409, f"只有审核通过（APPROVED）的成果可以发布，当前：{art.status.value}")
+
+    from sqlalchemy import text
+    # 已发布 → 幂等返回
+    row = (await db.execute(
+        text("SELECT published_at FROM artifacts WHERE id = :id"),
+        {"id": artifact_id})).first()
+    if row and row[0]:
+        return {"id": artifact_id, "published_at": str(row[0]), "already": True}
+
+    needs_approval = False
+    try:
+        from app.models.intervention import InterventionPolicy
+        pol = (await db.execute(
+            select(InterventionPolicy).where(
+                InterventionPolicy.company_id == art.company_id,
+                InterventionPolicy.level >= 1))).scalars().first()
+        needs_approval = bool(pol and "artifact_publish" in (pol.approval_actions or []))
+    except Exception:
+        needs_approval = False
+
+    if needs_approval:
+        from app.models.intervention import ApprovalRequest
+        req = ApprovalRequest(
+            id=str(_uuid.uuid4()), company_id=art.company_id,
+            action_type="artifact_publish",
+            payload={"artifact_id": artifact_id, "awaiting_execution": True},
+            reason=f"交付物「{art.name}」申请正式发布（已审核通过）")
+        db.add(req)
+        await db.commit()
+        return {"status": "pending_approval", "approval_id": req.id,
+                "message": "发布需老板二次确认（交付流水线三分离）"}
+
+    await db.execute(
+        text("UPDATE artifacts SET published_at = NOW() WHERE id = :id"),
+        {"id": artifact_id})
+    await db.commit()
+    return {"id": artifact_id, "published_at": str(row[0] or "now"),
+            "message": "已发布：交付物可对外交付"}
+
+
+@router.post("/{artifact_id}/publish/decide")
+async def decide_publish(
+    artifact_id: str,
+    data: ReviewIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """C2：发布审批单 approve 后自动标记 published_at。"""
+    import uuid as _uuid
+    from sqlalchemy import text
+    from app.models.intervention import ApprovalRequest
+    art = await _owned_artifact(artifact_id, db, user)
+    req = (await db.execute(
+        select(ApprovalRequest).where(
+            ApprovalRequest.company_id == art.company_id,
+            ApprovalRequest.action_type == "artifact_publish",
+            ApprovalRequest.status == "PENDING",
+            ApprovalRequest.payload["artifact_id"].as_string() == artifact_id)
+        .order_by(ApprovalRequest.created_at.desc()))).scalars().first()
+    if not req:
+        raise HTTPException(404, "没有待审批的发布单")
+    if data.decision not in ("approve", "reject"):
+        raise HTTPException(400, "decision must be approve/reject")
+    req.status = "APPROVED" if data.decision == "approve" else "REJECTED"
+    req.decided_by = user.id
+    if data.decision == "approve":
+        await db.execute(
+            text("UPDATE artifacts SET published_at = NOW() WHERE id = :id"),
+            {"id": artifact_id})
+    await db.commit()
+    return {"id": artifact_id, "decision": data.decision,
+            "published": data.decision == "approve"}
+
+
 @router.delete("/{artifact_id}")
 async def delete_artifact(
     artifact_id: str,

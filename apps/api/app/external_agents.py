@@ -130,15 +130,55 @@ class LocalAgentAdapter(APIAgentAdapter):
                 "provider": "local", "hint": "llama.cpp OpenAI-compatible"}
 
 
+class McpHttpAgentAdapter(AgentAdapter):
+    """V5.5 B2 入站：外部 MCP Server（streamable-http / JSON-RPC POST）。
+
+    execute(task_input):
+      - JSON：{"tool": "...", "arguments": {...}} → 直通 tools/call
+      - 自然语言 → 先 tools/list，取第一个工具执行（尽力而为）
+    """
+
+    async def execute(self, task_input: str, config: dict | None = None) -> dict:
+        from app.api.routes.mcp import mcp_http_execute
+        return await mcp_http_execute(
+            self.conn.endpoint or "", task_input, config,
+            bearer=self._resolve_api_key())
+
+    async def get_status(self) -> dict:
+        return {"reachable": bool(self.conn.endpoint), "provider": "mcp"}
+
+    async def test_connection(self) -> dict:
+        import httpx
+        try:
+            headers = {}
+            key = self._resolve_api_key()
+            if key:
+                headers["Authorization"] = f"Bearer {key}"
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.post(self.conn.endpoint or "", json={
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {}})
+                return {"ok": r.status_code < 500, "http": r.status_code,
+                        "provider": "mcp"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:150]}
+
+
 ADAPTERS = {
     AgentProviderType.API: APIAgentAdapter,
     AgentProviderType.LOCAL: LocalAgentAdapter,
     AgentProviderType.REMOTE: APIAgentAdapter,
     AgentProviderType.NATIVE: None,  # Native Agent 走内部 runtime，不走 adapter
 }
+# V5.5 B2：外部 MCP Server 接入（复用 REMOTE 类型的 endpoint + JSON 直通）
+MCP_PROVIDER_ALIASES = {"MCP": McpHttpAgentAdapter}
 
 
 def get_adapter(connection: ExternalAgentConnection) -> AgentAdapter:
+    # V5.5 B2：REMOTE + capabilities 含 "mcp" → 外部 MCP Server 直通
+    if (connection.provider_type == AgentProviderType.REMOTE
+            and "mcp" in (connection.capabilities or [])):
+        return McpHttpAgentAdapter(connection)
     cls = ADAPTERS.get(connection.provider_type)
     if cls is None:
         raise ValueError(f"{connection.provider_type} 不需要 adapter")

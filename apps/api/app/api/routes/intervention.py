@@ -206,6 +206,30 @@ async def decide_request(
         except (ComputerActionDenied, ValueError) as exc:
             execution_result = {"ok": False, "error": str(exc)}
         req.payload = payload
+    # V5.5 A3：批准「外部 Agent 外发」审批单后，自动执行外发
+    elif req.status == "APPROVED" and req.action_type == "external_agent" \
+            and (req.payload or {}).get("awaiting_execution"):
+        from app.external_agents import ExternalAgentConnection
+        from app.api.routes.external_agents import _run_external
+        payload = req.payload or {}
+        conn = await db.get(ExternalAgentConnection, payload.get("connection_id", ""))
+        if conn is None:
+            execution_result = {"ok": False, "error": "外部连接已删除，无法执行"}
+        else:
+            from app.api.routes.external_agents import ExecuteIn
+            try:
+                edata = ExecuteIn(task_input=payload.get("task_input") or "",
+                                   config=payload.get("config"))
+                out = await _run_external(conn, edata, db)
+                if "_error" in out:
+                    execution_result = {"ok": False, "error": out["_error"]}
+                else:
+                    out.pop("_code", None)
+                    execution_result = {"ok": True, "result": out}
+            except Exception as exc:
+                execution_result = {"ok": False, "error": str(exc)}
+        payload["awaiting_execution"] = False
+        req.payload = payload
     await db.commit()
     out = {"id": req.id, "status": req.status}
     if execution_result is not None:

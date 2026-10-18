@@ -12,6 +12,8 @@ export default function ExternalAgentsPage() {
   const [provider, setProvider] = useState("API");
   const [endpoint, setEndpoint] = useState("");
   const [envVar, setEnvVar] = useState("");
+  // V5.5 B2：外部 MCP Server 开关（capabilities=["mcp"]）
+  const [isMcp, setIsMcp] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [msg, setMsg] = useState("");
 
@@ -25,12 +27,14 @@ export default function ExternalAgentsPage() {
     if (!name || !cid) return;
     try {
       await api.post(`/external-agents?company_id=${cid}`, {
-        name, provider_type: provider, endpoint: endpoint || undefined,
+        name, provider_type: isMcp ? "REMOTE" : provider,
+        endpoint: endpoint || undefined,
         auth_env_var: envVar || undefined,
+        capabilities: isMcp ? ["mcp"] : undefined,
         attachments: attachments.length ? attachments : undefined,
       });
       setMsg("✅ 已注册");
-      setName(""); setEndpoint(""); setEnvVar(""); setAttachments([]);
+      setName(""); setEndpoint(""); setEnvVar(""); setAttachments([]); setIsMcp(false);
       await refresh();
     } catch (e) { setMsg(`❌ ${describeError(e, "注册失败")}`); }
   }
@@ -75,6 +79,22 @@ export default function ExternalAgentsPage() {
             className="input" />
           <input value={envVar} onChange={(e) => setEnvVar(e.target.value)} placeholder="API Key 环境变量名"
             className="input" />
+          {/* V5.5 B2：外部 MCP Server */}
+          <label className="flex items-center gap-2 text-xs cursor-pointer select-none"
+            style={{ color: "var(--muted)" }}>
+            <input type="checkbox" checked={isMcp} onChange={(e) => setIsMcp(e.target.checked)} />
+            <span>
+              🔌 这是外部 <b>MCP Server</b>（填 JSON-RPC 端点，如 <code>/mcp</code> 或第三方 MCP 服务）
+            </span>
+          </label>
+          {isMcp && (
+            <p className="text-[11px] leading-relaxed p-2 rounded-lg"
+              style={{ background: "rgba(34,211,238,0.07)", border: "1px solid rgba(34,211,238,0.25)", color: "var(--muted)" }}>
+              执行时任务内容按 <code>{"{"}tool, arguments{"}"}</code> JSON 直通外部 MCP 的 tools/call；
+              自然语言则先 tools/list 取首个工具。出站方向：AI-EOS 自身也是 MCP Server
+              （POST /mcp，7 个 aieos.* 工具），可被 Claude Code / Codex 等外部 Agent 调用。
+            </p>
+          )}
           <AttachmentPicker value={attachments} onChange={setAttachments} label="📎 关联附件（接入文档 / 密钥说明）" />
           <button onClick={register} disabled={!name}
             className="btn-primary disabled:opacity-40">注册</button>

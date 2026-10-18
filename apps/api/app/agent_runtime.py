@@ -151,9 +151,14 @@ async def write_checkpoint(
 
 
 async def run_agent_on_task(
-    db: AsyncSession, agent: Agent, task: Task, actor_type: str = "system"
+    db: AsyncSession, agent: Agent, task: Task, actor_type: str = "system",
+    takeover_note: str | None = None,
 ) -> AgentExecution:
-    """Full runtime cycle for one agent-task pair."""
+    """Full runtime cycle for one agent-task pair.
+
+    V5.5 B1：takeover_note = 老板接管时给的改方向指令，
+    恢复执行时作为最高优先级系统指令注入。
+    """
     from app.capability_packs import resolve_capabilities
     caps = resolve_capabilities(agent.memory_config)
     execution = AgentExecution(agent_id=agent.id, task_id=task.id, status="running",
@@ -172,6 +177,13 @@ async def run_agent_on_task(
 
     try:
         messages, model_ids = await build_context(db, agent, task)
+        # V5.5 B1：老板接管指令（最高优先级，放在所有上下文之后）
+        if takeover_note:
+            messages.append({
+                "role": "system",
+                "content": (f"⚠ 老板接管指令（最高优先级，覆盖之前的执行方向）：\n{takeover_note}\n"
+                            "请严格按此指令调整后续执行，并先在执行结果中说明你是如何响应该指令的。"),
+            })
 
         # Planning checkpoint
         await write_checkpoint(db, execution.id, "planning", 0,
@@ -328,10 +340,25 @@ async def resume_execution(db: AsyncSession, execution: AgentExecution) -> Agent
     )
     cp = q.scalars().first()
     from_checkpoint = cp.checkpoint_type if cp else None
+    # V5.5 B1：若最近是老板接管检查点，取出指令注入恢复执行
+    takeover_note: str | None = None
+    if cp and cp.checkpoint_type == "human_takeover":
+        takeover_note = (cp.context_snapshot or {}).get("note")
+    if not takeover_note:
+        # 兜底：找该执行最近一个 human_takeover（跨步骤）
+        q2 = await db.execute(
+            select(ExecutionCheckpoint)
+            .where(ExecutionCheckpoint.execution_id == execution.id,
+                   ExecutionCheckpoint.checkpoint_type == "human_takeover")
+            .order_by(ExecutionCheckpoint.step_index.desc()))
+        cp2 = q2.scalars().first()
+        if cp2:
+            takeover_note = (cp2.context_snapshot or {}).get("note")
     execution.status = "superseded"
     execution.completed_at = utcnow_iso()
     await log_event(db, "execution.resumed", "execution", execution.id, "system", None,
                     {"from_checkpoint": from_checkpoint,
+                     "has_takeover_note": bool(takeover_note),
                      "note": "旧执行 superseded，重新提交后台工作真正恢复"})
     await db.commit()
 
@@ -346,7 +373,9 @@ async def resume_execution(db: AsyncSession, execution: AgentExecution) -> Agent
             logger.error("恢复执行失败：agent/task 不存在 execution=%s", execution_id)
             return
         try:
-            new_exec = await run_agent_on_task(session, agent, task, actor_type="system")
+            new_exec = await run_agent_on_task(session, agent, task,
+                                               actor_type="system",
+                                               takeover_note=takeover_note)
             if task.status == TS.RUNNING:
                 await transition(session, task, TS.COMPLETED,
                                  actor_type="agent", actor_id=agent_id)

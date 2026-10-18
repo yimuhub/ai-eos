@@ -341,7 +341,15 @@ export default function OrganizationPage() {
               <button key={p.id} onClick={() => previewPreset(p)}
                 className="text-left p-3 rounded-xl border transition-all hover:-translate-y-0.5"
                 style={{ borderColor: "var(--border)", background: "rgba(255,255,255,0.02)" }}>
-                <div className="text-2xl mb-1.5">{p.emoji}</div>
+                <div className="text-2xl mb-1.5">
+                  {p.emoji}
+                  {p.id?.startsWith("pack_") && (
+                    <span className="ml-1.5 align-middle text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+                      style={{ background: "rgba(99,102,241,0.15)", color: "#a5b4fc" }}>
+                      岗位包
+                    </span>
+                  )}
+                </div>
                 <div className="text-sm font-semibold">{p.industry}</div>
                 <div className="text-[11px] mt-0.5" style={{ color: "var(--muted)" }}>
                   {p.department_count} 部门 · {p.agent_count} 岗位（配专家）

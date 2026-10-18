@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
 import { api, setActiveCompanyId } from "@/lib/api";
@@ -31,6 +31,8 @@ type Briefing = {
            meetings: { title: string; status: string }[]; automation_runs_today: number };
   needs_you: { count: number; items: { kind: string; text: string; goto: string }[] };
   cost_today: { cost: number; tokens: number };
+  /* V5.5 A2：预算软预警（≥80% 黄色提示，到顶自动暂停） */
+  budget_alert?: { pct: number; paused: boolean; message: string } | null;
 };
 
 const TASK_BADGE: Record<string, { cls: string; dot: string }> = {
@@ -83,8 +85,33 @@ export default function DashboardPage() {
 
   // V5.5 P0：CEO 晨间简报（昨日完成 / 今日计划 / 需要你决策）
   const [briefing, setBriefing] = useState<Briefing | null>(null);
+  // V5.5 A1：每日简报推送状态 + 系统通知
+  const [pushEnabled, setPushEnabled] = useState<boolean | null>(null);
+  const lastBriefIdRef = useRef<string>("");
 
   useEffect(() => { setMounted(true); }, []);
+
+  /* V5.5 A1：查询是否已开启每日简报推送 */
+  useEffect(() => {
+    const cid = localStorage.getItem("aieos_active_cid");
+    if (!cid) return;
+    api.get<{ action_type?: string; name?: string }[]>(
+      `/schedules?company_id=${cid}`).then((r) => {
+      setPushEnabled(r.some((s) => s.action_type === "daily_briefing"));
+    }).catch(() => { setPushEnabled(false); });
+  }, []);
+
+  const enablePush = async () => {
+    const cid = localStorage.getItem("aieos_active_cid");
+    if (!cid) return;
+    try {
+      await api.post(`/briefing/push-schedule?company_id=${cid}&time_str=09:00`);
+      setPushEnabled(true);
+      if (typeof Notification !== "undefined" && Notification.permission === "default") {
+        void Notification.requestPermission();
+      }
+    } catch { /* 推送失败不影响主流程 */ }
+  };
 
   const load = useCallback(async () => {
     // 原实现在这里没有 try/catch，且"没有公司"时直接 return，
@@ -143,6 +170,23 @@ export default function DashboardPage() {
     if (!cid) return;
     try { setBriefing(await api.get<Briefing>(`/briefing?company_id=${cid}`)); }
     catch { /* 简报失败不打扰指挥中心主流程 */ }
+    /* V5.5 A1：有新简报推送 + 浏览器通知已授权 → 弹系统通知 */
+    try {
+      const evs = await api.get<{ id: string; payload?: Record<string, unknown> }[]>(
+        `/events?event_type=BRIEFING_PUSH&limit=1`);
+      const ev = evs[0];
+      if (ev && ev.id !== lastBriefIdRef.current) {
+        lastBriefIdRef.current = ev.id;
+        if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+          const b = (ev.payload?.briefing ?? {}) as Partial<Briefing>;
+          const n = b.needs_you?.count ?? 0;
+          new Notification("🌅 CEO 每日简报", {
+            body: `${b.greeting || ""} · 需要你决策 ${n} 件${n > 0 ? "：" : ""} ` +
+              ((b.needs_you?.items || []).slice(0, 2).map((i) => i.text).join("；")),
+          });
+        }
+      }
+    } catch { /* 事件拉取失败不打扰 */ }
   }, []);
   useEffect(() => {
     loadBriefing();
@@ -411,6 +455,13 @@ export default function DashboardPage() {
                         border: "1px solid rgba(245,158,11,0.3)" }}>
                 今日已用 ¥{briefing.cost_today?.cost ?? 0} · {briefing.cost_today?.tokens ?? 0} token
               </span>
+              {briefing.budget_alert && (
+                <span className="px-2 py-1 rounded-full font-medium animate-pulse"
+                  style={{ background: "rgba(239,68,68,0.12)", color: "#f87171",
+                          border: "1px solid rgba(239,68,68,0.3)" }}>
+                  🛡 {briefing.budget_alert.paused ? "预算已暂停" : `预算 ${briefing.budget_alert.pct}%`}
+                </span>
+              )}
               {briefing.needs_you?.count > 0 && (
                 <span className="px-2 py-1 rounded-full font-medium"
                   style={{ background: "rgba(239,68,68,0.12)", color: "#f87171",
@@ -418,6 +469,16 @@ export default function DashboardPage() {
                   ⚠ {briefing.needs_you.count} 件事需要你
                 </span>
               )}
+              {/* V5.5 A1：每日简报推送开关 */}
+              <button onClick={enablePush} disabled={pushEnabled === true}
+                className="px-2 py-1 rounded-full font-medium hover:opacity-80 transition"
+                style={pushEnabled
+                  ? { background: "rgba(16,185,129,0.12)", color: "#34d399",
+                      border: "1px solid rgba(16,185,129,0.3)", cursor: "default" }
+                  : { background: "rgba(34,211,238,0.1)", color: "#22d3ee",
+                      border: "1px solid rgba(34,211,238,0.3)" }}>
+                {pushEnabled ? "✓ 每日 09:00 自动推送简报" : "🔔 开启每日 09:00 简报推送"}
+              </button>
             </div>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">

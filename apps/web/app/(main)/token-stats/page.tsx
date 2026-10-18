@@ -63,8 +63,26 @@ export default function TokenAdminPage() {
   // V5.5 P0：预算上限
   const [budgets, setBudgets] = useState<any[]>([]);
   const [bform, setBform] = useState({
-    scope_type: "company", limit_tokens: 0, limit_cost: 0, period: "day",
+    scope_type: "company", scope_id: "", limit_tokens: 0, limit_cost: 0, period: "day",
   });
+  // V5.5 A4：部门级预算选项
+  const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
+  // V5.5 A4：员工级预算选项
+  const [agents, setAgents] = useState<{ id: string; name: string }[]>([]);
+
+  const loadDepartments = useCallback(async () => {
+    const cs = await api.get("/companies").catch(() => []);
+    const cid = cs[0]?.id;
+    if (!cid) return;
+    try {
+      const r = await api.get(`/companies/${cid}/departments`);
+      setDepartments(Array.isArray(r) ? r : (r?.departments || []));
+      const ra = await api.get<{ id: string; name: string }[]>(
+        `/agents?company_id=${cid}`).catch(() => []);
+      setAgents(Array.isArray(ra) ? ra : []);
+    } catch { /* 静默 */ }
+  }, []);
+  useEffect(() => { loadDepartments(); }, [loadDepartments]);
 
   const [msg, setMsg] = useState("");
   const [msgType, setMsgType] = useState<"ok" | "err">("ok");
@@ -149,9 +167,15 @@ export default function TokenAdminPage() {
       const cid = cs[0]?.id;
       if (!cid) return flash("还没有公司，无法设预算", "err");
       if (!bform.limit_tokens && !bform.limit_cost) return flash("请至少填一个上限", "err");
-      await api.post(`/token-budgets?company_id=${cid}`, bform);
+      const payload: Record<string, unknown> = { ...bform };
+      if (bform.scope_type === "company") delete payload.scope_id;
+      else if (!bform.scope_id) {
+        delete payload.scope_id;
+        return flash(bform.scope_type === "department" ? "请选择要限制的部门" : "请选择要限制的员工", "err");
+      }
+      await api.post(`/token-budgets?company_id=${cid}`, payload);
       flash("✅ 预算上限已生效：到顶自动暂停（不加价惩罚）");
-      setBform({ scope_type: "company", limit_tokens: 0, limit_cost: 0, period: "day" });
+      setBform({ scope_type: "company", scope_id: "", limit_tokens: 0, limit_cost: 0, period: "day" });
       loadBudgets();
     } catch (e: any) { flash(e.message || String(e), "err"); }
   }
@@ -487,6 +511,43 @@ export default function TokenAdminPage() {
               <b>不是 10 倍加价惩罚</b>。
             </p>
             <div className="flex flex-wrap gap-2 items-end">
+              {/* V5.5 A4：范围（公司/部门/员工） */}
+              <label className="text-xs text-[var(--muted)]">
+                范围
+                <select value={bform.scope_type}
+                  onChange={(e) => setBform({ ...bform, scope_type: e.target.value, scope_id: "" })}
+                  className="input !py-1.5 mt-1 block w-24">
+                  <option value="company">🏢 公司</option>
+                  <option value="department">📁 部门（虚拟账户）</option>
+                  <option value="agent">👤 员工</option>
+                </select>
+              </label>
+              {bform.scope_type === "department" && (
+                <label className="text-xs text-[var(--muted)]">
+                  部门
+                  <select value={bform.scope_id}
+                    onChange={(e) => setBform({ ...bform, scope_id: e.target.value })}
+                    className="input !py-1.5 mt-1 block w-36">
+                    <option value="">选择部门…</option>
+                    {departments.map((d) => (
+                      <option key={d.id} value={d.id}>{d.name}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {bform.scope_type === "agent" && (
+                <label className="text-xs text-[var(--muted)]">
+                  员工
+                  <select value={bform.scope_id}
+                    onChange={(e) => setBform({ ...bform, scope_id: e.target.value })}
+                    className="input !py-1.5 mt-1 block w-36">
+                    <option value="">选择员工…</option>
+                    {agents.map((a) => (
+                      <option key={a.id} value={a.id}>{a.name}</option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <label className="text-xs text-[var(--muted)]">
                 Token 上限
                 <input type="number" min={0} value={bform.limit_tokens}
@@ -534,7 +595,8 @@ export default function TokenAdminPage() {
                     }}>
                     <div className="text-sm text-[var(--foreground)]">
                       <span className="font-medium">
-                        {b.scope_type === "agent" ? "👤 员工级" : "🏢 公司级"}
+                        {b.scope_type === "agent" ? "👤 员工级"
+                          : b.scope_type === "department" ? "📁 部门级" : "🏢 公司级"}
                       </span>
                       <span className="ml-2 text-xs text-[var(--muted)]">
                         上限 {b.limit_tokens || "∞"} token{b.limit_cost ? ` / ¥${b.limit_cost}` : ""}
@@ -543,6 +605,23 @@ export default function TokenAdminPage() {
                       <div className="text-xs mt-0.5 text-[var(--muted)]">
                         已用 {b.used_tokens ?? "—"} token{b.used_cost != null ? ` / ¥${b.used_cost}` : ""}
                       </div>
+                      {/* V5.5 A2：用量进度条（80% 起黄色预警，超了红色） */}
+                      {b.usage_pct != null && !b.exceeded && (
+                        <div className="mt-1.5 h-1.5 rounded-full overflow-hidden max-w-[220px]"
+                          style={{ background: "rgba(255,255,255,0.06)" }}>
+                          <div className="h-full rounded-full transition-all"
+                            style={{
+                              width: `${Math.min(b.usage_pct, 100)}%`,
+                              background: b.usage_pct >= 80 ? "linear-gradient(90deg,#f59e0b,#ef4444)"
+                                : "linear-gradient(90deg,#22d3ee,#34d399)",
+                            }} />
+                        </div>
+                      )}
+                      {b.warn && (
+                        <div className="text-[11px] mt-1" style={{ color: "#fbbf24" }}>
+                          ⚠ 已用 {b.usage_pct}%（≥80% 预警，到顶将自动暂停）
+                        </div>
+                      )}
                     </div>
                     <div className="flex items-center gap-2">
                       {b.paused && (

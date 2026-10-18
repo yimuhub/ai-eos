@@ -4,7 +4,7 @@ import asyncio
 import json
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -207,6 +207,79 @@ async def resume_task(tid: str, db: AsyncSession = Depends(get_db),
     return {"detail": "resumed"}
 
 
+class InterventionIn(BaseModel):
+    type: str  # MESSAGE|INSTRUCTION|FILE|URL|PRIORITY_CHANGE|AGENT_CHANGE
+    content: str | None = None
+    attachments: dict | None = {}
+    new_priority: str | None = None
+    new_agent_id: str | None = None
+
+
+@router.post("/{tid}/takeover", status_code=201)
+async def takeover_task(tid: str, data: InterventionIn,
+                       db: AsyncSession = Depends(get_db),
+                       user=Depends(get_current_user)):
+    """V5.5 B1 老板接管：RUNNING 任务立即暂停，写下你的改方向指令，
+    恢复执行时 Agent 按你的指令继续（检查点可追溯，见执行轨迹）。"""
+    t = await _task_owned(db, user.id, tid)
+    if t.status not in (TaskStatus.RUNNING, TaskStatus.PLANNING):
+        raise HTTPException(409, f"只有执行中的任务可以接管，当前状态：{t.status.value}")
+    # 1) 暂停所有 running executions（写 execution 检查点保留现场）
+    q = await db.execute(select(AgentExecution).where(
+        AgentExecution.task_id == tid, AgentExecution.status == "running"))
+    execs = q.scalars().all()
+    for e in execs:
+        await pause_execution(db, e)
+    # 2) 每个被暂停的执行写 human_takeover 检查点（恢复时取出指令注入）
+    from app.models.task import ExecutionCheckpoint
+    note = (data.content or "老板接管：按最新要求继续").strip()
+    for e in execs:
+        db.add(ExecutionCheckpoint(
+            execution_id=e.id, checkpoint_type="human_takeover",
+            step_index=3,
+            context_snapshot={"note": note[:2000], "taken_by": user.id}))
+    # 3) 任务进 PAUSED
+    if t.status == TaskStatus.RUNNING:
+        await transition(db, t, TaskStatus.PAUSED, "user", user.id,
+                         payload={"takeover": note[:200]})
+    else:
+        t.status = TaskStatus.PAUSED
+    # 4) 干预留痕
+    iv = Intervention(task_id=tid, user_id=user.id, type="TAKEOVER",
+                     content=note, status="applied")
+    db.add(iv)
+    await db.commit()
+    return {"detail": "已接管，任务暂停", "paused_executions": len(execs),
+            "resume_via": f"POST /tasks/{tid}/takeover/resolve"}
+
+
+@router.post("/{tid}/takeover/resolve")
+async def resolve_takeover(tid: str, data: InterventionIn,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(get_current_user)):
+    """V5.5 B1 接管解除：老板确认改完方向，任务从检查点恢复，
+    最新接管指令作为最高优先级注入 Agent 上下文。"""
+    t = await _task_owned(db, user.id, tid)
+    if t.status != TaskStatus.PAUSED:
+        raise HTTPException(409, f"只有已接管暂停的任务可以解除，当前状态：{t.status.value}")
+    # 可选：解除前再补一条指令（恢复注入取 step_index 最大的检查点）
+    if data.content:
+        from app.models.task import ExecutionCheckpoint
+        q = await db.execute(select(AgentExecution).where(
+            AgentExecution.task_id == tid, AgentExecution.status == "paused"))
+        for e in q.scalars():
+            db.add(ExecutionCheckpoint(
+                execution_id=e.id, checkpoint_type="human_takeover",
+                step_index=4,
+                context_snapshot={"note": data.content[:2000], "taken_by": user.id}))
+    await transition(db, t, TaskStatus.RUNNING, "user", user.id)
+    q = await db.execute(select(AgentExecution).where(
+        AgentExecution.task_id == tid, AgentExecution.status == "paused"))
+    for e in q.scalars():
+        await resume_execution(db, e)
+    return {"detail": "接管已解除，任务从检查点恢复（含老板指令）"}
+
+
 @router.post("/{tid}/retry")
 async def retry_task(tid: str, background: BackgroundTasks,
                      db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
@@ -248,12 +321,7 @@ async def cancel_task(tid: str, reason: str | None = None,
 
 
 # ---------- Human In The Loop (P1-15) ----------
-class InterventionIn(BaseModel):
-    type: str  # MESSAGE|INSTRUCTION|FILE|URL|PRIORITY_CHANGE|AGENT_CHANGE
-    content: str | None = None
-    attachments: dict | None = {}
-    new_priority: str | None = None
-    new_agent_id: str | None = None
+# class InterventionIn moved above its first use (takeover endpoints)
 
 
 @router.post("/{tid}/interventions", status_code=201)
@@ -287,6 +355,113 @@ async def list_executions(tid: str, db: AsyncSession = Depends(get_db),
     await _task_owned(db, user.id, tid)
     q = await db.execute(select(AgentExecution).where(AgentExecution.task_id == tid))
     return [{c.key: getattr(e, c.key) for c in e.__table__.columns} for e in q.scalars()]
+
+
+@router.get("/{tid}/trace")
+async def task_trace(tid: str, db: AsyncSession = Depends(get_db),
+                     user=Depends(get_current_user)):
+    """V5.5 B4 节点级执行轨迹：按时间正序的"每 Agent 每步"时间线。
+
+    数据全来自现有表：agent_executions（每步）+ execution_checkpoints（检查点）
+    + interventions（老板介入）+ token_usages（每步成本）+ event_log（事件）。
+    失败可定位到具体节点。
+    """
+    t = await _task_owned(db, user.id, tid)
+    from app.models.task import ExecutionCheckpoint, Intervention
+    from app.models.token_usage import TokenUsage
+    from app.models.event import EventLog
+    from app.models.agent import Agent
+
+    execs = (await db.execute(
+        select(AgentExecution).where(AgentExecution.task_id == tid)
+        .order_by(AgentExecution.created_at.asc()))).scalars().all()
+    agent_ids = {e.agent_id for e in execs}
+    agent_rows = (await db.execute(
+        select(Agent).where(Agent.id.in_(agent_ids)))).scalars().all() if agent_ids else []
+    amap = {a.id: a.name for a in agent_rows}
+
+    usage_rows = (await db.execute(
+        select(TokenUsage).where(TokenUsage.task_id == tid).order_by(
+            TokenUsage.created_at.asc()))).scalars().all()
+    # 把用量按 agent 汇总（同 Agent 多次调用）
+    usage_by_agent: dict[str, dict] = {}
+    for u in usage_rows:
+        k = u.agent_id or "unknown"
+        slot = usage_by_agent.setdefault(k, {"tokens": 0, "cost": 0.0, "calls": 0,
+                                              "models": set(), "last_model": None})
+        slot["tokens"] += int(u.total_tokens or 0)
+        slot["cost"] += float(u.total_cost or 0.0)
+        slot["calls"] += 1
+        if u.model_id:
+            slot["models"].add(u.model_id)
+            slot["last_model"] = u.model_id
+
+    cps = (await db.execute(
+        select(ExecutionCheckpoint).where(
+            ExecutionCheckpoint.execution_id.in_(
+                [e.id for e in execs] or ["__none__"]))
+        .order_by(ExecutionCheckpoint.created_at.asc()))).scalars().all()
+    intvs = (await db.execute(
+        select(Intervention).where(Intervention.task_id == tid)
+        .order_by(Intervention.created_at.asc()))).scalars().all()
+    evs = (await db.execute(
+        select(EventLog).where(
+            or_(EventLog.entity_id == tid,
+                EventLog.payload["task_id"].as_string() == tid))
+        .order_by(EventLog.created_at.asc()).limit(200))).scalars().all()
+
+    # ---- 组装时间线（正序）----
+    nodes: list[dict] = []
+    cp_map: dict[str, list] = {}
+    for cp in cps:
+        cp_map.setdefault(cp.execution_id, []).append(cp)
+    for e in execs:
+        cp_list = cp_map.get(e.id, [])
+        meta = e.metadata_json or {}
+        nodes.append({
+            "kind": "execution",
+            "id": e.id,
+            "ts": e.created_at.isoformat() if e.created_at else None,
+            "agent_id": e.agent_id,
+            "agent_name": amap.get(e.agent_id, e.agent_id),
+            "status": e.status,
+            "input": (e.input or "")[:200],
+            "output": (e.output or "")[:200],
+            "error": e.error,
+            "model_id": meta.get("model_id"),
+            "duration_s": meta.get("duration_s"),
+            "checkpoints": [
+                {"type": cp.checkpoint_type, "step": cp.step_index,
+                 "ts": cp.created_at.isoformat() if cp.created_at else None}
+                for cp in cp_list],
+            "usage": ({
+                "tokens": usage_by_agent[e.agent_id]["tokens"],
+                "cost": round(usage_by_agent[e.agent_id]["cost"], 4),
+                "calls": usage_by_agent[e.agent_id]["calls"],
+                "last_model": usage_by_agent[e.agent_id]["last_model"],
+            } if e.agent_id in usage_by_agent else None),
+        })
+    for iv in intvs:
+        nodes.append({"kind": "intervention", "id": iv.id,
+                     "ts": iv.created_at.isoformat() if iv.created_at else None,
+                     "type": iv.type, "content": (iv.content or "")[:200],
+                     "status": iv.status})
+    for ev in evs:
+        nodes.append({"kind": "event", "id": ev.id,
+                     "ts": ev.created_at.isoformat() if ev.created_at else None,
+                     "event_type": ev.event_type,
+                     "detail": (str(ev.payload or {})[:150])})
+    nodes.sort(key=lambda n: n.get("ts") or "")
+    # 成本合计
+    total = {
+        "calls": sum(u["calls"] for u in usage_by_agent.values()),
+        "tokens": sum(u["tokens"] for u in usage_by_agent.values()),
+        "cost": round(sum(u["cost"] for u in usage_by_agent.values()), 4),
+        "executions": len(execs),
+        "failed": sum(1 for e in execs if e.status == "failed"),
+    }
+    return {"task": {"id": t.id, "title": t.title, "status": t.status},
+            "nodes": nodes, "total": total}
 
 
 @router.get("/{tid}/logs")

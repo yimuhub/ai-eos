@@ -47,6 +47,8 @@ async def _usage_for_async(db: AsyncSession, b: TokenBudget) -> tuple[int, float
     ).where(TokenUsage.company_id == b.company_id)
     if b.scope_type == "agent" and b.scope_id:
         q = q.where(TokenUsage.agent_id == b.scope_id)
+    elif b.scope_type == "department" and b.scope_id:
+        q = q.where(TokenUsage.department_id == b.scope_id)
     if b.period == "day":
         start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         q = q.where(TokenUsage.created_at >= start)
@@ -80,8 +82,16 @@ async def list_budgets(
             d["exceeded"] = False
             continue
         tokens, cost = await _usage_for_async(db, b)
+        exceeded = _is_exceeded(b, tokens, cost)
+        # V5.5 A2：占比（进度条）+ 软预警（≥80%）
+        usage_pct = None
+        if b.limit_tokens:
+            usage_pct = round(tokens * 100 / b.limit_tokens)
+        elif b.limit_cost:
+            usage_pct = round(cost * 100 / b.limit_cost)
         d.update({"used_tokens": tokens, "used_cost": round(cost, 4),
-                  "exceeded": _is_exceeded(b, tokens, cost)})
+                  "exceeded": exceeded, "usage_pct": usage_pct,
+                  "warn": not exceeded and usage_pct is not None and usage_pct >= 80})
         # 自动挂起：用量到顶且未手动解除 → 标记 paused（前端显示"已暂停"）
         if not b.paused and _is_exceeded(b, tokens, cost):
             b.paused = True
@@ -102,14 +112,14 @@ async def create_budget(
     user: User = Depends(get_current_user),
 ):
     await assert_company_owned(db, user.id, company_id)
-    if data.scope_type not in ("company", "agent"):
-        raise HTTPException(400, "scope_type 必须是 company 或 agent")
+    if data.scope_type not in ("company", "agent", "department"):
+        raise HTTPException(400, "scope_type 必须是 company、agent 或 department")
     if data.period not in ("day", "total"):
         raise HTTPException(400, "period 必须是 day 或 total")
     if data.limit_tokens <= 0 and data.limit_cost <= 0:
         raise HTTPException(400, "至少要设一个上限（tokens 或 cost）")
     b = TokenBudget(company_id=company_id, scope_type=data.scope_type,
-                    scope_id=data.scope_id if data.scope_type == "agent" else None,
+                    scope_id=data.scope_id if data.scope_type in ("agent", "department") else None,
                     limit_tokens=data.limit_tokens, limit_cost=data.limit_cost,
                     period=data.period, enabled=data.enabled, note=data.note,
                     updated_by=user.id)

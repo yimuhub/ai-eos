@@ -1,0 +1,18 @@
+{
+  "id": "pack_finance",
+  "industry": "一人公司·财务岗位包",
+  "emoji": "📊",
+  "kind": "position_pack",
+  "departments": [
+    {
+      "name": "财务部",
+      "desc": "一人公司财务岗位包：记账→开票→税务→资金预测",
+      "agents": [
+        {"name": "记账会计", "role": "日常账务/总账", "expert_slug": "bookkeeper-controller"},
+        {"name": "税务策略师", "role": "申报/税务筹划", "expert_slug": "tax-strategist"},
+        {"name": "开票专员", "role": "发票管理/合规", "expert_slug": "invoice-manager"},
+        {"name": "资金预测师", "role": "现金流/财务预测", "expert_slug": "financial-forecaster"}
+      ]
+    }
+  ]
+}

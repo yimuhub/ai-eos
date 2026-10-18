@@ -383,14 +383,23 @@ class ModelGateway:
         from datetime import datetime as _dt
         today_start = _dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
         for b in budgets:
-            if b.scope_type == "agent" and b.scope_id != agent_id:
+            if b.scope_type == "agent" and b.scope_id != ctx.get("agent_id"):
                 continue
+            # V5.5 A4：部门级虚拟账户（scope_id=部门 id）
+            if b.scope_type == "department":
+                dep = ctx.get("department_id") or (
+                    str(getattr(agent_obj, "department_id", None))
+                    if getattr(agent_obj, "department_id", None) else None)
+                if b.scope_id != dep:
+                    continue
             q = select(
                 func.coalesce(func.sum(TokenUsage.total_tokens), 0),
                 func.coalesce(func.sum(TokenUsage.total_cost), 0.0),
             ).where(TokenUsage.company_id == company_id)
             if b.scope_type == "agent" and b.scope_id:
                 q = q.where(TokenUsage.agent_id == b.scope_id)
+            elif b.scope_type == "department" and b.scope_id:
+                q = q.where(TokenUsage.department_id == b.scope_id)
             if b.period == "day":
                 q = q.where(TokenUsage.created_at >= today_start)
             row = (await self.db.execute(q)).one()

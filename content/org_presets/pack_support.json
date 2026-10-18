@@ -1,0 +1,17 @@
+{
+  "id": "pack_support",
+  "industry": "一人公司·客服岗位包",
+  "emoji": "🎧",
+  "kind": "position_pack",
+  "departments": [
+    {
+      "name": "客服部",
+      "desc": "一人公司客服岗位包：首响、工单、合规、报告",
+      "agents": [
+        {"name": "客服应答员", "role": "工单/FAQ 首响", "expert_slug": "support-responder"},
+        {"name": "运营数据分析师", "role": "客服指标/周报", "expert_slug": "support-analytics-reporter"},
+        {"name": "合规检查员", "role": "服务合规/隐私", "expert_slug": "support-legal-compliance-checker"}
+      ]
+    }
+  ]
+}

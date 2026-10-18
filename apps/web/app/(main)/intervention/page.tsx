@@ -63,6 +63,7 @@ const ACTION_LABELS: Record<string, string> = {
   artifact_approve: "成果验收",
   escalate: "升级请求",
   computer_command: "🖥 高危本机操作（V5.5 审批门）",
+  external_agent: "📤 外部 Agent 外发（V5.5 A3 审批门）",
 };
 
 export default function InterventionPage() {
@@ -165,6 +166,29 @@ export default function InterventionPage() {
 
   // ---------- V5.5 P0：高危本机操作审批门开关 ----------
   const ccEnabled = (policy.approval_actions || []).includes("computer_command");
+  // ---------- V5.5 A3：外部 Agent 外发审批门开关 ----------
+  const extEnabled = (policy.approval_actions || []).includes("external_agent");
+  async function toggleExt(enabled: boolean) {
+    if (!companyId) return;
+    setSavingPolicy(true);
+    try {
+      const actions = new Set(policy.approval_actions || []);
+      if (enabled) actions.add("external_agent"); else actions.delete("external_agent");
+      const res = await api.put<Policy>(`/intervention/policy?company_id=${companyId}`, {
+        level: policy.level ?? 2,
+        project_id: null,
+        approval_actions: Array.from(actions),
+      });
+      setPolicy(res || policy);
+      notify("success", enabled
+        ? "已开启：外部 Agent 外发执行需你批准后才执行"
+        : "已关闭外部 Agent 外发审批门");
+    } catch (e) {
+      notify("error", describe(e, "保存外发审批门开关失败"));
+    } finally {
+      setSavingPolicy(false);
+    }
+  }
   async function toggleCc(enabled: boolean) {
     if (!companyId) return;
     setSavingPolicy(true);
@@ -346,6 +370,36 @@ export default function InterventionPage() {
               className="px-3 py-1.5 rounded-lg text-xs font-medium text-white disabled:opacity-40"
               style={{ background: ccEnabled ? "#b91c1c" : "#15803d" }}>
               {ccEnabled ? "关闭" : "开启"}
+            </button>
+          </div>
+        </section>
+
+        {/* ---------- V5.5 A3：外部 Agent 外发审批门 ---------- */}
+        <section className="card card-static p-4">
+          <h3 className="font-medium text-[var(--foreground)] mb-1">
+            📤 外部 Agent 外发审批门
+          </h3>
+          <p className="text-xs mb-3 text-[var(--muted)]">
+            开启后，向<b>外部 Agent 服务</b>（外部连接）发任务执行前，
+            必须先拿到你的批准——外发内容离开本机前最后一道闸。
+          </p>
+          <div className="flex items-center justify-between gap-3 rounded-xl px-3 py-2.5 border"
+            style={{ borderColor: extEnabled ? "var(--accent)" : "var(--border)",
+                    background: extEnabled ? "rgba(99,102,241,0.12)" : "rgba(255,255,255,0.02)" }}>
+            <div>
+              <div className="text-sm font-medium text-[var(--foreground)]">
+                {extEnabled ? "✓ 外发需你批准" : "× 直接外发（不拦截）"}
+              </div>
+              <p className="text-xs mt-0.5 text-[var(--muted)]">
+                覆盖动作：外部 Agent execute（external_agent）
+              </p>
+            </div>
+            <button
+              onClick={() => toggleExt(!extEnabled)}
+              disabled={!companyId || savingPolicy}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium text-white disabled:opacity-40"
+              style={{ background: extEnabled ? "#b91c1c" : "#15803d" }}>
+              {extEnabled ? "关闭" : "开启"}
             </button>
           </div>
         </section>

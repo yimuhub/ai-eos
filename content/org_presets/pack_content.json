@@ -1,0 +1,18 @@
+{
+  "id": "pack_content",
+  "industry": "一人公司·内容岗位包",
+  "emoji": "✍️",
+  "kind": "position_pack",
+  "departments": [
+    {
+      "name": "内容部",
+      "desc": "一人公司内容岗位包：选题→写作→分发→私域增长",
+      "agents": [
+        {"name": "内容创作官", "role": "选题/长文/脚本", "expert_slug": "content-creator"},
+        {"name": "多平台分发官", "role": "全网分发/排期", "expert_slug": "multi-platform-publisher"},
+        {"name": "私域运营官", "role": "微信生态/社群", "expert_slug": "private-domain-operator"},
+        {"name": "PR 传播经理", "role": "品牌传播/危机公关", "expert_slug": "pr-communications-manager"}
+      ]
+    }
+  ]
+}

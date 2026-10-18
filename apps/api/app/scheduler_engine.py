@@ -57,6 +57,27 @@ async def execute_action(db: AsyncSession, sched: AutomationSchedule) -> dict:
         return {"agents": len(results),
                 "top": results[0]["agent_name"] if results else None}
 
+    if sched.action_type == "daily_briefing":
+        # V5.5 A1：CEO 简报推送——生成简报全文写进事件流，
+        # 老板打开 App 首页/事件流即可看到"总经理的早间汇报"
+        from app.models.company import Company
+        from app.models.event import EventLog
+        from app.api.routes.briefing import build_briefing
+        company = await db.get(Company, sched.company_id)
+        if not company:
+            raise ValueError("company not found")
+        brief = await build_briefing(db, company)
+        ev = EventLog(
+            event_type="BRIEFING_PUSH",
+            entity_type="company", entity_id=sched.company_id,
+            actor_type="system",
+            payload={"name": sched.name, "briefing": brief})
+        db.add(ev)
+        await db.commit()
+        return {"event_id": ev.id,
+                "greeting": brief.get("greeting", ""),
+                "needs_you": brief.get("needs_you", {}).get("count", 0)}
+
     raise ValueError(f"unknown action_type {sched.action_type}")
 
 

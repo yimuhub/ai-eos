@@ -38,6 +38,32 @@ export default function CommandDeckPage() {
   const [result, setResult] = useState<ExecResult | null>(null);
   const [msg, setMsg] = useState("");
   const [webhook, setWebhook] = useState("");
+  // V5.5 C4：语音前台（Web Speech API 输入 + TTS 播报，仅桌面版浏览器可用）
+  const [listening, setListening] = useState(false);
+  const recRef = useRef<any>(null);
+  const startVoice = useCallback(() => {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) { setMsg("⚠️ 当前浏览器不支持语音输入（Chrome/Edge 桌面版可用）"); return; }
+    if (listening) { recRef.current?.stop(); setListening(false); return; }
+    const rec = new SR();
+    rec.lang = "zh-CN"; rec.continuous = false; rec.interimResults = false;
+    rec.onresult = (e: any) => {
+      const t = e.results[0][0].transcript as string;
+      setPhrase(p => (p ? p + " " : "") + t);
+      setListening(false);
+    };
+    rec.onend = () => setListening(false);
+    rec.onerror = () => { setListening(false); setMsg("⚠️ 没听清，再试一次"); };
+    recRef.current = rec;
+    rec.start();
+    setListening(true);
+  }, [listening]);
+  const speak = useCallback((text: string) => {
+    if (!("speechSynthesis" in window)) return;
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "zh-CN"; u.rate = 1.05;
+    window.speechSynthesis.speak(u);
+  }, []);
   const [notifyBusy, setNotifyBusy] = useState(false);
   const [polling, setPolling] = useState(false);
   const timerRef = useRef<any>(null);
@@ -171,6 +197,16 @@ export default function CommandDeckPage() {
             onKeyDown={e => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) doPlan();
             }} />
+          {/* V5.5 C4：语音前台——对着电脑说，AI 指挥台听懂 */}
+          <button
+            onClick={startVoice}
+            disabled={listening}
+            title="🎙 语音输入（浏览器 Web Speech API，仅桌面版可用）"
+            className={`self-stretch px-3 rounded-lg text-sm border transition-all ${
+              listening ? "bg-red-500/20 border-red-500/50 text-red-300 animate-pulse"
+              : "border-[var(--border)] hover:bg-white/[0.06] text-[var(--muted)]"}`}>
+            {listening ? "● 听…" : "🎙 说"}
+          </button>
           <button onClick={doPlan} disabled={planning || !phrase.trim()}
             className="btn-primary self-stretch disabled:opacity-40">
             {planning ? "AI 判断中…" : "下达"}
@@ -191,6 +227,9 @@ export default function CommandDeckPage() {
           <div className="flex items-center gap-2 text-sm font-bold">
             <span className="pulse-dot bg-emerald-400" />
             已放行 · {PATH_META[result.path]?.label}
+            <button onClick={() => speak(`已放行，${PATH_META[result.path]?.label || result.path}`)}
+              title="C4 语音播报：让电脑念出来"
+              className="text-xs font-normal text-[var(--muted)] hover:text-[var(--accent)]">🔊 播报</button>
             {polling && <span className="text-xs text-[var(--muted)] font-normal">正在盯进度，完成后自动停</span>}
           </div>
           <div className="flex flex-wrap gap-2">

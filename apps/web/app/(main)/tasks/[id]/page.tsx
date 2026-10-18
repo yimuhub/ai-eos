@@ -7,6 +7,7 @@ import { TASK_STATUS_ZH, EVENT_TYPE_ZH, EXEC_STATUS_ZH, zh } from "@/lib/i18n";
 import { DeliverablesPanel, TaskLogsPanel } from "@/components/DeliverablesLogs";
 import { createPortal } from "react-dom";
 import { notify } from "@/components/Toast";
+import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
 import type { Company } from "@/lib/types";
 
 /* ============================================================
@@ -101,6 +102,14 @@ export default function TaskDetailPage() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // V5.5 B4：节点级执行轨迹（每 Agent 每步 + 成本 + 检查点）
+  const [trace, setTrace] = useState<{ nodes: any[]; total: any } | null>(null);
+  const [traceOpen, setTraceOpen] = useState(false);
+  const loadTrace = useCallback(async () => {
+    if (!id) return;
+    try { setTrace(await api.get(`/tasks/${id}/trace`)); } catch { /* 静默 */ }
+  }, [id]);
+
   const load = useCallback(async () => {
     if (!id) return;
     // 轮询失败不抛（否则每 5s 一条未处理 rejection）：保留旧数据，下轮再试
@@ -112,6 +121,39 @@ export default function TaskDetailPage() {
   const [chatHist, setChatHist] = useState(false);
   const [folderOpen, setFolderOpen] = useState(false);
   const [folderFiles, setFolderFiles] = useState<any[]>([]);
+
+  // V5.5 B1：老板接管（改方向）弹窗
+  const [takeoverOpen, setTakeoverOpen] = useState(false);
+  const [takeoverNote, setTakeoverNote] = useState("");
+  const [takeoverBusy, setTakeoverBusy] = useState(false);
+  const [takeoverAttached, setTakeoverAttached] = useState<Attachment[]>([]);
+  const doTakeover = async () => {
+    if (!id || !takeoverNote.trim()) return;
+    setTakeoverBusy(true);
+    try {
+      await api.post(`/tasks/${id}/takeover`, {
+        type: "TAKEOVER", content: takeoverNote.trim(),
+        attachments: { files: takeoverAttached },
+      });
+      setMsg("🧑 已接管：任务已暂停，你的指令将在恢复执行时生效");
+      setTakeoverOpen(false); setTakeoverNote(""); setTakeoverAttached([]);
+      await load();
+    } catch (e: any) { setMsg(`❌ 接管失败：${e.message || e}`); }
+    setTakeoverBusy(false);
+  };
+  const doTakeoverResolve = async () => {
+    if (!id) return;
+    setTakeoverBusy(true);
+    try {
+      await api.post(`/tasks/${id}/takeover/resolve`, {
+        type: "TAKEOVER", content: takeoverNote.trim() || undefined,
+      });
+      setMsg("✅ 已按你的指令从检查点恢复执行");
+      setTakeoverOpen(false); setTakeoverNote("");
+      await load();
+    } catch (e: any) { setMsg(`❌ 恢复失败：${e.message || e}`); }
+    setTakeoverBusy(false);
+  };
   useEffect(() => {
     load();
     api.get("/agents").then(setAgents).catch(() => {});
@@ -124,9 +166,10 @@ export default function TaskDetailPage() {
     api.get<Company[]>("/companies").then(async (cs) => {
       if (cs.length) setCid(cs[0].id);
     }).catch(() => {});
-    const t = setInterval(load, 5000);
+    loadTrace();
+    const t = setInterval(() => { load(); loadTrace(); }, 5000);
     return () => clearInterval(t);
-  }, [load]);
+  }, [load, loadTrace]);
 
   // 群聊历史加载（cid 就绪后触发一次）
   useEffect(() => {
@@ -291,6 +334,15 @@ export default function TaskDetailPage() {
                   ▶ {d.status === "PAUSED" ? "恢复执行" : "启动"}
                 </button>
               )}
+              {/* V5.5 B1：PAUSED 时可带指令解除接管 */}
+              {d.status === "PAUSED" && (
+                <button onClick={() => setTakeoverOpen(true)}
+                  title="带你的改方向指令，从检查点恢复执行"
+                  className="px-4 py-2 rounded-lg text-sm font-medium transition-all hover:bg-indigo-500/15 text-indigo-300"
+                  style={{ background: "rgba(99,102,241,0.12)", border: "1px solid rgba(99,102,241,0.35)" }}>
+                  🧑 接管解除（带指令）
+                </button>
+              )}
               {d.status === "FAILED" && (
                 <button onClick={() => control("retry")} disabled={busy}
                   title="从失败处重新执行该任务"
@@ -303,6 +355,15 @@ export default function TaskDetailPage() {
                 <button onClick={() => control("pause")} disabled={busy}
                   title="暂停将在当前步骤完成后生效"
                   className="btn-ghost disabled:opacity-40">⏸ 暂停</button>
+              )}
+              {/* V5.5 B1：老板接管（改方向） */}
+              {d.status === "RUNNING" && (
+                <button onClick={() => setTakeoverOpen(true)}
+                  title="立即暂停并写下你的改方向指令，Agent 恢复时按指令执行"
+                  className="px-4 py-2 rounded-lg text-sm font-medium transition-all hover:bg-indigo-500/15 text-indigo-300"
+                  style={{ background: "rgba(99,102,241,0.12)", border: "1px solid rgba(99,102,241,0.35)" }}>
+                  🧑 老板接管
+                </button>
               )}
               {canStop && (
                 <button onClick={() => control("cancel")} disabled={busy}
@@ -340,6 +401,67 @@ export default function TaskDetailPage() {
             <p className="text-[11px] mt-1.5" style={{ color: "var(--muted)" }}>
               当前阶段：{d.current_stage}
             </p>
+          )}
+        </div>
+      )}
+
+      {/* V5.5 B4：节点级执行轨迹（展开显示每 Agent 每步 + 成本 + 检查点） */}
+      {trace && trace.nodes.length > 0 && (
+        <div className="card card-static mb-5">
+          <button onClick={() => setTraceOpen(!traceOpen)}
+            className="w-full flex items-center justify-between text-xs font-medium px-4 py-3 text-left"
+            style={{ color: "var(--foreground)" }}>
+            <span>🧭 执行轨迹（{trace.nodes.length} 个节点 · {trace.total?.executions ?? 0} 次执行 · 成本 ¥{trace.total?.cost ?? 0}）</span>
+            <span style={{ color: "var(--muted)" }}>{traceOpen ? "收起 ▲" : "展开 ▼"}</span>
+          </button>
+          {traceOpen && (
+            <div className="px-4 pb-4 space-y-2">
+              {trace.nodes.map((n: any) => (
+                <div key={n.id}
+                  className="rounded-lg border px-3 py-2 text-xs"
+                  style={{
+                    borderColor: n.kind === "execution" && n.status === "failed"
+                      ? "rgba(239,68,68,0.4)" : "var(--border)",
+                    background: n.kind === "execution" && n.status === "failed"
+                      ? "rgba(239,68,68,0.06)" : "rgba(255,255,255,0.02)",
+                  }}>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span style={{ color: "var(--muted)" }}>
+                      {new Date(n.ts).toLocaleString("zh-CN", { hour12: false })}
+                    </span>
+                    {n.kind === "execution" && (<>
+                      <span className="font-medium">👤 {n.agent_name}</span>
+                      <span className={n.status === "completed" ? "text-emerald-400"
+                        : n.status === "failed" ? "text-red-400" : "text-cyan-400"}>
+                        {n.status}
+                      </span>
+                      {n.model_id && <span style={{ color: "var(--muted)" }}>· {n.model_id}</span>}
+                      {n.usage && <span style={{ color: "var(--muted)" }}>
+                        · {n.usage.tokens} token / ¥{n.usage.cost}（{n.usage.calls} 次调用）</span>}
+                    </>)}
+                    {n.kind === "intervention" && (
+                      <span className="font-medium">🛑 老板介入 {n.type}（{n.status}）</span>
+                    )}
+                    {n.kind === "event" && <span>📌 {n.event_type}</span>}
+                  </div>
+                  {n.kind === "execution" && (
+                    <div className="mt-1 space-y-0.5">
+                      {n.input && <div style={{ color: "var(--muted)" }}>入参：{n.input}</div>}
+                      {n.status === "completed" && n.output && <div>产出：{n.output}</div>}
+                      {n.error && <div className="text-red-400">❌ {n.error}</div>}
+                      {n.checkpoints?.length > 0 && (
+                        <div style={{ color: "var(--muted)" }}>
+                          检查点：{n.checkpoints.map((c: any) => `${c.type}#${c.step}`).join(" · ")}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {n.kind === "intervention" && n.content && (
+                    <div className="mt-0.5" style={{ color: "var(--muted)" }}>{n.content}</div>
+                  )}
+                </div>
+              ))}
+            </div>
           )}
         </div>
       )}
@@ -736,6 +858,52 @@ export default function TaskDetailPage() {
             title="打开任务助手">🤖</button>
         )}
       </div>
+
+      {/* V5.5 B1：老板接管弹窗（Portal 居中，max-h-90vh 内部滚动） */}
+      {takeoverOpen && createPortal(
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}
+          onClick={() => !takeoverBusy && setTakeoverOpen(false)}>
+          <div onClick={(e) => e.stopPropagation()}
+            className="card animate-fade-up w-full max-w-lg max-h-[90vh] overflow-y-auto"
+            style={{ background: "var(--card, rgba(24,26,32,0.96))" }}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold text-sm">
+                🧑 老板接管{d?.status === "PAUSED" ? " · 解除" : "（改方向）"}
+              </h3>
+              <button onClick={() => setTakeoverOpen(false)}
+                className="text-[var(--muted)] hover:text-white text-lg leading-none">✕</button>
+            </div>
+            <p className="text-xs mb-3" style={{ color: "var(--muted)" }}>
+              {d?.status === "PAUSED"
+                ? "任务已暂停在检查点。可补一条最终指令，Agent 恢复执行时会把它作为最高优先级指令遵守。"
+                : "点确认后任务立即暂停，Agent 恢复执行时会把你的指令当作最高优先级要求执行（可在下方先补充指令，解除时再补最终版）。"}
+            </p>
+            <textarea value={takeoverNote} onChange={(e) => setTakeoverNote(e.target.value)}
+              rows={4} placeholder="例：方向不对——不要写长文，改成 3 条短视频脚本，语气更口语化"
+              className="input w-full text-xs resize-none" />
+            {/* 📎 附件口（老板要求：所有输入界面必须带） */}
+            <div className="mt-2">
+              <AttachmentPicker value={takeoverAttached} onChange={setTakeoverAttached}
+                label="📎 附件参考（随指令交给 Agent）" />
+            </div>
+            <div className="flex gap-2 mt-4">
+              {d?.status === "PAUSED" ? (
+                <button onClick={doTakeoverResolve} disabled={takeoverBusy}
+                  className="btn-primary flex-1 disabled:opacity-40">
+                  ▶ 按此指令恢复执行
+                </button>
+              ) : (
+                <button onClick={doTakeover}
+                  disabled={takeoverBusy || !takeoverNote.trim()}
+                  className="btn-primary flex-1 disabled:opacity-40">
+                  ⏸ 接管并暂停
+                </button>
+              )}
+            </div>
+          </div>
+        </div>,
+        document.body)}
     </div>
   );
 }

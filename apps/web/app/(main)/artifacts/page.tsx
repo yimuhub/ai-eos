@@ -90,6 +90,18 @@ export default function ArtifactsPage() {
     reload();
   };
 
+  // V5.5 C2：交付流水线三分离——APPROVED 后"发布"才离开内网
+  const publish = async (aid: string) => {
+    try {
+      const r = await api.post<{ status?: string; message?: string; approval_id?: string }>(
+        `/artifacts/${aid}/publish?company_id=${cid}`);
+      setMsg(r.status === "pending_approval"
+        ? `⏳ ${r.message || "已建发布审批单"}`
+        : "✅ 已发布");
+      reload();
+    } catch (e: any) { setMsg(`❌ ${e.message || "发布失败"}`); }
+  };
+
   const openDetail = async (aid: string) => {
     setDetail(await api.get(`/artifacts/${aid}?company_id=${cid}`));
   };
@@ -174,9 +186,16 @@ export default function ArtifactsPage() {
                   </>
                 )}
                 {a.status === "APPROVED" && (
-                  <span className="text-[11px] px-2 py-1 rounded-lg bg-emerald-500/10 text-emerald-300">
-                    ✓ 审核通过
-                  </span>
+                  <>
+                    <span className="text-[11px] px-2 py-1 rounded-lg bg-emerald-500/10 text-emerald-300">
+                      ✓ 审核通过
+                    </span>
+                    <button onClick={() => publish(a.id)}
+                      title="C2 三分离：审核通过 ≠ 已发布，点发布才离开内网"
+                      className="px-3 py-1.5 rounded-lg text-xs font-medium bg-cyan-700 hover:bg-cyan-600 text-white transition-colors">
+                      📤 发布
+                    </button>
+                  </>
                 )}
               </div>
             </div>

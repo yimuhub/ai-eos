@@ -27,7 +27,7 @@ type CareerRec = { title: string; change_type: string; is_current: boolean };
 type MemoryItem = { id: string; content: string; type: string; created_at: string };
 type SkillNode = { id: string; name: string };
 
-const TABS = ["成长", "训练", "技能", "私人知识库", "记忆", "复盘", "考核", "职业"] as const;
+const TABS = ["成长", "训练", "技能", "私人知识库", "记忆", "复盘", "考核", "职业", "邮箱"] as const;
 const LEVEL_ZH: Record<string, string> = {
   BEGINNER: "入门", JUNIOR: "初级", INTERMEDIATE: "中级", ADVANCED: "高级", EXPERT: "专家",
 };
@@ -47,6 +47,51 @@ export default function AgentProfilePage() {
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
   const [career, setCareer] = useState<CareerRec[]>([]);
+  // V5.5 C3：Agent 专属邮箱（收件箱 / 代答 / 别名）
+  const [mailbox, setMailbox] = useState<any>(null);
+  const [messages, setMessages] = useState<any[]>([]);
+  const [aliasInput, setAliasInput] = useState("");
+  const [replyBody, setReplyBody] = useState("");
+  const [replyTo, setReplyTo] = useState<string | null>(null);
+  const [inSubject, setInSubject] = useState("");
+  const [inBody, setInBody] = useState("");
+
+  const loadMailbox = useCallback((aid: string) => {
+    api.get(`/mailboxes?agent_id=${aid}`).then((list: any[]) => {
+      setMailbox(list[0] || null);
+      if (list[0]) api.get(`/mailboxes/messages?mailbox_id=${list[0].id}`).then(setMessages).catch(() => {});
+      else setMessages([]);
+    }).catch(() => setMailbox(null));
+  }, []);
+  useEffect(() => { if (agentId) loadMailbox(agentId); }, [agentId, loadMailbox]);
+
+  const createMailbox = async () => {
+    if (!aliasInput.trim()) { notify("warning", "⚠️ 先填邮箱别名"); return; }
+    try {
+      const r = await api.post(`/mailboxes`, { agent_id: agentId, alias: aliasInput.trim() });
+      notify("success", `✅ 已开通 ${r.alias}`);
+      setAliasInput("");
+      loadMailbox(agentId);
+    } catch (e: any) { notify("error", `❌ ${describeError(e)}`); }
+  };
+  const sendInboxMsg = async () => {
+    if (!mailbox) return;
+    try {
+      await api.post(`/mailboxes/messages`, { mailbox_id: mailbox.id, subject: inSubject || "老板来信", body: inBody, from_addr: "boss@aieos.local" });
+      setInSubject(""); setInBody("");
+      api.get(`/mailboxes/messages?mailbox_id=${mailbox.id}`).then(setMessages).catch(() => {});
+      notify("success", "✅ 已写入收件箱");
+    } catch (e: any) { notify("error", `❌ ${describeError(e)}`); }
+  };
+  const doReply = async (mid: string) => {
+    if (!mailbox) return;
+    try {
+      await api.post(`/mailboxes/messages/${mid}/reply`, { body: replyBody || "（代答）收到，谢谢。" });
+      setReplyBody(""); setReplyTo(null);
+      api.get(`/mailboxes/messages?mailbox_id=${mailbox.id}`).then(setMessages).catch(() => {});
+      notify("success", "✅ 代答已发出");
+    } catch (e: any) { notify("error", `❌ ${describeError(e)}`); }
+  };
   const [nodes, setNodes] = useState<any[]>([]);
   const [trTitle, setTrTitle] = useState("");
   const [trInput, setTrInput] = useState("");
@@ -529,6 +574,72 @@ export default function AgentProfilePage() {
           ))}
           {!reviews.length && (
             <p className="text-sm py-8 text-center" style={{ color: "var(--muted)" }}>暂无考核记录</p>
+          )}
+        </div>
+      )}
+
+      {/* ---- 邮箱（V5.5 C3）---- */}
+      {tab === "邮箱" && (
+        <div className="space-y-4 max-w-3xl">
+          {!mailbox && (
+            <div className="card card-static p-4 space-y-2">
+              <div className="text-sm font-medium">📧 为该员工开通专属邮箱</div>
+              <p className="text-xs text-[var(--muted)]">
+                开通后，外部来信（站内 / 局域网通道）进这个收件箱，老板可代答；配 SMTP 后可真实收发
+              </p>
+              <div className="flex gap-2">
+                <input value={aliasInput} onChange={e => setAliasInput(e.target.value)}
+                  placeholder="别名，如 chen / zhang@yourcompany.aieos"
+                  className="input-glow flex-1" />
+                <button onClick={createMailbox} className="btn-primary">开通</button>
+              </div>
+            </div>
+          )}
+          {mailbox && (
+            <>
+              <div className="card card-static p-3 flex items-center gap-3 text-sm">
+                <span className="font-medium">📧 {mailbox.alias}</span>
+                <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300">已开通</span>
+                <span className="text-xs text-[var(--muted)] ml-auto">自动回复：{mailbox.auto_reply ? "开" : "关"}</span>
+                <button onClick={() => loadMailbox(agentId!)} className="text-xs text-[var(--muted)] hover:text-[var(--accent)]">⟳ 刷新</button>
+              </div>
+              {/* 模拟来信（站内通道演示） */}
+              <div className="card card-static p-3 space-y-2">
+                <div className="text-xs font-medium text-[var(--muted)]">✍️ 模拟来信（写入收件箱，演示 C3 全流程）</div>
+                <input value={inSubject} onChange={e => setInSubject(e.target.value)} placeholder="主题（可选）" className="input-glow w-full" />
+                <textarea value={inBody} onChange={e => setInBody(e.target.value)} rows={2} placeholder="来信内容" className="input-glow w-full" />
+                <button onClick={sendInboxMsg} className="btn-ghost text-xs">写入收件箱</button>
+              </div>
+              {/* 收件箱 */}
+              <div className="space-y-2">
+                <div className="text-xs font-medium text-[var(--muted)]">📥 收件箱（{messages.length}）</div>
+                {messages.length === 0 && <p className="text-sm py-4 text-center text-[var(--muted)]">暂无来信</p>}
+                {messages.map((m: any) => (
+                  <div key={m.id} className="card card-static p-3 space-y-1.5">
+                    <div className="flex items-center gap-2 text-sm">
+                      <span>{m.direction === "in" ? "📥" : "📤"}</span>
+                      <span className="font-medium">{m.subject || "(无主题)"}</span>
+                      <span className="text-xs text-[var(--muted)] ml-auto">{m.from} → {m.to}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${m.status === "unread" ? "bg-amber-500/15 text-amber-300" : "bg-white/5 text-[var(--muted)]"}`}>{m.status}</span>
+                    </div>
+                    <p className="text-xs text-[var(--muted)] whitespace-pre-wrap">{m.body}</p>
+                    {m.direction === "in" && m.status !== "replied" && (
+                      replyTo === m.id ? (
+                        <div className="flex gap-2 pt-1">
+                          <textarea value={replyBody} onChange={e => setReplyBody(e.target.value)} rows={1}
+                            placeholder="代答内容（留空则自动简短回复）" className="input-glow flex-1" />
+                          <button onClick={() => doReply(m.id)} className="btn-primary text-xs">发出</button>
+                          <button onClick={() => { setReplyTo(null); setReplyBody(""); }} className="btn-ghost text-xs">取消</button>
+                        </div>
+                      ) : (
+                        <button onClick={() => { setReplyTo(m.id); setReplyBody(""); }}
+                          className="text-xs text-indigo-400 hover:text-indigo-300">✍️ 代答</button>
+                      )
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
           )}
         </div>
       )}

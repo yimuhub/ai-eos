@@ -1,0 +1,18 @@
+{
+  "id": "pack_legal",
+  "industry": "一人公司·法务岗位包",
+  "emoji": "⚖️",
+  "kind": "position_pack",
+  "departments": [
+    {
+      "name": "法务部",
+      "desc": "一人公司法务岗位包：合同审查→客户对接→政策起草→计费管理",
+      "agents": [
+        {"name": "合同审查员", "role": "合同风险/条款修订", "expert_slug": "contract-reviewer"},
+        {"name": "文书审查员", "role": "正式文书/函件", "expert_slug": "document-review"},
+        {"name": "政策起草人", "role": "内控制度/用户协议", "expert_slug": "policy-writer"},
+        {"name": "客户对接专员", "role": "法务咨询/接待", "expert_slug": "client-intake"}
+      ]
+    }
+  ]
+}

@@ -4,10 +4,11 @@
 数据全部来自现有表（tasks / automation_runs / approval_requests /
 meetings / token_usages），零新表。GET /briefing 鉴权，返回用户首家公司视角。
 """
+import uuid
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, join, select
+from sqlalchemy import func, join, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
@@ -39,14 +40,15 @@ async def get_briefing(
         rows = (await db.execute(
             select(Company).where(Company.owner_id == user.id).limit(1)
         )).scalars().all()
-        if not rows:
-            company = None
-        else:
-            company = rows[0]
+        company = rows[0] if rows else None
     if company is None:
         return {"has_company": False, "greeting": "", "yesterday": {}, "today": {},
                 "needs_you": {"count": 0, "items": []}, "cost_today": {}}
+    return await build_briefing(db, company)
 
+
+async def build_briefing(db: AsyncSession, company: Company) -> dict:
+    """CEO 晨间简报数据（路由与调度器推送共用）。"""
     cid = company.id
     now = datetime.now()
     yesterday_from = now - timedelta(hours=24)
@@ -132,6 +134,39 @@ async def get_briefing(
 
     hour = now.hour
     greeting = "早上好" if hour < 12 else ("下午好" if hour < 18 else "晚上好")
+
+    # V5.5 A2：预算软提醒（≥80% 黄色预警，到顶另见 paused）
+    budget_alert: dict | None = None
+    try:
+        from app.models.budget import TokenBudget
+        bts = (await db.execute(
+            select(TokenBudget).where(
+                TokenBudget.company_id == cid,
+                TokenBudget.enabled == True,  # noqa: E712
+                or_(TokenBudget.scope_type == "company",
+                    TokenBudget.scope_type == "department")))).scalars().all()
+        for b in bts:
+            uq = select(func.coalesce(func.sum(TokenUsage.total_tokens), 0),
+                        func.coalesce(func.sum(TokenUsage.total_cost), 0.0)).where(
+                TokenUsage.company_id == cid)
+            if b.scope_type == "agent" and b.scope_id:
+                uq = uq.where(TokenUsage.agent_id == b.scope_id)
+            elif b.scope_type == "department" and b.scope_id:
+                uq = uq.where(TokenUsage.department_id == b.scope_id)
+            if b.period == "day":
+                uq = uq.where(TokenUsage.created_at >= today_from)
+            trow = (await db.execute(uq)).one()
+            tokens, cost = int(trow[0]), float(trow[1])
+            if b.limit_tokens and tokens >= b.limit_tokens * 0.8:
+                pct = round(tokens * 100 / b.limit_tokens)
+                budget_alert = {"pct": pct, "paused": b.paused,
+                                "message": (f"预算{'已暂停' if b.paused else '即将用尽'}："
+                                            f"已用 {tokens}/{b.limit_tokens} token（{pct}%）"
+                                            f"，可到「Token 统计 → 预算上限」调高额度")}
+                break
+    except Exception:
+        budget_alert = None
+
     return {
         "has_company": True,
         "company": {"id": cid, "name": company.name},
@@ -148,4 +183,45 @@ async def get_briefing(
         },
         "needs_you": {"count": len(items), "items": items},
         "cost_today": cost_today,
+        "budget_alert": budget_alert,
     }
+
+
+@router.post("/push-schedule")
+async def ensure_push_schedule(
+    company_id: str = Query(...),
+    time_str: str = Query("09:00"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """一键创建/更新「每日简报推送」调度（A1）。
+
+    到点由 scheduler 生成 BRIEFING_PUSH 事件进事件流，
+    首页简报卡标注"最后一次推送时间"，浏览器可弹系统通知。
+    """
+    company = await db.get(Company, company_id)
+    if not company or (company.owner_id != user.id and user.id != company.created_by):
+        raise HTTPException(404, "公司不存在")
+    hh, mm = time_str.split(":")
+    sched = (await db.execute(
+        select(AutomationSchedule).where(
+            AutomationSchedule.company_id == company_id,
+            AutomationSchedule.action_type == "daily_briefing"))).scalars().first()
+    if not sched:
+        from app.models.scheduler import _now
+        sched = AutomationSchedule(id=str(uuid.uuid4()),
+                                    company_id=company_id,
+                                    name="CEO 简报每日推送",
+                                    trigger_type="daily",
+                                    trigger_config={"time": f"{hh}:{mm}"},
+                                    action_type="daily_briefing",
+                                    status="ACTIVE",
+                                    created_by=user.id,
+                                    next_run_at=_now())
+        db.add(sched)
+    else:
+        from app.models.scheduler import compute_next_run
+        sched.trigger_config = {"time": f"{hh}:{mm}"}
+        sched.next_run_at = compute_next_run("daily", sched.trigger_config, datetime.now())
+    await db.commit()
+    return {"schedule_id": sched.id, "time": f"{hh}:{mm}", "exists": bool(sched.id)}
