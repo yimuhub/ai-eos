@@ -3,7 +3,7 @@
   "version": "5.1.0",
   "description": "AI-EOS 桌面客户端（Mac / Windows / Linux）— Electron 壳封装便携后端 + Web 前端",
   "main": "main.cjs",
-  "author": "AI-EOS",
+  "author": "AI-EOS <dev@aieos.local>",
   "homepage": "https://github.com/yimuhub/ai-eos",
   "license": "BUSL-1.1",
   "scripts": {
@@ -46,7 +46,9 @@
         { "target": "AppImage", "arch": ["x64"] },
         { "target": "deb", "arch": ["x64"] }
       ],
-      "category": "Utility"
+      "category": "Utility",
+      "maintainer": "AI-EOS <dev@aieos.local>",
+      "synopsis": "AI-EOS desktop client"
     }
   },
   "devDependencies": {
