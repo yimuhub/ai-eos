@@ -16,6 +16,12 @@ import { useEffect, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { api } from "@/lib/api";
 import { notify } from "@/components/Toast";
+import { confirmAction } from "@/components/ConfirmDialog";
+
+interface DeviceRow {
+  id: string; name: string; source: string;
+  last_seen_at: string | null; revoked: boolean; has_active_session: boolean;
+}
 
 export default function LanSharePage() {
   const [lanIp, setLanIp] = useState("");
@@ -25,6 +31,11 @@ export default function LanSharePage() {
   const [isDesktop, setIsDesktop] = useState(false);
   const [autoLaunch, setAutoLaunch] = useState(false);
   const [alBusy, setAlBusy] = useState(false);
+  // V5.4 配对码 + 设备授权
+  const [pairToken, setPairToken] = useState("");
+  const [pairBusy, setPairBusy] = useState(false);
+  const [devices, setDevices] = useState<DeviceRow[]>([]);
+  const [devLoaded, setDevLoaded] = useState(false);
 
   useEffect(() => {
     setIsDesktop(!!window.aieosDesktop);
@@ -45,10 +56,46 @@ export default function LanSharePage() {
       setLanIp(window.location.hostname !== "localhost" ? window.location.hostname : "");
       setReachable(window.location.hostname !== "localhost");
     }).finally(() => setLoaded(true));
+    loadDevices();
   }, []);
 
   const webUrl = lanIp ? `${window.location.protocol}//${lanIp}${window.location.port ? ":" + window.location.port : ""}` : "";
   const apiUrl = lanIp ? `http://${lanIp}:${apiPort}` : "";
+  const pairUrl = pairToken ? window.location.origin + "/pair?token=" + pairToken : "";
+
+  const loadDevices = async () => {
+    try {
+      setDevices(await api.get<DeviceRow[]>("/devices"));
+    } catch { /* 无设备或后端不可达：列表留空 */ }
+    finally { setDevLoaded(true); }
+  };
+
+  const createPairing = async () => {
+    setPairBusy(true);
+    try {
+      const d = await api.post<any>("/pairings", {});
+      setPairToken(d.token || "");
+      notify("success", "配对二维码已生成（10 分钟内有效，一次只能用一次）");
+    } catch (e: any) {
+      notify("error", "生成配对码失败：" + (e?.message || ""));
+    } finally { setPairBusy(false); }
+  };
+
+  const revokeDevice = async (d: DeviceRow) => {
+    if (!(await confirmAction({
+      title: "吊销这台设备？",
+      description: d.name,
+      confirmText: "吊销",
+      danger: true,
+    }))) return;
+    try {
+      const r = await api.post<any>(`/devices/${d.id}/revoke`, {});
+      notify("success", `已吊销（${r.sessions_revoked ?? 0} 个会话立即失效）`);
+      loadDevices();
+    } catch (e: any) {
+      notify("error", "吊销失败：" + (e?.message || ""));
+    }
+  };
 
   const toggleAutoLaunch = async () => {
     if (!window.aieosDesktop?.setAutoLaunch) return;
@@ -84,7 +131,7 @@ export default function LanSharePage() {
         </div>
         {isDesktop && (
           <button
-            onClick={toggleAutoLaunch}
+            onClick={() => toggleAutoLaunch()}
             disabled={alBusy}
             className={`card px-3 py-2 text-xs flex items-center gap-2 transition ${autoLaunch ? "ring-1 ring-[var(--accent)]" : ""}`}
             style={{ borderColor: autoLaunch ? "var(--accent)" : "var(--border)" }}
@@ -106,22 +153,43 @@ export default function LanSharePage() {
       <div className="grid gap-3 fade-up" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
         {/* 二维码 */}
         <div className="card p-4 flex flex-col items-center gap-3">
-          <div className="text-xs" style={{ color: "var(--muted-foreground)" }}>手机扫码 · 同 WiFi 下</div>
+          <div className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+            {pairToken ? "📱 配对二维码 · 免输密码 · 10 分钟内有效 · 仅用一次" : "手机扫码 · 同 WiFi 下"}
+          </div>
           <div className="p-3 rounded-xl" style={{ background: "#fff" }}>
-            {webUrl ? (
-              <QRCodeSVG value={webUrl} size={190} level="M" />
+            {(pairToken ? pairUrl : webUrl) ? (
+              <QRCodeSVG value={pairToken ? pairUrl : webUrl} size={190} level="M" />
             ) : (
               <div className="w-[190px] h-[190px] flex items-center justify-center text-xs" style={{ color: "var(--muted-foreground)" }}>
                 {loaded ? "无法生成地址" : "加载中…"}
               </div>
             )}
           </div>
-          <code className="text-xs px-2 py-1 rounded" style={{ background: "var(--card)" }}>
-            {webUrl || "—"}
+          <code className="text-xs px-2 py-1 rounded max-w-full truncate" style={{ background: "var(--card)" }}>
+            {pairToken ? pairUrl : webUrl || "—"}
           </code>
-          <button onClick={() => copy(webUrl, "Web 地址")} className="text-xs px-3 py-1.5 rounded-md" style={{ background: "var(--card)" }}>
-            📋 复制 Web 地址
-          </button>
+          {pairToken ? (
+            <div className="flex gap-2">
+              <button onClick={() => createPairing()} disabled={pairBusy}
+                      className="text-xs px-3 py-1.5 rounded-md" style={{ background: "var(--card)" }}>
+                {pairBusy ? "生成中…" : "🔄 换一个"}
+              </button>
+              <button onClick={() => setPairToken("")} className="text-xs px-3 py-1.5 rounded-md"
+                      style={{ background: "var(--card)" }}>✕ 关闭</button>
+            </div>
+          ) : (
+            <div className="flex gap-2">
+              <button onClick={() => copy(webUrl, "Web 地址")} className="text-xs px-3 py-1.5 rounded-md"
+                      style={{ background: "var(--card)" }}>
+                📋 复制 Web 地址
+              </button>
+              <button onClick={() => createPairing()} disabled={pairBusy}
+                      className="text-xs px-3 py-1.5 rounded-md font-medium"
+                      style={{ background: "linear-gradient(135deg,#6d5ef0,#a78bfa)", color: "#fff" }}>
+                {pairBusy ? "生成中…" : "📱 生成配对二维码（免密码）"}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* 步骤 */}
@@ -151,11 +219,46 @@ export default function LanSharePage() {
         </div>
       </div>
 
+      {/* 已授权设备（V5.4） */}
+      <div className="card p-4 flex flex-col gap-2.5 fade-up">
+        <div className="text-sm font-medium">已授权设备 {devices.length > 0 && <span className="text-xs" style={{ color: "var(--muted-foreground)" }}>（{devices.length}）</span>}</div>
+        {devLoaded && devices.length === 0 && (
+          <div className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+            暂无设备通过配对码接入。手机点「生成配对二维码」→ 扫码即授权；随时可在这里吊销。
+          </div>
+        )}
+        {devices.map((d) => (
+          <div key={d.id} className="flex items-center gap-2 p-2 rounded-lg text-xs"
+               style={{ background: "var(--card)" }}>
+            <span className="text-base">{d.revoked ? "🚫" : d.has_active_session ? "🟢" : "📱"}</span>
+            <div className="flex-1 min-w-0">
+              <div className="font-medium truncate">
+                {d.name}
+                <span className="ml-2 px-1.5 py-0.5 rounded-full text-[10px]"
+                      style={{ background: "rgba(107,94,240,.15)", color: "#8f83f5" }}>{d.source}</span>
+                {d.revoked && <span className="ml-1.5 text-[10px]" style={{ color: "#ff8a7a" }}>已吊销</span>}
+              </div>
+              {d.last_seen_at && (
+                <div style={{ color: "var(--muted-foreground)" }}>最近活动 {new Date(d.last_seen_at).toLocaleString()}</div>
+              )}
+            </div>
+            {!d.revoked && (
+              <button onClick={() => revokeDevice(d)} className="px-2 py-1 rounded-md text-[11px]"
+                      style={{ background: "rgba(255,80,80,.12)", color: "#ff8a7a" }}>
+                吊销
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+
       {/* 说明与边界 */}
       <div className="card p-4 text-xs flex flex-col gap-2 fade-up" style={{ color: "var(--muted-foreground)" }}>
         <div className="text-sm font-medium" style={{ color: "var(--foreground)" }}>边界与安全</div>
         <div>· 桌面版后端已监听 <code>0.0.0.0</code>：同局域网设备可访问，<b style={{ color: "var(--foreground)" }}>所有写接口仍需登录</b>，没有账号就进不了数据。</div>
         <div>· 手机浏览器看到的是与桌面版<b style={{ color: "var(--foreground)" }}>同一份数据</b>（本机 SQLite / 服务器 Postgres），操作实时互见。</div>
+        <div>· <b style={{ color: "var(--foreground)" }}>配对码</b>：一次性 + 10 分钟过期 + 吊销设备立即失效（学 Home Assistant 配对模型，手机免输密码）。</div>
+        <div>· <b style={{ color: "var(--foreground)" }}>mDNS 广播</b>：服务起来后在局域网宣告 <code>ai-eos-端口.local</code>（zeroconf），未来 App/发现页可自动定位，无需手敲 IP（AI_EOS_MDNS=0 可关）。</div>
         <div>· 公司网/多 VLAN 环境下手机与电脑可能不在同一网段 → 扫码后打不开属网络隔离，换热点直连（手机开热点给电脑连）即可。</div>
         <div>· 「开机自启」仅桌面版可用（{!isDesktop ? "你现在在浏览器里，请用桌面版" : "Mac 登录项 / Windows 启动项 / Linux 桌面自启"}）。</div>
         <div>· 一键部署：三端安装包首启即自动备好环境（SQLite + 内置服务），无需配置；服务器形态用「服务器一键部署.sh」。</div>

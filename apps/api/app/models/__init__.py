@@ -25,6 +25,7 @@ from .artifact import Artifact, ArtifactStatus, ArtifactVersion  # noqa: F401
 from .intervention import (ApprovalRequest, InterventionPolicy,  # noqa: F401
                            OverrideLog)
 from .performance import PerformanceSnapshot  # noqa: F401
+from .device import Device, PairingToken  # noqa: F401
 from app.browser_agent import BrowserActionLog  # noqa: F401
 from app.computer_agent import ComputerActionLog, ComputerPermission, KNOWN_CAPABILITIES  # noqa: F401
 from .app_alias import AppAliasRule  # noqa: F401

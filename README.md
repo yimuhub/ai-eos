@@ -195,6 +195,17 @@ The **2026-10-14 hardening pass** (full report in `CHANGELOG.md`) fixed every P0
 
 ---
 
+## 📡 V5.x LAN Sharing & Device Pairing
+
+Beyond cloud SaaS, AI-EOS runs as a **local LAN office**:
+
+- **LAN sharing (V5.3)**: the desktop app listens on `0.0.0.0`; open **📡 局域网共享** to see your LAN IP, a QR code (phone scans → straight into the responsive Web UI), and the API endpoint for the Android app. Optional **auto-launch at login** (macOS/Windows login items, Linux XDG autostart).
+- **Pairing & device authorization (V5.4)**: instead of typing passwords on a phone, generate a **one-time pairing code** (10-minute TTL, single-use, hashed in DB) from the LAN-sharing page; scanning it registers the phone as a *device* and hands it a scoped token pair. Every connected device shows up in **已授权设备** and can be **revoked in one click** — revocation kills all of that device's refresh tokens instantly.
+- **mDNS discovery (V5.4)**: while running, the service announces itself on the local network as `ai-eos-<port>._aieos._tcp.local.` (zeroconf, degrades silently when unavailable; `AI_EOS_MDNS=0` disables it).
+- **🩺 Diagnostics (V5.4)**: one-click health check — DB latency, disk space, LAN reachability, update-channel manifest, stuck executions — with a suggested fix for every failing item.
+
+---
+
 ## 📜 License & Copyright Terms
 
 - **Copyright Entity & Licensor**: eos.hyipf.com

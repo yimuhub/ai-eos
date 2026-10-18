@@ -8,7 +8,7 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             agent_chat, delivery, departments_batch, kb2, offboarding, task_dispatch,
                             test_console,
                             career,
-                            clients,
+                            clients, pairing, diagnostics,
                             org_presets,
                             companies, collaboration, computer_agent, context,
                             dashboard, events, health, intervention, knowledge,
@@ -53,6 +53,12 @@ async def lifespan(app: FastAPI):
         logger.info("[startup] 自动补齐 %d 个新增列", len(_added))
     from app.scheduler_engine import start_scheduler, stop_scheduler
     start_scheduler()
+    # mDNS 局域网广播（V5.4）：零依赖降级，失败不影响启动
+    try:
+        from app import mdns_advertise
+        mdns_advertise.start()
+    except Exception as e:
+        logger.warning("[startup] mDNS 广播未启动（不影响服务）：%s", e)
     # 启动时恢复卡在 RUNNING 的会议（自愈）
     try:
         import app.background_jobs as background_jobs
@@ -65,6 +71,11 @@ async def lifespan(app: FastAPI):
         logger.error("[startup] 恢复卡住的会议/任务失败：%s", e, exc_info=True)
     yield
     stop_scheduler()
+    try:
+        from app import mdns_advertise
+        mdns_advertise.stop()
+    except Exception:
+        pass
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
@@ -101,5 +112,5 @@ for r in (health, auth, companies, agents, agent_chat, models_api, skills, tasks
           schedules, learning, training, reflection, skill_growth, career,
           review, factory, external_agents, sandbox, automation, governance,
           offboarding, departments_batch, task_dispatch, test_console, war_room, team_generator, company_manage, tokens, experts, command, org_presets,
-          access, prometheus_metrics, clients):
+          access, prometheus_metrics, clients, pairing, diagnostics):
     app.include_router(r.router)

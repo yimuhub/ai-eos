@@ -114,6 +114,7 @@ function startApi() {
     DATABASE_URL: `sqlite+aiosqlite:///${path.join(DATA_DIR, "aieos.db")}`,
     PYTHONUNBUFFERED: "1",
     PYTHONPATH: path.join(ROOT, "apps/api"),
+    AIEOS_HTTP_PORT: String(DEFAULT_API_PORT),  // mDNS 广播用（零依赖降级，缺失不影响启动）
   };
   const useUv = fs.existsSync(path.join(ROOT, ".venv")) || process.env.UV === "1";
   // 0.0.0.0：允许同局域网的手机/其他设备扫码接入（V5.3 局域网共享）；
@@ -270,6 +271,14 @@ function buildMenu() {
           if (!mainWindow) return;
           mainWindow.webContents.executeJavaScript(
             "location.assign('/lan-share')").catch(() => {});
+        },
+      },
+      {
+        label: "🩺 系统诊断",
+        click: () => {
+          if (!mainWindow) return;
+          mainWindow.webContents.executeJavaScript(
+            "location.assign('/diagnostics')").catch(() => {});
         },
       },
       {

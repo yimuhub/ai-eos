@@ -25,3 +25,8 @@ class RefreshToken(TimestampMixin, Base):
     token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+    # V5.4 设备授权：该 refresh 属于哪台接入设备（手机扫码配对产生的会话
+    # 带 device_id；桌面/浏览器普通登录为 NULL）。吊销设备时批量吊销其全部行。
+    device_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("devices.id", ondelete="SET NULL"),
+        nullable=True, index=True)

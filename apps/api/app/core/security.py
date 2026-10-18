@@ -52,10 +52,12 @@ def _utcnow_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-async def issue_token_pair(db: AsyncSession, user_id: str) -> dict[str, str]:
+async def issue_token_pair(db: AsyncSession, user_id: str,
+                           device_id: str | None = None) -> dict[str, str]:
     """签发一对 token：短期 access（JWT）+ 长期 refresh（DB 可吊销）。
 
     只 add + flush，不 commit——提交权交还调用方，不破坏外层事务。
+    device_id（V5.4）：设备授权场景传入，吊销设备时可批量吊销其 refresh。
     """
     from app.models.refresh_token import RefreshToken
 
@@ -64,6 +66,7 @@ async def issue_token_pair(db: AsyncSession, user_id: str) -> dict[str, str]:
         user_id=user_id,
         token_hash=_hash_refresh_token(raw),
         expires_at=_utcnow_naive() + timedelta(days=settings.jwt_refresh_expire_days),
+        device_id=device_id,
     ))
     await db.flush()
     return {"access_token": create_access_token(user_id), "refresh_token": raw}
