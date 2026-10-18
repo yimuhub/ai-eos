@@ -16,6 +16,7 @@
   "build": {
     "appId": "com.aieos.desktop",
     "productName": "AI-EOS",
+    "homepage": "https://github.com/yimuhub/ai-eos",
     "directories": {
       "output": "dist"
     },
