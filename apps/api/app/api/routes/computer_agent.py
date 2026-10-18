@@ -9,6 +9,7 @@ screenshot/type_text/click/key/run_app/run_shell 全部走 macOS 原生工具
 2. 执行路径统一走 app/services/computer_service.py，与聊天里的
    computer_* 工具调用共用同一份权限判断与审计逻辑。
 """
+import json
 import uuid
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from app.api.deps import assert_company_owned, get_current_user, get_db
 from app.computer_agent import ComputerActionLog, ComputerPermission
 from app.computer_real import EXTENDED_CAPABILITIES
 from app.core.logging_config import get_logger
+from app.models.intervention import ApprovalRequest, InterventionPolicy, new_id
 from app.models.user import User
 from app.services.computer_service import (
     ComputerActionDenied,
@@ -111,6 +113,21 @@ async def list_capabilities(
             "granted": status}
 
 
+# V5.5 P0 审批门：高危本机能力。公司在「干预中心」策略里勾选
+# "computer_command"（approval_actions）后，这些操作先建审批单，
+# 老板批准后才真正执行（见 intervention /requests/{id}/decide）。
+HIGH_RISK_CAPABILITIES = {"run_shell", "run_write", "run_app"}
+
+
+async def _high_risk_needs_approval(db: AsyncSession, company_id: str) -> bool:
+    """公司级策略的 approval_actions 是否含 computer_command（老板主动开启）。"""
+    policy = (await db.execute(
+        select(InterventionPolicy).where(
+            InterventionPolicy.company_id == company_id,
+            InterventionPolicy.project_id.is_(None)))).scalars().first()
+    return bool(policy and "computer_command" in (policy.approval_actions or []))
+
+
 @router.post("/execute")
 async def execute_action(
     data: ActionIn,
@@ -119,8 +136,26 @@ async def execute_action(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Agent 请求执行本机操作：检查授权 → 真实执行 → 审计落库。"""
+    """Agent 请求执行本机操作：审批门 → 检查授权 → 真实执行 → 审计落库。"""
     await assert_company_owned(db, user.id, company_id)
+
+    # ---- V5.5 P0：高危操作审批门 ----
+    if data.action_type in HIGH_RISK_CAPABILITIES and await _high_risk_needs_approval(db, company_id):
+        req = ApprovalRequest(
+            id=new_id(), company_id=company_id,
+            action_type="computer_command",
+            payload={"capability": data.action_type, "params": data.params,
+                     "agent_id": agent_id, "awaiting_execution": True},
+            requested_by_agent_id=agent_id,
+            reason=f"高危本机操作 {data.action_type}: "
+                   f"{json.dumps(data.params, ensure_ascii=False)[:200]}")
+        db.add(req)
+        await db.commit()
+        return {"status": "awaiting_approval", "approval_request_id": req.id,
+                "message": "该操作为高危动作，已生成审批单。在「干预中心」批准后自动执行，"
+                           "拒绝则丢弃。",
+                "mode": "HOLD"}
+
     try:
         outcome = await execute_computer_action(
             db, company_id=company_id, capability=data.action_type,

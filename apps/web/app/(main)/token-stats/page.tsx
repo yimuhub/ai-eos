@@ -42,7 +42,7 @@ function fmtCost(c: number): string {
   return "¥" + c.toFixed(2);
 }
 
-type Tab = "dashboard" | "pricing" | "logs";
+type Tab = "dashboard" | "pricing" | "budget" | "logs";
 
 export default function TokenAdminPage() {
   const [tab, setTab] = useState<Tab>("dashboard");
@@ -59,6 +59,12 @@ export default function TokenAdminPage() {
   const [logs, setLogs] = useState<UsageLog[]>([]);
   const [pricings, setPricings] = useState<Pricing[]>([]);
   const [models, setModels] = useState<ModelRow[]>([]);
+
+  // V5.5 P0：预算上限
+  const [budgets, setBudgets] = useState<any[]>([]);
+  const [bform, setBform] = useState({
+    scope_type: "company", limit_tokens: 0, limit_cost: 0, period: "day",
+  });
 
   const [msg, setMsg] = useState("");
   const [msgType, setMsgType] = useState<"ok" | "err">("ok");
@@ -120,10 +126,56 @@ export default function TokenAdminPage() {
   }, []);
 
   useEffect(() => { loadStats(); }, [loadStats]);
+  // ---------- V5.5 P0：预算上限 ----------
+  const loadBudgets = useCallback(async () => {
+    try {
+      const cs = await api.get("/companies").catch(() => []);
+      const cid = cs[0]?.id;
+      if (!cid) return;
+      const r = await api.get(`/token-budgets?company_id=${cid}`);
+      setBudgets(Array.isArray(r?.budgets) ? r.budgets : []);
+    } catch { /* 静默 */ }
+  }, []);
+
   useEffect(() => {
     if (tab === "pricing") loadPricing();
+    if (tab === "budget") loadBudgets();
     if (tab === "logs") loadLogs();
-  }, [tab, loadPricing, loadLogs]);
+  }, [tab, loadPricing, loadLogs, loadBudgets]);
+
+  async function saveBudget() {
+    try {
+      const cs = await api.get("/companies").catch(() => []);
+      const cid = cs[0]?.id;
+      if (!cid) return flash("还没有公司，无法设预算", "err");
+      if (!bform.limit_tokens && !bform.limit_cost) return flash("请至少填一个上限", "err");
+      await api.post(`/token-budgets?company_id=${cid}`, bform);
+      flash("✅ 预算上限已生效：到顶自动暂停（不加价惩罚）");
+      setBform({ scope_type: "company", limit_tokens: 0, limit_cost: 0, period: "day" });
+      loadBudgets();
+    } catch (e: any) { flash(e.message || String(e), "err"); }
+  }
+
+  async function toggleBudget(b: any) {
+    try {
+      const cs = await api.get("/companies").catch(() => []);
+      const cid = cs[0]?.id;
+      await api.put(`/token-budgets/${b.id}?company_id=${cid}`,
+        { enabled: !b.paused, paused: false });
+      flash(b.paused ? "✅ 已恢复执行" : "⏸ 已暂停该预算（LLM 调用将被拦截）");
+      loadBudgets();
+    } catch (e: any) { flash(e.message || String(e), "err"); }
+  }
+
+  async function deleteBudget(b: any) {
+    try {
+      const cs = await api.get("/companies").catch(() => []);
+      const cid = cs[0]?.id;
+      await api.del(`/token-budgets/${b.id}?company_id=${cid}`);
+      flash("已删除预算上限");
+      loadBudgets();
+    } catch (e: any) { flash(e.message || String(e), "err"); }
+  }
 
   async function savePricing() {
     if (!pf.model_id) return flash("请选择模型", "err");
@@ -217,7 +269,7 @@ export default function TokenAdminPage() {
           <option value={90}>最近90天</option>
         </select>
         <div className="flex rounded-lg bg-white/[0.05] p-1">
-          {([["dashboard", "📈 统计看板"], ["pricing", "💰 计费设置"], ["logs", "📜 用量流水"]] as [Tab, string][]).map(([k, label]) => (
+          {([["dashboard", "📈 统计看板"], ["pricing", "💰 计费设置"], ["budget", "🛡 预算上限"], ["logs", "📜 用量流水"]] as [Tab, string][]).map(([k, label]) => (
             <button key={k} onClick={() => setTab(k)}
               className={`px-4 py-1.5 rounded-md text-sm transition-all ${tab === k
                 ? "bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-md"
@@ -417,6 +469,99 @@ export default function TokenAdminPage() {
                 <p className="text-3xl mb-2 opacity-40">💰</p>
                 <p className="text-sm">还没有配置任何计费标准</p>
                 <p className="text-xs mt-1 opacity-70">左侧选择模型并填写单价——保存后系统开始按此标准估算每次调用的费用</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ===== V5.5 P0：预算上限（到顶就停，不加价惩罚）===== */}
+      {tab === "budget" && (
+        <div className="space-y-4">
+          <div className="card p-5">
+            <h3 className="font-medium text-[var(--foreground)] mb-1">
+              🛡 新建预算上限
+            </h3>
+            <p className="text-xs mb-3 text-[var(--muted)]">
+              一人公司成本护栏：用量到顶 → 自动暂停（任务停下等老板调额），
+              <b>不是 10 倍加价惩罚</b>。
+            </p>
+            <div className="flex flex-wrap gap-2 items-end">
+              <label className="text-xs text-[var(--muted)]">
+                Token 上限
+                <input type="number" min={0} value={bform.limit_tokens}
+                  onChange={(e) => setBform({ ...bform, limit_tokens: +e.target.value })}
+                  placeholder="如 500000"
+                  className="input w-32 !py-1.5 mt-1 block" />
+              </label>
+              <label className="text-xs text-[var(--muted)]">
+                费用上限（¥）
+                <input type="number" min={0} step="0.01" value={bform.limit_cost || ""}
+                  onChange={(e) => setBform({ ...bform, limit_cost: +e.target.value })}
+                  placeholder="如 100"
+                  className="input w-28 !py-1.5 mt-1 block" />
+              </label>
+              <label className="text-xs text-[var(--muted)]">
+                周期
+                <select value={bform.period}
+                  onChange={(e) => setBform({ ...bform, period: e.target.value })}
+                  className="input !py-1.5 mt-1 block">
+                  <option value="day">每天重置</option>
+                  <option value="total">累计不重置</option>
+                </select>
+              </label>
+              <button onClick={saveBudget} className="btn-primary !py-1.5 text-xs">
+                ＋ 保存预算
+              </button>
+            </div>
+          </div>
+
+          <div className="card p-5">
+            <h3 className="font-medium text-[var(--foreground)] mb-3">当前预算列表</h3>
+            {budgets.length === 0 ? (
+              <div className="text-center py-8 text-[var(--muted)]">
+                <p className="text-3xl mb-2 opacity-40">🛡</p>
+                <p className="text-sm">还没有预算上限</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {budgets.map((b: any) => (
+                  <div key={b.id}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-xl px-3 py-2.5 border"
+                    style={{
+                      borderColor: b.exceeded ? "rgba(239,68,68,0.4)" : "var(--border)",
+                      background: b.exceeded ? "rgba(239,68,68,0.06)" : "rgba(255,255,255,0.02)",
+                    }}>
+                    <div className="text-sm text-[var(--foreground)]">
+                      <span className="font-medium">
+                        {b.scope_type === "agent" ? "👤 员工级" : "🏢 公司级"}
+                      </span>
+                      <span className="ml-2 text-xs text-[var(--muted)]">
+                        上限 {b.limit_tokens || "∞"} token{b.limit_cost ? ` / ¥${b.limit_cost}` : ""}
+                        {" "}· {b.period === "day" ? "每日" : "累计"}
+                      </span>
+                      <div className="text-xs mt-0.5 text-[var(--muted)]">
+                        已用 {b.used_tokens ?? "—"} token{b.used_cost != null ? ` / ¥${b.used_cost}` : ""}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {b.paused && (
+                        <span className="text-xs px-2 py-0.5 rounded-full"
+                          style={{ background: "rgba(239,68,68,0.15)", color: "#f87171" }}>
+                          ⏸ 已自动暂停
+                        </span>
+                      )}
+                      <button onClick={() => toggleBudget(b)}
+                        className="btn-ghost text-xs !py-1">
+                        {b.paused ? "▶ 恢复" : "⏸ 停用"}
+                      </button>
+                      <button onClick={() => deleteBudget(b)}
+                        className="btn-ghost text-xs !py-1" style={{ color: "#f87171" }}>
+                        🗑
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>

@@ -8,7 +8,7 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             agent_chat, delivery, departments_batch, kb2, offboarding, task_dispatch,
                             test_console,
                             career,
-                            clients, pairing, diagnostics,
+                            clients, pairing, diagnostics, briefing, budgets,
                             org_presets,
                             companies, collaboration, computer_agent, context,
                             dashboard, events, health, intervention, knowledge,
@@ -43,6 +43,15 @@ async def lifespan(app: FastAPI):
         async with engine.begin() as conn:
             await conn.run_sync(lambda c: Base.metadata.create_all(c))
         logger.info("[startup] sqlite schema ensured")
+    else:
+        # PostgreSQL 的**新表**同样幂等补齐（create_all 只建缺失表，
+        # 不改已存在的表——补列仍由 Alembic 管，双轨不打架）
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(lambda c: Base.metadata.create_all(c))
+            logger.info("[startup] postgres 缺失表已幂等补齐")
+        except Exception as _pg_e:  # noqa: BLE001
+            logger.warning("[startup] postgres create_all 检查失败（不影响启动）：%s", _pg_e)
 
     # 补列：create_all 只建缺失的表，**不会给已存在的表补新列**。
     # 升级后老数据库缺少新增字段会直接报 "no such column"，
@@ -112,5 +121,6 @@ for r in (health, auth, companies, agents, agent_chat, models_api, skills, tasks
           schedules, learning, training, reflection, skill_growth, career,
           review, factory, external_agents, sandbox, automation, governance,
           offboarding, departments_batch, task_dispatch, test_console, war_room, team_generator, company_manage, tokens, experts, command, org_presets,
-          access, prometheus_metrics, clients, pairing, diagnostics):
+          access, prometheus_metrics, clients, pairing, diagnostics, briefing,
+          budgets):
     app.include_router(r.router)

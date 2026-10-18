@@ -62,6 +62,7 @@ const ACTION_LABELS: Record<string, string> = {
   meeting_start: "召开会议",
   artifact_approve: "成果验收",
   escalate: "升级请求",
+  computer_command: "🖥 高危本机操作（V5.5 审批门）",
 };
 
 export default function InterventionPage() {
@@ -118,11 +119,18 @@ export default function InterventionPage() {
   async function decide(id: string, decision: "approve" | "reject") {
     setBusyId(id);
     try {
-      const res = await api.post<{ id: string; status: string }>(
+      const res = await api.post<{ id: string; status: string; execution?: { ok: boolean; error?: string; result?: any } }>(
         `/intervention/requests/${id}/decide`,
         { decision },
       );
-      notify("success", decision === "approve" ? "已批准，Agent 将继续执行" : "已拒绝");
+      if (decision === "approve" && res?.execution) {
+        notify(res.execution.ok ? "success" : "error",
+          res.execution.ok
+            ? "已批准，高危命令已自动执行完成"
+            : `已批准但执行失败：${res.execution.error || "未知原因"}`);
+      } else {
+        notify("success", decision === "approve" ? "已批准，Agent 将继续执行" : "已拒绝");
+      }
       // 用后端返回的真实状态回填，避免本地乐观更新与后端不一致
       setReqs((prev) =>
         prev.map((r) => (r.id === id ? { ...r, status: res?.status || r.status } : r)),
@@ -150,6 +158,30 @@ export default function InterventionPage() {
       notify("success", `自动化等级已设为 ${LEVELS.find((l) => l.v === level)?.name || `L${level}`}`);
     } catch (e) {
       notify("error", describe(e, "保存自动化等级失败"));
+    } finally {
+      setSavingPolicy(false);
+    }
+  }
+
+  // ---------- V5.5 P0：高危本机操作审批门开关 ----------
+  const ccEnabled = (policy.approval_actions || []).includes("computer_command");
+  async function toggleCc(enabled: boolean) {
+    if (!companyId) return;
+    setSavingPolicy(true);
+    try {
+      const actions = new Set(policy.approval_actions || []);
+      if (enabled) actions.add("computer_command"); else actions.delete("computer_command");
+      const res = await api.put<Policy>(`/intervention/policy?company_id=${companyId}`, {
+        level: policy.level ?? 2,
+        project_id: null,
+        approval_actions: Array.from(actions),
+      });
+      setPolicy(res || policy);
+      notify("success", enabled
+        ? "已开启：高危本机操作（shell/写文件/启动应用）需你批准后才执行"
+        : "已关闭高危操作审批门");
+    } catch (e) {
+      notify("error", describe(e, "保存审批门开关失败"));
     } finally {
       setSavingPolicy(false);
     }
@@ -286,6 +318,36 @@ export default function InterventionPage() {
           {savingPolicy && (
             <p className="text-xs mt-2 text-[var(--muted)]">正在保存…</p>
           )}
+        </section>
+
+        {/* ---------- V5.5 P0：高危本机操作审批门 ---------- */}
+        <section className="card card-static p-4">
+          <h3 className="font-medium text-[var(--foreground)] mb-1">
+            🖥 高危本机操作审批门
+          </h3>
+          <p className="text-xs mb-3 text-[var(--muted)]">
+            开启后，Agent 执行 <b>shell 命令 / 写文件 / 启动应用</b> 前必须先拿到你的批准
+            （批准后自动执行）。一人公司老板的成本与安全底线。
+          </p>
+          <div className="flex items-center justify-between gap-3 rounded-xl px-3 py-2.5 border"
+            style={{ borderColor: ccEnabled ? "var(--accent)" : "var(--border)",
+                    background: ccEnabled ? "rgba(99,102,241,0.12)" : "rgba(255,255,255,0.02)" }}>
+            <div>
+              <div className="text-sm font-medium text-[var(--foreground)]">
+                {ccEnabled ? "✓ 高危操作需你批准" : "× 直接执行（不拦截）"}
+              </div>
+              <p className="text-xs mt-0.5 text-[var(--muted)]">
+                覆盖能力：run_shell · run_write · run_app
+              </p>
+            </div>
+            <button
+              onClick={() => toggleCc(!ccEnabled)}
+              disabled={!companyId || savingPolicy}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium text-white disabled:opacity-40"
+              style={{ background: ccEnabled ? "#b91c1c" : "#15803d" }}>
+              {ccEnabled ? "关闭" : "开启"}
+            </button>
+          </div>
         </section>
       </div>
 

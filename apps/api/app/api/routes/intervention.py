@@ -187,8 +187,30 @@ async def decide_request(
     req.decided_by = user.id
     req.decision_note = data.note
     req.decided_at = dt.now(tz.utc).replace(tzinfo=None)
+
+    # V5.5 P0：批准"高危本机操作"审批单后，自动补执行挂起的高危命令
+    execution_result = None
+    if req.status == "APPROVED" and req.action_type == "computer_command" \
+            and (req.payload or {}).get("awaiting_execution"):
+        from app.services.computer_service import (
+            ComputerActionDenied, execute_computer_action)
+        payload = req.payload or {}
+        try:
+            outcome = await execute_computer_action(
+                db, company_id=req.company_id,
+                capability=payload.get("capability", ""),
+                params=payload.get("params"),
+                agent_id=payload.get("agent_id"))
+            execution_result = {"ok": True, "result": outcome.get("result")}
+            payload["awaiting_execution"] = False
+        except (ComputerActionDenied, ValueError) as exc:
+            execution_result = {"ok": False, "error": str(exc)}
+        req.payload = payload
     await db.commit()
-    return {"id": req.id, "status": req.status}
+    out = {"id": req.id, "status": req.status}
+    if execution_result is not None:
+        out["execution"] = execution_result
+    return out
 
 
 # ---------- 人工覆盖 ----------

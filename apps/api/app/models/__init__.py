@@ -55,3 +55,4 @@ from app.models.p3_governance import (AgentSandbox, AgentVersion,  # noqa: F401
                                       EnterpriseTemplate, MarketplacePackage,
                                       PackageInstallation,
                                       SelfImprovementCase)
+from .budget import TokenBudget  # noqa: F401

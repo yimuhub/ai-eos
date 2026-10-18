@@ -8,16 +8,26 @@ import time
 from abc import ABC, abstractmethod
 
 import httpx
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import contextvars
 
 from app.core.logging_config import get_logger
 from app.models.agent import Model, ModelProviderType
+from app.models.budget import TokenBudget
+from app.models.token_usage import TokenUsage
 
 logger = get_logger(__name__)
 
 # 调用上下文（ContextVar 支持并发请求各自隔离）
+
+
+class BudgetExhausted(RuntimeError):
+    """V5.5 P0：token 预算到顶，自动暂停（不是加价惩罚）。
+
+    老板在「Token 统计 → 预算上限」调高/关闭后立即恢复。
+    """
 
 usage_ctx: contextvars.ContextVar = contextvars.ContextVar("usage_ctx", default=None)
 
@@ -355,6 +365,55 @@ class ModelGateway:
             )
         return plugin_obj
 
+    async def _enforce_budget(self, ctx: dict | None) -> None:
+        """V5.5 P0 成本护栏：LLM 调用前检查 token 预算上限，到顶即抛暂停。"""
+        if not ctx:
+            return
+        agent_obj = ctx.get("agent")
+        company_id = ctx.get("company_id") or getattr(agent_obj, "company_id", None)
+        agent_id = getattr(agent_obj, "id", None) or ctx.get("agent_id")
+        if not company_id:
+            return
+        budgets = (await self.db.execute(
+            select(TokenBudget).where(
+                TokenBudget.company_id == company_id,
+                TokenBudget.enabled == True))).scalars().all()  # noqa: E712
+        if not budgets:
+            return
+        from datetime import datetime as _dt
+        today_start = _dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        for b in budgets:
+            if b.scope_type == "agent" and b.scope_id != agent_id:
+                continue
+            q = select(
+                func.coalesce(func.sum(TokenUsage.total_tokens), 0),
+                func.coalesce(func.sum(TokenUsage.total_cost), 0.0),
+            ).where(TokenUsage.company_id == company_id)
+            if b.scope_type == "agent" and b.scope_id:
+                q = q.where(TokenUsage.agent_id == b.scope_id)
+            if b.period == "day":
+                q = q.where(TokenUsage.created_at >= today_start)
+            row = (await self.db.execute(q)).one()
+            tokens, cost = int(row[0]), float(row[1])
+            exceeded = ((b.limit_tokens and tokens >= b.limit_tokens)
+                        or (b.limit_cost and cost >= b.limit_cost))
+            if not exceeded:
+                continue
+            if not b.paused:
+                b.paused = True
+                b.paused_reason = (f"用量到顶（{tokens}/"
+                                    f"{'∞' if not b.limit_tokens else b.limit_tokens}"
+                                    f" token, ¥{cost:.2f}/"
+                                    f"{'∞' if not b.limit_cost else b.limit_cost:.2f}），已自动暂停")
+                try:
+                    await self.db.commit()
+                except Exception:
+                    pass
+            raise BudgetExhausted(
+                f"token 预算上限已触发，执行已自动暂停：已用 {tokens} token"
+                f"（上限 {b.limit_tokens or '∞'}）。老板可在「Token 统计 → 预算上限」"
+                f"调高额度或暂停该上限后立即恢复。")
+
     async def chat_with_agent_models(
         self,
         model_ids: list[str],
@@ -377,6 +436,8 @@ class ModelGateway:
 
         last_error: Exception | None = None
         ctx = usage_ctx.get()
+        # V5.5 P0：预算上限预检查（到顶抛 BudgetExhausted，任务停下等老板调额）
+        await self._enforce_budget(ctx)
         attempted = 0
         missing: list[str] = []
         failures: list[str] = []  # 每次失败的摘要，最终异常附全部（不再只留最后一次）

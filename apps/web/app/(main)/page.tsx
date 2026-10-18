@@ -24,6 +24,14 @@ type Dash = {
   recent_events: { event_type: string; payload: any; created_at: string }[];
 };
 type RTask = { id: string; title: string; status: string; priority: string };
+type Briefing = {
+  greeting: string;
+  yesterday: { completed_tasks: { title: string }[]; automation_ok: number; automation_failed: number };
+  today: { active_tasks: { title: string; status: string }[]; todo_count: number;
+           meetings: { title: string; status: string }[]; automation_runs_today: number };
+  needs_you: { count: number; items: { kind: string; text: string; goto: string }[] };
+  cost_today: { cost: number; tokens: number };
+};
 
 const TASK_BADGE: Record<string, { cls: string; dot: string }> = {
   RUNNING: { cls: "text-cyan-300", dot: "bg-cyan-400" },
@@ -72,6 +80,9 @@ export default function DashboardPage() {
   // 冷启动向导：没有公司时不再白屏，而是给出可执行的三步引导
   const [onboarding, setOnboarding] = useState(false);
   const [bootError, setBootError] = useState("");
+
+  // V5.5 P0：CEO 晨间简报（昨日完成 / 今日计划 / 需要你决策）
+  const [briefing, setBriefing] = useState<Briefing | null>(null);
 
   useEffect(() => { setMounted(true); }, []);
 
@@ -126,16 +137,29 @@ export default function DashboardPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  /* V5.5 P0：CEO 晨间简报低频刷新（30s），不跟 5s 实时循环抢连接 */
+  const loadBriefing = useCallback(async () => {
+    const cid = localStorage.getItem("aieos_active_cid");
+    if (!cid) return;
+    try { setBriefing(await api.get<Briefing>(`/briefing?company_id=${cid}`)); }
+    catch { /* 简报失败不打扰指挥中心主流程 */ }
+  }, []);
+  useEffect(() => {
+    loadBriefing();
+    const t = window.setInterval(loadBriefing, 30000);
+    return () => window.clearInterval(t);
+  }, [loadBriefing]);
+
   /* 指挥中心需要"实时"：任务正在跑，5 秒一次的新鲜度是合理的。
      但**页面在后台时不该继续打后端**——用户看不见的刷新是纯粹的成本，
      还可能与真正的前台请求抢连接。切回来自动补一次，避免第一眼是旧数据。 */
   useVisibilityInterval(load, 5000);
 
   useEffect(() => {
-    const onSwitch = () => load();
+    const onSwitch = () => { load(); loadBriefing(); };
     window.addEventListener("aieos-company-changed", onSwitch);
     return () => window.removeEventListener("aieos-company-changed", onSwitch);
-  }, [load]);
+  }, [load, loadBriefing]);
 
   /* ---------- 部门化选人 ---------- */
   const allAgentIds = deptGroups.flatMap((g) => g.agents.map((a) => a.id));
@@ -366,6 +390,98 @@ export default function DashboardPage() {
         <div className="px-4 py-2 rounded-lg text-sm"
           style={{ background: "rgba(99,102,241,0.1)", color: "#a5b4fc", border: "1px solid rgba(99,102,241,0.25)" }}>
           {msg}
+        </div>
+      )}
+
+      {/* ===== V5.5 P0：CEO 晨间简报（一人公司老板视角）===== */}
+      {briefing && (
+        <div className="card card-static relative overflow-hidden">
+          <div className="absolute top-0 left-0 w-full h-[2px]"
+            style={{ background: "linear-gradient(90deg, #f59e0b, #ef4444, transparent)" }} />
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <div>
+              <h2 className="font-semibold text-sm">🌅 {briefing.greeting || "CEO 晨间简报"}</h2>
+              <p className="text-xs mt-0.5" style={{ color: "var(--muted)" }}>
+                昨日完成 · 今日计划 · 需要你决策
+              </p>
+            </div>
+            <div className="flex items-center gap-2 text-xs">
+              <span className="px-2 py-1 rounded-full font-medium"
+                style={{ background: "rgba(245,158,11,0.12)", color: "#fbbf24",
+                        border: "1px solid rgba(245,158,11,0.3)" }}>
+                今日已用 ¥{briefing.cost_today?.cost ?? 0} · {briefing.cost_today?.tokens ?? 0} token
+              </span>
+              {briefing.needs_you?.count > 0 && (
+                <span className="px-2 py-1 rounded-full font-medium"
+                  style={{ background: "rgba(239,68,68,0.12)", color: "#f87171",
+                          border: "1px solid rgba(239,68,68,0.3)" }}>
+                  ⚠ {briefing.needs_you.count} 件事需要你
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+            <div className="rounded-lg p-3"
+              style={{ background: "rgba(16,185,129,0.06)", border: "1px solid rgba(16,185,129,0.18)" }}>
+              <div className="text-xs font-semibold mb-2" style={{ color: "#34d399" }}>
+                ✅ 昨日完成
+              </div>
+              <ul className="space-y-1 text-xs">
+                {(briefing.yesterday?.completed_tasks || []).slice(0, 3).map((t, i) => (
+                  <li key={i} className="truncate" style={{ color: "var(--muted)" }}>· {t.title}</li>
+                ))}
+                {(briefing.yesterday?.completed_tasks || []).length === 0 && (
+                  <li style={{ color: "var(--muted)" }}>暂无完成任务</li>
+                )}
+                <li style={{ color: "var(--muted)" }}>
+                  自动化：{briefing.yesterday?.automation_ok ?? 0} 成功
+                  {briefing.yesterday?.automation_failed ? ` · ${briefing.yesterday.automation_failed} 失败` : ""}
+                </li>
+              </ul>
+            </div>
+            <div className="rounded-lg p-3"
+              style={{ background: "rgba(34,211,238,0.06)", border: "1px solid rgba(34,211,238,0.18)" }}>
+              <div className="text-xs font-semibold mb-2" style={{ color: "#22d3ee" }}>
+                📋 今日计划
+              </div>
+              <ul className="space-y-1 text-xs">
+                {(briefing.today?.active_tasks || []).slice(0, 2).map((t, i) => (
+                  <li key={i} className="truncate" style={{ color: "var(--foreground)" }}>
+                    · {t.title} <span style={{ color: "var(--muted)" }}>({t.status})</span>
+                  </li>
+                ))}
+                <li style={{ color: "var(--muted)" }}>
+                  待办 {briefing.today?.todo_count ?? 0} · 会议
+                  {(briefing.today?.meetings || []).slice(0, 1).map((m, i) => (
+                    <span key={i} className="ml-1">{m.title}</span>
+                  ))}
+                </li>
+                <li style={{ color: "var(--muted)" }}>今日自动化已跑 {briefing.today?.automation_runs_today ?? 0} 次</li>
+              </ul>
+            </div>
+            <div className="rounded-lg p-3"
+              style={{ background: "rgba(239,68,68,0.05)", border: "1px solid rgba(239,68,68,0.18)" }}>
+              <div className="text-xs font-semibold mb-2" style={{ color: "#f87171" }}>
+                ⚠ 需要你决策（{briefing.needs_you?.count ?? 0}）
+              </div>
+              <ul className="space-y-1">
+                {(briefing.needs_you?.items || []).slice(0, 3).map((it, i) => (
+                  <li key={i}>
+                    <Link href={it.goto}
+                      className="text-xs hover:underline block truncate"
+                      style={{ color: "var(--foreground)" }}>
+                      <span style={{ color: "#fbbf24" }}>[{it.kind}]</span> {it.text}
+                    </Link>
+                  </li>
+                ))}
+                {(briefing.needs_you?.count ?? 0) === 0 && (
+                  <li className="text-xs" style={{ color: "var(--muted)" }}>
+                    一切正常，无需干预 👌
+                  </li>
+                )}
+              </ul>
+            </div>
+          </div>
         </div>
       )}
 

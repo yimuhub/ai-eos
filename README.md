@@ -206,6 +206,16 @@ Beyond cloud SaaS, AI-EOS runs as a **local LAN office**:
 
 ---
 
+## 🏢 V5.5 One-Person Company Upgrades (P0)
+
+Per the industry research in [`docs/调研报告_Agent公司与一人公司_2026-10.md`](docs/调研报告_Agent公司与一人公司_2026-10.md), AI-EOS now covers the three highest-leverage gaps that let **one human run a real AI company** safely:
+
+- **🌅 CEO Morning Briefing**: the dashboard opens with *yesterday's results / today's plan / decisions that need you* plus a live cost chip — all derived from existing audit data (`GET /briefing`, zero new tables).
+- **🖥 High-risk action approval gate**: with the switch on, agents must get the boss's approval before running **shell commands / file writes / app launches**; approving auto-executes the pending command, rejecting discards it (two-layer defense: capability grant **and** boss approval).
+- **🛡 Token budget cap**: set daily/total token or ¥ limits per company or per agent; when the ceiling is hit, work **pauses** (no punitive overage pricing), and raising the limit instantly resumes execution. Managed on the Token-Stats page's new *预算上限* tab.
+
+---
+
 ## 📜 License & Copyright Terms
 
 - **Copyright Entity & Licensor**: eos.hyipf.com
