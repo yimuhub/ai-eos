@@ -1,0 +1,210 @@
+# AI-EOS 多平台客户端流水线（V5.1）
+# 产出：Mac(dmg+zip) / Windows(nsis+portable) / Linux(AppImage+deb) / Android(发布版 APK)
+# 触发：手动（workflow_dispatch）或 push 标签 clients-*
+name: clients
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release 标签（留空自动生成 clients-<日期>）"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "clients-*"
+
+concurrency:
+  group: clients-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------- 桌面：macOS ----------
+  desktop-mac:
+    runs-on: macos-latest   # Apple Silicon runner，x64/arm64 双架构
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: 安装依赖
+        working-directory: desktop
+        run: npm ci --no-audit --no-fund
+      - name: 构建 dmg + zip（x64/arm64）
+        working-directory: desktop
+        run: npx electron-builder --mac
+      - name: 收集产物
+        run: |
+          mkdir -p out/mac
+          cp desktop/dist/AI-EOS-*.dmg desktop/dist/AI-EOS-*.zip out/mac/ 2>/dev/null || cp desktop/dist/*.dmg desktop/dist/*.zip out/mac/ 2>/dev/null
+          ls -lh out/mac/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-mac
+          path: out/mac
+          retention-days: 14
+
+  # ---------- 桌面：Windows ----------
+  desktop-win:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: 安装依赖
+        working-directory: desktop
+        run: npm ci --no-audit --no-fund
+      - name: 构建 NSIS 安装器 + portable 绿色版
+        working-directory: desktop
+        run: npx electron-builder --win
+      - name: 收集产物
+        run: |
+          New-Item -ItemType Directory -Force out/win | Out-Null
+          Copy-Item desktop/dist/*Setup*.exe, desktop/dist/*portable*.exe out/win/ -ErrorAction SilentlyContinue
+          Get-ChildItem out/win | Format-Table Name, Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-win
+          path: out/win
+          retention-days: 14
+
+  # ---------- 桌面：Linux ----------
+  desktop-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: 安装依赖
+        working-directory: desktop
+        run: npm ci --no-audit --no-fund
+      - name: 构建 AppImage + deb
+        working-directory: desktop
+        run: npx electron-builder --linux
+      - name: 收集产物
+        run: |
+          mkdir -p out/linux
+          cp desktop/dist/*.AppImage desktop/dist/*.deb out/linux/ 2>/dev/null
+          ls -lh out/linux/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux
+          path: out/linux
+          retention-days: 14
+
+  # ---------- Android：发布版 APK（自签 p12） ----------
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: 安装依赖
+        working-directory: mobile
+        run: npm ci --no-audit --no-fund
+      - name: expo prebuild 生成原生工程
+        working-directory: mobile
+        run: npx expo prebuild -p android --no-install
+      - name: 注入 release 签名配置（p12 自签）
+        working-directory: mobile/android
+        run: |
+          python3 - <<'PY'
+          import re, pathlib
+          g = pathlib.Path("app/build.gradle")
+          s = g.read_text()
+          # 已有 signingConfigs 则跳过
+          if "signingConfigs" not in s:
+              # 在 android { 内追加 signingConfigs + buildTypes.release 引用
+              anchor = "buildTypes {"
+              i = s.index(anchor)
+              block = (
+                  "    signingConfigs {\n"
+                  "        release {\n"
+                  "            storeFile file('../../packaging/keystore/ai-eos.p12')\n"
+                  "            storeType 'p12'\n"
+                  "            storePassword 'aieos2026'\n"
+                  "            keyAlias 'aieos'\n"
+                  "            keyPassword 'aieos2026'\n"
+                  "        }\n"
+                  "    }\n"
+              )
+              # 插到 buildTypes 块前
+              s = s[:i] + block + s[i:]
+              # release 加 signingConfig
+              s = s.replace("release {", "release {\n                signingConfig signingConfigs.release", 1)
+          g.write_text(s)
+          print("build.gradle 签名配置注入完成")
+          PY
+      - name: gradle 构建 release APK
+        working-directory: mobile/android
+        run: |
+          yes | ./gradlew :app:assembleRelease --no-daemon --stacktrace
+      - name: 收集 APK
+        run: |
+          mkdir -p out/android
+          cp mobile/android/app/build/outputs/apk/release/app-release.apk "out/android/AI-EOS-Android-v5.1.0.apk"
+          ls -lh out/android/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: out/android
+          retention-days: 30
+
+  # ---------- 汇总：发 Release + 挂全部安装包 ----------
+  release:
+    needs: [desktop-mac, desktop-win, desktop-linux, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: 定标签
+        id: tag
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="clients-$(date +%Y%m%d)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: 创建 Release 并附安装包
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 展平产物到 release-files/（文件名去重）
+          mkdir -p release-files
+          find artifacts -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.apk" \) \
+            -exec sh -c 'f="${1}"; b="$(basename "$f")"; n=1; while [ -e "release-files/$b" ]; do b="$(basename "$f" .${b##*.})-${n}.${b##*.}"; n=$((n+1)); done; cp "$f" "release-files/$b"' _ {} \;
+          ls -lh release-files/
+          # 若同名 Release 已存在则先删
+          gh release delete "${{ steps.tag.outputs.tag }}" --cleanup-tag --yes 2>/dev/null || true
+          BODY="## AI-EOS V5.1 客户端
+
+          | 平台 | 文件 | 安装方式 |
+          |---|---|---|
+          | macOS (Apple Silicon / Intel) | .dmg / .zip | 拖入 应用 目录即可；首次打开右键→打开（自签） |
+          | Windows | *Setup.exe (NSIS) / *portable.exe | 双击安装 / 绿色版直接运行 |
+          | Linux | .AppImage（自包含）/ .deb | chmod +x 后双击 / dpkg -i |
+          | Android | AI-EOS-Android-v5.1.0.apk | 传到手机，允许「未知来源」后安装 |
+
+          **说明**
+          - 桌面客户端是 Electron 壳：它负责把 AI-EOS 前端装进原生窗口。安装后首次打开若显示「服务未检测到」引导页，按引导连接你的 AI-EOS 服务（本机便携版 / 一键部署 / 远程服务器），或点「更换服务器」填地址。
+          - 开发机场景（仓库内 `npm start`）仍会自动拉起本地服务，行为不变。
+          - 安装包均为内部自签（未做 Apple/Windows 公证），分发给自己/团队设备时按系统提示放行即可。"
+          gh release create "${{ steps.tag.outputs.tag }}" --title "AI-EOS V5.1 客户端（Mac/Windows/Linux/Android）" --notes "$BODY" --latest --verify release-files/*

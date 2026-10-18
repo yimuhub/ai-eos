@@ -38,3 +38,8 @@ packaging/*.zip
 packaging/*.tar.gz
 vendor/agency-agents-zh-archive/
 tsconfig.tsbuildinfo
+
+# 客户端生成物（不入库；keystore 除外——CI 签 APK 需要它）
+mobile/android/
+mobile/.expo/
+desktop/dist/
