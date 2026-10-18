@@ -3,6 +3,34 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的组织方式。
 完整的工程质量改造记录见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
 
+## [5.2.0] 客户端自动升级 — 2026-10-18
+
+> 各端客户端启动后自动从「你自己的服务器」检查并升级，不再需要手动找 Release 重新下载。
+
+### 后端：更新通道 API（apps/api/app/api/routes/clients.py）
+- `GET /clients/update/check?platform=&arch=&current=`：与 `storage/clients/manifest.json` 比对版本号，返回是否有新版 + 安装包下载 URL + 大小 + 更新说明；manifest 未部署时优雅返回 `has_update=false`（客户端静默，零影响）
+- `GET /clients/update/download/{filename}`：下发 `storage/clients/` 下的安装包（防目录穿越）
+
+### 桌面壳（Electron）
+- 启动后自动检查更新：新版本 → 底部浮出升级横幅（新特性说明 + 进度条）
+- 一键升级（按平台自动应用）：
+  - **Windows**：NSIS 静默安装（`/S`）→ 自动重启，全程无感
+  - **macOS**：自动打开 dmg 安装器并引导替换 /Applications（替换系统目录需要管理员权限，无法完全静默）
+  - **Linux**：AppImage 场景原地替换并自动重启；权限不足时引导手动替换
+- 菜单「查看 → 检查更新」手动触发；下载/安装/重启进度事件实时回推前端
+
+### Android（Expo）
+- 服务连接页新增「自动升级」区：检查更新 → 发现新版 → 下载 APK（带进度）→ 系统分享面板选择「安装」（react-native-share）
+
+### 发布工具（tools/publish_client_updates.py）
+- 一条命令从 GitHub Release 拉 5 个主安装包 → 写入服务器更新目录 + 生成 manifest.json
+- 凭证自动读 `~/Documents/张阗/.github_token`（或 `GH_TOKEN`）
+- 用法：`python3 tools/publish_client_updates.py [--release 标签] [--dir 目录]`
+
+### 验证
+- 后端 check/download API 全链路通（真实 manifest + 真实安装包）
+- web / mobile / desktop 三方类型与语法检查全过
+
 ## [5.1.0] 多平台客户端（Mac / Windows / Linux / Android）— 2026-10-18
 
 > 把 AI-EOS 打成「直接安装」的客户端安装包。iOS / 鸿蒙本迭代不做。

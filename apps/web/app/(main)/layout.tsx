@@ -6,6 +6,7 @@ import ToastHost from "@/components/Toast";
 import ConfirmHost from "@/components/ConfirmDialog";
 import CommandPalette from "@/components/CommandPalette";
 import GlobalShortcuts from "@/components/GlobalShortcuts";
+import UpdateBanner from "@/components/UpdateBanner";
 import { api, ApiError, getToken } from "@/lib/api";
 
 /**
@@ -80,6 +81,8 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
       <CommandPalette />
       {/* 全局快捷键（n / / j k / 空格 / ?）：与命令面板互不干扰 */}
       <GlobalShortcuts />
+      {/* 自动升级横幅：只在桌面壳里工作，浏览器访问零渲染 */}
+      <UpdateBanner />
       <Layout>{children}</Layout>
     </>
   );

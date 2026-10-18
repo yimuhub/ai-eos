@@ -33,6 +33,7 @@ let frontProc = null;
 let mainWindow = null;
 let quitting = false;
 let _shuttingDown = false;
+let _updating = false;
 
 // ---------- 服务器设置（userData/settings.json） ----------
 function settingsFile() { return path.join(app.getPath("userData"), "settings.json"); }
@@ -258,6 +259,10 @@ function buildMenu() {
       { role: "togglefullscreen" },
       { type: "separator" },
       {
+        label: "检查更新",
+        click: () => checkNowSelf(),
+      },
+      {
         label: "更换服务器地址",
         click: () => promptServerAndApply(),
       },
@@ -303,12 +308,134 @@ function promptServerAndApply() {
   });
 }
 
+// ---------- 自动升级（更新源：你自己服务器上的 /clients/update/*） ----------
+function guessApiBase() {
+  const s = loadSettings();
+  if (s.apiBase) return String(s.apiBase).replace(/\/$/, "");
+  const { frontUrl } = currentSettings();
+  try {
+    const u = new URL(frontUrl);
+    // 便携/一键部署约定：前端 8000（或未显式指定端口）→ API 8001；其余同端口
+    const isFrontDefault = u.port === "" || u.port === "8000";
+    const apiPort = isFrontDefault ? "8001" : (u.port || "8000");
+    return `${u.protocol}//${u.hostname}:${apiPort}`;
+  } catch { return frontUrl; }
+}
+
+async function checkUpdateRemote() {
+  const base = guessApiBase();
+  const url = `${base}/clients/update/check?platform=${process.platform}&arch=${process.arch}&current=${app.getVersion()}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+function updateEvents(payload) {
+  if (mainWindow) mainWindow.webContents.send("update:event", payload);
+}
+
+async function downloadToFile(url, dest, onProgress) {
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  const res = await fetch(url, { signal: AbortSignal.timeout(300000) });
+  if (!res.ok) throw new Error(`下载失败 HTTP ${res.status}`);
+  const total = Number(res.headers.get("content-length") || 0);
+  const fileStream = fs.createWriteStream(dest);
+  let got = 0;
+  for await (const chunk of res.body) {
+    got += chunk.length;
+    fileStream.write(chunk);
+    if (total) onProgress && onProgress(Math.round((got / total) * 100));
+  }
+  await new Promise((r, j) => { fileStream.end(() => fileStream.closed ? r() : fileStream.on("close", r)); fileStream.on("error", j); });
+  return got;
+}
+
+async function applyUpdate(file) {
+  const dest = path.join(app.getPath("userData"), "updates", file);
+  if (isWin) {
+    // NSIS 静默覆盖安装 → 重启
+    updateEvents({ phase: "installing", file });
+    const p = spawn(dest, ["/S"], { detached: true, stdio: "ignore" });
+    p.unref();
+    setTimeout(() => { killProc(apiProc); killProc(frontProc); app.relaunch(); app.exit(0); }, 1500);
+    return;
+  }
+  if (isMac) {
+    // dmg/zip：挂载后引导替换（无法无管理员密码静默替换 /Applications）
+    await shell.openPath(dest);
+    updateEvents({ phase: "manual", dest, tip: isMac && file.endsWith(".dmg")
+      ? "安装器已打开：把 AI-EOS 拖到「应用程序」替换旧版即可"
+      : "请解压并把 AI-EOS.app 替换到 应用程序 目录" });
+    return;
+  }
+  // Linux：AppImage 场景尝试原地替换
+  if (/AI-EOS.*\.AppImage$/.test(process.execPath)) {
+    try {
+      fs.renameSync(dest, process.execPath);
+      updateEvents({ phase: "restarting" });
+      killProc(apiProc); killProc(frontProc);
+      app.relaunch();
+      app.exit(0);
+      return;
+    } catch { /* 权限不足 → 走手动 */ }
+  }
+  updateEvents({ phase: "manual", dest, tip: "下载完成。请用该文件替换原 AppImage / 重新安装 deb" });
+}
+
+async function runUpdateFlow(info) {
+  if (_updating) return { ok: false, error: "已有更新在下载中" };
+  _updating = true;
+  try {
+    updateEvents({ phase: "downloading", pct: 0, file: info.file });
+    const bytes = await downloadToFile(info.url, path.join(app.getPath("userData"), "updates", info.file),
+      (pct) => updateEvents({ phase: "downloading", pct, file: info.file }));
+    updateEvents({ phase: "done", file: info.file, bytes });
+    await applyUpdate(info.file);
+    return { ok: true };
+  } catch (e) {
+    _updating = false;
+    updateEvents({ phase: "error", error: String(e && e.message || e) });
+    return { ok: false, error: String(e && e.message || e) };
+  }
+}
+
+function checkNowSelf() {
+  checkUpdateRemote().then((info) => {
+    if (info.has_update && info.url) {
+      const target = guessApiBase() + info.url;
+      dialog.showMessageBox(mainWindow, {
+        title: "发现新版本",
+        message: `AI-EOS ${info.latest} 可用（当前 ${app.getVersion()}）`,
+        detail: (info.notes || "").slice(0, 300) + "\n\n现在下载并升级？",
+        buttons: ["稍后", "立即升级"],
+      }).then((r) => {
+        if (r.response === 1) runUpdateFlow({ url: target, file: info.file, platform: process.platform });
+      });
+    } else {
+      dialog.showMessageBox(mainWindow, {
+        title: "已是最新版",
+        message: `AI-EOS ${app.getVersion()} 已是最新版本`,
+        detail: info.message || "",
+        buttons: ["好"],
+      });
+    }
+  }).catch((e) => {
+    dialog.showMessageBox(mainWindow, {
+      title: "检查更新失败",
+      message: "无法连接更新通道",
+      detail: `${guessApiBase()}\n${e && e.message}`,
+      buttons: ["好"],
+    });
+  });
+}
+
 // ---------- IPC ----------
 function registerIpc() {
   ipcMain.handle("desktop:env", () => {
     const s = currentSettings();
     return {
       platform: process.platform,
+      arch: process.arch,
       api: s.apiUrl,
       front: s.frontUrl,
       dataDir: DATA_DIR,
@@ -325,6 +452,15 @@ function registerIpc() {
   });
   ipcMain.handle("desktop:changeServer", async () => {
     promptServerAndApply();
+  });
+  // 自动升级：前端横幅 / 菜单 都能触发
+  ipcMain.handle("desktop:startUpdate", (e, info) => {
+    // info: { url, file, platform } —— 前端用自己的 API base 拼好完整 url
+    return runUpdateFlow(info);
+  });
+  ipcMain.handle("desktop:checkNow", () => {
+    checkNowSelf();
+    return true;
   });
 }
 
