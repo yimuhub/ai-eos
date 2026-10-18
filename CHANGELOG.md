@@ -3,6 +3,28 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的组织方式。
 完整的工程质量改造记录见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
 
+## [5.1.0] 多平台客户端（Mac / Windows / Linux / Android）— 2026-10-18
+
+> 把 AI-EOS 打成「直接安装」的客户端安装包。iOS / 鸿蒙本迭代不做。
+
+### 桌面客户端（Electron，desktop/）
+- 新品牌图标（深色玻璃拟态 + 渐变轨道环 + AI/EOS 字标 + 呼吸点），多尺寸 ico/png
+- 主进程重构：服务器地址可配置（`userData/settings.json`，可指向本机便携 / 远程自托管）
+  - **打包安装场景**：app 内无仓库文件时不再强拉服务——探测不到服务显示「服务未检测到」引导页（玻璃拟态，可重试 / 换服务器 / 打开数据目录）
+  - **开发场景**（仓库内 `npm start`）保留原行为：复用已监听端口，否则自拉起后端(8001)+前端(8000)
+- 产物：`AI-EOS-5.1.0.dmg`（Intel）/ `AI-EOS-5.1.0-arm64.dmg`（Apple Silicon）/ 同名 zip ×2
+- 验证：electron-builder 双架构构建 0 错、SMOKE 冒烟 0 错、打包 .app 实跑正常加载运行中的服务
+
+### Android 客户端（Expo，mobile/）
+- 老板视角 App（KPI / 一句话 / 签字门 / 连接服务器），V4.1 起已有
+- 本次：`versionCode` 补齐、真图标替换 1×1 占位、版本 → 5.1.0
+- 自签 p12 keystore（`packaging/keystore/ai-eos.p12`，100 年有效期）→ gradle `assembleRelease` 出发布版 APK
+
+### 客户端流水线（.github/workflows/clients.yml）
+- 4 平台并行：macos-latest(dmg+zip) / windows-latest(NSIS 安装器 + 绿色版) / ubuntu-latest(AppImage + deb + Android APK)
+- 汇总 job 自动发 GitHub Release，挂全部安装包（tag `clients-*` 或手动 dispatch 触发）
+- 说明：安装包均为内部自签（未做 Apple/Windows 公证）——分发给自己的设备时按系统提示放行即可
+
 ## [5.0.3] 附件口补全（建团队 / 冷启动 / 部门 / 项目）— 2026-10-18
 
 > 延续 V5.0.2 全系统附件口：把剩余输入表单的📎接通，并修掉一处「附件口在 UI 但 payload 漏发」的假成功。
