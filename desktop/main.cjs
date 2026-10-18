@@ -116,9 +116,11 @@ function startApi() {
     PYTHONPATH: path.join(ROOT, "apps/api"),
   };
   const useUv = fs.existsSync(path.join(ROOT, ".venv")) || process.env.UV === "1";
+  // 0.0.0.0：允许同局域网的手机/其他设备扫码接入（V5.3 局域网共享）；
+  // 数据仍是本机 SQLite，访问控制靠登录鉴权（不对外开放匿名写接口）
   const args = useUv
-    ? ["run", "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", String(DEFAULT_API_PORT), "--log-level", "info"]
-    : ["-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", String(DEFAULT_API_PORT), "--log-level", "info"];
+    ? ["run", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", String(DEFAULT_API_PORT), "--log-level", "info"]
+    : ["-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", String(DEFAULT_API_PORT), "--log-level", "info"];
   apiProc = spawn(useUv ? "uv" : py, args, {
     cwd: path.join(ROOT, "apps/api"),
     env,
@@ -261,6 +263,14 @@ function buildMenu() {
       {
         label: "检查更新",
         click: () => checkNowSelf(),
+      },
+      {
+        label: "📡 局域网共享（手机扫码接入）",
+        click: () => {
+          if (!mainWindow) return;
+          mainWindow.webContents.executeJavaScript(
+            "location.assign('/lan-share')").catch(() => {});
+        },
       },
       {
         label: "更换服务器地址",
@@ -500,6 +510,49 @@ function registerIpc() {
     checkNowSelf();
     return true;
   });
+  // 开机自启（V5.3）：mac/win 用系统登录项，linux 写 XDG autostart
+  ipcMain.handle("desktop:getAutoLaunch", () => {
+    try {
+      if (process.platform === "linux") {
+        return fs.existsSync(path.join(os.homedir(), ".config/autostart/aieos.desktop"));
+      }
+      return app.getLoginItemSettings().openAtLogin;
+    } catch { return false; }
+  });
+  ipcMain.handle("desktop:setAutoLaunch", (_e, enabled) => {
+    const on = !!enabled;
+    try {
+      if (process.platform === "linux") {
+        const dir = path.join(os.homedir(), ".config/autostart");
+        fs.mkdirSync(dir, { recursive: true });
+        const f = path.join(dir, "aieos.desktop");
+        if (on) {
+          fs.writeFileSync(f, [
+            "[Desktop Entry]",
+            "Type=Application",
+            "Name=AI-EOS",
+            "Comment=AI-EOS 桌面版",
+            `Exec=${process.execPath}`,
+            "Terminal=false",
+            "X-GNOME-Autostart-enabled=true",
+            "",
+          ].join("\n"));
+        } else if (fs.existsSync(f)) {
+          fs.unlinkSync(f);
+        }
+      } else {
+        app.setLoginItemSettings({ openAtLogin: on });
+      }
+    } catch (e) { log(`设置开机自启失败: ${e.message}`); }
+    try { return ipcGetAutoLaunch(); } catch { return on; }
+  });
+}
+
+function ipcGetAutoLaunch() {
+  if (process.platform === "linux") {
+    return fs.existsSync(path.join(os.homedir(), ".config/autostart/aieos.desktop"));
+  }
+  return app.getLoginItemSettings().openAtLogin;
 }
 
 // ---------- 清理子进程 ----------

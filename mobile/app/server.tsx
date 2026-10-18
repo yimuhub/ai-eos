@@ -173,6 +173,11 @@ export default function Server() {
 
       {/* 服务地址 */}
       <View style={{ gap: 10 }}>
+        <Text style={{ fontSize: 12, color: "#8b93a7", marginBottom: 4 }}>
+          📡 手机扫码接入：桌面版「局域网共享」页的二维码就是 Web 入口；
+          App 直连则填它展示的 <Text style={{ color: "#c3c9d6" }}>API 地址</Text>（如 http://192.168.x.x:8001），
+          手机需与电脑同一 WiFi。
+        </Text>
         <TextInput
           value={base}
           onChangeText={setBase}

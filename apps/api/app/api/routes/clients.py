@@ -111,3 +111,62 @@ def download_update(filename: str):
     if not fpath.is_file():
         raise HTTPException(404, "更新文件不存在")
     return FileResponse(fpath, filename=safe, media_type="application/octet-stream")
+
+
+# ---------- 局域网共享（V5.3）：手机扫码接入 ----------
+import socket
+
+from fastapi import Depends
+
+from app.api.deps import get_current_user
+
+
+def _detect_lan_ip() -> str:
+    """探测本机对外的局域网 IPv4。
+
+    ① UDP "connect" 8.8.8.8：不实际发包，只是让内核选出「出去会用的网卡」，
+    拿到其源 IP（多网卡机器上比 gethostname 靠谱）；
+    ② 兜底：枚举本机所有 IPv4，挑第一个私网段（10/172.16-31/192.168）；
+    ③ 都失败返回 127.0.0.1（前端会提示「无法确定局域网地址」）。
+    全程无新依赖、不阻塞（超时 0.5s）。
+    """
+    def _is_lan(ip: str) -> bool:
+        return ip.startswith(("10.", "192.168.")) or ip.startswith("172.")
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.5)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and ip != "127.0.0.1" and (ip == "0.0.0.0" or _is_lan(ip)):
+            return "127.0.0.1" if ip == "0.0.0.0" else ip
+    except OSError:
+        pass
+    try:
+        for family, _mode, _ttl, _socktype, sockaddr in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            if family != socket.AF_INET:
+                continue
+            ip = sockaddr[0]  # AF_INET 的 sockaddr = (ip, port)
+            if isinstance(ip, str) and _is_lan(ip):
+                return ip
+    except OSError:
+        pass
+    return "127.0.0.1"
+
+
+@router.get("/lan", response_model=None)
+async def lan_share_info(user=Depends(get_current_user)):
+    """返回本机局域网接入信息（📡 局域网共享页的数据源）。
+
+    前端拿 lan_ip + 自己的 window.location.port 拼扫码地址；
+    需要鉴权：这是内部网络拓扑信息，不能对整个局域网裸奔。
+    """
+    ip = _detect_lan_ip()
+    return {
+        "lan_ip": ip,
+        "reachable": ip != "127.0.0.1",
+        # 手机浏览器扫到的入口 = 前端端口（桌面壳 8000 / dev 3000）；
+        # 后端 API 端口仅供壳与 App 直连（App 的「更换服务器」页填写）。
+        "note": "手机需与本机在同一局域网；扫码进入 Web 版，Android App 在「服务器」页填写本地址",
+    }

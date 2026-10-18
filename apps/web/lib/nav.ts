@@ -98,6 +98,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: "/intervention", label: "干预中心", icon: "🛠", desc: "员工卡住或跑偏时，人工介入并批准", keywords: ["intervention", "ganyu", "干预", "人工", "审批", "介入"] },
       { href: "/skill-growth", label: "技能成长档案", icon: "📈", desc: "技能随任务增长的完整档案", keywords: ["skill growth", "jineng", "成长档案", "技能曲线"] },
       { href: "/token-stats", label: "Token统计", icon: "🪙", desc: "花了多少钱、花在哪个模型上", keywords: ["token", "cost", "billing", "统计", "费用", "成本", "计费"] },
+      { href: "/lan-share", label: "局域网共享", icon: "📡", desc: "手机扫二维码接入同一份数据：Web 版直进、App 接管、开机自启", keywords: ["lan", "share", "lajuan", "局域网", "共享", "扫码", "二维码", "手机", "mobile", "二维码", "qrcode", "开机自启", "autostart"] },
       { href: "/logs", label: "审计日志", icon: "📜", desc: "系统里发生过的每一件事", keywords: ["log", "audit", "日志", "审计", "记录"] },
     ],
   },

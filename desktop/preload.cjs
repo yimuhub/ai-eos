@@ -23,5 +23,8 @@ contextBridge.exposeInMainWorld("aieosDesktop", {
     ipcRenderer.on("update:event", handler);
     return () => ipcRenderer.removeListener("update:event", handler);
   },
+  // 开机自启（V5.3 局域网共享页的「随系统启动」开关）
+  getAutoLaunch: () => ipcRenderer.invoke("desktop:getAutoLaunch"),
+  setAutoLaunch: (on) => ipcRenderer.invoke("desktop:setAutoLaunch", on),
   platform: process.platform,
 });

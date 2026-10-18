@@ -12,20 +12,6 @@
 import { useEffect, useRef, useState } from "react";
 import { API_BASE } from "@/lib/api";
 
-declare global {
-  interface Window {
-    aieosDesktop?: {
-      isDesktop: boolean;
-      platform: string;
-      getEnv: () => Promise<{ platform: string; arch: string; version: string }>;
-      startUpdate: (info: {
-        url: string; file: string; platform: string; sha256?: string;
-      }) => Promise<{ ok: boolean; error?: string }>;
-      onUpdateEvent: (cb: (e: any) => void) => () => void;
-    };
-  }
-}
-
 interface UpdateInfo {
   has_update: boolean;
   latest: string | null;
