@@ -109,11 +109,8 @@ export default function WarRoomDetail() {
         try { setTeam(await api.get(`/war-room/sessions/${sid}/team?company_id=${cs[0].id}`)); } catch {}
         try {
           const ch = await api.get(`/war-room/sessions/${sid}/chat?company_id=${cs[0].id}`);
+          // 保留较长历史：响应缺 messages 时不清空已拉到的聊天
           setChatMsgs((prev) => (ch.messages?.length >= prev.length ? ch.messages : prev));
-        } catch {}
-        try {
-          const ch = await api.get(`/war-room/sessions/${sid}/chat?company_id=${cs[0].id}`);
-          setChatMsgs(ch.messages || []);
         } catch {}
       } else { setTeam(null); setChatMsgs([]); }
     } catch {}

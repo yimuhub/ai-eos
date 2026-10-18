@@ -53,6 +53,7 @@ class Meeting(TimestampMixin, Base):
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
     coordinator_agent_id: Mapped[str | None] = mapped_column(ForeignKey("agents.id"))
     current_speaker_id: Mapped[str | None] = mapped_column(ForeignKey("agents.id"))
+    attachments: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 会议附件（资产记录数组；可空：SQLite 自动补列/老行兼容）
 
 
 class MeetingParticipant(TimestampMixin, Base):

@@ -103,7 +103,10 @@ export default function TaskDetailPage() {
 
   const load = useCallback(async () => {
     if (!id) return;
-    setD(await api.get(`/tasks/${id}`));
+    // 轮询失败不抛（否则每 5s 一条未处理 rejection）：保留旧数据，下轮再试
+    try {
+      setD(await api.get(`/tasks/${id}`));
+    } catch { /* 静默：网络抖动/后端重启时任务页不崩，5s 后自动重试 */ }
   }, [id]);
 
   const [chatHist, setChatHist] = useState(false);

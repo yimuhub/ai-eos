@@ -1,6 +1,6 @@
 "use client";
 import { useMemo, useRef, useState } from "react";
-import { api, API_BASE, describeError } from "@/lib/api";
+import { api, describeError, downloadURL, fetchBlobURL } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { notify } from "@/components/Toast";
 import { ASSET_TYPE_ZH, zh } from "@/lib/i18n";
@@ -38,13 +38,14 @@ export default function AssetsPage() {
     try {
       const d = await api.get<{ content?: unknown }>(`/assets/${id}`);
       // 文本类素材用 Toast 展示（原来用 alert：超长内容会被系统弹窗截断且无法复制）
-      // 二进制素材走下载，交给浏览器处理
+      // 二进制素材走下载：带鉴权的 blob 下载（window.open 新 tab 带不上
+      // Bearer token → 必然 401；lib/api.ts 里明确警告过这个模式）
       if (d.content !== undefined) {
         const text = String(d.content);
         notify("info", text.length > 2000 ? `${text.slice(0, 2000)}…（已截断，共 ${text.length} 字）` : text);
       } else {
-        // 用 API_BASE 拼下载地址，不再写死 localhost
-        window.open(`${API_BASE}/assets/${id}/download`, "_blank");
+        const name = (d as { name?: string }).name || "素材";
+        downloadURL(await fetchBlobURL(`/assets/${id}/download`), name);
       }
     } catch (e) {
       notify("error", `读取素材失败：${describeError(e, "读取失败")}`);

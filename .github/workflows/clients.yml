@@ -157,7 +157,9 @@ jobs:
       - name: 收集 APK
         run: |
           mkdir -p out/android
-          cp mobile/android/app/build/outputs/apk/release/app-release.apk "out/android/AI-EOS-Android-v5.1.0.apk"
+          # 版本从 mobile/app.json 读（别再写死——发新版客户端时 CI 自动跟随）
+          AV=$(python3 -c "import json;print(json.load(open('mobile/app.json'))['expo']['version'])")
+          cp mobile/android/app/build/outputs/apk/release/app-release.apk "out/android/AI-EOS-Android-v${AV}.apk"
           ls -lh out/android/
       - uses: actions/upload-artifact@v4
         with:
@@ -195,16 +197,17 @@ jobs:
           find artifacts -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.apk" \) \
             -exec sh -c 'f="${1}"; b="$(basename "$f")"; n=1; while [ -e "release-files/$b" ]; do base="${b%.${b##*.}}"; ext="${b##*.}"; b="${base}-${n}.${ext}"; n=$((n+1)); done; cp "$f" "release-files/$b"' _ {} \;
           ls -lh release-files/
-          # 组装 notes 文件
-          cat > release-notes.md <<'EOF'
-          ## AI-EOS V5.1 客户端
+          # 组装 notes 文件（RV：从安装包文件名提取最新版本号，别再写死 V5.x）
+          RV=$(ls release-files/ | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1)
+          cat > release-notes.md <<EOF
+          ## AI-EOS V${RV} 客户端
 
           | 平台 | 文件 | 安装方式 |
           |---|---|---|
           | macOS (Apple Silicon / Intel) | .dmg / .zip | 拖入「应用程序」；自签需右键→打开（或 系统设置→隐私与安全性→仍要打开） |
           | Windows | AI-EOS Setup *.exe (NSIS) / AI-EOS-*.exe (绿色版) | 双击安装 / 解压直接运行；SmartScreen 点「仍要运行」 |
           | Linux | .AppImage（自包含）/ .deb | chmod +x 双击 / sudo dpkg -i |
-          | Android | AI-EOS-Android-v5.1.0.apk | 传到手机，允许「未知来源」后安装 |
+          | Android | AI-EOS-Android-v${RV}.apk | 传到手机，允许「未知来源」后安装 |
 
           **桌面客户端使用说明**
           - Electron 壳：把 AI-EOS 前端装进原生窗口（界面与网页版完全一致，含全部功能页）。
@@ -226,7 +229,7 @@ jobs:
             git push origin ":$TAG_NAME" 2>/dev/null || true
           fi
           # 创建 Release（body 从 release-notes.md 内嵌进 JSON；$API/$TAG 由 shell 展开进 python 单行）
-          python3 -c "import json,os,urllib.request as u,sys; body=open('release-notes.md').read(); payload={'tag_name':'$TAG_NAME','name':'AI-EOS V5.1 客户端（Mac/Windows/Linux/Android）','body':body,'draft':False,'prerelease':False}; req=u.Request('$API'+'/releases',data=json.dumps(payload).encode(),method='POST',headers={'Authorization':'token '+os.environ['GH_TOKEN'],'Content-Type':'application/json'}); rel=u.urlopen(req).read(); open('/tmp/release_id.txt','w').write(str(json.loads(rel)['id'])); print(rel[:300])"
+          python3 -c "import json,os,urllib.request as u,sys; body=open('release-notes.md').read(); payload={'tag_name':'$TAG_NAME','name':'AI-EOS V$RV 客户端（Mac/Windows/Linux/Android）','body':body,'draft':False,'prerelease':False}; req=u.Request('$API'+'/releases',data=json.dumps(payload).encode(),method='POST',headers={'Authorization':'token '+os.environ['GH_TOKEN'],'Content-Type':'application/json'}); rel=u.urlopen(req).read(); open('/tmp/release_id.txt','w').write(str(json.loads(rel)['id'])); print(rel[:300])"
           RID=$(cat /tmp/release_id.txt)
           echo "release id: $RID"
           # 逐个上传 assets（必须走 release 的 upload_url：uploads.github.com；

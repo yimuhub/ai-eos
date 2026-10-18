@@ -21,7 +21,7 @@ export default function AttachmentPicker({
   disabled = false,
 }: {
   value: Attachment[];
-  onChange: (next: Attachment[]) => void;
+  onChange: (next: Attachment[] | ((prev: Attachment[]) => Attachment[])) => void;
   label?: string;
   disabled?: boolean;
 }) {
@@ -54,7 +54,9 @@ export default function AttachmentPicker({
         setErr(`「${f.name}」上传失败：只会记录文件名，文件内容不会被引用`);
       }
     }
-    onChange([...value, ...added]);
+    // 函数式更新：上传是秒级异步过程，期间用户可能删附件/父组件已改 value——
+    // 直接 [...value, ...added] 用的是闭包里的旧 value，会把刚删的条目复活
+    onChange((prev: Attachment[]) => [...prev, ...added]);
     setUploading(false);
     if (fileRef.current) fileRef.current.value = "";
   };

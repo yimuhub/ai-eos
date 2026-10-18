@@ -53,7 +53,7 @@ export default function DeliveryCenterPage() {
   const load = useCallback(async () => {
     setLoading(true);
     const cs = await api.get<Company[]>("/companies");
-    if (!cs.length) return;
+    if (!cs.length) { setLoading(false); return; }  // 早退也必须复位 loading，否则骨架屏永远转
     setCid(cs[0].id);
     try {
       if (view === "agent") {

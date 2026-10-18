@@ -136,8 +136,11 @@ export default function MeetingsPage() {
       topic: mtype === "FREE_CHAT" ? "自由交流 · 无固定议题" : topic,
       context_material: material,
       meeting_type: finalType, participant_ids: Array.from(picked),
+      // 会议附件（AttachmentPicker 已真实上传入库；不带上就是假成功）
+      attachments: createAttach.length ? createAttach : undefined,
     });
     setTitle(""); setTopic(""); setMaterial(""); setPicked(new Set()); setShowCreate(false);
+    setCreateAttach([]);
     await loadMeetings(companyId);
     openDetail(res.id);
   }

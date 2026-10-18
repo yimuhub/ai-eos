@@ -34,6 +34,7 @@ export default function WorkflowBuilderPage() {
   const [savedId, setSavedId] = useState<string | null>(null);
   const [runStatus, setRunStatus] = useState<string>("");
   const dragRef = useRef<{ key: string; dx: number; dy: number } | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);  // 工作流运行轮询句柄
   const linkRef = useRef<{ from: string; x: number; y: number } | null>(null);
   const [linkPreview, setLinkPreview] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
 
@@ -126,12 +127,29 @@ export default function WorkflowBuilderPage() {
     if (!savedId) return;
     const res = await api.post(`/workflows/${savedId}/run`);
     setRunStatus("运行中…");
-    const t = setInterval(async () => {
-      const ex = await api.get(`/executions/${res.execution_id}`);
-      setRunStatus(`${ex.status}（${ex.steps.length} 步）`);
-      if (["COMPLETED", "FAILED", "CANCELLED"].includes(ex.status)) clearInterval(t);
+    // 句柄存 ref：离开页面要清掉，连点「运行」要先清旧的，避免叠加轮询
+    if (pollRef.current) clearInterval(pollRef.current);
+    let fails = 0;
+    pollRef.current = setInterval(async () => {
+      try {
+        const ex = await api.get(`/executions/${res.execution_id}`);
+        fails = 0;
+        setRunStatus(`${ex.status}（${ex.steps.length} 步）`);
+        if (["COMPLETED", "FAILED", "CANCELLED"].includes(ex.status)) {
+          if (pollRef.current) clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
+      } catch {
+        // 轮询失败不崩：连续 3 次失败自动停止并提示（否则每 5s 一条未处理 rejection）
+        if (++fails >= 3) {
+          if (pollRef.current) clearInterval(pollRef.current);
+          pollRef.current = null;
+          setRunStatus("轮询失败，已停止（刷新页面可查看结果）");
+        }
+      }
     }, 5000);
   }
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
   return (
     <div className="p-4 flex flex-col h-full">

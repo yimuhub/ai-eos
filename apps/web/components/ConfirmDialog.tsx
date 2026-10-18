@@ -80,36 +80,45 @@ const FOCUSABLE = 'button:not([disabled]), input, [href], select, textarea, [tab
 
 export default function ConfirmHost() {
   const [current, setCurrent] = useState<Pending | null>(null);
+  // current 的 ref 镜像：finish 的副作用（resolve/shift）必须发生在 updater **之外**——
+  // setState updater 在 StrictMode(dev) 下会被调用两次，updater 里做副作用
+  // （cur.resolve + queue.shift）会 double-shift，队列里下一条确认的 Promise
+  // 永远无人 resolve → 调用方 await 永久挂起（"点了没反应"）。
+  const currentRef = useRef<Pending | null>(null);
   const [phraseInput, setPhraseInput] = useState("");
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const primaryRef = useRef<HTMLButtonElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
 
+  const setCurrentBoth = useCallback((p: Pending | null) => {
+    currentRef.current = p;
+    setCurrent(p);
+  }, []);
+
   // 订阅：宿主只处理第一个请求，后续由 finish() 从队列里取
   useEffect(() => {
-    const fn: Listener = (p) => setCurrent(p);
+    const fn: Listener = (p) => setCurrentBoth(p);
     listeners.add(fn);
     return () => {
       listeners.delete(fn);
     };
-  }, []);
+  }, [setCurrentBoth]);
 
   const finish = useCallback((ok: boolean) => {
-    setCurrent((cur) => {
-      if (cur) {
-        try {
-          cur.resolve(ok);
-        } catch {
-          /* 调用方的后续逻辑抛错不该影响弹窗关闭 */
-        }
+    const cur = currentRef.current;
+    if (cur) {
+      try {
+        cur.resolve(ok);
+      } catch {
+        /* 调用方的后续逻辑抛错不该影响弹窗关闭 */
       }
-      const next = queue.shift() ?? null;
-      active = !!next;
-      return next;
-    });
+    }
+    const next = queue.shift() ?? null;
+    active = !!next;
+    setCurrentBoth(next);
     setPhraseInput("");
-  }, []);
+  }, [setCurrentBoth]);
 
   // 打开时聚焦 + 记录来源焦点，关闭时归还焦点
   useEffect(() => {

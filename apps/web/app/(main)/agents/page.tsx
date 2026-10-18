@@ -67,14 +67,21 @@ export default function AgentsPage() {
   // 组织视图折叠的部门
   const [collapsedDepts, setCollapsedDepts] = useState<Set<string>>(new Set());
   // 置顶的部门与 Agent（localStorage 持久化）
-  const [pinnedDepts, setPinnedDepts] = useState<string[]>(() => {
-    try { return JSON.parse(localStorage.getItem("aieos_pinned_depts") || "[]"); } catch { return []; }
-  });
-  const [pinnedAgents, setPinnedAgents] = useState<string[]>(() => {
-    try { return JSON.parse(localStorage.getItem("aieos_pinned_agents") || "[]"); } catch { return []; }
-  });
-  useEffect(() => { localStorage.setItem("aieos_pinned_depts", JSON.stringify(pinnedDepts)); }, [pinnedDepts]);
-  useEffect(() => { localStorage.setItem("aieos_pinned_agents", JSON.stringify(pinnedAgents)); }, [pinnedAgents]);
+  // SSR 加固：惰性初始化器里直接读 localStorage 会让服务端（返回 []）与
+  // 客户端首帧（真实值）不一致 → hydration 报错整块重渲染。统一先 []，
+  // 挂载后再读。
+  const [pinnedDepts, setPinnedDepts] = useState<string[]>([]);
+  const [pinnedAgents, setPinnedAgents] = useState<string[]>([]);
+  const [pinsLoaded, setPinsLoaded] = useState(false);
+  useEffect(() => {
+    try {
+      setPinnedDepts(JSON.parse(localStorage.getItem("aieos_pinned_depts") || "[]"));
+      setPinnedAgents(JSON.parse(localStorage.getItem("aieos_pinned_agents") || "[]"));
+    } catch { /* 坏数据当空 */ }
+    setPinsLoaded(true);
+  }, []);
+  useEffect(() => { if (pinsLoaded) localStorage.setItem("aieos_pinned_depts", JSON.stringify(pinnedDepts)); }, [pinnedDepts, pinsLoaded]);
+  useEffect(() => { if (pinsLoaded) localStorage.setItem("aieos_pinned_agents", JSON.stringify(pinnedAgents)); }, [pinnedAgents, pinsLoaded]);
   function togglePinDept(name: string) {
     setPinnedDepts((prev) => prev.includes(name) ? prev.filter((x) => x !== name) : [name, ...prev]);
   }

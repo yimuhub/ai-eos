@@ -35,6 +35,7 @@ class MeetingCreateIn(BaseModel):
     meeting_type: str = "PROJECT_MEETING"
     participant_ids: list[str]
     coordinator_agent_id: str | None = None
+    attachments: list[dict] | None = None  # 会议附件（AttachmentPicker 上传后的资产记录）
 
 
 @router.post("/meetings", status_code=201)
@@ -51,7 +52,8 @@ async def create_meeting(data: MeetingCreateIn, db: AsyncSession = Depends(get_d
                 title=data.title, topic=data.topic,
                 context_material=data.context_material, meeting_type=mtype,
                 status=MeetingStatus.SCHEDULED, created_by=user.id,
-                coordinator_agent_id=data.coordinator_agent_id)
+                coordinator_agent_id=data.coordinator_agent_id,
+                attachments=data.attachments or [])
     db.add(m)
     await db.flush()
     for aid in data.participant_ids:
@@ -106,6 +108,7 @@ async def get_meeting(mid: str, db: AsyncSession = Depends(get_db),
         "id": m.id, "title": m.title, "status": m.status.value,
         "meeting_type": m.meeting_type,
         "topic": m.topic, "minutes": m.minutes, "summary": m.summary,
+        "attachments": m.attachments or [],
         "participants": [
             {"agent_id": p.agent_id, "name": await agent_name(p.agent_id),
              "spoke_count": p.spoke_count} for p in parts_q.scalars()],

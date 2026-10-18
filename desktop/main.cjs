@@ -345,7 +345,9 @@ async function sha256OfFile(p) {
 
 async function downloadToFile(url, dest, onProgress) {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  const res = await fetch(url, { signal: AbortSignal.timeout(300000) });
+  // 下载不设硬超时（百 MB 级安装器在慢网下 5 分钟不够，中途 abort 只会逼用户重试）；
+  // check 请求的 8s 超时保留在 checkUpdateRemote 里
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`下载失败 HTTP ${res.status}`);
   const total = Number(res.headers.get("content-length") || 0);
   const fileStream = fs.createWriteStream(dest);
@@ -365,8 +367,9 @@ async function applyUpdate(file) {
     // NSIS 静默覆盖安装 → 等安装进程退出后再重启（否则 relaunch 与安装器争抢 exe）
     updateEvents({ phase: "installing", file });
     let restarted = false;
+    let installFailed = false;
     const doRelaunch = () => {
-      if (restarted) return;
+      if (restarted || installFailed) return;
       restarted = true;
       killProc(apiProc);
       killProc(frontProc);
@@ -375,6 +378,12 @@ async function applyUpdate(file) {
     };
     const p = spawn(dest, ["/S"], { detached: true, stdio: "ignore" });
     p.on("exit", () => setTimeout(doRelaunch, 800));
+    p.on("error", (e) => {
+      // spawn 失败（杀软锁定/权限不足）：不重启，交回手动路径可重试
+      installFailed = true;
+      _updating = false;
+      updateEvents({ phase: "error", error: "安装器启动失败：" + (e && e.message || e) });
+    });
     p.unref();
     setTimeout(doRelaunch, 120000); // 兜底：安装卡死时 120s 后仍重启
     return;
@@ -438,7 +447,7 @@ function checkNowSelf() {
         detail: (info.notes || "").slice(0, 300) + "\n\n现在下载并升级？",
         buttons: ["稍后", "立即升级"],
       }).then((r) => {
-        if (r.response === 1) runUpdateFlow({ url: target, file: info.file, platform: process.platform });
+        if (r.response === 1) runUpdateFlow({ url: target, file: info.file, platform: process.platform, sha256: info.sha256 || undefined });
       });
     } else {
       dialog.showMessageBox(mainWindow, {

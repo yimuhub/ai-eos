@@ -159,9 +159,13 @@ export function useResource<T>(
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(key ? cached === undefined : false);
   const aliveRef = useRef(true);
+  // 代际计数：key 切换（如换公司 agents:${cid} → agents:${cid2}）时，
+  // 旧 key 仍在途的请求若只靠 aliveRef（会被新 effect 重置为 true）判断，
+  // 就会把旧公司的数据 setData 进现在跟踪新 key 的组件 → 页面显示旧公司数据。
+  const genRef = useRef(0);
 
   const run = useCallback(
-    async (force: boolean) => {
+    async (force: boolean, gen: number = genRef.current) => {
       if (!key) return;
       const entry = cache.get(key);
       if (!force && entry) {
@@ -172,20 +176,21 @@ export function useResource<T>(
       setLoading(true);
       try {
         const next = await load(key, () => fetcherRef.current());
-        if (!aliveRef.current) return;
+        if (!aliveRef.current || gen !== genRef.current) return;
         setData(next);
         setError(null);
       } catch (e) {
-        if (!aliveRef.current) return;
+        if (!aliveRef.current || gen !== genRef.current) return;
         setError(e instanceof Error ? e.message : "加载失败");
       } finally {
-        if (aliveRef.current) setLoading(false);
+        if (aliveRef.current && gen === genRef.current) setLoading(false);
       }
     },
     [key],
   );
 
   useEffect(() => {
+    const gen = ++genRef.current;
     aliveRef.current = true;
     if (!key) {
       setData(null);
@@ -200,9 +205,9 @@ export function useResource<T>(
     if (entry) {
       setData(entry.data as T);
       setLoading(false);
-      if (Date.now() - entry.at > staleMs) void run(true);
+      if (Date.now() - entry.at > staleMs) void run(true, gen);
     } else {
-      void run(false);
+      void run(false, gen);
     }
 
     const listener = () => {

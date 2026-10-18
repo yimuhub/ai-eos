@@ -31,10 +31,13 @@ REPO = "yimuhub/ai-eos"
 TOKEN_FILE = Path.home() / "Documents" / "张阗" / ".github_token"
 
 # 各平台更新键 → 文件名匹配（发布 9 个资产中取 5 个主安装器）
+# win32 需兼容三种历史命名：CI 默认产物 "AI-EOS Setup 5.2.0.exe"（旧版
+# electron-builder 无 artifactName 时）、固定名 "AI-EOS-5.2.0-win-setup.exe"
+# （新 artifactName / 本地交付目录）。portable 版不进自动升级。
 PLATFORM_PATTERNS = {
     "darwin-arm64": lambda n: n.endswith("-arm64.dmg"),
     "darwin-x64": lambda n: n.endswith(".dmg") and "-arm64" not in n,
-    "win32": lambda n: n.endswith("win-setup.exe"),
+    "win32": lambda n: n.lower().endswith(".exe") and "setup" in n.lower(),
     "linux-x64": lambda n: n.endswith(".AppImage"),
     "android": lambda n: n.endswith(".apk"),
 }
@@ -62,9 +65,13 @@ def resolve_release(token: str, tag: str | None):
         data = json.loads(gh(f"https://api.github.com/repos/{REPO}/releases/tags/{tag}", token))
     else:
         items = json.loads(gh(f"https://api.github.com/repos/{REPO}/releases?per_page=10", token))
-        # 优先 clients-* 标签（客户端发布流），否则最新 release
+        # 只接受 clients-* 标签（客户端发布流）；没有就报错，**不要**退回任意
+        # 最新 release——那可能是文档/其他流水线的 release，资产名全对不上
         clients = [i for i in items if str(i.get("tag_name", "")).startswith("clients")]
-        data = (clients or items)[0]
+        if not clients:
+            sys.exit("没有 clients-* 的 Release。先打 clients-<日期> tag 触发 CI，"
+                     "或显式 --release <tag>")
+        data = clients[0]
     assets = {a["name"]: a for a in data.get("assets", [])}
     return data, assets
 
@@ -83,9 +90,12 @@ def default_clients_dir() -> Path:
     try:
         from app.api.routes.assets import storage_root  # type: ignore
         return Path(storage_root()) / "clients"
-    except Exception:
-        # 依赖缺失（比如用系统 python 跑、没有 pydantic_settings）→
-        # 直接读 .env 的 STORAGE_DIR，保证与后端一致
+    except ImportError:
+        # 仅依赖缺失（比如用系统 python 跑、没装 venv 的 pydantic_settings）才
+        # 手解析 .env；其它异常（模块真 bug）必须暴露，别静默写错目录
+        import traceback
+        traceback.print_exc()
+        print("⚠️  无法 import 后端 resolver，改用 .env 手解析（建议用 venv python 运行本工具）")
         envf = api_dir / ".env"
         if envf.exists():
             for line in envf.read_text().splitlines():
@@ -108,6 +118,16 @@ def _sha256(p: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _backup_manifest(target: Path):
+    """覆盖 manifest.json 前备份一份（带时间戳）—— 线上发布写错可秒级回滚。"""
+    cur = target / "manifest.json"
+    if cur.exists():
+        import time
+        bak = cur.with_suffix(f".json.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+        shutil.copy2(cur, bak)
+        print(f"   💾 旧 manifest 已备份 → {bak.name}")
 
 
 def main():
@@ -151,6 +171,7 @@ def main():
             "notes": args.notes or f"本地发布：{src.name}",
             "files": files,
         }
+        _backup_manifest(target)
         (target / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\n✅ 已发布 {total} 个更新包 → {target}")
@@ -204,6 +225,7 @@ def main():
         "notes": (data.get("body") or "")[:2000],
         "files": files,
     }
+    _backup_manifest(target)
     (target / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 

@@ -47,18 +47,20 @@
       "darkModeSupport": true
     },
     "win": {
-      "target": [
+      "targets": [
         {
           "target": "nsis",
           "arch": [
             "x64"
-          ]
+          ],
+          "artifactName": "AI-EOS-${version}-win-setup.${ext}"
         },
         {
           "target": "portable",
           "arch": [
             "x64"
-          ]
+          ],
+          "artifactName": "AI-EOS-${version}-win-portable.${ext}"
         }
       ],
       "icon": "icon.ico"
