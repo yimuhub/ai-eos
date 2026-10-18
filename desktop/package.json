@@ -4,6 +4,7 @@
   "description": "AI-EOS 桌面客户端（Mac / Windows / Linux）— Electron 壳封装便携后端 + Web 前端",
   "main": "main.cjs",
   "author": "AI-EOS",
+  "homepage": "https://github.com/yimuhub/ai-eos",
   "license": "BUSL-1.1",
   "scripts": {
     "start": "electron .",
@@ -16,7 +17,6 @@
   "build": {
     "appId": "com.aieos.desktop",
     "productName": "AI-EOS",
-    "homepage": "https://github.com/yimuhub/ai-eos",
     "directories": {
       "output": "dist"
     },
