@@ -225,8 +225,8 @@ jobs:
             git tag -d "$TAG_NAME" 2>/dev/null || true
             git push origin ":$TAG_NAME" 2>/dev/null || true
           fi
-          # 创建 Release（body 从 release-notes.md 内嵌进 JSON，避免 API 不支持 body_file）
-          python3 -c "import json,os,urllib.request as u,sys; body=open('release-notes.md').read(); payload={'tag_name':os.environ['TAG_NAME'],'name':'AI-EOS V5.1 客户端（Mac/Windows/Linux/Android）','body':body,'draft':False,'prerelease':False}; req=u.Request(os.environ['API']+'/releases',data=json.dumps(payload).encode(),method='POST',headers={'Authorization':'token '+os.environ['GH_TOKEN'],'Content-Type':'application/json'}); rel=u.urlopen(req).read(); open('/tmp/release_id.txt','w').write(str(json.loads(rel)['id'])); print(rel[:300])"
+          # 创建 Release（body 从 release-notes.md 内嵌进 JSON；$API/$TAG 由 shell 展开进 python 单行）
+          python3 -c "import json,os,urllib.request as u,sys; body=open('release-notes.md').read(); payload={'tag_name':'$TAG_NAME','name':'AI-EOS V5.1 客户端（Mac/Windows/Linux/Android）','body':body,'draft':False,'prerelease':False}; req=u.Request('$API'+'/releases',data=json.dumps(payload).encode(),method='POST',headers={'Authorization':'token '+os.environ['GH_TOKEN'],'Content-Type':'application/json'}); rel=u.urlopen(req).read(); open('/tmp/release_id.txt','w').write(str(json.loads(rel)['id'])); print(rel[:300])"
           RID=$(cat /tmp/release_id.txt)
           echo "release id: $RID"
           # 逐个上传 assets（API 上传，文件名带空格也能处理）
