@@ -18,7 +18,9 @@ declare global {
       isDesktop: boolean;
       platform: string;
       getEnv: () => Promise<{ platform: string; arch: string; version: string }>;
-      startUpdate: (info: { url: string; file: string; platform: string }) => Promise<{ ok: boolean; error?: string }>;
+      startUpdate: (info: {
+        url: string; file: string; platform: string; sha256?: string;
+      }) => Promise<{ ok: boolean; error?: string }>;
       onUpdateEvent: (cb: (e: any) => void) => () => void;
     };
   }
@@ -31,6 +33,7 @@ interface UpdateInfo {
   file?: string | null;
   url?: string | null;
   size_mb?: number | null;
+  sha256?: string | null;
   message?: string | null;
 }
 
@@ -77,7 +80,9 @@ export default function UpdateBanner() {
     return () => { alive = false; off(); };
   }, []);
 
-  if (!window.aieosDesktop || dismissed || !info) return null;
+  // SSR/静态生成加固：服务端 render 体没有 window，必须放在所有渲染逻辑之前。
+  // 当前 (main) layout 的 checking 分支挡住 banner 才没出事，不能把安全建立在 UI 排列上。
+  if (typeof window === "undefined" || !window.aieosDesktop || dismissed || !info) return null;
   if (phase === "restarting") {
     return <Bar tone="ok">🔄 正在重启，即将自动打开新版本…</Bar>;
   }
@@ -85,7 +90,7 @@ export default function UpdateBanner() {
   const btn = () => {
     const d = window.aieosDesktop!;
     setPhase("downloading"); setPct(0);
-    d.startUpdate({ url: API_BASE + info.url!, file: info.file!, platform: d.platform });
+    d.startUpdate({ url: API_BASE + info.url!, file: info.file!, platform: d.platform, sha256: info.sha256 ?? undefined });
   };
 
   let body: string;

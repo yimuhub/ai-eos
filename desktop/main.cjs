@@ -334,6 +334,15 @@ function updateEvents(payload) {
   if (mainWindow) mainWindow.webContents.send("update:event", payload);
 }
 
+async function sha256OfFile(p) {
+  const crypto = require("crypto");
+  const h = crypto.createHash("sha256");
+  await new Promise((res, rej) => {
+    fs.createReadStream(p).pipe(h).on("end", res).on("error", rej);
+  });
+  return h.digest("hex");
+}
+
 async function downloadToFile(url, dest, onProgress) {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   const res = await fetch(url, { signal: AbortSignal.timeout(300000) });
@@ -353,19 +362,30 @@ async function downloadToFile(url, dest, onProgress) {
 async function applyUpdate(file) {
   const dest = path.join(app.getPath("userData"), "updates", file);
   if (isWin) {
-    // NSIS 静默覆盖安装 → 重启
+    // NSIS 静默覆盖安装 → 等安装进程退出后再重启（否则 relaunch 与安装器争抢 exe）
     updateEvents({ phase: "installing", file });
+    let restarted = false;
+    const doRelaunch = () => {
+      if (restarted) return;
+      restarted = true;
+      killProc(apiProc);
+      killProc(frontProc);
+      app.relaunch();
+      app.exit(0);
+    };
     const p = spawn(dest, ["/S"], { detached: true, stdio: "ignore" });
+    p.on("exit", () => setTimeout(doRelaunch, 800));
     p.unref();
-    setTimeout(() => { killProc(apiProc); killProc(frontProc); app.relaunch(); app.exit(0); }, 1500);
+    setTimeout(doRelaunch, 120000); // 兜底：安装卡死时 120s 后仍重启
     return;
   }
   if (isMac) {
     // dmg/zip：挂载后引导替换（无法无管理员密码静默替换 /Applications）
     await shell.openPath(dest);
-    updateEvents({ phase: "manual", dest, tip: isMac && file.endsWith(".dmg")
+    updateEvents({ phase: "manual", dest, tip: file.endsWith(".dmg")
       ? "安装器已打开：把 AI-EOS 拖到「应用程序」替换旧版即可"
       : "请解压并把 AI-EOS.app 替换到 应用程序 目录" });
+    _updating = false; // 手动路径结束 → 允许重试
     return;
   }
   // Linux：AppImage 场景尝试原地替换
@@ -380,6 +400,7 @@ async function applyUpdate(file) {
     } catch { /* 权限不足 → 走手动 */ }
   }
   updateEvents({ phase: "manual", dest, tip: "下载完成。请用该文件替换原 AppImage / 重新安装 deb" });
+  _updating = false; // 手动路径结束 → 允许重试
 }
 
 async function runUpdateFlow(info) {
@@ -387,8 +408,16 @@ async function runUpdateFlow(info) {
   _updating = true;
   try {
     updateEvents({ phase: "downloading", pct: 0, file: info.file });
-    const bytes = await downloadToFile(info.url, path.join(app.getPath("userData"), "updates", info.file),
+    const dest = path.join(app.getPath("userData"), "updates", info.file);
+    const bytes = await downloadToFile(info.url, dest,
       (pct) => updateEvents({ phase: "downloading", pct, file: info.file }));
+    // 完整性校验：manifest 带 sha256 时，下载文件必须逐位一致才允许执行
+    if (info.sha256) {
+      const got = await sha256OfFile(dest);
+      if (got.toLowerCase() !== String(info.sha256).toLowerCase()) {
+        throw new Error("安装包完整性校验失败（SHA-256 不一致），已放弃本次升级");
+      }
+    }
     updateEvents({ phase: "done", file: info.file, bytes });
     await applyUpdate(info.file);
     return { ok: true };

@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -95,6 +96,20 @@ def default_clients_dir() -> Path:
         os.chdir(cwd)
 
 
+def _ver_key(v: str):
+    """版本号 → 数值元组，避免 '5.10.0' < '5.9.0' 的字符串比较坑。"""
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:4]) or (0,)
+
+
+def _sha256(p: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def main():
     ap = argparse.ArgumentParser(description="发布客户端自动升级包")
     ap.add_argument("--release", help="GitHub Release 标签（默认：最新 clients-* release）")
@@ -124,10 +139,12 @@ def main():
             for key, match in PLATFORM_PATTERNS.items():
                 if match(name):
                     shutil.copy2(src / name, target / name)
-                    files[key] = {"file": name, "size_mb": round((src / name).stat().st_size / 1048576, 1)}
+                    files[key] = {"file": name,
+                                  "size_mb": round((src / name).stat().st_size / 1048576, 1),
+                                  "sha256": _sha256(target / name)}
                     total += 1
                     print(f"  ⧉ 复制 {name} → {target.name}/")
-        latest = args.latest or (max(versions) if versions else "0.0.0")
+        latest = args.latest or (max(versions, key=_ver_key) if versions else "0.0.0")
         manifest = {
             "latest": latest,
             "tag": f"local-{src.name}",
@@ -151,7 +168,7 @@ def main():
         m = re.search(r"(\d+\.\d+\.\d+)", name)
         if m:
             versions.add(m.group(1))
-    latest = max(versions) if versions else "0.0.0"
+    latest = max(versions, key=_ver_key) if versions else "0.0.0"
 
     files: dict[str, dict] = {}
     total = 0
@@ -165,10 +182,21 @@ def main():
         dest = target / name
         print(f"  ↓ 下载 {name} ({assets[name].get('size', 0) / 1048576:.0f} MB) → {dest.name}")
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-        with urllib.request.urlopen(req, timeout=600) as r, open(dest, "wb") as f:
-            shutil.copyfileobj(r, f)
+        try:
+            with urllib.request.urlopen(req, timeout=600) as r, open(dest, "wb") as f:
+                shutil.copyfileobj(r, f)
+        except urllib.error.HTTPError as e:
+            dest.unlink(missing_ok=True)
+            sys.exit(f"下载 {name} 失败（HTTP {e.code}）。GitHub 资产有时上传成功但下载 404，"
+                     f"改用 --from-local 本地交付目录发布。")
+        # 与 release 上报的 size 对账，防半截文件进更新通道
+        expect = assets[name].get("size")
+        if expect and dest.stat().st_size != expect:
+            sys.exit(f"{name} 下载不完整（{dest.stat().st_size} ≠ {expect} 字节），请重试")
         total += 1
-        files[key] = {"file": name, "size_mb": round(dest.stat().st_size / 1048576, 1)}
+        files[key] = {"file": name,
+                      "size_mb": round(dest.stat().st_size / 1048576, 1),
+                      "sha256": _sha256(dest)}
 
     manifest = {
         "latest": latest,

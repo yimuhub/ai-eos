@@ -45,12 +45,15 @@ class UpdateInfo(BaseModel):
     file: str | None = None
     url: str | None = None
     size_mb: float | None = None
+    sha256: str | None = None
     message: str | None = None
 
 
 def _platform_key(platform: str, arch: str) -> str:
-    if platform == "android":
-        return "android"
+    # win32 / android 的 manifest 键不带 arch（Win 更新通道只发 x64 安装包；
+    # 拼出 "win32-x64" 会永远匹配不到 manifest → Windows 端收不到更新）
+    if platform in ("android", "win32"):
+        return platform
     return f"{platform}-{arch or 'x64'}"
 
 
@@ -62,22 +65,29 @@ def check_update(platform: str, arch: str = "", current: str | None = None):
         return UpdateInfo(
             has_update=False, current=current,
             message="服务器未部署更新通道（先运行 tools/publish_client_updates.py）")
-    m = json.loads(mfile.read_text(encoding="utf-8"))
+    try:
+        m = json.loads(mfile.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return UpdateInfo(has_update=False, current=current,
+                         message="manifest.json 损坏，请重新运行发布工具")
     latest = m.get("latest")
     entry = (m.get("files") or {}).get(_platform_key(platform, arch))
-    if not entry or not latest:
+    fname = (entry or {}).get("file") if isinstance(entry, dict) else None
+    if not fname or not latest:
         return UpdateInfo(has_update=False, current=current, latest=latest,
                           message="该平台暂无更新包")
-    fpath = clients_dir() / entry["file"]
+    safe = Path(fname).name  # 与 download 端点同样的消毒：manifest 里的 ../ 不能逃逸
+    fpath = clients_dir() / safe
     if not fpath.exists():
         return UpdateInfo(has_update=False, current=current, latest=latest,
-                          message=f"更新文件缺失：{entry['file']}")
+                          message=f"更新文件缺失：{safe}")
     has = current is None or (_ver_tuple(latest) or (0,)) > (_ver_tuple(current) or (0,))
     return UpdateInfo(
         has_update=has, current=current, latest=latest, notes=m.get("notes"),
-        file=entry["file"],
-        url=f"/clients/update/download/{entry['file']}",
-        size_mb=round(fpath.stat().st_size / 1048576, 1))
+        file=safe,
+        url=f"/clients/update/download/{safe}",
+        size_mb=round(fpath.stat().st_size / 1048576, 1),
+        sha256=(entry or {}).get("sha256"))
 
 
 @router.get("/update/download/{filename}")
