@@ -43,3 +43,6 @@ tsconfig.tsbuildinfo
 mobile/android/
 mobile/.expo/
 desktop/dist/
+
+# 客户端交付目录（本地大文件，勿入库；安装包在 GitHub Release）
+客户端交付_V5.1/
