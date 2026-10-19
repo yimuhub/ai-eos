@@ -65,6 +65,7 @@ async def list_presets(user=Depends(get_current_user)):
             "id": obj.get("id", f[:-5]),
             "industry": obj.get("industry", f[:-5]),
             "emoji": obj.get("emoji", "🏢"),
+            "kind": obj.get("kind", "industry_preset"),
             "department_count": len(obj.get("departments", [])),
             "agent_count": posts,
         })
@@ -172,14 +173,26 @@ async def apply_preset(pid: str, data: ApplyIn,
                 plan.append({"type": "agent", "name": aname, "dept": dname,
                              "status": "skipped"})
                 continue
+            # V5.6 大厂仿：预设岗位自带 skills/职责/人设时，
+            # 无专家匹配也把"说明+技能包"落到员工身上（不裸奔）
+            skills = a.get("skills") or []
+            desc = a.get("duties") or (tpl.description if tpl else None)
+            sp = (a.get("personality") or a.get("system_prompt")
+                  or (tpl.system_prompt if tpl else None))
+            memory_cfg: dict | None = None
+            if skills:
+                memory_cfg = {"skills": skills}
+                if a.get("expert_slug"):
+                    memory_cfg["expert_slug_hint"] = a["expert_slug"]
             agent = Agent(
                 company_id=data.company_id,
                 department_id=d.id,
                 name=aname,
                 role=a.get("role"),
-                description=tpl.description if tpl else None,
-                system_prompt=tpl.system_prompt if tpl else None,
+                description=desc,
+                system_prompt=sp,
                 expert_template_id=tpl.id if tpl else None,
+                memory_config=memory_cfg,
                 status=AgentStatus.IDLE,
             )
             db.add(agent)
@@ -190,8 +203,9 @@ async def apply_preset(pid: str, data: ApplyIn,
             if tpl:
                 hired.append(tpl.id)
             plan.append({"type": "agent", "name": aname, "dept": dname,
-                         "expert": tpl.source_slug if tpl else None,
-                         "status": "created"})
+                        "expert": tpl.source_slug if tpl else None,
+                        "skills": skills or None,
+                        "status": "created"})
 
     if not data.dry_run:
         await db.flush()

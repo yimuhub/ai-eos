@@ -349,6 +349,13 @@ export default function OrganizationPage() {
                       岗位包
                     </span>
                   )}
+                  {/* V5.6：大厂仿照包——一键生成对标大厂架构的数字组织 */}
+                  {p.id?.startsWith("bigco_") && (
+                    <span className="ml-1.5 align-middle text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+                      style={{ background: "rgba(245,158,11,0.15)", color: "#fbbf24" }}>
+                      大厂仿
+                    </span>
+                  )}
                 </div>
                 <div className="text-sm font-semibold">{p.industry}</div>
                 <div className="text-[11px] mt-0.5" style={{ color: "var(--muted)" }}>
