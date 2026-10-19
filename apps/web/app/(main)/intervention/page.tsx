@@ -70,6 +70,11 @@ export default function InterventionPage() {
   const [companyId, setCompanyId] = useState<string | null>(null);
   const [reqs, setReqs] = useState<Req[]>([]);
   const [overrides, setOverrides] = useState<OverrideRow[]>([]);
+  // V5.6.1 工具级免批白名单
+  const [whitelist, setWhitelist] = useState<{ id: string; capability: string; param_pattern: string; note: string | null }[]>([]);
+  const loadWhitelist = (cid: string) => {
+    api.get(`/intervention/whitelist?company_id=${cid}`).then((r: any) => setWhitelist(Array.isArray(r) ? r : [])).catch(() => setWhitelist([]));
+  };
   const [policy, setPolicy] = useState<Policy>({ level: 2 });
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -97,7 +102,8 @@ export default function InterventionPage() {
     else setLoadError(describe(reqRes.reason, "读取待审批请求失败"));
 
     if (ovRes.status === "fulfilled") setOverrides(ovRes.value || []);
-  }, []);
+    loadWhitelist(cid);
+  }, [loadWhitelist]);
 
   useEffect(() => {
     (async () => {
@@ -117,12 +123,13 @@ export default function InterventionPage() {
   }, [load]);
 
   // ---------- 审批：成功以响应为准，不再无条件报喜 ----------
-  async function decide(id: string, decision: "approve" | "reject") {
+  // V5.6.1：批准时可勾"始终允许"（always_allow）→ 后端写免批白名单，防审批疲劳
+  async function decide(id: string, decision: "approve" | "reject", alwaysAllow = false) {
     setBusyId(id);
     try {
       const res = await api.post<{ id: string; status: string; execution?: { ok: boolean; error?: string; result?: any } }>(
         `/intervention/requests/${id}/decide`,
-        { decision },
+        { decision, always_allow: alwaysAllow },
       );
       if (decision === "approve" && res?.execution) {
         notify(res.execution.ok ? "success" : "error",
@@ -289,6 +296,17 @@ export default function InterventionPage() {
                     >
                       {busyId === r.id ? "处理中…" : "批准"}
                     </button>
+                    {(r.action_type === "computer_command" || r.action_type === "external_agent") && (
+                      <button
+                        onClick={() => decide(r.id, "approve", true)}
+                        disabled={busyId === r.id}
+                        title="V5.6.1 工具级免批：同类操作（同能力+参数模式）后续自动放行，可撤销"
+                        className="px-3 py-1 rounded-lg text-xs text-white disabled:opacity-50"
+                        style={{ background: "#0e7490" }}
+                      >
+                        批准并始终允许
+                      </button>
+                    )}
                     <button
                       onClick={() => decide(r.id, "reject")}
                       disabled={busyId === r.id}
@@ -404,6 +422,42 @@ export default function InterventionPage() {
           </div>
         </section>
       </div>
+
+      {/* ---------- V5.6.1 工具级免批白名单 ---------- */}
+      <section className="card card-static p-4">
+        <h3 className="font-medium text-[var(--foreground)] mb-1">🔓 免批白名单（始终允许）</h3>
+        <p className="text-xs mb-3 text-[var(--muted)]">
+          老板批准时勾「始终允许」→ 同类高危操作（同能力+参数模式）自动放行并留审计；撤销则立即恢复拦截。
+        </p>
+        {!whitelist.length ? (
+          <p className="text-xs text-[var(--muted)]">暂无白名单。在待审批单点「批准并始终允许」即可添加。</p>
+        ) : (
+          <div className="space-y-1.5">
+            {whitelist.map((w) => (
+              <div key={w.id} className="flex items-center gap-2 text-xs rounded-lg px-2.5 py-1.5"
+                style={{ background: "rgba(14,116,144,0.08)", border: "1px solid rgba(14,116,144,0.25)" }}>
+                <span className="font-medium" style={{ color: "#67e8f9" }}>{w.capability}</span>
+                {w.param_pattern && (
+                  <span className="text-[var(--muted)] truncate" style={{ maxWidth: 220 }}>
+                    模式：{w.param_pattern.slice(0, 50)}{w.param_pattern.length > 50 ? "…" : ""}
+                  </span>
+                )}
+                <span className="ml-auto" />
+                <button
+                  onClick={async () => {
+                    if (!companyId) return;
+                    try {
+                      await api.del(`/intervention/whitelist/${w.id}?company_id=${companyId}`);
+                      loadWhitelist(companyId);
+                      notify("success", "已撤销，同类操作恢复拦截");
+                    } catch (e) { notify("error", describe(e, "撤销失败")); }
+                  }}
+                  className="text-[var(--muted)] hover:text-red-400">✕ 撤销</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       {/* ---------- 覆盖记录 ---------- */}
       <section className="card card-static p-4">

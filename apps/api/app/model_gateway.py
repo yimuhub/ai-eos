@@ -410,10 +410,20 @@ class ModelGateway:
                 continue
             if not b.paused:
                 b.paused = True
-                b.paused_reason = (f"用量到顶（{tokens}/"
-                                    f"{'∞' if not b.limit_tokens else b.limit_tokens}"
-                                    f" token, ¥{cost:.2f}/"
-                                    f"{'∞' if not b.limit_cost else b.limit_cost:.2f}），已自动暂停")
+                # V5.6.1 tripped 语义（学 OpenAI Agents SDK）：结构化熔断原因
+                # ——暂停≠失败，老板可加预算原状态续跑
+                import json as _json
+                b.paused_reason = _json.dumps({
+                    "tripped": True,
+                    "cause": "budget",
+                    "period": b.period,
+                    "tokens_used": tokens, "tokens_limit": b.limit_tokens,
+                    "cost_used": round(cost, 4), "cost_limit": b.limit_cost,
+                    "message": (f"用量到顶（{tokens}/"
+                                f"{'∞' if not b.limit_tokens else b.limit_tokens}"
+                                f" token, ¥{cost:.2f}/"
+                                f"{'∞' if not b.limit_cost else b.limit_cost:.2f}），已自动暂停"),
+                }, ensure_ascii=False)
                 try:
                     await self.db.commit()
                 except Exception:

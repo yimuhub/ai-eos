@@ -421,9 +421,11 @@ export default function TaskDetailPage() {
                   className="rounded-lg border px-3 py-2 text-xs"
                   style={{
                     borderColor: n.kind === "execution" && n.status === "failed"
-                      ? "rgba(239,68,68,0.4)" : "var(--border)",
+                      ? "rgba(239,68,68,0.4)"
+                      : n.kind === "boss" ? "rgba(251,191,36,0.45)" : "var(--border)",
                     background: n.kind === "execution" && n.status === "failed"
-                      ? "rgba(239,68,68,0.06)" : "rgba(255,255,255,0.02)",
+                      ? "rgba(239,68,68,0.06)"
+                      : n.kind === "boss" ? "rgba(251,191,36,0.05)" : "rgba(255,255,255,0.02)",
                   }}>
                   <div className="flex items-center gap-2 flex-wrap">
                     <span style={{ color: "var(--muted)" }}>
@@ -439,8 +441,10 @@ export default function TaskDetailPage() {
                       {n.usage && <span style={{ color: "var(--muted)" }}>
                         · {n.usage.tokens} token / ¥{n.usage.cost}（{n.usage.calls} 次调用）</span>}
                     </>)}
-                    {n.kind === "intervention" && (
-                      <span className="font-medium">🛑 老板介入 {n.type}（{n.status}）</span>
+                    {n.kind === "boss" && (
+                      <span className="font-medium" style={{ color: "#fbbf24" }}>
+                        👑 老板事件 {n.type}（{n.status}）
+                      </span>
                     )}
                     {n.kind === "event" && <span>📌 {n.event_type}</span>}
                   </div>
@@ -456,7 +460,7 @@ export default function TaskDetailPage() {
                       )}
                     </div>
                   )}
-                  {n.kind === "intervention" && n.content && (
+                  {n.kind === "boss" && n.content && (
                     <div className="mt-0.5" style={{ color: "var(--muted)" }}>{n.content}</div>
                   )}
                 </div>

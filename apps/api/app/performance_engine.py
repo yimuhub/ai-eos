@@ -59,6 +59,25 @@ async def compute_agent_metrics(db: AsyncSession, agent_id: str,
         activity = min(1.0, (total + spoke * 2 + msgs_sent) / 50)
         score = round(cr * 60 + stability * 25 + activity * 15, 1)
 
+    # V5.6.1 考核量化（学 TheAgentCompany）：成本维度 + ROI
+    # cost_per_task + roi_30d：完成产出价值 ≈ 完成数 × 基准人工小时(0.5h) × 时薪(100¥/h)，
+    # 减去该 Agent 实际 LLM 成本
+    cost_sum = 0.0
+    try:
+        from app.models.token_usage import TokenUsage
+        c_q = select(func.coalesce(func.sum(TokenUsage.total_cost), 0.0)).where(
+            TokenUsage.agent_id == agent_id)
+        if since:
+            c_q = c_q.where(TokenUsage.created_at >= since)
+        cost_sum = float((await db.execute(c_q)).scalar() or 0.0)
+    except Exception:
+        pass
+    cost_per_task = round(cost_sum / completed, 4) if completed else (
+        round(cost_sum / total, 4) if total else 0.0)
+    # ROI = (产出价值 − 成本) / 成本；产出价值按完成任务数 × 50¥（≈0.5h 人工基准）
+    output_value = completed * 50.0
+    roi = round((output_value - cost_sum) / cost_sum, 3) if cost_sum > 0 else None
+
     return {
         "agent_id": agent_id,
         "tasks_total": total,
@@ -69,6 +88,11 @@ async def compute_agent_metrics(db: AsyncSession, agent_id: str,
         "meeting_spoke_count": spoke,
         "messages_sent": msgs_sent,
         "score": score,
+        # V5.6.1 ROI 维度
+        "cost_total": round(cost_sum, 4),
+        "cost_per_task": cost_per_task,
+        "output_value_est": round(output_value, 2),
+        "roi": roi,
     }
 
 

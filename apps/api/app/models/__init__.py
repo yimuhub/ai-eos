@@ -57,3 +57,4 @@ from app.models.p3_governance import (AgentSandbox, AgentVersion,  # noqa: F401
                                       SelfImprovementCase)
 from .budget import TokenBudget  # noqa: F401
 from .mailbox import AgentMailbox, MailMessage  # noqa: F401
+from .whitelist import ApprovalWhitelist  # noqa: F401

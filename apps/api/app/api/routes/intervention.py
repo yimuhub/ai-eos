@@ -166,6 +166,7 @@ async def list_requests(
 class DecideIn(BaseModel):
     decision: str          # approve / reject
     note: str | None = None
+    always_allow: bool = False   # V5.6.1：批准后写入免批白名单（工具级防审批疲劳）
 
 
 @router.post("/requests/{request_id}/decide")
@@ -187,6 +188,25 @@ async def decide_request(
     req.decided_by = user.id
     req.decision_note = data.note
     req.decided_at = dt.now(tz.utc).replace(tzinfo=None)
+
+    # V5.6.1：老板批准时勾"始终允许"→ 写免批白名单（参数模式取本次 params 的
+    # 命令/输入子串；run_shell 取 cmd，其余取关键参数值）
+    if data.decision == "approve" and data.always_allow and req.action_type in (
+            "computer_command", "external_agent"):
+        from app.models.whitelist import ApprovalWhitelist
+        payload0 = req.payload or {}
+        cap = payload0.get("capability", "external_agent")
+        params = payload0.get("params") or (
+            {"task_input": payload0.get("task_input", "")}
+            if req.action_type == "external_agent" else {})
+        pattern = str((params or {}).get("cmd")
+                      or (params or {}).get("text")
+                      or (params or {}).get("task_input") or "")[:300]
+        db.add(ApprovalWhitelist(
+            company_id=req.company_id, capability=cap,
+            param_pattern=pattern,
+            note=(data.note or "老板批准时勾「始终允许」")[:300],
+            created_by=user.id))
 
     # V5.5 P0：批准"高危本机操作"审批单后，自动补执行挂起的高危命令
     execution_result = None
@@ -277,3 +297,39 @@ async def list_overrides(
              "original": o.original_decision, "override": o.override_decision,
              "reason": o.reason, "created_at": o.created_at.isoformat()}
             for o in rows]
+
+
+# ---------- V5.6.1 工具级免批白名单管理（学 Cline"始终允许"） ----------
+@router.get("/whitelist")
+async def list_whitelist(
+    company_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """公司当前免批白名单（前端干预中心展示/撤销）。"""
+    from app.models.whitelist import ApprovalWhitelist
+    rows = (await db.execute(select(ApprovalWhitelist).where(
+        ApprovalWhitelist.company_id == company_id)
+        .order_by(ApprovalWhitelist.created_at.desc()))).scalars().all()
+    return [{
+        "id": w.id, "capability": w.capability,
+        "param_pattern": w.param_pattern, "note": w.note,
+        "created_at": w.created_at.isoformat() if w.created_at else None,
+    } for w in rows]
+
+
+@router.delete("/whitelist/{wl_id}")
+async def delete_whitelist(
+    wl_id: str,
+    company_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """撤销一条白名单 → 同类操作立即恢复拦截（老板随时收权）。"""
+    from app.models.whitelist import ApprovalWhitelist
+    w = await db.get(ApprovalWhitelist, wl_id)
+    if not w or w.company_id != company_id:
+        raise HTTPException(404, "whitelist not found")
+    await db.delete(w)
+    await db.commit()
+    return {"id": wl_id, "deleted": True}

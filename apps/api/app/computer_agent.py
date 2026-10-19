@@ -36,6 +36,7 @@ class ComputerActionLog(Base):
     allowed: Mapped[bool] = mapped_column(Boolean, nullable=False)
     deny_reason: Mapped[str | None] = mapped_column(Text)
     mock: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    auto_approved: Mapped[str | None] = mapped_column(String(40), nullable=True)
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_now, index=True)
 

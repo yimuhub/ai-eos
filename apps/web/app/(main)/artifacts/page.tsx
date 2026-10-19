@@ -100,6 +100,16 @@ export default function ArtifactsPage() {
         : "✅ 已发布");
       reload();
     } catch (e: any) { setMsg(`❌ ${e.message || "发布失败"}`); }
+  }
+
+  // V5.6.1 ④ SOP 交接单：结构化 Markdown 交接文档（不靠聊天记录）
+  const [sop, setSop] = useState<{ artifact_id: string; title: string; markdown: string } | null>(null);
+  const showSop = async (aid: string) => {
+    try {
+      const r = await api.get<{ artifact_id: string; title: string; markdown: string }>(
+        `/artifacts/${aid}/sop?company_id=${cid}`);
+      setSop(r);
+    } catch (e: any) { setMsg(`❌ ${e.message || "交接单生成失败"}`); }
   };
 
   const openDetail = async (aid: string) => {
@@ -197,6 +207,11 @@ export default function ArtifactsPage() {
                     </button>
                   </>
                 )}
+                <button onClick={() => showSop(a.id)}
+                  title="V5.6.1 ④ SOP 交接单：结构化 Markdown 交接文档"
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-700 hover:bg-slate-600 text-slate-200 transition-colors">
+                  📄 交接单
+                </button>
               </div>
             </div>
           );
@@ -253,6 +268,41 @@ export default function ArtifactsPage() {
                 </div>
               ))}
             </div>
+          </div>
+        </div>, document.body
+      )}
+
+      {/* V5.6.1 ④ SOP 交接单弹窗 */}
+      {mounted && sop && createPortal(
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4 overflow-y-auto py-8"
+          style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)" }}
+          onClick={() => setSop(null)}>
+          <div className="w-full max-w-2xl rounded-2xl p-5 space-y-3 max-h-[90vh] overflow-y-auto animate-fade-up"
+            style={{ background: "linear-gradient(180deg,#15151f,#101018)", border: "1px solid rgba(148,163,184,0.3)" }}
+            onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between pb-3 border-b" style={{ borderColor: "var(--border)" }}>
+              <div>
+                <h3 className="font-semibold text-base">📄 交接单 · {sop.title}</h3>
+                <p className="text-xs mt-0.5" style={{ color: "var(--muted)" }}>
+                  V5.6.1 SOP 交接文档 —— 下一个 Agent / 老板可直接接手
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={async () => {
+                    await navigator.clipboard.writeText(sop.markdown);
+                    setMsg("✅ 交接单已复制到剪贴板");
+                  }}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
+                  ⧉ 复制
+                </button>
+                <button onClick={() => setSop(null)} className="btn-ghost !px-2 !py-0.5 text-xs">✕</button>
+              </div>
+            </div>
+            <pre className="text-xs whitespace-pre-wrap rounded-lg p-3"
+              style={{ background: "rgba(255,255,255,0.03)", color: "var(--foreground)" }}>
+              {sop.markdown}
+            </pre>
           </div>
         </div>, document.body
       )}

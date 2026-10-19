@@ -35,9 +35,12 @@ async def ensure_columns(engine) -> list[str]:
     """补齐模型里新增、但数据库里还缺的可空列。返回补出的列名列表。"""
     # 双轨熔断：PostgreSQL 的 schema 演进走 Alembic；这个函数只服务
     # SQLite 便携形态。两边同时跑会在 PG 上打架（列被各加一次/锁表）。
-    if engine.dialect.name != "sqlite":
-        logger.info("[migrate] 跳过自动补列（方言=%s）：PostgreSQL 交给 Alembic 管理",
-                    engine.dialect.name)
+    # 例外（V5.6.1）：PG 上"仅补缺失的可空列"是幂等且安全的
+    # （ADD COLUMN IF NOT EXISTS，不碰已有列/不锁数据表），
+    # 保证发版后老库升级不报 "no such column"。
+    is_pg = engine.dialect.name == "postgresql"
+    if not is_pg and engine.dialect.name != "sqlite":
+        logger.info("[migrate] 跳过自动补列（方言=%s）", engine.dialect.name)
         return []
     added: list[str] = []
     dialect = engine.dialect
@@ -45,25 +48,45 @@ async def ensure_columns(engine) -> list[str]:
     async with engine.begin() as conn:
         existing_tables = set(
             await conn.run_sync(lambda c: inspect(c).get_table_names()))
-
-        for table in Base.metadata.sorted_tables:
-            if table.name not in existing_tables:
-                continue  # 新表交给 create_all，这里只管给老表加列
-            present = await conn.run_sync(
-                lambda c, name=table.name:
-                {col["name"] for col in inspect(c).get_columns(name)})
-            for column in table.columns:
-                if column.name in present:
+        if is_pg:
+            from sqlalchemy import text as _text
+            for table in Base.metadata.sorted_tables:
+                if table.name not in existing_tables:
                     continue
-                if not _auto_addable(column):
-                    logger.warning(
-                        "模型新增了非空列 %s.%s，无法自动补齐；"
-                        "老数据需要人工决定填充值，请手工迁移后再启用该字段",
-                        table.name, column.name)
-                    continue
-                await conn.execute(text(_add_column_ddl(table.name, column, dialect)))
-                added.append(f"{table.name}.{column.name}")
-                logger.info("[migrate] 已补齐列 %s.%s", table.name, column.name)
+                for column in table.columns:
+                    if not _auto_addable(column):
+                        continue
+                    # PG 幂等补列：仅补真正缺失的
+                    have = (await conn.execute(_text(
+                        "SELECT 1 FROM information_schema.columns "
+                        "WHERE table_name=:t AND column_name=:c"),
+                        {"t": table.name, "c": column.name})).first()
+                    if have:
+                        continue
+                    ddl = f'ALTER TABLE {table.name} ADD COLUMN IF NOT EXISTS ' \
+                          f'"{column.name}" {column.type.compile(dialect=dialect)}'
+                    await conn.execute(_text(ddl))
+                    added.append(f"{table.name}.{column.name}")
+                    logger.info("[migrate] PG 幂等补列 %s.%s", table.name, column.name)
+        else:
+            for table in Base.metadata.sorted_tables:
+                if table.name not in existing_tables:
+                    continue  # 新表交给 create_all，这里只管给老表加列
+                present = await conn.run_sync(
+                    lambda c, name=table.name:
+                    {col["name"] for col in inspect(c).get_columns(name)})
+                for column in table.columns:
+                    if column.name in present:
+                        continue
+                    if not _auto_addable(column):
+                        logger.warning(
+                            "模型新增了非空列 %s.%s，无法自动补齐；"
+                            "老数据需要人工决定填充值，请手工迁移后再启用该字段",
+                            table.name, column.name)
+                        continue
+                    await conn.execute(text(_add_column_ddl(table.name, column, dialect)))
+                    added.append(f"{table.name}.{column.name}")
+                    logger.info("[migrate] 已补齐列 %s.%s", table.name, column.name)
 
     if added:
         logger.info("[migrate] 本次共补齐 %d 个列：%s",

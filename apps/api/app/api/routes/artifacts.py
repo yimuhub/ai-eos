@@ -346,6 +346,65 @@ async def delete_artifact(
     return {"id": artifact_id, "deleted": True}
 
 
+@router.get("/{artifact_id}/sop")
+async def artifact_sop(
+    artifact_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """V5.6.1 ④ SOP 交接文档（学 OpenHands handoff）：把交付物 + 上下文
+    结构化成 Markdown 交接单，下一个 Agent/老板可直接接手而不靠聊天记录。
+    包含：成果信息、当前状态、最近 3 版变更、审阅记录、待办建议。
+    """
+    art = await _owned_artifact(artifact_id, db, user)
+    from datetime import datetime
+    versions = (await db.execute(
+        select(ArtifactVersion).where(ArtifactVersion.artifact_id == art.id)
+        .order_by(ArtifactVersion.version.desc()).limit(3))).scalars().all()
+    v = versions[0] if versions else None
+    reviews = [ver for ver in (await db.execute(
+        select(ArtifactVersion).where(ArtifactVersion.artifact_id == art.id)
+        .order_by(ArtifactVersion.version.desc()).limit(10)
+    )).scalars().all() if ver.review_comment]
+
+    lines = [
+        f"# 交接单：{art.name}",
+        "",
+        f"- **类型**：{art.artifact_type}",
+        f"- **状态**：{art.status.value}（v{art.current_version}）",
+        f"- **生成时间**：{datetime.now().isoformat(timespec='seconds')}",
+        "",
+        "## 交接内容（最新版摘要）",
+        (v.content or "")[:800] if v else "",
+        "",
+        "## 变更历史（最近 3 版）",
+    ]
+    for ver in versions:
+        lines.append(f"- **v{ver.version}**：{ver.change_note or '（无说明）'}"
+                     f"（{ver.created_at.isoformat(timespec='seconds') if ver.created_at else '?'}）")
+    lines += ["", "## 审阅记录（最近 10 条）"]
+    if not reviews:
+        lines.append("- 暂无")
+    for r in reviews:
+        lines.append(f"- v{r.version} {r.status.value if r.status else ''}：{(r.review_comment or '')[:80]}"
+                     f"（审阅人 {r.reviewed_by}）")
+    lines += [
+        "",
+        "## 建议下一步",
+    ]
+    if art.status.value == "DRAFT":
+        lines.append("1. 完善内容后提交审阅（POST /artifacts/{id}/submit）")
+    elif art.status.value == "IN_REVIEW":
+        lines.append("1. 等待/推进审阅决策（POST /artifacts/{id}/review）")
+    elif art.status.value == "APPROVED":
+        lines.append("1. 可发布（POST /artifacts/{id}/publish）并通知下游")
+    else:
+        lines.append("1. 按审阅意见修订后重新提交")
+
+    return {"artifact_id": art.id, "title": art.name,
+            "markdown": "\n".join(lines), "versions": len(versions)}
+
+
 @router.get("/{artifact_id}/download.zip")
 async def download_artifact_zip(
     artifact_id: str,

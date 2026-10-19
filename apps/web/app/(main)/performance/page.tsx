@@ -20,6 +20,7 @@ import { notify } from "@/components/Toast";
 
 type Ranked = {
   agent_name: string; score: number;
+  cost_total?: number; cost_per_task?: number; roi?: number | null;
   tasks_total: number; tasks_completed: number; tasks_failed: number;
   meeting_spoke_count: number; messages_sent: number;
 };
@@ -329,6 +330,17 @@ export default function PerformancePage() {
                   任务 {r.tasks_total} · 完成 {r.tasks_completed} · 失败 {r.tasks_failed}
                   {" · "}会议发言 {r.meeting_spoke_count} · 消息 {r.messages_sent}
                 </div>
+                {/* V5.6.1 ROI 考核维度（学 TheAgentCompany） */}
+                {(r.cost_total != null || r.roi != null) && (
+                  <div className="text-xs mt-0.5 flex flex-wrap gap-2" style={{ color: "var(--muted)" }}>
+                    <span>💸 成本 ¥{(r.cost_total ?? 0).toFixed(2)}{r.cost_per_task ? `（¥${r.cost_per_task}/件）` : ""}</span>
+                    {r.roi != null && (
+                      <span style={{ color: (r.roi >= 0 ? "#34d399" : "#f87171") }}>
+                        📈 ROI {(r.roi * 100).toFixed(0)}%{r.roi < 0 ? "（亏损）" : ""}
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="text-2xl font-bold tabular-nums shrink-0">{r.score}</div>
             </div>

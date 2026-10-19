@@ -442,7 +442,9 @@ async def task_trace(tid: str, db: AsyncSession = Depends(get_db),
             } if e.agent_id in usage_by_agent else None),
         })
     for iv in intvs:
-        nodes.append({"kind": "intervention", "id": iv.id,
+        # V5.6.1 事件流（学 OpenHands）：老板介入 = 流中"老板事件"，
+        # 与 Agent 动作同一条时间线，可回放/审计/分叉
+        nodes.append({"kind": "boss", "id": iv.id,
                      "ts": iv.created_at.isoformat() if iv.created_at else None,
                      "type": iv.type, "content": (iv.content or "")[:200],
                      "status": iv.status})

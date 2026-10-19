@@ -146,12 +146,47 @@ async def patch_budget(
         if val is not None:
             setattr(b, field, val)
     # 老板主动解除暂停/调高上限 → 立即恢复（这是"到顶就停"的对侧开关）
+    resumed_tasks: list[str] = []
     if data.enabled is True or data.paused is False or data.limit_tokens or data.limit_cost:
+        was_paused = b.paused
         b.paused = False
         b.paused_reason = None
+        # V5.6.1 tripped→resume：预算恢复后，自动把该范围内 PAUSED 的
+        # AgentExecution 续跑（学 OpenAI SDK"加预算续跑"；老板有可视化确认点）
+        if was_paused:
+            from app.models.task import AgentExecution
+            # 找范围内 PAUSED 执行：agent 级按 agent_id；department 级先查该部门
+            # 下的 agent 集合；company 级全部
+            agent_ids: list[str] | None = None
+            if b.scope_type == "agent" and b.scope_id:
+                agent_ids = [b.scope_id]
+            elif b.scope_type == "department" and b.scope_id:
+                from app.models.agent import Agent as _Agent
+                agent_ids = [str(a.id) for a in (await db.execute(
+                    select(_Agent).where(_Agent.department_id == b.scope_id)
+                )).scalars().all()]
+            q2 = select(AgentExecution).where(AgentExecution.status == "PAUSED")
+            if agent_ids:
+                q2 = q2.where(AgentExecution.agent_id.in_(agent_ids))
+            execs = (await db.execute(q2)).scalars().all()
+            for ex in execs:
+                # 只恢复范围匹配的（company 级全恢复；agent/department 级按范围）
+                if b.scope_type == "agent" and ex.agent_id != b.scope_id:
+                    continue
+                if b.scope_type == "department" and ex.department_id != b.scope_id:
+                    continue
+                try:
+                    from app.agent_runtime import resume_execution
+                    await resume_execution(db, ex)
+                    resumed_tasks.append(ex.task_id or ex.id)
+                except Exception:
+                    continue
     b.updated_by = user.id
     await db.commit()
-    return b.to_dict()
+    return {**b.to_dict(),
+            "resumed_executions": resumed_tasks,
+            "note": (f"预算已恢复，{len(resumed_tasks)} 个挂起执行自动续跑"
+                     if resumed_tasks else None)}
 
 
 @router.delete("/{budget_id}")

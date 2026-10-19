@@ -58,6 +58,7 @@ async def execute_computer_action(
     capability: str,
     params: dict | None = None,
     agent_id: str | None = None,
+    auto_approved: str | None = None,
 ) -> dict:
     """执行一次电脑操作。返回统一结构：
 
@@ -67,6 +68,7 @@ async def execute_computer_action(
     - 能力未知 → 明确报错，不猜；
     - 未授权 → 落审计日志（allowed=False）后抛 ComputerActionDenied；
     - 已授权 → 执行、落审计日志，执行异常也如实记录，不伪造成成功。
+    - auto_approved：V5.6.1 白名单放行时传入（如 "whitelist"），审计留痕。
     """
     capability = (capability or "").strip()
     if capability not in EXTENDED_CAPABILITIES:
@@ -77,7 +79,8 @@ async def execute_computer_action(
 
     log = ComputerActionLog(
         id=str(uuid.uuid4()), company_id=company_id, agent_id=agent_id,
-        action_type=capability, params=params, allowed=granted, mock=False)
+        action_type=capability, params=params, allowed=granted, mock=False,
+        auto_approved=auto_approved)
 
     if not granted:
         log.deny_reason = f"能力 '{capability}' 未获授权（默认拒绝）"

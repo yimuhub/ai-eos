@@ -141,6 +141,23 @@ async def execute_action(
 
     # ---- V5.5 P0：高危操作审批门 ----
     if data.action_type in HIGH_RISK_CAPABILITIES and await _high_risk_needs_approval(db, company_id):
+        # V5.6.1 工具级免批白名单（学 Cline"始终允许"防审批疲劳）：
+        # 命中白名单 → 直接放行并留审计，不再建审批单
+        from app.models.whitelist import ApprovalWhitelist
+        wl_rows = (await db.execute(
+            select(ApprovalWhitelist).where(
+                ApprovalWhitelist.company_id == company_id,
+                ApprovalWhitelist.capability == data.action_type)
+        )).scalars().all()
+        if ApprovalWhitelist.matches(data.action_type, data.params, list(wl_rows)):
+            outcome = await execute_computer_action(
+                db, company_id=company_id, capability=data.action_type,
+                params=data.params, agent_id=agent_id,
+                auto_approved="whitelist")
+            return {"log_id": outcome["log_id"], "action": outcome["capability"],
+                    "result": outcome["result"], "mode": "REAL",
+                    "auto_approved": "whitelist",
+                    "message": "命中免批白名单，直接放行（已留审计）"}
         req = ApprovalRequest(
             id=new_id(), company_id=company_id,
             action_type="computer_command",

@@ -253,6 +253,30 @@ async def main():
         else:
             check("C3 建测试员工", False, f"got {r.status_code} {r.text[:120]}")
 
+        # ---- V5.6.1 ①③④⑤ 冒烟 ----
+        # ② 工具级免批白名单 CRUD
+        r = await c.get("/intervention/whitelist", params={"company_id": company_id}, headers=H)
+        check("② 白名单列表端点", r.status_code == 200, f"got {r.status_code} {r.text[:80]}")
+        # ④ SOP 交接单：建一个成果再取交接单
+        r = await c.post(f"/artifacts?company_id={company_id}",
+                        json={"name": "V561 SOP 冒烟单", "content": "测试交接内容"}, headers=H)
+        if r.status_code in (200, 201):
+            art_id = r.json().get("id")
+            r2 = await c.get(f"/artifacts/{art_id}/sop", headers=H)
+            md = (r2.json() or {}).get("markdown", "")
+            check("④ SOP 交接单含状态/变更/建议", r2.status_code == 200
+                  and "交接单" in md and "建议下一步" in md,
+                  f"got {r2.status_code} {r2.text[:100]}")
+        else:
+            check("④ 建测试成果", False, f"got {r.status_code} {r.text[:100]}")
+        # ⑤ 绩效含 ROI 维度
+        r = await c.post(f"/performance/company/{company_id}/snapshot", headers=H)
+        ok = r.status_code == 200
+        ranked = (r.json() or {}).get("ranked", []) if ok else []
+        has_roi = any(("roi" in m and "cost_total" in m) for m in ranked)
+        check("⑤ 绩效快照含 ROI/成本维度", ok and has_roi,
+              f"{len(ranked)} agents {('roi ok' if has_roi else 'no roi field')}")
+
         print(f"\n[结果] {passed} 通过, {len(failed)} 失败 {failed if failed else ''}")
         return 0 if not failed else 1
 

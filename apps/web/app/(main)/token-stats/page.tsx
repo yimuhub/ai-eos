@@ -184,9 +184,13 @@ export default function TokenAdminPage() {
     try {
       const cs = await api.get("/companies").catch(() => []);
       const cid = cs[0]?.id;
-      await api.put(`/token-budgets/${b.id}?company_id=${cid}`,
+      const res = await api.put(`/token-budgets/${b.id}?company_id=${cid}`,
         { enabled: !b.paused, paused: false });
-      flash(b.paused ? "✅ 已恢复执行" : "⏸ 已暂停该预算（LLM 调用将被拦截）");
+      // V5.6.1 tripped→resume：恢复预算时后端自动续跑挂起执行
+      const resumed: string[] = res?.resumed_executions || [];
+      flash(b.paused
+        ? `✅ 已恢复执行${resumed.length ? `，${resumed.length} 个挂起任务自动续跑` : ""}`
+        : "⏸ 已暂停该预算（LLM 调用将被拦截）");
       loadBudgets();
     } catch (e: any) { flash(e.message || String(e), "err"); }
   }
