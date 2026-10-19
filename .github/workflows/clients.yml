@@ -32,28 +32,32 @@ jobs:
       - name: 安装依赖
         working-directory: desktop
         run: npm ci --no-audit --no-fund
-      - name: 构建 dmg + zip（x64/arm64，可选 Apple 签名 + 公证）
+      - name: 构建 dmg + zip（x64/arm64，两级签名）
         working-directory: desktop
         env:
-          # ── 根治 macOS"恶意软件"拦截：配好以下 secrets 后自动签名+公证 ──
-          # APPLE_CERTIFICATE      : Developer ID .p12 的 base64（openssl smime 导出后 b64）
-          # APPLE_CERT_PASSWORD    : 该 p12 的导出密码
-          # APPLE_ID               : Apple 开发者账号邮箱（公证）
-          # APPLE_APP_SPECIFIC_PASSWORD : App 专用密码（developer.apple.com 生成）
-          # APPLE_TEAM_ID          : 团队 ID（9 位，证书 Subject OU 里）
-          # 全部留空时自动回落 ad-hoc（现状），不破坏现有构建
-          CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
-          CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          # ── 两级签名策略 ──
+          # Tier 2（配了 Apple secrets）：Developer ID 签名 + Apple 公证 → 完全无警告
+          #   APPLE_CERTIFICATE(base64 p12) / APPLE_CERT_PASSWORD / APPLE_ID /
+          #   APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID
+          # Tier 1（默认，无 Apple 账号）：用仓库自签 p12（packaging/mac-signing）签名
+          #   → 任何 Mac 上为"未验证开发者"，系统设置点【仍要打开】即可，不再被判"恶意软件"删除
+          CSC_KEY_PASSWORD: aieos2026
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
         run: |
-          if [ -n "$CSC_LINK" ]; then
+          if [ -n "$APPLE_CSC_LINK" ]; then
             echo "✅ 已配置 Apple 证书 → Developer ID 签名 + 公证（APPLE_ID / TeamID）"
+            export CSC_LINK="$APPLE_CSC_LINK"
+            export CSC_KEY_PASSWORD="$APPLE_CSC_KEY_PASSWORD"
             npx electron-builder --mac
           else
-            echo "ℹ️ 未配置 Apple 证书 → ad-hoc 签名（维持现状；macOS 会弹'恶意软件'，配好上面 secrets 即根治）"
-            CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac
+            echo "ℹ️ 未配置 Apple 证书 → 用仓库自签 p12 签名（『未验证开发者』，用户点『仍要打开』）"
+            export CSC_LINK="$(cat ../packaging/mac-signing/aieos-mac.p12.b64)"
+            export CSC_NAME="AI-EOS Distribution SelfSign"
+            npx electron-builder --mac
           fi
       - name: 收集产物
         run: |

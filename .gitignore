@@ -48,3 +48,6 @@ desktop/dist/
 客户端交付_V5.1/
 客户端交付_V5.8/
 客户端交付_*/
+
+# Mac 自签证书：p12/证书提交（内部自签，供 CI 签名用），裸 key 不入库
+packaging/mac-signing/*.key
