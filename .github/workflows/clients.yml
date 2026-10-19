@@ -223,7 +223,7 @@ jobs:
           API="https://api.github.com/repos/$REPO"
           # 展平产物到 release-files/（文件名去重）
           mkdir -p release-files
-          find artifacts -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.apk" \) \
+          find artifacts -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.apk" -o -name "*.command" \) \
             -exec sh -c 'f="${1}"; b="$(basename "$f")"; n=1; while [ -e "release-files/$b" ]; do base="${b%.${b##*.}}"; ext="${b##*.}"; b="${base}-${n}.${ext}"; n=$((n+1)); done; cp "$f" "release-files/$b"' _ {} \;
           ls -lh release-files/
           # 组装 notes 文件（RV：从安装包文件名提取最新版本号，别再写死 V5.x）
