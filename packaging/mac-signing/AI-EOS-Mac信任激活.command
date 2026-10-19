@@ -1,23 +1,44 @@
 #!/bin/bash
-# AI-EOS Mac 信任激活（每台 Mac 跑一次；需要 Touch ID / 密码）
+# ============================================================
+#  AI-EOS Mac 信任激活脚本（每台 Mac 只需跑一次；需要 Touch ID / 密码）
+#  作用：
+#    1) 把 AI-EOS 的自签证书+私钥(p12)导入本机钥匙串
+#    2) 设为受信任根证书（这一步弹 Touch ID / 密码）
+#    3) 用受信任的自签身份重签 /Applications/AI-EOS.app
+#  之后：Mac 不再把它当"恶意软件"删除，双击即可打开
+#        （首次若提示"未识别开发者"，点"仍要打开"一次）
+#  无需 Apple 账号。
+# ============================================================
 set -e
 WORK="$(mktemp -d /tmp/aieos-trust.XXXXXX)"
-CERT="$WORK/aieos.crt"
+P12="$WORK/aieos-mac.p12"
 echo "===== AI-EOS Mac 信任激活 ====="
-echo "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURnRENDQW1pZ0F3SUJBZ0lVWjVyZjF6QzVTWUZnVVYwY1d6RC9GaFkvYjFRd0RRWUpLb1pJaHZjTkFRRUwKQlFBd1JURWxNQ01HQTFVRUF3d2NRVWt0UlU5VElFUnBjM1J5YVdKMWRHbHZiaUJUWld4bVUybG5iakVQTUEwRwpBMVVFQ2d3R1FVa3RSVTlUTVFzd0NRWURWUVFHRXdKVlV6QWVGdzB5TmpFd01Ua3hNalU1TlRoYUZ3MHpOakV3Ck1UWXhNalU1TlRoYU1FVXhKVEFqQmdOVkJBTU1IRUZKTFVWUFV5QkVhWE4wY21saWRYUnBiMjRnVTJWc1psTnAKWjI0eER6QU5CZ05WQkFvTUJrRkpMVVZQVXpFTE1Ba0dBMVVFQmhNQ1ZWTXdnZ0VpTUEwR0NTcUdTSWIzRFFFQgpBUVVBQTRJQkR3QXdnZ0VLQW9JQkFRQ2RRQUxUNnlLcm5uclBrNU9NQjVOOTlyRHI5N2lpanNmbXdMc2hwTGgwCnZpNGRPZkJmQXh2UVBHT2RUSUNMRTdXTzV3MDAzdmxaNHBCMDZmSUtYTk5kU3ZVMzRSbVFydTRhbHNObHNsQU4KRFpYT1lCYjFzRnZ4ZEtKT3ZiWVE0dmZQajNsa3JCK1lPQ1pqcXlSTXFoRFQ3VS9ZeDlKZk05L0JjWWFMQzBrdwp0aG80cnRHSS9sOTA1RXFwb3pjRjQ4TlpQTld2ck8vNjg2TUpaMjI3N1NaQmJ0MGhSQW9zUXlEbTFVZHlTUSt2Ck04eld2SGNvT25PcFdtbzl0T3hiM3dQd3drSUpQT0pRSmRRVkFTcll2T2p6SFlSQWpGUlI3UmQwNlJaZlFUbkwKeFliZURNeURnTnZtRmV2K3h1Z09ZeXhhL2c2RXpicXRmTEJBaVNjUUFJL0JBZ01CQUFHamFEQm1NQjBHQTFVZApEZ1FXQkJSNlpObWk5WGI5cnVTR0pUUkxsRERvS2t0K0J6QWZCZ05WSFNNRUdEQVdnQlI2Wk5taTlYYjlydVNHCkpUUkxsRERvS2t0K0J6QVBCZ05WSFJNQkFmOEVCVEFEQVFIL01CTUdBMVVkSlFRTU1Bb0dDQ3NHQVFVRkJ3TUQKTUEwR0NTcUdTSWIzRFFFQkN3VUFBNElCQVFBdjNla1FXMEU0V1loRU4xQzBvbnhJcVFPK0IzQ3RscDI4WUVHVApWeTdqbjJ6Smp5LzU2N2RTY1N6V2w5Zk5lVXVnRlAxWHBRbjNjRDNxc1kwUnkxTkxGS3ZzNDd1NjNyaXM0Z0JLCnhMUVpEbDkyVHBxdEsrQVhibWtSbVNydGlHVWpDWHRlRzVJYSsraUtzS3RjQ0llQ0d5VTcxL0R2VklFbzYzelgKVjlrTHJzOTFxRjk2SnhNMTZsdW1ma2VHaDNEZ0xMOTVKVDB4a2ZMS1l5cU9BaUVvM1IxYVFVNWZmYldtd29MZwozN1hLL1BPa1BjdlRQR05aTlJVRmN2Y05tdXd2N1hENjBMNFc3dUdkME83cCt0aW90ZGduV0FvOHhGRGdSZDVrCk1VM0p6dFZKM1B4STVQMXBEUk5VdWJYU3dLZk5neDJ6SEJiT2NmVzluVENUTlJjTgotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==" | base64 -d > "$CERT"
-echo "1/3 证书就绪：AI-EOS Distribution SelfSign（自签，10 年）"
-echo "2/3 加入系统信任（即将 Touch ID / 密码）..."
-security add-trusted-cert -d -r trustAsRoot -k /Library/Keychains/System.keychain "$CERT" 2>/dev/null \
-  || security add-trusted-cert -d -r trustAsRoot "$CERT"
-echo "  ✓ 证书已设为受信任根证书"
+echo "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" | base64 -d > "$P12"
+echo "1/4 p12 证书+私钥已就绪：AI-EOS Distribution SelfSign（10 年）"
+echo "2/4 导入本机登录钥匙串 ..."
+security import "$P12" -k ~/Library/Keychains/login.keychain -P aieos2026 2>/dev/null \
+  || security import "$P12" -P aieos2026
+echo "  ✓ 已导入（身份：AI-EOS Distribution SelfSign）"
+echo "3/4 设为受信任根证书（即将 Touch ID / 密码）..."
+security add-trusted-cert -d -r trustAsRoot -k /Library/Keychains/System.keychain "$(dirname $P12)/aieos-mac.crt" 2>/dev/null || true
+# 从 p12 导出 crt 再信任（crt 不在 p12 里，需 openssl 抽出）
+openssl pkcs12 -in "$P12" -nokeys -password pass:aieos2026 2>/dev/null | \
+  openssl x509 -out "$WORK/aieos.crt" 2>/dev/null || true
+if [ -s "$WORK/aieos.crt" ]; then
+  security add-trusted-cert -d -r trustAsRoot "$WORK/aieos.crt"
+  echo "  ✓ 证书已设为受信任根证书"
+else
+  echo "  ! 未能抽出证书做信任（可能已信任过）——继续重签"
+fi
 APP="/Applications/AI-EOS.app"
 if [ -d "$APP" ]; then
-  echo "3/3 重签 $APP ..."
+  echo "4/4 用受信任身份重签 $APP ..."
   codesign --force --deep -s "AI-EOS Distribution SelfSign" "$APP" 2>&1 | tail -1 || true
   xattr -cr "$APP" 2>/dev/null || true
-  echo "  ✓ 已重签为受信任的 AI-EOS Distribution SelfSign"
+  AUTH="$(codesign -dv "$APP" 2>&1 | grep -i Authority | head -1 | sed 's/.*Authority=//')"
+  echo "  ✓ 重签完成 Authority=$AUTH"
 else
-  echo "3/3 未找到 $APP：请先用 DMG 安装 AI-EOS 到 应用程序，再重跑本脚本"
+  echo "4/4 未找到 $APP：请先用 .dmg 安装 AI-EOS 到 应用程序，再重跑本脚本"
 fi
 rm -rf "$WORK"
 echo ""

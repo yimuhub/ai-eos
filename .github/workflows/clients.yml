@@ -32,16 +32,16 @@ jobs:
       - name: 安装依赖
         working-directory: desktop
         run: npm ci --no-audit --no-fund
-      - name: 构建 dmg + zip（x64/arm64，两级签名）
+      - name: 构建 dmg + zip（x64/arm64；Tier1 ad-hoc + 信任激活脚本）
         working-directory: desktop
         env:
-          # ── 两级签名策略 ──
-          # Tier 2（配了 Apple secrets）：Developer ID 签名 + Apple 公证 → 完全无警告
+          # ── 签名策略 ──
+          # Tier 2（配了 Apple secrets）：Developer ID 签名 + Apple 公证 → 全 Mac 零接触
           #   APPLE_CERTIFICATE(base64 p12) / APPLE_CERT_PASSWORD / APPLE_ID /
           #   APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID
-          # Tier 1（默认，无 Apple 账号）：用仓库自签 p12（packaging/mac-signing）签名
-          #   → 任何 Mac 上为"未验证开发者"，系统设置点【仍要打开】即可，不再被判"恶意软件"删除
-          CSC_KEY_PASSWORD: aieos2026
+          # Tier 1（默认，无 Apple 账号）：ad-hoc 构建 + 随附「信任激活脚本」
+          #   （electron-builder 的 CSC_LINK 自签在 macOS 27 有 set-key-partition-list
+          #     钥匙串 bug，CI 无法完成受信任自签 → 改由每台 Mac 用户跑一次激活脚本重签）
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -54,15 +54,16 @@ jobs:
             export CSC_KEY_PASSWORD="$APPLE_CSC_KEY_PASSWORD"
             npx electron-builder --mac
           else
-            echo "ℹ️ 未配置 Apple 证书 → 用仓库自签 p12 签名（『未验证开发者』，用户点『仍要打开』）"
-            export CSC_LINK="$(cat ../packaging/mac-signing/aieos-mac.p12.b64)"
-            export CSC_NAME="AI-EOS Distribution SelfSign"
-            npx electron-builder --mac
+            echo "ℹ️ 未配置 Apple 证书 → ad-hoc 构建；每台 Mac 用户装完跑一次『AI-EOS-Mac信任激活.command』重签即可"
+            CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac
           fi
-      - name: 收集产物
+      - name: 收集产物（含信任激活脚本）
         run: |
           mkdir -p out/mac
           cp desktop/dist/AI-EOS-*.dmg desktop/dist/AI-EOS-*.zip out/mac/ 2>/dev/null || cp desktop/dist/*.dmg desktop/dist/*.zip out/mac/ 2>/dev/null
+          # 随附 Mac 信任激活脚本（无 Apple 账号时，每台 Mac 跑一次即可信任+重签）
+          cp packaging/mac-signing/"AI-EOS-Mac信任激活.command" out/mac/ 2>/dev/null || echo "  (信任激活脚本缺失，跳过)"
+          chmod +x out/mac/"AI-EOS-Mac信任激活.command" 2>/dev/null || true
           ls -lh out/mac/
       - uses: actions/upload-artifact@v4
         with:
@@ -239,12 +240,16 @@ jobs:
 
           **macOS「恶意软件」拦截处理（重要）**
           - 未做 Apple 公证的 Mac 客户端，在 macOS（尤其 27）双击 .dmg 里的 app 可能被判定"恶意软件"并自动移入废纸篓。
-          - **快速恢复**（被删后）：终端执行
-            `sudo xattr -cr /Applications/AI-EOS.app && open /Applications/AI-EOS.app`
-            （若 /Applications 里已被删，先重新从 .dmg 拖一份进去，再去隔离属性）。
-          - **根治**：本仓库 CI 已支持 Apple 签名+公证——在 GitHub 仓库 Secrets 配
+          - **首选（无需 Apple 账号）：运行随附的 `AI-EOS-Mac信任激活.command`**
+            ① 先用 .dmg 把 AI-EOS 拖进 应用程序（被删就重拖一份）；
+            ② 双击 `AI-EOS-Mac信任激活.command`，按提示完成一次 Touch ID / 密码；
+            ③ 脚本会自动把自签证书设为受信任根并重签 /Applications/AI-EOS.app；
+            ④ 之后双击 AI-EOS 即可打开（首次若提示"未识别开发者"，点"仍要打开"一次）。
+            每台 Mac 只需跑一次。
+          - **应急（被删后、临时）**：终端执行 `sudo xattr -cr /Applications/AI-EOS.app && open /Applications/AI-EOS.app`。
+          - **彻底零接触（需 Apple 账号，$99/年）**：在 GitHub 仓库 Secrets 配
             `APPLE_CERTIFICATE / APPLE_CERT_PASSWORD / APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID`
-            后重跑 clients 流水线，产出的 Mac 客户端即可无警告直接打开（需 Apple 开发者账号，$99/年）。
+            后重跑 clients 流水线，CI 自动 Developer ID 签名 + 公证，所有 Mac 开箱即用、无警告无删除。
 
           **桌面客户端使用说明**
           - Electron 壳：把 AI-EOS 前端装进原生窗口（界面与网页版完全一致，含全部功能页）。
