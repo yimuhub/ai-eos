@@ -27,7 +27,7 @@ type CareerRec = { title: string; change_type: string; is_current: boolean };
 type MemoryItem = { id: string; content: string; type: string; created_at: string };
 type SkillNode = { id: string; name: string };
 
-const TABS = ["成长", "训练", "技能", "私人知识库", "记忆", "复盘", "考核", "职业", "邮箱"] as const;
+const TABS = ["成长", "训练", "技能", "私人知识库", "记忆", "复盘", "考核", "职业", "邮箱", "下班学习"] as const;
 const LEVEL_ZH: Record<string, string> = {
   BEGINNER: "入门", JUNIOR: "初级", INTERMEDIATE: "中级", ADVANCED: "高级", EXPERT: "专家",
 };
@@ -40,6 +40,40 @@ export default function AgentProfilePage() {
   const router = useRouter();
   const [agentName, setAgentName] = useState("");
   const [tab, setTab] = useState<(typeof TABS)[number]>("成长");
+
+  // V5.7 ⑥⑦ 下班学习：工作日志列表 + 写日志 + 老板审批（成长也要点头）
+  const [worklogs, setWorklogs] = useState<any[]>([]);
+  const [wlContent, setWlContent] = useState("");
+  const [wlLessons, setWlLessons] = useState("");
+  const [wlMsg, setWlMsg] = useState("");
+  const loadWorklogs = () => {
+    if (!agentId) return;
+    api.get(`/worklogs?agent_id=${agentId}`).then((r: any) => setWorklogs(Array.isArray(r) ? r : [])).catch(() => setWorklogs([]));
+  };
+  useEffect(() => { loadWorklogs(); }, [agentId]);
+
+  async function postWorklog() {
+    if (!wlContent.trim()) { notify("warning", "先写点日志内容"); return; }
+    try {
+      const lessons = wlLessons.trim() ? wlLessons.split("\n").map(s => s.trim()).filter(Boolean) : null;
+      await api.post(`/worklogs?agent_id=${agentId}`, {
+        agent_id: agentId, content: wlContent.trim(),
+        lessons, period: "daily",
+      });
+      setWlContent(""); setWlLessons("");
+      setWlMsg("✅ 日志已提交，等老板审批后沉淀为高置信记忆");
+      loadWorklogs();
+    } catch (e: any) { setWlMsg(`❌ ${e.message || "提交失败"}`); }
+  }
+
+  async function decideWorklog(wl: any, decision: "approve" | "reject") {
+    try {
+      await api.post(`/worklogs/${wl.id}/decide?agent_id=${agentId}`,
+        { decision, comment: decision === "reject" ? "老板否决" : null });
+      loadWorklogs();
+      notify("success", decision === "approve" ? "已批准，已沉淀为高置信记忆（0.95）" : "已否决");
+    } catch (e: any) { notify("error", e.message || "决策失败"); }
+  }
   const [profile, setProfile] = useState<Profile | null>(null);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [skillNodes, setSkillNodes] = useState<SkillNode[]>([]);
@@ -657,6 +691,63 @@ export default function AgentProfilePage() {
           {!career.length && (
             <p className="text-sm py-8 text-center" style={{ color: "var(--muted)" }}>暂无职业轨迹</p>
           )}
+        </div>
+      )}
+
+      {/* ---- 下班学习（V5.7 ⑥⑦）---- */}
+      {tab === "下班学习" && (
+        <div className="space-y-4 max-w-3xl">
+          <div className="card card-static p-4 space-y-2">
+            <div className="text-sm font-medium">📓 今天学到了什么（员工自写 · 学 Letta）</div>
+            <p className="text-xs text-[var(--muted)]">
+              经验点每行一条。提交后走老板审批门——批准才沉淀为高置信记忆（importance 0.95），否决保留记录。
+            </p>
+            <textarea value={wlContent} onChange={e => setWlContent(e.target.value)}
+              placeholder="例：处理发票任务时，先用 dry_run 预检坐标，点击失败率降了一半…"
+              rows={3} className="input-glow w-full text-xs" />
+            <textarea value={wlLessons} onChange={e => setWlLessons(e.target.value)}
+              placeholder={"经验点（每行一条）\n预检先行，点击成功率更高"}
+              rows={2} className="input-glow w-full text-xs" />
+            <div className="flex items-center gap-3">
+              <button onClick={postWorklog} className="btn-primary">提交日志</button>
+              {wlMsg && <span className="text-xs" style={{ color: "var(--muted)" }}>{wlMsg}</span>}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            {worklogs.length === 0 && (
+              <p className="text-xs py-4 text-center" style={{ color: "var(--muted)" }}>暂无日志</p>
+            )}
+            {worklogs.map((w: any) => (
+              <div key={w.id} className="card card-static p-3 space-y-1">
+                <div className="flex items-center gap-2 flex-wrap text-xs">
+                  <span className="font-medium">{w.title || "工作日志"}</span>
+                  <span className={w.status === "APPROVED" ? "text-emerald-400"
+                    : w.status === "REJECTED" ? "text-red-400" : "text-amber-400"}>
+                    {w.status === "APPROVED" ? "✓ 已沉淀" : w.status === "REJECTED" ? "✗ 已否决" : "⏳ 待审批"}
+                  </span>
+                  {w.memory_ref && <span style={{ color: "var(--muted)" }}>→ 记忆 {w.memory_ref.slice(0, 8)}…</span>}
+                  <span className="ml-auto" style={{ color: "var(--muted)" }}>
+                    {w.created_at ? new Date(w.created_at).toLocaleString("zh-CN", { hour12: false }) : ""}
+                  </span>
+                </div>
+                <p className="text-xs whitespace-pre-wrap" style={{ color: "var(--foreground)" }}>{w.content}</p>
+                {Array.isArray(w.lessons) && w.lessons.length > 0 && (
+                  <ul className="text-xs pl-4 list-disc" style={{ color: "var(--muted)" }}>
+                    {w.lessons.map((l: string, i: number) => <li key={i}>{l}</li>)}
+                  </ul>
+                )}
+                {w.status === "PENDING" && (
+                  <div className="flex gap-2 pt-1">
+                    <button onClick={() => decideWorklog(w, "approve")}
+                      className="text-xs px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white">✓ 批准并沉淀</button>
+                    <button onClick={() => decideWorklog(w, "reject")}
+                      className="text-xs px-2.5 py-1 rounded-lg bg-red-800/60 hover:bg-red-700 text-red-200">✕ 否决</button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>

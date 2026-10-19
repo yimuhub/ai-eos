@@ -51,6 +51,54 @@ async def is_capability_granted(db: AsyncSession, company_id: str,
     return bool(row and row.granted)
 
 
+# V5.7 ⑧ 防呆 ACI（学 SWE-agent）：高危动作执行前"先试错"——
+# 参数合法性 + 限行窗口预检，不合法直接返回防呆反馈，
+# 不烧 LLM 循环、不落脏操作。每步先验证再执行，出错率↓=token↓。
+def _precheck_capability(capability: str, params: dict) -> dict | None:
+    """返回 None=放行；否则返回 {ok:False, error, precheck:True}。"""
+    p = params or {}
+    if capability in ("click",):
+        x, y = p.get("x"), p.get("y")
+        if x is None or y is None:
+            return {"ok": False, "precheck": True,
+                   "error": f"坐标缺失：x={x!r} y={y!r}，请先截图定位"}
+        try:
+            x, y = int(x), int(y)
+        except (TypeError, ValueError):
+            return {"ok": False, "precheck": True,
+                   "error": f"坐标必须是整数，收到 x={x!r} y={y!r}"}
+        if not (0 <= x <= 10000 and 0 <= y <= 10000):
+            return {"ok": False, "precheck": True,
+                   "error": f"坐标越界（x={x}, y={y}），请先截图确认目标位置"}
+        return None
+    if capability == "type_text":
+        text = p.get("text")
+        if not text:
+            return {"ok": False, "precheck": True, "error": "text 不能为空"}
+        if len(str(text)) > 500:
+            return {"ok": False, "precheck": True,
+                   "error": f"文本 {len(str(text))} 字超过 500 字上限，请分段输入"}
+        return None
+    if capability in ("run_shell", "run_write"):
+        cmd = str(p.get("command") or p.get("cmd") or "")
+        # 限行窗口：破坏性命令拦截（老板可显式 confirm_destructive 绕过）
+        if p.get("confirm_destructive") is not True:
+            for pat in ("rm -rf /", "mkfs", "dd if=", ":(){", "shutdown",
+                        "reboot", "DROP TABLE", "drop database"):
+                if pat in cmd.lower():
+                    return {"ok": False, "precheck": True,
+                           "error": (f"限行窗口：命令含破坏性片段 {pat!r}。"
+                                     "如确需执行，请在 params 显式传 "
+                                     "confirm_destructive=true（审计留痕）")}
+        return None
+    if capability == "run_app":
+        app = p.get("app")
+        if not app:
+            return {"ok": False, "precheck": True, "error": "app 不能为空"}
+        return None
+    return None
+
+
 async def execute_computer_action(
     db: AsyncSession,
     *,
@@ -59,6 +107,7 @@ async def execute_computer_action(
     params: dict | None = None,
     agent_id: str | None = None,
     auto_approved: str | None = None,
+    skip_precheck: bool = False,
 ) -> dict:
     """执行一次电脑操作。返回统一结构：
 
@@ -91,6 +140,18 @@ async def execute_computer_action(
         raise ComputerActionDenied(capability, log.deny_reason)
 
     executor = REAL_EXECUTORS[capability]
+    # V5.7 ⑧ 防呆 ACI：执行前先试错——参数/限行预检不通过直接返回
+    # 防呆反馈（不进执行器、不烧 token、不落脏操作）
+    if not skip_precheck:
+        pre = _precheck_capability(capability, params or {})
+        if pre:
+            log.result = pre
+            log.deny_reason = f"precheck: {pre.get('error')}"
+            db.add(log)
+            await db.commit()
+            return {"ok": False, "allowed": True, "capability": capability,
+                    "result": pre, "log_id": log.id, "deny_reason": None,
+                    "precheck_blocked": True}
     try:
         result = await executor(params or {})
     except Exception as exc:

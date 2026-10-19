@@ -64,7 +64,14 @@ async def recall(db: AsyncSession, agent_id: str, query: str | None = None,
         for m in live:
             m_tokens = set(m.keywords or []) or _tokens(m.content)
             overlap = len(q_tokens & m_tokens)
-            score = overlap / (len(q_tokens) ** 0.5 + 1e-9) + m.importance * 0.3
+            # V5.7 多信号排序（mem0 风格）：
+            # 相关度(overlap) + 重要度 + 新鲜度（30 天半衰）+ 热度(log 访问)
+            import math
+            age_days = max((now - m.created_at).total_seconds() / 86400.0, 0.0)
+            freshness = 0.5 ** (age_days / 30.0)
+            heat = math.log1p(m.access_count) * 0.05
+            score = (overlap / (len(q_tokens) ** 0.5 + 1e-9) * 2.0
+                     + m.importance * 0.5 + freshness * 0.3 + heat)
             scored.append((score, m))
         scored.sort(key=lambda x: -x[0])
         top = [m for _, m in scored[:top_k]]

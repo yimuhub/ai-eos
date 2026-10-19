@@ -277,6 +277,44 @@ async def main():
         check("⑤ 绩效快照含 ROI/成本维度", ok and has_roi,
               f"{len(ranked)} agents {('roi ok' if has_roi else 'no roi field')}")
 
+        # ---- V5.7 ⑥⑦⑧ 冒烟 ----
+        # ⑥⑦ 下班学习：写日志 → 老板批准 → 沉淀为高置信记忆
+        agent7 = (await c.post("/agents", json={"name": "V57 学习员",
+                                               "company_id": company_id},
+                                headers=H)).json()
+        a7id = agent7.get("id") or agent7.get("agent_id")
+        r = await c.post(f"/worklogs?agent_id={a7id}",
+                        json={"agent_id": a7id, "content": "学会了 dry_run 预检",
+                              "lessons": ["预检先行"], "period": "daily"},
+                        headers=H)
+        wl_ok = r.status_code in (200, 201)
+        check("⑥ 写工作日志", wl_ok, f"got {r.status_code} {r.text[:100]}")
+        wl_id = r.json().get("id") if wl_ok else None
+        if wl_id:
+            r2 = await c.post(f"/worklogs/{wl_id}/decide?agent_id={a7id}",
+                             json={"decision": "approve"}, headers=H)
+            d2 = r2.json() if r2.status_code == 200 else {}
+            check("⑦ 批准→沉淀高置信记忆",
+                  r2.status_code == 200 and d2.get("memory_ref"),
+                  f"got {r2.status_code} {r2.text[:120]}")
+            # 验证记忆真的入库且 importance=0.95
+            rec = await c.get(f"/memory/recall", params={
+                "company_id": company_id, "agent_id": a7id, "top_k": 5}, headers=H)
+            mems = rec.json().get("memories", []) if rec.status_code == 200 else []
+            hit = any(m.get("importance") == 0.95 for m in mems)
+            check("⑦ 沉淀记忆可召回(importance 0.95)", hit,
+                  f"{len(mems)} memories")
+        # ⑧ 防呆 ACI：dry_run 预检拦截越界坐标
+        r = await c.post("/computer-agent/execute",
+                         json={"action_type": "click",
+                              "params": {"x": 999999, "y": 1},
+                              "dry_run": True},
+                         params={"company_id": company_id}, headers=H)
+        d3 = r.json() if r.status_code == 200 else {}
+        check("⑧ dry_run 预检拦截越界坐标",
+              r.status_code == 200 and d3.get("precheck_blocked") is True,
+              f"got {r.status_code} {r.text[:120]}")
+
         print(f"\n[结果] {passed} 通过, {len(failed)} 失败 {failed if failed else ''}")
         return 0 if not failed else 1
 

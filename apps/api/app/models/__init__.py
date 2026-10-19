@@ -58,3 +58,4 @@ from app.models.p3_governance import (AgentSandbox, AgentVersion,  # noqa: F401
 from .budget import TokenBudget  # noqa: F401
 from .mailbox import AgentMailbox, MailMessage  # noqa: F401
 from .whitelist import ApprovalWhitelist  # noqa: F401
+from .worklog import AgentWorklog, WorklogStatus  # noqa: F401

@@ -37,6 +37,8 @@ router = APIRouter(prefix="/computer-agent", tags=["computer-agent"])
 
 class ActionIn(BaseModel):
     action_type: str
+    # V5.7 ⑧ 防呆 ACI：dry_run 只跑限行/参数预检，不真正执行
+    dry_run: bool = False
     params: dict | None = None
 
 
@@ -173,6 +175,14 @@ async def execute_action(
                            "拒绝则丢弃。",
                 "mode": "HOLD"}
 
+    # V5.7 ⑧ 防呆 ACI：dry_run 模式——只跑限行/参数预检，不执行
+    if data.dry_run:
+        from app.services.computer_service import _precheck_capability
+        pre = _precheck_capability(data.action_type, data.params or {})
+        return {"dry_run": True,
+                "result": pre or {"ok": True, "precheck": True,
+                                  "message": "预检通过，可真实执行"},
+                "precheck_blocked": pre is not None}
     try:
         outcome = await execute_computer_action(
             db, company_id=company_id, capability=data.action_type,
