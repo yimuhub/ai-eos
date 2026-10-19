@@ -11,7 +11,7 @@ type Pricing = {
   included_tokens_per_month: number; currency: string; enabled: boolean; note?: string | null;
 };
 type ModelRow = { id: string; name: string; model_id: string; provider_type: string };
-type StatRow = { key: string; name?: string; input_tokens: number; output_tokens: number; total_tokens: number; total_cost: number; calls: number };
+type StatRow = { key: string; name?: string; input_tokens: number; output_tokens: number; total_tokens: number; total_cost: number; calls: number; cost_pct?: number; rule_candidate?: boolean; suggestion?: string | null };
 type Summary = {
   input_tokens: number; output_tokens: number; total_tokens: number;
   total_cost: number; calls: number; avg_latency_ms: number;
@@ -264,8 +264,15 @@ export default function TokenAdminPage() {
                   <span className="text-[var(--foreground)] font-medium truncate max-w-[60%]">{r.name || r.key}</span>
                   <span className="text-[var(--muted-foreground)] shrink-0 ml-2">
                     {fmtTokens(r.total_tokens)} tokens · {fmtCost(r.total_cost)} · {r.calls}次
+                    {r.cost_pct != null ? ` · ${r.cost_pct}%` : ""}
                   </span>
                 </div>
+                {/* V5.8 ⑩ 成本分维：可规则化场景的高占比降本建议 */}
+                {r.suggestion && (
+                  <div className="text-[11px] mt-0.5 px-2 py-1 rounded bg-amber-500/10 text-amber-300">
+                    💡 {r.suggestion}
+                  </div>
+                )}
                 <div className="h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
                   <div className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500"
                     style={{ width: `${Math.max(3, (r.total_tokens / max) * 100)}%` }} />

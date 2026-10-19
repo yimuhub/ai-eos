@@ -315,6 +315,23 @@ async def main():
               r.status_code == 200 and d3.get("precheck_blocked") is True,
               f"got {r.status_code} {r.text[:120]}")
 
+        # ---- V5.8 ⑨⑩ 冒烟 ----
+        # ⑨ Agent Card
+        r = await c.get(f"/agents/{a7id}/card", headers=H)
+        card = r.json() if r.status_code == 200 else {}
+        check("⑨ Agent Card 含能力+needs-auth",
+              r.status_code == 200 and "needs_auth" in card
+              and card.get("agent_id") == a7id,
+              f"got {r.status_code} {r.text[:120]}")
+        # ⑩ 成本分维
+        r = await c.get(f"/tokens/stats/by-scenario",
+                       params={"company_id": company_id, "days": 30}, headers=H)
+        ok = r.status_code == 200
+        rows = r.json() if ok else []
+        has_dim = any("cost_pct" in x and "rule_candidate" in x for x in rows)
+        check("⑩ 成本分维含占比/规则化建议", ok and (has_dim or not rows),
+              f"got {r.status_code} {len(rows)} rows")
+
         print(f"\n[结果] {passed} 通过, {len(failed)} 失败 {failed if failed else ''}")
         return 0 if not failed else 1
 

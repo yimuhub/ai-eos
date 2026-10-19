@@ -305,14 +305,33 @@ async def stats_by_task(company_id: str = Query(...), days: int = Query(30),
     return await _attach_names(db, rows[:limit], "task")
 
 
+# V5.8 ⑩ 成本分维：低价值动作（通知/围观/心跳/反思）走规则引擎或限流，
+# 关键岗位才上大模型——token 护栏从"总预算"扩到"调用类型"维度。
+_SCENARIO_BUDGET_HINT = {
+    # scenario: 是否适合走规则引擎（低价值/批量/可枚举）
+    "CHAT": False, "TASK": False, "MEETING": False, "ORCHESTRATION": False,
+    "LEARNING": True, "REFLECTION": True, "SKILL": True, "TRAINING": True,
+    "TEAM_GEN": True, "FACTORY": True,
+}
+
+
 @router.get("/stats/by-scenario")
 async def stats_by_scenario(company_id: str = Query(...), days: int = Query(30),
                             db: AsyncSession = Depends(get_db),
                             user: User = Depends(get_current_user)):
-    """(f) 学习/场景维度：学习·会议·任务·聊天…各占多少。"""
+    """(f) 学习/场景维度 + V5.8 ⑩ 成本分维：占比 + 优化建议（可规则化）。"""
     conds = [TokenUsage.company_id == company_id]
     conds += _parse_range(days, None, None)
-    return await _group_stats(db, TokenUsage.scenario, conds)
+    rows = await _group_stats(db, TokenUsage.scenario, conds)
+    total_cost = sum(r["total_cost"] for r in rows) or 1.0
+    for r in rows:
+        rule_ok = _SCENARIO_BUDGET_HINT.get(r["key"], False)
+        r["cost_pct"] = round(r["total_cost"] / total_cost * 100, 1)
+        r["rule_candidate"] = rule_ok
+        r["suggestion"] = (
+            f"占 {r['cost_pct']}%，可考虑走规则引擎/限流降本"
+            if rule_ok and r["cost_pct"] >= 20 else None)
+    return rows
 
 
 SCENARIO_LABELS = {

@@ -27,7 +27,7 @@ type CareerRec = { title: string; change_type: string; is_current: boolean };
 type MemoryItem = { id: string; content: string; type: string; created_at: string };
 type SkillNode = { id: string; name: string };
 
-const TABS = ["成长", "训练", "技能", "私人知识库", "记忆", "复盘", "考核", "职业", "邮箱", "下班学习"] as const;
+const TABS = ["成长", "训练", "技能", "私人知识库", "记忆", "复盘", "考核", "职业", "邮箱", "下班学习", "工牌"] as const;
 const LEVEL_ZH: Record<string, string> = {
   BEGINNER: "入门", JUNIOR: "初级", INTERMEDIATE: "中级", ADVANCED: "高级", EXPERT: "专家",
 };
@@ -40,6 +40,13 @@ export default function AgentProfilePage() {
   const router = useRouter();
   const [agentName, setAgentName] = useState("");
   const [tab, setTab] = useState<(typeof TABS)[number]>("成长");
+
+  // V5.8 ⑨ Agent Card（员工工牌）：能力清单 + needs-auth 态
+  const [card, setCard] = useState<any>(null);
+  useEffect(() => {
+    if (!agentId) return;
+    api.get(`/agents/${agentId}/card`).then(setCard).catch(() => setCard(null));
+  }, [agentId]);
 
   // V5.7 ⑥⑦ 下班学习：工作日志列表 + 写日志 + 老板审批（成长也要点头）
   const [worklogs, setWorklogs] = useState<any[]>([]);
@@ -748,6 +755,70 @@ export default function AgentProfilePage() {
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {/* ---- 工牌（V5.8 ⑨ Agent Card / needs-auth）---- */}
+      {tab === "工牌" && (
+        <div className="space-y-3 max-w-2xl">
+          {!card ? (
+            <p className="text-xs py-4 text-center" style={{ color: "var(--muted)" }}>加载中…</p>
+          ) : (
+            <>
+              <div className="card card-static p-5">
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="w-12 h-12 rounded-xl flex items-center justify-center text-xl"
+                    style={{ background: "linear-gradient(135deg,#10b981,#22d3ee)" }}>🪪</div>
+                  <div>
+                    <h3 className="font-semibold text-base">{card.name}</h3>
+                    <p className="text-xs" style={{ color: "var(--muted)" }}>{card.role || "未设岗位"} · 状态 {card.status}</p>
+                  </div>
+                </div>
+                <div className="text-xs space-y-1.5">
+                  {card.description && <p style={{ color: "var(--muted)" }}>{card.description}</p>}
+                  <div>
+                    <span className="font-medium">技能清单：</span>{" "}
+                    {Array.isArray(card.capabilities) && card.capabilities.length
+                      ? card.capabilities.map((s: string) => (
+                        <span key={s} className="inline-block px-1.5 py-0.5 mr-1 rounded bg-emerald-500/10 text-emerald-300">{s}</span>
+                      ))
+                      : <span style={{ color: "var(--muted)" }}>暂无</span>}
+                  </div>
+                  <div>
+                    <span className="font-medium">电脑操作授权：</span>{" "}
+                    {Array.isArray(card.computer_capabilities) && card.computer_capabilities.length
+                      ? card.computer_capabilities.map((s: string) => (
+                        <span key={s} className="inline-block px-1.5 py-0.5 mr-1 rounded bg-cyan-500/10 text-cyan-300">{s}</span>
+                      ))
+                      : <span style={{ color: "var(--muted)" }}>未授权</span>}
+                  </div>
+                </div>
+              </div>
+
+              <div className="card card-static p-4">
+                <h4 className="text-sm font-medium mb-2">🔐 needs-auth（A2A 任务状态机）</h4>
+                <p className="text-xs mb-2" style={{ color: "var(--muted)" }}>
+                  调用方按工牌可预知哪些动作要先找老板批。挂起中的审批单：
+                </p>
+                {Array.isArray(card.needs_auth?.pending) && card.needs_auth.pending.length ? (
+                  <div className="space-y-1">
+                    {card.needs_auth.pending.map((p: any) => (
+                      <div key={p.id} className="text-xs flex items-center gap-2">
+                        <span className="text-amber-400">⏳</span>
+                        <span className="font-medium">{p.action}</span>
+                        <span style={{ color: "var(--muted)" }}>{p.since ? new Date(p.since).toLocaleString("zh-CN", { hour12: false }) : ""}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-emerald-400">✓ 无挂起审批（可自由调用）</p>
+                )}
+                <div className="text-xs mt-2" style={{ color: "var(--muted)" }}>
+                  高危动作：{card.needs_auth?.high_risk_actions?.join(", ") || "—"}
+                </div>
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

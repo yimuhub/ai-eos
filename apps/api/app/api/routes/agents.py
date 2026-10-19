@@ -162,6 +162,74 @@ async def get_agent(aid: str, db: AsyncSession = Depends(get_db),
     return a
 
 
+@router.get("/{aid}/card")
+async def agent_card(aid: str, db: AsyncSession = Depends(get_db),
+                    user=Depends(get_current_user)):
+    """V5.8 ⑨ Agent Card（学 A2A 协议）：员工工牌 JSON。
+
+    局域网/外部系统按工牌发现"这个员工是谁、会什么、找哪干"：
+    - name/role/description：身份
+    - capabilities：技能清单 + 电脑操作能力授权
+    - needs_auth：哪些动作要先找老板批（A2A 任务状态机的 needs-auth 态）
+    - health：当前状态
+    这是"别家公司 agent 按工牌调用你的员工"的协议层基础。
+    """
+    a = await db.get(Agent, aid)
+    if not a:
+        raise HTTPException(404, "Agent not found")
+    await _verify_agent_access(db, user.id, a)
+    # 能力清单：技能（skills 表名）+ 电脑操作授权
+    from app.models.skill import AgentSkill, Skill
+    from sqlalchemy import select as _sel
+    skill_links = (await db.execute(
+        _sel(AgentSkill.skill_id).where(AgentSkill.agent_id == a.id))
+        ).scalars().all()
+    cap_names: list[str] = []
+    if skill_links:
+        from app.models.skill import Skill as _Sk
+        skill_rows = (await db.execute(
+            _sel(_Sk.name).where(_Sk.id.in_(skill_links)))).scalars().all()
+        cap_names = [n for n in skill_rows if n]
+    # 电脑操作能力授权（公司级）
+    from app.computer_agent import ComputerPermission
+    granted_caps = [row for row in (await db.execute(
+        _sel(ComputerPermission.capability).where(
+            ComputerPermission.company_id == a.company_id,
+            ComputerPermission.granted.is_(True)))).scalars().all()]
+    # needs-auth 态（A2A）：该 Agent 名下挂起的审批单 → 调用方应知"在等批"
+    from app.models.intervention import ApprovalRequest
+    pending_auth = (await db.execute(
+        _sel(ApprovalRequest.id, ApprovalRequest.action_type,
+             ApprovalRequest.created_at).where(
+            ApprovalRequest.requested_by_agent_id == a.id,
+            ApprovalRequest.status == "PENDING")
+        .order_by(ApprovalRequest.created_at.desc()).limit(5)
+    )).all()
+    return {
+        "agent_id": a.id,
+        "name": a.name,
+        "role": a.role,
+        "description": a.description,
+        "status": a.status.value if hasattr(a.status, "value") else str(a.status),
+        "department_id": a.department_id,
+        "company_id": a.company_id,
+        "capabilities": cap_names or None,
+        "computer_capabilities": granted_caps,
+        # needs-auth（A2A 状态机）：高危电脑操作默认要审批
+        "needs_auth": {
+            "high_risk_actions": ["run_shell", "run_write", "click",
+                                   "type_text", "key", "run_app"],
+            "policy": "company approval gate (default deny until granted)",
+            "pending": [
+                {"id": p[0], "action": p[1],
+                 "since": p[2].isoformat() if p[2] else None}
+                for p in pending_auth
+            ],
+        },
+        "card_version": "1.0",
+    }
+
+
 @router.patch("/{aid}")
 async def update_agent(aid: str, data: dict, db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
