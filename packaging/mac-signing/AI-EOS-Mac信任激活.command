@@ -1,0 +1,27 @@
+#!/bin/bash
+# AI-EOS Mac 信任激活（每台 Mac 跑一次；需要 Touch ID / 密码）
+set -e
+WORK="$(mktemp -d /tmp/aieos-trust.XXXXXX)"
+CERT="$WORK/aieos.crt"
+echo "===== AI-EOS Mac 信任激活 ====="
+echo "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURnRENDQW1pZ0F3SUJBZ0lVWjVyZjF6QzVTWUZnVVYwY1d6RC9GaFkvYjFRd0RRWUpLb1pJaHZjTkFRRUwKQlFBd1JURWxNQ01HQTFVRUF3d2NRVWt0UlU5VElFUnBjM1J5YVdKMWRHbHZiaUJUWld4bVUybG5iakVQTUEwRwpBMVVFQ2d3R1FVa3RSVTlUTVFzd0NRWURWUVFHRXdKVlV6QWVGdzB5TmpFd01Ua3hNalU1TlRoYUZ3MHpOakV3Ck1UWXhNalU1TlRoYU1FVXhKVEFqQmdOVkJBTU1IRUZKTFVWUFV5QkVhWE4wY21saWRYUnBiMjRnVTJWc1psTnAKWjI0eER6QU5CZ05WQkFvTUJrRkpMVVZQVXpFTE1Ba0dBMVVFQmhNQ1ZWTXdnZ0VpTUEwR0NTcUdTSWIzRFFFQgpBUVVBQTRJQkR3QXdnZ0VLQW9JQkFRQ2RRQUxUNnlLcm5uclBrNU9NQjVOOTlyRHI5N2lpanNmbXdMc2hwTGgwCnZpNGRPZkJmQXh2UVBHT2RUSUNMRTdXTzV3MDAzdmxaNHBCMDZmSUtYTk5kU3ZVMzRSbVFydTRhbHNObHNsQU4KRFpYT1lCYjFzRnZ4ZEtKT3ZiWVE0dmZQajNsa3JCK1lPQ1pqcXlSTXFoRFQ3VS9ZeDlKZk05L0JjWWFMQzBrdwp0aG80cnRHSS9sOTA1RXFwb3pjRjQ4TlpQTld2ck8vNjg2TUpaMjI3N1NaQmJ0MGhSQW9zUXlEbTFVZHlTUSt2Ck04eld2SGNvT25PcFdtbzl0T3hiM3dQd3drSUpQT0pRSmRRVkFTcll2T2p6SFlSQWpGUlI3UmQwNlJaZlFUbkwKeFliZURNeURnTnZtRmV2K3h1Z09ZeXhhL2c2RXpicXRmTEJBaVNjUUFJL0JBZ01CQUFHamFEQm1NQjBHQTFVZApEZ1FXQkJSNlpObWk5WGI5cnVTR0pUUkxsRERvS2t0K0J6QWZCZ05WSFNNRUdEQVdnQlI2Wk5taTlYYjlydVNHCkpUUkxsRERvS2t0K0J6QVBCZ05WSFJNQkFmOEVCVEFEQVFIL01CTUdBMVVkSlFRTU1Bb0dDQ3NHQVFVRkJ3TUQKTUEwR0NTcUdTSWIzRFFFQkN3VUFBNElCQVFBdjNla1FXMEU0V1loRU4xQzBvbnhJcVFPK0IzQ3RscDI4WUVHVApWeTdqbjJ6Smp5LzU2N2RTY1N6V2w5Zk5lVXVnRlAxWHBRbjNjRDNxc1kwUnkxTkxGS3ZzNDd1NjNyaXM0Z0JLCnhMUVpEbDkyVHBxdEsrQVhibWtSbVNydGlHVWpDWHRlRzVJYSsraUtzS3RjQ0llQ0d5VTcxL0R2VklFbzYzelgKVjlrTHJzOTFxRjk2SnhNMTZsdW1ma2VHaDNEZ0xMOTVKVDB4a2ZMS1l5cU9BaUVvM1IxYVFVNWZmYldtd29MZwozN1hLL1BPa1BjdlRQR05aTlJVRmN2Y05tdXd2N1hENjBMNFc3dUdkME83cCt0aW90ZGduV0FvOHhGRGdSZDVrCk1VM0p6dFZKM1B4STVQMXBEUk5VdWJYU3dLZk5neDJ6SEJiT2NmVzluVENUTlJjTgotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==" | base64 -d > "$CERT"
+echo "1/3 证书就绪：AI-EOS Distribution SelfSign（自签，10 年）"
+echo "2/3 加入系统信任（即将 Touch ID / 密码）..."
+security add-trusted-cert -d -r trustAsRoot -k /Library/Keychains/System.keychain "$CERT" 2>/dev/null \
+  || security add-trusted-cert -d -r trustAsRoot "$CERT"
+echo "  ✓ 证书已设为受信任根证书"
+APP="/Applications/AI-EOS.app"
+if [ -d "$APP" ]; then
+  echo "3/3 重签 $APP ..."
+  codesign --force --deep -s "AI-EOS Distribution SelfSign" "$APP" 2>&1 | tail -1 || true
+  xattr -cr "$APP" 2>/dev/null || true
+  echo "  ✓ 已重签为受信任的 AI-EOS Distribution SelfSign"
+else
+  echo "3/3 未找到 $APP：请先用 DMG 安装 AI-EOS 到 应用程序，再重跑本脚本"
+fi
+rm -rf "$WORK"
+echo ""
+echo "===== 完成 ====="
+echo "现在双击 应用程序/AI-EOS 打开即可；若提示'未识别开发者'，点'仍要打开'一次。"
+echo "本脚本每台 Mac 只需跑一次。"
+read -n1 -s -p "回车关闭窗口..."
