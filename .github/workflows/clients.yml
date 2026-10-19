@@ -180,9 +180,13 @@ jobs:
       - name: 定标签
         id: tag
         run: |
-          TAG="${{ inputs.tag }}"
-          if [ -z "$TAG" ]; then
-            TAG="clients-$(date +%Y%m%d)"
+          # 用户铁律：每个版本的 Release 必须挂客户端 → 用推送的 tag 名
+          # （clients-v5.8.0）作 Release tag，不再回落日期标签
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${{ github.ref_name }}"        # 例：clients-v5.8.0
+          else
+            TAG="${{ inputs.tag }}"             # workflow_dispatch 手动
+            if [ -z "$TAG" ]; then TAG="clients-$(date +%Y%m%d)"; fi
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
       - name: 创建 Release 并附安装包
