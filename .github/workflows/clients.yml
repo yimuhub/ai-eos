@@ -54,7 +54,7 @@ jobs:
             export CSC_KEY_PASSWORD="$APPLE_CSC_KEY_PASSWORD"
             npx electron-builder --mac
           else
-            echo "ℹ️ 未配置 Apple 证书 → ad-hoc 构建；每台 Mac 用户装完跑一次『AI-EOS-Mac信任激活.command』重签即可"
+            echo "ℹ️ 未配置 Apple 证书 → ad-hoc 构建；每台 Mac 用户装完跑一次『AI-EOS-Mac-trust-activate.command』重签即可"
             CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac
           fi
       - name: 收集产物（含信任激活脚本）
@@ -62,8 +62,8 @@ jobs:
           mkdir -p out/mac
           cp desktop/dist/AI-EOS-*.dmg desktop/dist/AI-EOS-*.zip out/mac/ 2>/dev/null || cp desktop/dist/*.dmg desktop/dist/*.zip out/mac/ 2>/dev/null
           # 随附 Mac 信任激活脚本（无 Apple 账号时，每台 Mac 跑一次即可信任+重签）
-          cp packaging/mac-signing/"AI-EOS-Mac信任激活.command" out/mac/ 2>/dev/null || echo "  (信任激活脚本缺失，跳过)"
-          chmod +x out/mac/"AI-EOS-Mac信任激活.command" 2>/dev/null || true
+          cp packaging/mac-signing/"AI-EOS-Mac-trust-activate.command" out/mac/ 2>/dev/null || echo "  (信任激活脚本缺失，跳过)"
+          chmod +x out/mac/"AI-EOS-Mac-trust-activate.command" 2>/dev/null || true
           ls -lh out/mac/
       - uses: actions/upload-artifact@v4
         with:
@@ -240,9 +240,9 @@ jobs:
 
           **macOS「恶意软件」拦截处理（重要）**
           - 未做 Apple 公证的 Mac 客户端，在 macOS（尤其 27）双击 .dmg 里的 app 可能被判定"恶意软件"并自动移入废纸篓。
-          - **首选（无需 Apple 账号）：运行随附的 `AI-EOS-Mac信任激活.command`**
+          - **首选（无需 Apple 账号）：运行随附的 `AI-EOS-Mac-trust-activate.command`**
             ① 先用 .dmg 把 AI-EOS 拖进 应用程序（被删就重拖一份）；
-            ② 双击 `AI-EOS-Mac信任激活.command`，按提示完成一次 Touch ID / 密码；
+            ② 双击 `AI-EOS-Mac-trust-activate.command`，按提示完成一次 Touch ID / 密码；
             ③ 脚本会自动把自签证书设为受信任根并重签 /Applications/AI-EOS.app；
             ④ 之后双击 AI-EOS 即可打开（首次若提示"未识别开发者"，点"仍要打开"一次）。
             每台 Mac 只需跑一次。
