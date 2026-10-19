@@ -53,17 +53,16 @@
           "target": "nsis",
           "arch": [
             "x64"
-          ],
-          "artifactName": "AI-EOS-${version}-win-setup.${ext}"
+          ]
         },
         {
           "target": "portable",
           "arch": [
             "x64"
-          ],
-          "artifactName": "AI-EOS-${version}-win-portable.${ext}"
+          ]
         }
-      ]
+      ],
+      "artifactName": "AI-EOS-${version}-win-setup.${ext}"
     },
     "linux": {
       "target": [
