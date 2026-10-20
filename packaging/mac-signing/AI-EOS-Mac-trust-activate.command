@@ -1,48 +1,32 @@
 #!/bin/bash
-# ============================================================
-#  AI-EOS Mac 信任激活脚本（每台 Mac 只需跑一次；需要 Touch ID / 密码）
-#  作用：
-#    1) 把 AI-EOS 的自签证书+私钥(p12)导入本机钥匙串
-#    2) 设为受信任根证书（这一步弹 Touch ID / 密码）
-#    3) 用受信任的自签身份重签 /Applications/AI-EOS.app
-#  之后：Mac 不再把它当"恶意软件"删除，双击即可打开
-#        （首次若提示"未识别开发者"，点"仍要打开"一次）
-#  无需 Apple 账号。
-# ============================================================
-set -e
-WORK="$(mktemp -d /tmp/aieos-trust.XXXXXX)"
-P12="$WORK/aieos-mac.p12"
+# AI-EOS Mac 信任激活（每台 Mac 跑一次；需 Touch ID / 密码）
+W="$(mktemp -d /tmp/aieos-trust.XXXXXX)"
+LC="$HOME/Library/Keychains/login.keychain-db"
+IDENT="AI-EOS Distribution SelfSign"
 echo "===== AI-EOS Mac 信任激活 ====="
-echo "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" | base64 -d > "$P12"
-echo "1/4 p12 证书+私钥已就绪：AI-EOS Distribution SelfSign（10 年）"
-echo "2/4 导入本机登录钥匙串 ..."
-security import "$P12" -k ~/Library/Keychains/login.keychain -P aieos2026 2>/dev/null \
-  || security import "$P12" -P aieos2026
-echo "  ✓ 已导入（身份：AI-EOS Distribution SelfSign）"
-echo "3/4 设为受信任根证书（即将 Touch ID / 密码）..."
-security add-trusted-cert -d -r trustAsRoot -k /Library/Keychains/System.keychain "$(dirname $P12)/aieos-mac.crt" 2>/dev/null || true
-# 从 p12 导出 crt 再信任（crt 不在 p12 里，需 openssl 抽出）
-openssl pkcs12 -in "$P12" -nokeys -password pass:aieos2026 2>/dev/null | \
-  openssl x509 -out "$WORK/aieos.crt" 2>/dev/null || true
-if [ -s "$WORK/aieos.crt" ]; then
-  security add-trusted-cert -d -r trustAsRoot "$WORK/aieos.crt"
-  echo "  ✓ 证书已设为受信任根证书"
-else
-  echo "  ! 未能抽出证书做信任（可能已信任过）——继续重签"
+echo "[1/5] 解码内嵌 p12(证书+私钥) 与 crt ..."
+echo "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" | base64 -d > "$W/aieos-mac.p12"
+echo "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURiekNDQWxlZ0F3SUJBZ0lVS0R6cktCRzE3bDh6cnB5cTIwUTAwOFF1Tk9Fd0RRWUpLb1pJaHZjTkFRRUwKQlFBd1JURWxNQ01HQTFVRUF3d2NRVWt0UlU5VElFUnBjM1J5YVdKMWRHbHZiaUJUWld4bVUybG5iakVQTUEwRwpBMVVFQ2d3R1FVa3RSVTlUTVFzd0NRWURWUVFHRXdKVlV6QWVGdzB5TmpFd01Ua3hOVE16TURkYUZ3MHpOakV3Ck1UWXhOVE16TURkYU1FVXhKVEFqQmdOVkJBTU1IRUZKTFVWUFV5QkVhWE4wY21saWRYUnBiMjRnVTJWc1psTnAKWjI0eER6QU5CZ05WQkFvTUJrRkpMVVZQVXpFTE1Ba0dBMVVFQmhNQ1ZWTXdnZ0VpTUEwR0NTcUdTSWIzRFFFQgpBUVVBQTRJQkR3QXdnZ0VLQW9JQkFRQ2RRQUxUNnlLcm5uclBrNU9NQjVOOTlyRHI5N2lpanNmbXdMc2hwTGgwCnZpNGRPZkJmQXh2UVBHT2RUSUNMRTdXTzV3MDAzdmxaNHBCMDZmSUtYTk5kU3ZVMzRSbVFydTRhbHNObHNsQU4KRFpYT1lCYjFzRnZ4ZEtKT3ZiWVE0dmZQajNsa3JCK1lPQ1pqcXlSTXFoRFQ3VS9ZeDlKZk05L0JjWWFMQzBrdwp0aG80cnRHSS9sOTA1RXFwb3pjRjQ4TlpQTld2ck8vNjg2TUpaMjI3N1NaQmJ0MGhSQW9zUXlEbTFVZHlTUSt2Ck04eld2SGNvT25PcFdtbzl0T3hiM3dQd3drSUpQT0pRSmRRVkFTcll2T2p6SFlSQWpGUlI3UmQwNlJaZlFUbkwKeFliZURNeURnTnZtRmV2K3h1Z09ZeXhhL2c2RXpicXRmTEJBaVNjUUFJL0JBZ01CQUFHalZ6QlZNQTRHQTFVZApEd0VCL3dRRUF3SUhnREFXQmdOVkhTVUJBZjhFRERBS0JnZ3JCZ0VGQlFjREF6QU1CZ05WSFJNQkFmOEVBakFBCk1CMEdBMVVkRGdRV0JCUjZaTm1pOVhiOXJ1U0dKVFJMbEREb0trdCtCekFOQmdrcWhraUc5dzBCQVFzRkFBT0MKQVFFQWlqYUNmSHlMc3ZsUUZOblE4NVdyVm5YVHZ6WDNycy9hODRGSnUxY3N5Y2hJMWlEcVAySUNFZlF4d0ZqcgpxcmpkZVYvbTJaT3NwMFRyNFdsQ3R1bDNuL0RjVFNGMGxEbG5NRlNlc3VoOUlVL3pmUVA1N3BmSHArODJ4VFpYCndtNzR2ckhjd0lWN0psM1lSWXBVT3hNOGUyNFVvR3A4eDlKK3hKWGtuNUNKWG9ZZVZUd0NGeUp1ZzFkZzRpeEoKZGRaUURQWDFpRzhPc1FQRXcvNk5rUWcrR1BpV1FoR1ZEN3F3R0lTaEEyRWVoVHNxY1dZNVJLQW5na3Q2bzhwcApCd1BIWEV1d0ZHTk1tV1JXaWcvQXYydnpXNUE1V3JIcU9rQkUrY3hyOW4yeTM2TzkyOTczZHlWM3BTbEg1U2MvCmZSb2M5d2E5T0xjTVc1bVlld0tkSnBobFFBPT0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=" | base64 -d > "$W/aieos.crt"
+echo "[2/5] 导入 p12 到登录钥匙串 ..."
+security delete-certificate -c "$IDENT" "$LC" 2>/dev/null || true
+security import "$W/aieos-mac.p12" -k "$LC" -P aieos2026 -T /usr/bin/codesign 2>&1 | tail -1
+echo "[3/5] 设为受信任（即将弹 Touch ID / 密码，请完成）..."
+security add-trusted-cert -d "$W/aieos.crt"
+echo "  ✓ 证书已设为受信任"
+if [ ! -d /Applications/AI-EOS.app ]; then
+  echo "  ! 未找到 /Applications/AI-EOS.app，请先用 .dmg 安装后再重跑本脚本"; rm -rf "$W"; exit 0
 fi
-APP="/Applications/AI-EOS.app"
-if [ -d "$APP" ]; then
-  echo "4/4 用受信任身份重签 $APP ..."
-  codesign --force --deep -s "AI-EOS Distribution SelfSign" "$APP" 2>&1 | tail -1 || true
-  xattr -cr "$APP" 2>/dev/null || true
-  AUTH="$(codesign -dv "$APP" 2>&1 | grep -i Authority | head -1 | sed 's/.*Authority=//')"
-  echo "  ✓ 重签完成 Authority=$AUTH"
+echo "[4/5] 用受信任身份重签 /Applications/AI-EOS.app（inside-out）..."
+codesign --force --deep -s "$IDENT" /Applications/AI-EOS.app 2>&1 | tail -1 || true
+xattr -cr /Applications/AI-EOS.app 2>/dev/null || true
+echo "[5/5] 校验签名 ..."
+AUTH="$(codesign -dv /Applications/AI-EOS.app 2>&1 | grep -i 'Authority' | head -1)"
+if [ -n "$AUTH" ]; then
+  echo "  ✓ 签名成功：$AUTH"
+  echo "  ✓ 现在双击 应用程序/AI-EOS 打开（首次若提示未识别开发者，点『仍要打开』一次）"
+  echo "  ✓ XProtect 应不再把它当恶意软件删除。"
 else
-  echo "4/4 未找到 $APP：请先用 .dmg 安装 AI-EOS 到 应用程序，再重跑本脚本"
+  echo "  ⚠ 未取到 Authority，请重跑本脚本"
 fi
-rm -rf "$WORK"
-echo ""
-echo "===== 完成 ====="
-echo "现在双击 应用程序/AI-EOS 打开即可；若提示'未识别开发者'，点'仍要打开'一次。"
-echo "本脚本每台 Mac 只需跑一次。"
+rm -rf "$W"
 read -n1 -s -p "回车关闭窗口..."
