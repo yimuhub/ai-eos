@@ -16,7 +16,7 @@ export default function NotFound() {
           你访问的地址不存在，也可能是对应功能还未开放。
         </p>
         <div className="flex gap-2 justify-center pt-1">
-          <Link href="/" className="btn-primary">回到指挥中心</Link>
+          <Link href="/dashboard" className="btn-primary">回到指挥中心</Link>
           <Link href="/tasks" className="btn-ghost">去看任务</Link>
         </div>
       </div>

@@ -443,6 +443,72 @@ export async function fetchText(path: string, config?: RequestOptions): Promise<
   return res.text();
 }
 
+/** SSE 事件体；具体字段由各接口约定（聊天流：status / delta / done / error） */
+export type SseEvent = Record<string, any>;
+
+/**
+ * 以 SSE（text/event-stream）方式 POST 并逐条回调事件。
+ *
+ * 走 `raw()` 复用鉴权、401 续期、错误规范化与取消信号，只多做"读流 + 拆帧"。
+ * 默认 **不限时**：流式回复本身可能持续几分钟，用普通请求的超时会把它掐断；
+ * 调用方用 `signal` 主动停止即可。
+ */
+export async function streamPost(
+  path: string,
+  body: unknown,
+  opts: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    silent?: boolean;
+    onEvent: (ev: SseEvent) => void;
+  },
+): Promise<void> {
+  const res = await raw(
+    path,
+    { method: "POST", body: JSON.stringify(body), headers: { Accept: "text/event-stream" } },
+    { signal: opts.signal, timeoutMs: opts.timeoutMs ?? 0, silent: opts.silent },
+  );
+  if (!res.body) throw new ApiError("服务端没有返回可读的流", 0, path);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let finished = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      // SSE 以空行分帧；一帧可能跨多个 chunk，也可能一个 chunk 含多帧
+      let cut = buf.indexOf("\n\n");
+      while (cut >= 0) {
+        const frame = buf.slice(0, cut);
+        buf = buf.slice(cut + 2);
+        const data = frame
+          .split("\n")
+          .filter((l) => l.startsWith("data:"))
+          .map((l) => l.slice(5).trim())
+          .join("\n");
+        if (data) {
+          try {
+            opts.onEvent(JSON.parse(data));
+          } catch {
+            // 非 JSON 帧（心跳/注释）直接忽略，不影响整条流
+          }
+        }
+        cut = buf.indexOf("\n\n");
+      }
+    }
+    finished = true;
+  } finally {
+    if (!finished) {
+      // 中途取消/出错：显式取消底层流，别让连接挂着
+      try { await reader.cancel(); } catch { /* 已关闭 */ }
+    }
+    reader.releaseLock();
+  }
+}
+
 /**
  * 带鉴权的二进制读取，返回可直接用的 object URL。
  *

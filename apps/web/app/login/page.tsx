@@ -70,7 +70,7 @@ export default function LoginPage() {
       // 后端返回 refresh_token 时存下，供 401 自动续期用；没有也不影响
       if (res.refresh_token) setRefreshToken(res.refresh_token);
       // 用 replace 避免用户回退时又落回登录页
-      router.replace("/");
+      router.replace("/workspace");
     } catch (err: any) {
       // lib/api.ts 对 /auth/login、/auth/register 的 401 不再整页跳转，
       // 错误在此内联呈现：文案可见、已输入内容不清空、loading 在 finally 恢复。

@@ -116,3 +116,68 @@ async def test_tables_absent_from_database_are_left_alone():
         async with engine.connect() as conn:
             tables = await conn.run_sync(lambda c: set(inspect(c).get_table_names()))
         assert tables == {"agent_executions"}, f"凭空多出了表：{tables}"
+
+
+@asynccontextmanager
+async def full_schema_engine():
+    """建出完整表结构（模拟新版本库），供"删一列再补回来"使用。"""
+    from app.db.base import Base
+
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="aieos_migrate_full_"))
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp / 'full.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(lambda c: Base.metadata.create_all(c))
+        yield engine
+    finally:
+        await engine.dispose()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+async def test_non_nullable_json_column_is_added_with_empty_default():
+    """`Mapped[list] = mapped_column(JSON, default=list)` 这类非空列也要补。
+
+    这类列（公司/项目/自动化的附件列表）在模型里是 nullable=False，早先的
+    补列规则一律跳过——老库一读 /companies 就 `no such column`，用户升级后
+    直接登录不进去。语义上"没有附件"只有一种答案：空集合。
+    """
+    async with full_schema_engine() as engine:
+        async with engine.begin() as conn:
+            await conn.execute(text(
+                "INSERT INTO companies (id, owner_id, name, attachments)"
+                " VALUES ('c1', 'u1', '老公司', '[]')"))
+            # 模拟老库：这一列根本不存在（老行数据保留）
+            await conn.execute(text("ALTER TABLE companies DROP COLUMN attachments"))
+
+        added = await ensure_columns(engine)
+
+        assert "companies.attachments" in added, f"非空 JSON 列未补上：{added}"
+        async with engine.connect() as conn:
+            row = (await conn.execute(text(
+                "SELECT name, attachments FROM companies WHERE id='c1'"))).one()
+            ddl = (await conn.execute(text(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='companies'"
+            ))).scalar()
+        assert row.name == "老公司", "补列不能动原有数据"
+        val = row.attachments.strip() if isinstance(row.attachments, str) else row.attachments
+        assert val == [] or val == "[]", f"老行必须回落到空集合，实际：{row.attachments!r}"
+        assert "DEFAULT '[]'" in (ddl or ""), f"补列时必须带上默认值，DDL：{ddl}"
+
+
+async def test_non_nullable_non_json_column_still_requires_human():
+    """没有机械默认值的非空列仍要留给人决策，不能被自动填一个假值。"""
+    from app.db.migrations import _auto_addable
+
+    class FakeType:
+        def compile(self, dialect=None):
+            return "INTEGER"
+
+    class FakeColumn:
+        name = "amount"
+        nullable = False
+        primary_key = False
+        type = FakeType()
+        default = None
+
+    assert _auto_addable(FakeColumn()) is False
+

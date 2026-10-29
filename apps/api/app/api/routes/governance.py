@@ -31,6 +31,17 @@ def _now_utc():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+async def _owned_case(db: AsyncSession, user_id: str, iid: str):
+    """取改进提案并校验公司归属：提案里带 agent_id，直接部署等于改别家员工。"""
+    from app.api.deps import assert_company_owned
+
+    case = await db.get(SelfImprovementCase, iid)
+    if not case:
+        raise HTTPException(404, "not found")
+    await assert_company_owned(db, user_id, case.company_id)
+    return case
+
+
 # ================= P3-13 Self-Improvement Governance =================
 
 class ImprovementIn(BaseModel):
@@ -51,6 +62,14 @@ async def propose_improvement(
     user: User = Depends(get_current_user),
 ):
     """Agent/用户提交自我改进提案（进入治理流程，不直接生效）。"""
+    import app.api.deps as deps
+
+    await deps.assert_company_owned(db, user.id, company_id)
+    agent = await deps.assert_agent_owned(db, user.id, data.agent_id)
+    # 公司归属通过了还不够：提案里的员工必须真的属于这家公司，
+    # 否则「自己的 company_id + 别家的 agent_id」就能把改进部署到别家员工身上。
+    if agent.company_id != company_id:
+        raise HTTPException(404, "Agent not found")
     case = SelfImprovementCase(
         id=_id(), agent_id=data.agent_id, company_id=company_id,
         reflection_id=data.reflection_id,
@@ -71,9 +90,9 @@ async def sandbox_test(
     user: User = Depends(get_current_user),
 ):
     """创建沙盒克隆并记录测试对比结果。"""
-    case = await db.get(SelfImprovementCase, iid)
-    if not case or case.status not in ("PROPOSED", "SANDBOX_TESTING"):
-        raise HTTPException(409, f"status={case.status if case else 'missing'}")
+    case = await _owned_case(db, user.id, iid)
+    if case.status not in ("PROPOSED", "SANDBOX_TESTING"):
+        raise HTTPException(409, f"status={case.status}")
     a = await db.get(Agent, case.agent_id)
 
     # 克隆当前 Agent 配置到沙盒
@@ -108,9 +127,7 @@ async def deploy_improvement(
     user: User = Depends(get_current_user),
 ):
     """人工审批：批准 → 部署新版本（旧版本可回滚）；拒绝 → 关闭提案。"""
-    case = await db.get(SelfImprovementCase, iid)
-    if not case:
-        raise HTTPException(404, "not found")
+    case = await _owned_case(db, user.id, iid)
     if not data.approve:
         case.status = "REJECTED"
         case.decided_by = user.id
@@ -160,9 +177,9 @@ async def rollback_agent(
     user: User = Depends(get_current_user),
 ):
     """回滚 Agent 到指定历史版本。"""
-    a = await db.get(Agent, agent_id)
-    if not a:
-        raise HTTPException(404, "Agent not found")
+    from app.api.deps import assert_agent_owned
+
+    a = await assert_agent_owned(db, user.id, agent_id)
     q = await db.execute(select(AgentVersion).where(
         AgentVersion.agent_id == agent_id, AgentVersion.version == version))
     ver = q.scalars().first()

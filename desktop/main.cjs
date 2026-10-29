@@ -373,6 +373,8 @@ function createWindow() {
     show: false,
     title: "AI-EOS",
     icon: isWin ? path.join(__dirname, "icon.ico") : undefined,
+    // mac 上用无边框标题栏，让工作台的三栏能顶到窗口边缘；红绿灯仍保留并把位置让出来
+    ...(isMac ? { titleBarStyle: "hiddenInset", trafficLightPosition: { x: 16, y: 16 } } : {}),
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,

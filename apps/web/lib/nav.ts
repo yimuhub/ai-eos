@@ -39,7 +39,8 @@ export const NAV_GROUPS: NavGroup[] = [
     title: "指挥中枢",
     hint: "每天先看这里：现在在打什么仗、仗打到哪了",
     items: [
-      { href: "/", label: "指挥中心", icon: "◈", desc: "全局总览：公司、员工、任务与今日动向", keywords: ["dashboard", "home", "zhihuizhongxin", "首页", "总览", "概览"] },
+      { href: "/workspace", label: "工作台", icon: "◧", desc: "左看人、中间下指令、右边看产出，一张屏干完活", keywords: ["workspace", "gongzuotai", "工作台", "对话", "聊天", "首页", "home"] },
+      { href: "/dashboard", label: "指挥中心", icon: "◈", desc: "全局总览：公司、员工、任务与今日动向", keywords: ["dashboard", "zhihuizhongxin", "总览", "概览", "看板"] },
       { href: "/command", label: "一句话指挥台", icon: "📣", desc: "说一句话，AI 判断派活/专家组队/作战室立项，每步都有你的确认点", keywords: ["command", "zhichutai", "指挥台", "一句话", "下达", "派活", "组队", "立项", "orchestrator"] },
       { href: "/projects", label: "项目中心", icon: "▤", desc: "按项目组织目标：建项目、拉团队、下目标", keywords: ["project", "xiangmu", "项目", "目标"] },
       { href: "/warroom", label: "作战室", icon: "🎯", desc: "盯单个目标的实时执行过程与产出", keywords: ["warroom", "zuozhanshi", "作战", "盯盘"] },
@@ -111,6 +112,7 @@ export const NAV_GROUPS: NavGroup[] = [
  * 但对熟悉系统的人是刚需。所以「藏起来、搜得到」比「删掉」或「平铺」都更合适。 */
 export const HIDDEN_ITEMS: NavItem[] = [
   { href: "/test-console", label: "接口测试台", icon: "🧪", desc: "内部调试用：直接调用后端接口查看原始返回", keywords: ["test", "console", "ceshi", "调试", "接口测试", "debug"], hidden: true },
+  { href: "/", label: "首页（工作台）", icon: "🏠", desc: "访问根路径自动跳到工作台", keywords: ["home", "shouye", "首页", "根路径", "root"], hidden: true },
 ];
 
 /** 全部可检索页面（侧边栏 + 隐藏页），带所属分组名 */

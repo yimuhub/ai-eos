@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import assert_agent_owned, get_current_user
 from app.core.logging_config import get_logger
 from app.db.session import get_db
 from app.models.agent import Agent
@@ -543,8 +543,9 @@ async def project_chat_operation(pid: str, data: ChatOpIn,
     # ---- 手动选择模式：直接按传入 ID 执行，不做 NLP 解析 ----
     if data.agent_ids or data.department_ids or data.skill_ids:
         for aid in data.agent_ids:
-            a = await db.get(Agent, aid)
-            if not a:
+            a = await assert_agent_owned(db, user.id, aid)
+            # 同公司校验：把别家公司的员工拉进项目并设为负责人，等于跨租户写入
+            if a.company_id != p.company_id:
                 continue
             exists = await db.execute(text(
                 "SELECT 1 FROM project_members WHERE project_id = CAST(:pid AS varchar) "
@@ -557,7 +558,7 @@ async def project_chat_operation(pid: str, data: ChatOpIn,
                             "detail": f"{a.name} 已手动指派为负责人并加入团队"})
         for did in data.department_ids:
             dpt = await db.get(Department, did)
-            if not dpt:
+            if not dpt or dpt.company_id != p.company_id:
                 continue
             dept_agents = (await db.execute(select(Agent).where(
                 Agent.department_id == did))).scalars().all()
@@ -578,7 +579,7 @@ async def project_chat_operation(pid: str, data: ChatOpIn,
         for skid in data.skill_ids:
             from app.models.skill import Skill as SkillM
             sk = await db.get(SkillM, skid)
-            if sk:
+            if sk and sk.company_id in (None, p.company_id):
                 actions.append({"type": "attach_skill",
                                 "detail": f"技能「{sk.name}」已附加到项目"})
         reply = "；".join(a["detail"] for a in actions) + "。" if actions else "未找到有效目标。"

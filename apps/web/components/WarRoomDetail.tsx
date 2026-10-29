@@ -511,15 +511,19 @@ export default function WarRoomDetail() {
             <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
               <h3 className="font-semibold text-sm">📋 任务分工与执行看板</h3>
               <div className="flex gap-2">
-                {active.status === "announcing" && (
+                {["announcing", "confirmed"].includes(active.status) && (
                   <>
-                    {!active.tasks.every(t => t.announce_status === "announced") && (
+                    {active.status === "announcing" &&
+                     !active.tasks.every(t => t.announce_status === "announced") && (
                       <button onClick={announce} disabled={busy}
                         className="btn-primary !py-1.5 !px-4 text-xs disabled:opacity-40">
                         📣 让全员在群聊复述任务
                       </button>
                     )}
-                    {active.tasks.every(t => t.announce_status === "acknowledged") && (
+                    {/* 全部校对通过后会话会翻到 confirmed，按钮若只认 announcing
+                        就会在最后一刻消失，用户再也没有开工入口 */}
+                    {(active.status === "confirmed" ||
+                      active.tasks.every(t => t.announce_status === "acknowledged")) && (
                       <button onClick={startExec}
                         className="btn-primary !py-1.5 !px-4 text-xs bg-gradient-to-r from-emerald-600 to-teal-500">
                         🚀 正确，请继续 —— 全员开工

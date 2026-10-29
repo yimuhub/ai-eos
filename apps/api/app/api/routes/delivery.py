@@ -6,7 +6,6 @@
 - /download/{asset_id}: 文件下载
 """
 import mimetypes
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -14,6 +13,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+# Asset.path 存的是相对 storage 根的路径（如 artifacts/ab12_x.md），
+# 直接 Path() 会按进程 CWD 解析，换目录/换机器全部 404。
+from app.api.routes.assets import _resolve_asset_path
 from app.models.agent import Agent
 from app.models.asset import Asset
 from app.models.company import Company
@@ -31,7 +33,7 @@ async def _company_of(db: AsyncSession, user_id: str, company_id: str) -> Compan
 
 
 def _file_info(a: Asset) -> dict:
-    p = Path(a.path) if a.path else None
+    p = _resolve_asset_path(a.path) if a.path else None
     return {
         "id": a.id,
         "name": a.name,
@@ -124,8 +126,8 @@ async def download(asset_id: str, db: AsyncSession = Depends(get_db),
     c = await db.get(Company, a.company_id)
     if not c or c.owner_id != user.id:
         raise HTTPException(404)
-    p = Path(a.path or "")
-    if not p.exists():
+    p = _resolve_asset_path(a.path or "")
+    if not p.is_file():
         raise HTTPException(404, "file missing on disk")
     return FileResponse(p, filename=a.name)
 

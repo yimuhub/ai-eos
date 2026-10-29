@@ -591,7 +591,7 @@ export default function ProjectsPage() {
                 全选
               </label>
               {batchSel.size > 0 && (
-                <button onClick={() => () => setBatchSel(new Set())} className="text-[11px] hover:text-[var(--foreground)] transition-colors">清空</button>
+                <button onClick={() => setBatchSel(new Set())} className="text-[11px] hover:text-[var(--foreground)] transition-colors">清空</button>
               )}
             </div>
             <div className="max-h-[50vh] overflow-y-auto p-4 grid grid-cols-3 gap-2">

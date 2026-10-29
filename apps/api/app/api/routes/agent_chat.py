@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, get_db
 from app.core.logging_config import get_logger
 from app.db.base import Base
+from app.db.session import AsyncSessionLocal
 from app.models.agent import Agent
 from sqlalchemy import JSON, String, Integer, Text, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
@@ -155,106 +157,38 @@ async def _save_msg(db: AsyncSession, agent: Agent, role: str,
     return msg
 
 
-@router.get("/{aid}/chat/history")
-async def chat_history(aid: str, limit: int = Query(50, ge=1, le=200),
-                       db: AsyncSession = Depends(get_db),
-                       user=Depends(get_current_user)):
-    a = await _owned(db, user.id, aid)
-    rows = (await db.execute(select(AgentChatMessage).where(
-        AgentChatMessage.agent_id == str(a.id)).order_by(
-        AgentChatMessage.created_at.desc()).limit(limit))).scalars().all()
-    return [{"id": r.id, "role": r.role, "content": r.content,
-             "meta": r.meta, "created_at": str(r.created_at)}
-            for r in reversed(rows)]
+# ---------------- 普通/流式两个入口共用的逻辑 ----------------
+
+DOC_OPEN = "[GENERATE_DOC]"
+DOC_CLOSE = "[/GENERATE_DOC]"
 
 
-@router.post("/{aid}/chat")
-async def boss_chat(aid: str, data: ChatIn,
-                    db: AsyncSession = Depends(get_db),
-                    user=Depends(get_current_user)):
-    """老板与 Agent 单独聊天：问答 / 下达任务 / 指挥其他 Agent。"""
-    from app.model_gateway import ModelGateway
+def visible_reply(raw: str) -> str:
+    """去掉给系统看的文档标记，只留老板该看到的正文。
+
+    标记块是机器指令，落库/展示都不该带上——此前历史消息里会原样出现
+    ``[GENERATE_DOC] {"type":...}`` 这一整段 JSON。
+    """
+    text = re.sub(r"\[GENERATE_DOC\].*?\[/GENERATE_DOC\]", "", raw,
+                  flags=re.S)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+async def _agent_model_ids(db: AsyncSession, a: Agent) -> list[str]:
+    """按 primary → secondary → fallback 顺序取该员工的模型 id。"""
+    from app.models.agent import AgentModelConfig
+    cfg_rows = (await db.execute(select(AgentModelConfig).where(
+        AgentModelConfig.agent_id == str(a.id)))).scalars().all()
+    order = {"primary": 0, "secondary": 1, "fallback": 2}
+    return [c.model_id for c in sorted(cfg_rows,
+                                       key=lambda c: order.get(c.role, 3))]
+
+
+async def _build_qa_messages(db: AsyncSession, a: Agent, text: str) -> list[dict]:
+    """问答上下文的完整拼装：人设 + 长期记忆 + 知识库 + 最近对话 + 能力提示。"""
     from app.kb_engine import cost_optimized_rag
-    from app.memory_engine import MemoryType, remember, recall
+    from app.memory_engine import recall
 
-    a = await _owned(db, user.id, aid)
-    text = data.message.strip()
-    if not text:
-        raise HTTPException(400, "empty message")
-
-    # 本次对话触发的动作汇总（前端用来展示"我到底做了什么"）。
-    # 提到函数开头显式初始化：原代码用 locals().get("_actions") 做惰性判断，
-    # 依赖 CPython 局部变量字典的行为，既脆弱又难读。
-    actions: list[dict] = []
-
-    await _save_msg(db, a, "boss", text)
-
-    # ---------- 自然语言电脑操作（傻瓜式）----------
-    # 必须带 company_id/agent_id：execute_nl 内部按公司能力授权做门禁，
-    # 无授权的动作返回 denied 而不是静默执行（此前这里直接裸调用，
-    # 等于绕过了 ComputerPermission 与审批）。
-    from app.nl_computer import detect_intent
-    nl_intent = detect_intent(text)
-    if nl_intent:
-        from app.nl_computer import execute_nl
-        result = await execute_nl(nl_intent, company_id=str(a.company_id),
-                                  agent_id=str(a.id))
-        reply_text = f"{result.get('message') or result.get('error') or '操作完成'}"
-        detail = result.get("detail")
-        if detail:
-            lines = [f"• {m['file']} → {m['category']}/" for m in detail[:8]]
-            if len(detail) >= 8:
-                lines.append("…")
-            reply_text += "\n" + "\n".join(lines)
-        await _save_msg(db, a, "agent", reply_text,
-                        {"action": nl_intent["action"]})
-        await db.commit()
-        return {"reply": reply_text,
-                "actions": [{"type": "nl_action", **nl_intent, "result": result}]}
-
-    # ---------- 意图识别：安排任务 ----------
-    create_task_intent = any(kw in text for kw in
-                             ("安排任务", "下达任务", "去干", "去做", "办一件事",
-                              "执行一个任务", "安排一下", "负责处理"))
-    target_agent = None
-    if create_task_intent:
-        # 找消息里提到的其他 Agent 名（排除自己）
-        others = (await db.execute(select(Agent).where(
-            Agent.company_id == a.company_id))).scalars().all()
-        for o in others:
-            if o.id == a.id:
-                continue
-            # 名称全匹配 或 老板用称呼片段（如"文案"匹配"文案写手"）
-            name_hit = o.name in text
-            role_hit = bool(o.role) and len(o.role) >= 2 and o.role in text
-            prefix_hit = len(o.name) >= 2 and o.name[:2] in text
-            if name_hit or role_hit or prefix_hit:
-                target_agent = o
-                break
-
-    task_created = None
-    if create_task_intent:
-        from app.models.task import Task as TaskModel, TaskStatus
-        title = text[:80]
-        desc = text
-        assignee = target_agent or a
-        t = TaskModel(company_id=a.company_id, title=title,
-                      description=desc, assigned_agent_id=assignee.id,
-                      created_by=str(user.id), status=TaskStatus.TODO)
-        db.add(t)
-        await db.flush()
-        task_created = {"task_id": str(t.id), "assignee": assignee.name}
-        reply_text = (
-            f"✅ 已收到工作安排，我已创建任务《{title[:50]}》"
-            + (f"并指派给「{target_agent.name}」执行。" if target_agent
-               else "，稍后开始执行。"))
-        await _save_msg(db, a, "agent", reply_text,
-                        {"action": "create_task", **task_created})
-        await db.commit()
-        return {"reply": reply_text, "actions": [{"type": "create_task",
-                                                  **task_created}]}
-
-    # ---------- 普通问答：记忆 + 知识库 + LLM ----------
     messages = []
     base_prompt = (
         f"你是「{a.name}」，公司的一名数字员工。"
@@ -314,6 +248,142 @@ async def boss_chat(aid: str, data: ChatIn,
             "严禁凭记忆或猜测回答，严禁给出未经验证的数字。"})
     # 当前用户消息（必须显式加入）
     messages.append({"role": "user", "content": text})
+    return messages
+
+
+async def _try_short_intents(db: AsyncSession, a: Agent, user_id: str,
+                             text: str) -> dict | None:
+    """不需要 LLM 的两条短路径：本机操作、安排任务。
+
+    返回 ``{"reply", "actions", "meta"}``；不匹配返回 None（走问答）。
+    普通与流式入口共用，避免两套意图识别各自漂移。
+    """
+    from app.nl_computer import detect_intent
+    nl_intent = detect_intent(text)
+    if nl_intent:
+        from app.nl_computer import execute_nl
+        result = await execute_nl(nl_intent, company_id=str(a.company_id),
+                                  agent_id=str(a.id))
+        reply_text = f"{result.get('message') or result.get('error') or '操作完成'}"
+        detail = result.get("detail")
+        if detail:
+            lines = [f"• {m['file']} → {m['category']}/" for m in detail[:8]]
+            if len(detail) >= 8:
+                lines.append("…")
+            reply_text += "\n" + "\n".join(lines)
+        return {"reply": reply_text,
+                "actions": [{"type": "nl_action", **nl_intent, "result": result}],
+                "meta": {"action": nl_intent["action"]}}
+
+    create_task_intent = any(kw in text for kw in
+                             ("安排任务", "下达任务", "去干", "去做", "办一件事",
+                              "执行一个任务", "安排一下", "负责处理"))
+    if not create_task_intent:
+        return None
+
+    # 找消息里提到的其他 Agent 名（排除自己）
+    target_agent = None
+    others = (await db.execute(select(Agent).where(
+        Agent.company_id == a.company_id))).scalars().all()
+    for o in others:
+        if o.id == a.id:
+            continue
+        # 名称全匹配 或 老板用称呼片段（如"文案"匹配"文案写手"）
+        name_hit = o.name in text
+        role_hit = bool(o.role) and len(o.role) >= 2 and o.role in text
+        prefix_hit = len(o.name) >= 2 and o.name[:2] in text
+        if name_hit or role_hit or prefix_hit:
+            target_agent = o
+            break
+
+    from app.models.task import Task as TaskModel, TaskStatus
+    title = text[:80]
+    assignee = target_agent or a
+    t = TaskModel(company_id=a.company_id, title=title,
+                  description=text, assigned_agent_id=assignee.id,
+                  created_by=str(user_id), status=TaskStatus.TODO)
+    db.add(t)
+    await db.flush()
+    task_created = {"task_id": str(t.id), "assignee": assignee.name}
+    reply_text = (
+        f"✅ 已收到工作安排，我已创建任务《{title[:50]}》"
+        + (f"并指派给「{target_agent.name}」执行。" if target_agent
+           else "，稍后开始执行。"))
+    return {"reply": reply_text,
+            "actions": [{"type": "create_task", **task_created}],
+            "meta": {"action": "create_task", **task_created}}
+
+
+async def _materialize_docs(db: AsyncSession, a: Agent, raw_reply: str):
+    """把回复里的 [GENERATE_DOC] 标记渲染成真实文件并登记成果。
+
+    返回 ``(file, error)``：失败不阻断对话，但必须把原因带回给老板
+    ——此前这类失败被静默吞掉，用户"看到回复却拿不到文件"。
+    """
+    doc_file = None
+    doc_error = None
+    try:
+        from app.doc_generator import parse_doc_markers, generate_document
+        from app.models.asset import Asset as _Asset, AssetType
+        for dspec in parse_doc_markers(raw_reply):
+            gen = generate_document(dspec["type"], dspec["title"],
+                                    dspec["content"], agent_id=str(a.id))
+            db.add(_Asset(company_id=a.company_id,
+                          name=gen["file_name"],
+                          type=AssetType.OTHER,
+                          path=gen["file_path"], mime_type=gen["mime"],
+                          size=gen["size"], created_by=str(a.id),
+                          creator_type="agent", agent_id=str(a.id)))
+            doc_file = gen
+    except Exception as doc_err:
+        logger.warning("聊天内文档生成失败 agent=%s: %s", a.id, doc_err,
+                       exc_info=True)
+        doc_error = f"{type(doc_err).__name__}: {doc_err}"
+    return doc_file, doc_error
+
+
+@router.get("/{aid}/chat/history")
+async def chat_history(aid: str, limit: int = Query(50, ge=1, le=200),
+                       db: AsyncSession = Depends(get_db),
+                       user=Depends(get_current_user)):
+    a = await _owned(db, user.id, aid)
+    rows = (await db.execute(select(AgentChatMessage).where(
+        AgentChatMessage.agent_id == str(a.id)).order_by(
+        AgentChatMessage.created_at.desc()).limit(limit))).scalars().all()
+    return [{"id": r.id, "role": r.role, "content": r.content,
+             "meta": r.meta, "created_at": str(r.created_at)}
+            for r in reversed(rows)]
+
+
+@router.post("/{aid}/chat")
+async def boss_chat(aid: str, data: ChatIn,
+                    db: AsyncSession = Depends(get_db),
+                    user=Depends(get_current_user)):
+    """老板与 Agent 单独聊天：问答 / 下达任务 / 指挥其他 Agent。"""
+    from app.model_gateway import ModelGateway
+    from app.memory_engine import MemoryType, remember
+
+    a = await _owned(db, user.id, aid)
+    text = data.message.strip()
+    if not text:
+        raise HTTPException(400, "empty message")
+
+    # 本次对话触发的动作汇总（前端用来展示"我到底做了什么"）。
+    # 提到函数开头显式初始化：原代码用 locals().get("_actions") 做惰性判断，
+    # 依赖 CPython 局部变量字典的行为，既脆弱又难读。
+    actions: list[dict] = []
+
+    await _save_msg(db, a, "boss", text)
+
+    # 本机操作 / 安排任务：不需要 LLM，两步可秒回
+    short = await _try_short_intents(db, a, str(user.id), text)
+    if short:
+        await _save_msg(db, a, "agent", short["reply"], short["meta"])
+        await db.commit()
+        return {"reply": short["reply"], "actions": short["actions"]}
+
+    # ---------- 普通问答：记忆 + 知识库 + LLM ----------
+    messages = await _build_qa_messages(db, a, text)
 
     gw = ModelGateway(db)
     from app.model_gateway import usage_context
@@ -321,12 +391,7 @@ async def boss_chat(aid: str, data: ChatIn,
     # 函数末尾 commit 前 exit；异常上抛路径沿用旧语义（不比原来差）。
     _usage_scope = usage_context(agent=a, scenario="CHAT", user_id=str(user.id))
     _usage_scope.__enter__()
-    from app.models.agent import AgentModelConfig
-    cfg_rows = (await db.execute(select(AgentModelConfig).where(
-        AgentModelConfig.agent_id == str(a.id)))).scalars().all()
-    order = {"primary": 0, "secondary": 1, "fallback": 2}
-    model_ids = [c.model_id for c in sorted(cfg_rows,
-                 key=lambda c: order.get(c.role, 3))]
+    model_ids = await _agent_model_ids(db, a)
     llm = await gw.chat_with_agent_models(model_ids, messages, tools=[WEB_SEARCH_TOOL, *COMPUTER_TOOLS])
     # 处理 tool_calls：调用 web_search 后回填消息再循环
     tool_calls = llm.get("tool_calls") or []
@@ -439,27 +504,10 @@ async def boss_chat(aid: str, data: ChatIn,
                                   final_reply, flags=re.S).strip() or "(无回复)")
 
     # 聊天中检测文档生成标记 → 自动产出真实文件
-    doc_file = None
-    try:
-        from app.doc_generator import parse_doc_markers, generate_document
-        from app.models.asset import Asset as _Asset
-        for dspec in parse_doc_markers(final_reply):
-            gen = generate_document(dspec["type"], dspec["title"],
-                                    dspec["content"], agent_id=str(a.id))
-            from app.models.asset import AssetType
-            db.add(_Asset(company_id=a.company_id,
-                          name=gen["file_name"],
-                          type=AssetType.OTHER,
-                          path=gen["file_path"], mime_type=gen["mime"],
-                          size=gen["size"], created_by=str(a.id),
-                          creator_type="agent", agent_id=str(a.id)))
-            doc_file = gen
-    except Exception as doc_err:
-        # 文档生成失败：对话仍返回，但用户会"看到回复却拿不到文件"，
-        # 这正是之前被静默吞掉的那类缺陷，必须出声并回传原因
-        logger.warning("聊天内文档生成失败 agent=%s: %s", a.id, doc_err, exc_info=True)
-        doc_error = f"{type(doc_err).__name__}: {doc_err}"
+    doc_file, doc_error = await _materialize_docs(db, a, final_reply)
 
+    # 落库与展示都只留正文：标记块是给系统看的
+    final_reply = visible_reply(final_reply) or "(无回复)"
     await _save_msg(db, a, "agent", final_reply)
 
     # 省 token 记忆：每 6 轮压缩一次近期对话为单条摘要记忆
@@ -490,6 +538,208 @@ async def boss_chat(aid: str, data: ChatIn,
     await db.commit()
     return {"reply": final_reply, "file": doc_file, "doc_error": doc_error,
             "actions": actions}
+
+
+# ---------------- 流式聊天（SSE） ----------------
+
+_CHAT_TOOLS = [WEB_SEARCH_TOOL, *COMPUTER_TOOLS]
+
+
+class ChatStreamIn(BaseModel):
+    message: str
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+
+
+def _marker_holdback_len(s: str) -> int:
+    """s 末尾有多少字符可能是 [GENERATE_DOC] 的开头（需要暂缓发送）。"""
+    for n in range(min(len(s), len(DOC_OPEN) - 1), 0, -1):
+        if DOC_OPEN.startswith(s[-n:]):
+            return n
+    return 0
+
+
+class DocMarkerFilter:
+    """流式过滤器：把 [GENERATE_DOC]…[/GENERATE_DOC] 整段挡在气泡之外。
+
+    标记是给系统看的指令，不该出现在对话里；而它是逐字到达的，
+    所以只有"能确定不是标记前缀"的尾巴才放行——否则老板会先看到
+    ``[GENER`` 这样的碎片。
+    """
+
+    def __init__(self) -> None:
+        self.raw = ""       # 原文（含标记），最后交给文档生成
+        self._buf = ""
+        self._in_doc = False
+
+    def feed(self, piece: str) -> str:
+        self.raw += piece
+        self._buf += piece
+        if self._in_doc:
+            end = self._buf.find(DOC_CLOSE)
+            if end < 0:
+                return ""
+            self._in_doc = False
+            rest = self._buf[end + len(DOC_CLOSE):]
+            self._buf = ""
+            return rest
+        start = self._buf.find(DOC_OPEN)
+        if start >= 0:
+            emit = self._buf[:start]
+            self._buf = self._buf[start:]
+            self._in_doc = True
+            return emit
+        keep = _marker_holdback_len(self._buf)
+        if not keep:
+            emit, self._buf = self._buf, ""
+            return emit
+        emit, self._buf = self._buf[:-keep], self._buf[-keep:]
+        return emit
+
+    def flush(self) -> str:
+        if self._in_doc:
+            return ""   # 标记没闭合：半截指令没有意义，整段丢弃
+        out, self._buf = self._buf, ""
+        return out
+
+
+async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str):
+    """SSE 生成器。
+
+    自建 session：请求级依赖的回收时机与长连接无关，
+    流还没开始写的时候它可能已经被关掉了。
+    """
+    from app.model_gateway import ModelGateway, usage_context
+
+    async with AsyncSessionLocal() as db:
+        try:
+            a = await db.get(Agent, agent_id)
+            if a is None:
+                yield _sse({"type": "error", "message": "员工不存在或已离职"})
+                return
+
+            short = await _try_short_intents(db, a, user_id, text)
+            if short:
+                await _save_msg(db, a, "agent", short["reply"], short["meta"])
+                await db.commit()
+                # 短路径本来就是秒回，也按流式帧发，前端只有一套逻辑
+                yield _sse({"type": "delta", "text": short["reply"]})
+                yield _sse({"type": "done", "reply": short["reply"],
+                            "actions": short["actions"]})
+                return
+
+            yield _sse({"type": "status", "text": "正在检索记忆与知识库…"})
+            messages = await _build_qa_messages(db, a, text)
+            model_ids = await _agent_model_ids(db, a)
+            gw = ModelGateway(db)
+            flt = DocMarkerFilter()
+            actions: list[dict] = []
+
+            with usage_context(agent=a, scenario="CHAT", user_id=user_id):
+                tool_calls = None
+                rounds = 0
+                while True:
+                    async for ev in gw.stream_with_agent_models(
+                            model_ids, messages, tools=_CHAT_TOOLS):
+                        if ev.get("type") == "delta":
+                            piece = flt.feed(ev["text"])
+                            if piece:
+                                yield _sse({"type": "delta", "text": piece})
+                        elif ev.get("type") == "done":
+                            tool_calls = ev.get("tool_calls")
+
+                    if not tool_calls or rounds >= 2:
+                        break
+                    rounds += 1
+                    yield _sse({"type": "status", "text": "正在调用工具…"})
+                    messages.append({"role": "assistant", "content": "",
+                                     "tool_calls": tool_calls})
+                    for tc in tool_calls:
+                        fname = (tc.get("function") or {}).get("name", "")
+                        targs: dict = {}
+                        try:
+                            parsed = json.loads(
+                                (tc.get("function") or {}).get("arguments") or "{}")
+                            if isinstance(parsed, dict):
+                                targs = parsed
+                        except json.JSONDecodeError as exc:
+                            # 参数不是合法 JSON 时工具会拿到空参数执行，留痕便于排查模型输出问题
+                            logger.warning("流式工具参数解析失败 tool=%s agent=%s: %s",
+                                           fname, agent_id, exc)
+                        try:
+                            if fname.startswith("computer_"):
+                                cap = fname.replace("computer_", "")
+                                res = await _computer_action(
+                                    db, cap, targs, user_id, company_id)
+                                actions.append({"type": "computer_action",
+                                                "action": cap,
+                                                "command": targs.get("command", ""),
+                                                "result": res})
+                            else:
+                                res = await execute_skill_safe(db, fname, targs)
+                            body = str((res.get("result")
+                                        if isinstance(res, dict) else None) or res)
+                        except Exception as tool_err:
+                            # 工具失败要让模型知道，否则它会基于"工具没返回"编答案
+                            logger.warning("流式聊天工具失败 tool=%s agent=%s: %s",
+                                           fname, agent_id, tool_err, exc_info=True)
+                            body = f"error: {tool_err}"
+                        messages.append({"role": "tool",
+                                         "tool_call_id": tc.get("id"),
+                                         "content": body})
+                    tool_calls = None
+
+            tail = flt.flush()
+            if tail:
+                yield _sse({"type": "delta", "text": tail})
+            doc_file, doc_error = await _materialize_docs(db, a, flt.raw)
+            reply = visible_reply(flt.raw) or "（这次没有生成内容，请再说一次或换个问法）"
+            await _save_msg(db, a, "agent", reply)
+            await db.commit()
+            yield _sse({"type": "done", "reply": reply, "file": doc_file,
+                        "doc_error": doc_error, "actions": actions})
+        except Exception as exc:
+            logger.warning("流式聊天失败 agent=%s: %s", agent_id, exc, exc_info=True)
+            try:
+                await db.rollback()
+            except Exception:
+                logger.warning("流式聊天回滚失败 agent=%s", agent_id, exc_info=True)
+            yield _sse({"type": "error",
+                        "message": str(exc) or type(exc).__name__})
+
+
+@router.post("/{aid}/chat/stream")
+async def boss_chat_stream(aid: str, data: ChatStreamIn,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(get_current_user)):
+    """老板与 Agent 私聊（流式）。
+
+    与 ``/chat`` 共用意图识别、上下文构建和文档产出，差别只在"边生成边推"。
+    事件类型：
+    * ``status`` 阶段提示（检索中/调工具），不进正文
+    * ``delta``  正文增量，前端直接追加
+    * ``done``   结束，带完整 reply / file / actions
+    * ``error``  失败原因（本轮正文不会落库）
+    """
+    a = await _owned(db, user.id, aid)
+    text = data.message.strip()
+    if not text:
+        raise HTTPException(400, "empty message")
+    # 先落老板这句：即使后面模型挂了，历史里也留有他的指令
+    await _save_msg(db, a, "boss", text)
+    await db.commit()
+
+    return StreamingResponse(
+        _chat_stream(str(a.id), str(a.company_id), str(user.id), text),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ---------------- Agent 删除时级联清空聊天 ----------------

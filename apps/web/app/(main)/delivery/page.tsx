@@ -49,13 +49,15 @@ export default function DeliveryCenterPage() {
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
-    const cs = await api.get<Company[]>("/companies");
-    if (!cs.length) { setLoading(false); return; }  // 早退也必须复位 loading，否则骨架屏永远转
-    setCid(cs[0].id);
+    setErr("");
     try {
+      const cs = await api.get<Company[]>("/companies");
+      if (!cs.length) { setLoading(false); return; }  // 早退也必须复位 loading，否则骨架屏永远转
+      setCid(cs[0].id);
       if (view === "agent") {
         const r = await api.get(`/delivery/by-agent?company_id=${cs[0].id}`);
         setFolders(r.folders || []);
@@ -66,7 +68,11 @@ export default function DeliveryCenterPage() {
         const r = await api.get(`/delivery/by-project?company_id=${cs[0].id}`);
         setGroups(r.groups || []);
       }
-    } catch {}
+    } catch (e) {
+      // 原实现把 /companies 放在 try 之外：一旦失败，loading 永远为 true，
+      // 整页停在骨架屏（用户以为网慢，其实已经报错）。
+      setErr(describeError(e, "交付文件加载失败"));
+    }
     setLoading(false);
   }, [view]);
 
@@ -122,8 +128,15 @@ export default function DeliveryCenterPage() {
         <p className="text-sm text-center py-16" style={{ color: "var(--muted)" }}>加载中…</p>
       )}
 
+      {!loading && err && (
+        <div className="card card-static p-8 text-center space-y-3">
+          <p className="text-sm" style={{ color: "#fca5a5" }}>❌ {err}</p>
+          <button className="btn-primary !py-1.5 !px-4 text-xs" onClick={() => load()}>重试</button>
+        </div>
+      )}
+
       {/* ===== 按 Agent 文件夹视图 ===== */}
-      {!loading && view === "agent" && (
+      {!loading && !err && view === "agent" && (
         <div className="space-y-3">
           {folders.filter((f) => match(f.name)).map((f, i) => {
             const grad = AVATAR_GRADS[i % AVATAR_GRADS.length];
@@ -186,7 +199,7 @@ export default function DeliveryCenterPage() {
       )}
 
       {/* ===== 按项目视图 ===== */}
-      {!loading && (view === "project" || view === "task") && (
+      {!loading && !err && (view === "project" || view === "task") && (
         <div className="space-y-3">
           {groups.filter((g) => match(g.name)).map((g) => {
             const open = openKey === g.key;

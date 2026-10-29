@@ -57,6 +57,9 @@ async def _execute_step(db: AsyncSession, company_id: str, step: dict,
             task.project_id = params["project_id"]
         if params.get("assigned_agent_id"):
             task.assigned_agent_id = params["assigned_agent_id"]
+            # 自动化是"到点自己干活"，不是给老板攒待办：有执行人就交给
+            # auto_start 队列（10s 一轮）自动开工；没有执行人的留待人工指派。
+            task.auto_start = True
         db.add(task)
         await db.flush()
         return {"task_id": task.id}

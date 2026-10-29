@@ -5,6 +5,7 @@ Agent Runtime NEVER calls an LLM directly — always through ModelGateway.
 """
 import asyncio
 import contextlib
+import json
 import random
 import time
 from abc import ABC, abstractmethod
@@ -264,6 +265,24 @@ class BaseModelProvider(ABC):
     async def chat(self, messages: list[dict], tools=None, config: dict | None = None) -> dict:
         """Return {"content": str, "usage": {...}, "raw": ...}."""
 
+    async def stream(self, messages: list[dict], tools=None, config: dict | None = None):
+        """流式输出（异步生成器）。
+
+        事件约定：
+        * ``{"type": "delta", "text": str}`` — 正文增量，按顺序追加
+        * ``{"type": "final", "usage": dict, "tool_calls": list|None, ...}`` — 收尾
+
+        默认实现退化成"整段一次返回"：没实现流式的 provider 仍然能跑流式
+        接口，前端表现为整段一起出现，而不是报 500。
+        """
+        result = await self.chat(messages, tools=tools, config=config)
+        content = result.get("content") or ""
+        if content:
+            yield {"type": "delta", "text": content}
+        yield {"type": "final", "usage": result.get("usage") or {},
+               "tool_calls": result.get("tool_calls"),
+               "raw_model": result.get("raw_model")}
+
 
 class OpenAICompatProvider(BaseModelProvider):
     """Works for OpenAI / DeepSeek / Qwen / agnes / llama.cpp / any OpenAI-compatible API."""
@@ -299,6 +318,107 @@ class OpenAICompatProvider(BaseModelProvider):
             "usage": data.get("usage", {}),
             "raw_model": data.get("model", self.model_id),
         }
+
+    async def stream(self, messages, tools=None, config=None):
+        """SSE 流式调用。
+
+        与 ``chat`` 的三点差别，都是流式特有的坑：
+        1. **重试窗口**：只要还没吐出第一个字，超时/5xx/429 仍可重试；
+           一旦开始输出就锁定——重试会让用户看到两段重复的话。
+        2. **用量**：``stream_options.include_usage`` 只有部分服务支持，
+           遇到 400/404/422 且响应提到 stream_options 时去掉该参数重试，
+           否则"想拿用量"会变成"不能用流式"。
+        3. **工具调用**：流式的 tool_calls 是分片下发的（id/name 在前，
+           arguments 逐段拼接），这里按 index 累积后一次性交给调用方。
+        """
+        cfg = config or {}
+        base_body = {
+            "model": self.model_id,
+            "messages": messages,
+            "temperature": cfg.get("temperature", 0.7),
+            "max_tokens": cfg.get("max_tokens", 8192),
+            "stream": True,
+        }
+        if tools:
+            base_body["tools"] = tools
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        timeout = cfg.get("timeout")
+        kwargs = {"timeout": timeout} if timeout is not None else {}
+
+        include_usage = True
+        last_error: Exception | None = None
+        for attempt in range(MAX_HTTP_RETRIES + 1):
+            body = dict(base_body)
+            if include_usage:
+                body["stream_options"] = {"include_usage": True}
+            emitted = False
+            usage: dict = {}
+            acc: dict[int, dict] = {}
+            try:
+                async with get_http_client().stream(
+                        "POST", f"{self.base_url}/chat/completions",
+                        json=body, headers=headers, **kwargs) as resp:
+                    if resp.status_code >= 400:
+                        raw = (await resp.aread()).decode("utf-8", "ignore")
+                        if (include_usage and resp.status_code in (400, 404, 422)
+                                and "stream_options" in raw):
+                            include_usage = False
+                            logger.info("模型 %s 不支持 stream_options，去掉后重试",
+                                        self.model_id)
+                            continue
+                        resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        line = line.strip()
+                        if not line or line.startswith(":"):
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+                        if chunk.get("usage"):
+                            usage = chunk["usage"]
+                        for choice in chunk.get("choices") or []:
+                            delta = choice.get("delta") or {}
+                            piece = delta.get("content")
+                            if piece:
+                                emitted = True
+                                yield {"type": "delta", "text": piece}
+                            for tc in delta.get("tool_calls") or []:
+                                slot = acc.setdefault(tc.get("index", 0), {
+                                    "id": "", "type": "function",
+                                    "function": {"name": "", "arguments": ""}})
+                                if tc.get("id"):
+                                    slot["id"] = tc["id"]
+                                fn = tc.get("function") or {}
+                                if fn.get("name") and not slot["function"]["name"]:
+                                    slot["function"]["name"] = fn["name"]
+                                if fn.get("arguments"):
+                                    slot["function"]["arguments"] += fn["arguments"]
+                yield {"type": "final", "usage": usage,
+                       "tool_calls": [acc[k] for k in sorted(acc)] if acc else None,
+                       "raw_model": self.model_id}
+                return
+            except Exception as exc:
+                last_error = exc
+                if emitted:
+                    raise
+                retryable = (
+                    isinstance(exc, (httpx.TimeoutException, httpx.NetworkError,
+                                     httpx.RemoteProtocolError))
+                    or _is_retryable_status(_http_status(exc) or 0))
+                if not retryable or attempt >= MAX_HTTP_RETRIES:
+                    raise
+                delay = _retry_delay(attempt)
+                logger.warning("模型流式请求失败（%s），%.2fs 后重试 %d/%d",
+                               type(exc).__name__, delay,
+                               attempt + 1, MAX_HTTP_RETRIES)
+                await asyncio.sleep(delay)
+        raise last_error or RuntimeError("model stream failed without exception")
 
 
 class AnthropicProvider(BaseModelProvider):
@@ -660,6 +780,102 @@ class ModelGateway:
                                    row.name, mid)
                     break
                 continue
+
+        if attempted == 0:
+            raise RuntimeError(
+                f"该员工绑定的模型已不存在（可能已被删除）：{', '.join(missing[:3])}。"
+                "请重新绑定一个可用模型。")
+        raise RuntimeError(
+            f"已绑定的 {attempted} 个模型全部调用失败：{'; '.join(failures)}")
+
+    async def stream_with_agent_models(
+        self,
+        model_ids: list[str],
+        messages: list[dict],
+        tools=None,
+        config: dict | None = None,
+    ):
+        """流式版 ``chat_with_agent_models``：事件化输出 + 首字前可 failover。
+
+        事件：
+        * ``{"type": "delta", "text": ...}`` 正文增量（直接转发给前端）
+        * ``{"type": "done", "usage", "tool_calls", "model", "used_model_id"}`` 收尾
+
+        **一旦吐过字就不再换模型**：换模型重来会让用户看到两段不同模型的话
+        拼在一起，比直接报错更糟。代价是流式中途故障无法静默兜底。
+        """
+        if not model_ids:
+            raise RuntimeError(
+                "该员工尚未绑定任何模型，无法执行任务。"
+                "请到「模型配置」登记一个模型并配置密钥，"
+                "再在员工详情页把它绑定为首选模型。")
+
+        ctx = usage_ctx.get()
+        await self._enforce_budget(ctx)
+        attempted = 0
+        missing: list[str] = []
+        failures: list[str] = []
+        for mid in model_ids:
+            row = await self.db.get(Model, mid)
+            if row is None:
+                missing.append(mid)
+                continue
+            attempted += 1
+            if _in_cooldown(mid):
+                failures.append(f"{row.name}：熔断冷却中，已跳过")
+                logger.warning("模型 %s(%s) 处于熔断冷却期，跳过本次流式调用",
+                               row.name, mid)
+                continue
+            provider = self._build_provider(row)
+            if provider is None:
+                failures.append(f"{row.name}：未知 provider 类型 {row.provider_type}")
+                continue
+            t0 = time.time()
+            emitted = False
+            final: dict = {}
+            try:
+                async for ev in provider.stream(messages, tools=tools, config=config):
+                    if ev.get("type") == "delta":
+                        emitted = True
+                        yield ev
+                    elif ev.get("type") == "final":
+                        final = ev
+            except Exception as e:
+                if emitted:
+                    # 已经推给用户了：不能重放，直接上抛让调用方报错
+                    logger.error("模型 %s(%s) 流式中途失败，已输出部分内容不重试：%s",
+                                 row.name, mid, e)
+                    raise
+                last_summary = f"{type(e).__name__}: {e}"
+                failures.append(f"{row.name}：{last_summary}")
+                logger.warning("模型 %s(%s) 流式调用失败：%s",
+                               row.name, mid, last_summary)
+                _note_failure(mid)
+                try:
+                    await record_token_usage(
+                        self.db, {}, model_row=row, ctx=ctx,
+                        latency_ms=int((time.time() - t0) * 1000),
+                        success=False)
+                except Exception as usage_err:
+                    logger.error("失败调用计量落库失败 model=%s mid=%s: %s",
+                                 row.name, mid, usage_err, exc_info=True)
+                if is_non_retryable_4xx(e) or _http_status(e) == 429:
+                    break
+                continue
+
+            _note_success(mid)
+            try:
+                await record_token_usage(
+                    self.db, {"usage": final.get("usage") or {}},
+                    model_row=row, ctx=ctx,
+                    latency_ms=int((time.time() - t0) * 1000))
+            except Exception as usage_err:
+                logger.error("流式调用计量落库失败 model=%s mid=%s: %s",
+                             row.name, mid, usage_err, exc_info=True)
+            yield {"type": "done", "usage": final.get("usage") or {},
+                   "tool_calls": final.get("tool_calls"),
+                   "model": row.name, "used_model_id": mid}
+            return
 
         if attempted == 0:
             raise RuntimeError(

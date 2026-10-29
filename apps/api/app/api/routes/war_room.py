@@ -55,7 +55,11 @@ def _safe_filename(name: str) -> str:
 
 
 def _war_room_dir(sid: str) -> Path:
-    return Path(__file__).resolve().parents[3] / "storage" / "war_room" / sid
+    # 必须与 Asset 落盘同一个 storage 根（settings.storage_dir）。
+    # 硬编码 repo/apps/api/storage 会在配置了 STORAGE_DIR 的部署里另起一棵树，
+    # 交付中心按相对路径找不到这些文件。
+    from app.api.routes.assets import storage_root
+    return storage_root() / "war_room" / sid
 
 
 async def _render_and_register_file(*, session: AsyncSession, company_id: str,
@@ -137,9 +141,12 @@ async def _owned(db: AsyncSession, user_id: str, company_id: str) -> Company:
     return c
 
 
-async def _get_session(db: AsyncSession, sid: str) -> tuple[WarRoomSession, list[WarRoomTask]]:
+async def _get_session(db: AsyncSession, sid: str,
+                       company_id: str) -> tuple[WarRoomSession, list[WarRoomTask]]:
     sess = await db.get(WarRoomSession, sid)
-    if not sess:
+    # 归属校验必须落在会话本身：调用方只校验了"你拥有 query 里的 company_id"，
+    # 不比对 sess.company_id 就能拿自己的公司 id 去读写别家的作战室。
+    if not sess or sess.company_id != company_id:
         raise HTTPException(404, "session not found")
     rows = (await db.execute(select(WarRoomTask).where(
         WarRoomTask.session_id == sid).order_by(WarRoomTask.seq))).scalars().all()
@@ -369,13 +376,16 @@ def _make_kickoff(company_id: str, sid: str, goal: str,
                     WarRoomTask.session_id == sid))).scalars().all()
                 for t in rows:
                     t.announce_status = "acknowledged"
-                sess.status = "confirmed"
+                sess.auto_run = True
+                # 状态必须是 executing：前端"整合最终交付"只在 executing 渲染，
+                # 停在 confirmed 会让直达流程永远拿不到最终文件。
+                sess.status = "executing"
                 await db.commit()
                 try:
-                    await _dispatch_members(db, sess, rows)
+                    started = await _dispatch_members(db, sess, rows)
+                    logger.info("auto_run 已投递 %d 个成员任务 sid=%s", started, sid)
                 except Exception as run_err:
-                    import logging
-                    logging.getLogger("war_room").error(
+                    logger.error(
                         "auto_run 启动失败 sid=%s: %s", sid, run_err, exc_info=True)
                     sess.status = "failed"
                     await db.commit()
@@ -400,7 +410,7 @@ async def session_lifecycle(sid: str, data: SessionActionIn,
                             user: User = Depends(get_current_user)):
     """作战会话生命周期：暂停(现场保留)/恢复(继续执行)/停止(终止保留成果)/删除(彻底清除)。"""
     await _owned(db, user.id, company_id)
-    sess, tasks = await _get_session(db, sid)
+    sess, tasks = await _get_session(db, sid, company_id)
 
     if data.action == "pause":
         if sess.status not in ("announcing", "confirmed", "executing"):
@@ -448,7 +458,7 @@ async def batch_delete_sessions(data: BatchDeleteIn,
     for sid in data.session_ids:
         try:
             sess = await db.get(WarRoomSession, sid)
-            if not sess:
+            if not sess or sess.company_id != company_id:
                 failed.append({"id": sid, "reason": "not found"})
                 continue
             tasks = (await db.execute(select(WarRoomTask).where(
@@ -470,7 +480,7 @@ async def session_team(sid: str, company_id: str = Query(...),
                        user: User = Depends(get_current_user)):
     """明确：负责人是谁、参与 Agent 有哪些、各自进度。"""
     await _owned(db, user.id, company_id)
-    sess, tasks = await _get_session(db, sid)
+    sess, tasks = await _get_session(db, sid, company_id)
     agents = (await db.execute(select(Agent).where(
         Agent.company_id == company_id))).scalars().all()
     by_id = {str(a.id): a for a in agents}
@@ -527,9 +537,9 @@ async def session_file(sid: str, name: str = Query(...),
     from fastapi.responses import FileResponse
     await _owned(db, user.id, company_id)
     sess = await db.get(WarRoomSession, sid)
-    if not sess:
+    if not sess or sess.company_id != company_id:
         raise HTTPException(404, "session not found")
-    root = (Path(__file__).resolve().parents[3] / "storage" / "war_room" / sid).resolve()
+    root = _war_room_dir(sid).resolve()
     target = (root / name).resolve()
     if not str(target).startswith(str(root)) or not target.exists():
         raise HTTPException(404, "file not found")
@@ -555,7 +565,7 @@ async def boss_say(sid: str, data: BossSayIn,
     from app.api.routes.group_chat import GroupChatMessage
     await _owned(db, user.id, company_id)
     sess = await db.get(WarRoomSession, sid)
-    if not sess:
+    if not sess or sess.company_id != company_id:
         raise HTTPException(404, "session not found")
     msg = GroupChatMessage(
         id=uuid.uuid4().hex[:32], company_id=company_id,
@@ -629,7 +639,7 @@ async def session_chat(sid: str, company_id: str = Query(...),
     from app.api.routes.group_chat import GroupChatMessage
     await _owned(db, user.id, company_id)
     sess = await db.get(WarRoomSession, sid)
-    if not sess:
+    if not sess or sess.company_id != company_id:
         raise HTTPException(404, "session not found")
     chat_scope = sess.project_id or sess.id
     rows = (await db.execute(select(GroupChatMessage).where(
@@ -657,7 +667,7 @@ async def session_snapshot(sid: str, company_id: str = Query(...),
     from app.api.routes.group_chat import GroupChatMessage
 
     await _owned(db, user.id, company_id)
-    sess, tasks = await _get_session(db, sid)
+    sess, tasks = await _get_session(db, sid, company_id)
     agents = (await db.execute(select(Agent).where(
         Agent.company_id == company_id))).scalars().all()
     session_out = _session_out(sess, tasks, {str(a.id): a.name for a in agents})
@@ -706,7 +716,7 @@ async def announce(sid: str, company_id: str = Query(...),
                    user: User = Depends(get_current_user)):
     """每个成员在群聊复述自己的任务：「我的任务是什么」。"""
     await _owned(db, user.id, company_id)
-    sess, tasks = await _get_session(db, sid)
+    sess, tasks = await _get_session(db, sid, company_id)
     if sess.status != "announcing":
         raise HTTPException(409, f"当前阶段 {sess.status} 不允许宣告")
     gw = ModelGateway(db)
@@ -750,7 +760,7 @@ async def get_session(sid: str, company_id: str = Query(...),
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
     await _owned(db, user.id, company_id)
-    sess, tasks = await _get_session(db, sid)
+    sess, tasks = await _get_session(db, sid, company_id)
     agents = (await db.execute(select(Agent).where(
         Agent.company_id == company_id))).scalars().all()
     by_id = {str(a.id): a.name for a in agents}
@@ -771,7 +781,7 @@ async def acknowledge(sid: str, data: AckIn,
                       user: User = Depends(get_current_user)):
     """负责人逐项校对宣告：正确→acknowledged；不正确→corrected 并写纠正意见。"""
     await _owned(db, user.id, company_id)
-    sess, tasks = await _get_session(db, sid)
+    sess, tasks = await _get_session(db, sid, company_id)
     target = next((t for t in tasks if t.id == data.task_id), None)
     if not target:
         raise HTTPException(404, "task not found")
@@ -847,7 +857,42 @@ def _make_runner(task_id: str, agent_id: str, session_snapshot: dict):
 
         await session.commit()
         logger.info("task %s submitted: %s", task_id, t2.deliverable_name)
+        await _maybe_auto_finalize(session, s3.id)
     return _run_one
+
+
+async def _maybe_auto_finalize(session: AsyncSession, sid: str) -> None:
+    """一句话直达的收口：全员交付完成 → 自动通过审核 → 自动整合最终文件。
+
+    人工作战流程里"逐条审核 + 点整合交付"是老板的控制点；直达流程里老板
+    已经用一句指令授权过一次，再让他点 N 次就是把自动化又还给了人。
+    """
+    try:
+        war = await session.get(WarRoomSession, sid)
+        if not war or not war.auto_run or war.status != "executing":
+            return
+        rows = (await session.execute(select(WarRoomTask).where(
+            WarRoomTask.session_id == sid))).scalars().all()
+        if not rows or any(t.status in ("todo", "running") for t in rows):
+            return
+        if any(t.status == "failed" for t in rows):
+            return  # 有失败就交回给老板决定重做/人工整合
+        submitted = [t for t in rows if t.status == "submitted"]
+        if not submitted:
+            return
+        for t in submitted:
+            t.status = "approved"
+            t.reviewed_by = t.reviewed_by or "leader"
+            t.review_comment = t.review_comment or "一句话直达：自动通过"
+        await session.commit()
+        await _merge_and_deliver(session, war, rows)
+        logger.info("auto_run 已自动整合最终交付物 sid=%s", sid)
+    except HTTPException as exc:
+        logger.warning("auto_run 自动整合未完成 sid=%s: %s", sid, exc.detail)
+        await session.rollback()
+    except Exception as exc:
+        logger.warning("auto_run 自动整合异常 sid=%s: %s", sid, exc, exc_info=True)
+        await session.rollback()
 
 
 async def _settle_session_after_failure(session, sid: str) -> None:
@@ -885,7 +930,7 @@ async def start_exec(sid: str, company_id: str = Query(...),
       （审核驳回会把任务打回 todo；全部失败时会话会被标 failed）。
     """
     await _owned(db, user.id, company_id)
-    sess, tasks = await _get_session(db, sid)
+    sess, tasks = await _get_session(db, sid, company_id)
 
     member_todo = [t.id for t in tasks
                    if str(t.agent_id) != str(sess.leader_agent_id) and t.status == "todo"]
@@ -945,9 +990,23 @@ async def _dispatch_members(db: AsyncSession, sess: WarRoomSession,
     import app.background_jobs as bg
     session_snapshot = {"id": sess.id, "company_id": sess.company_id,
                         "goal": sess.goal, "format": sess.deliverable_format}
+    full: list[str] = []
     for tid in dispatched:
-        bg.submit_async(_make_runner(tid, agent_of[tid], session_snapshot))
-    return len(dispatched)
+        if bg.submit_async(_make_runner(tid, agent_of[tid],
+                                        session_snapshot)) is bg.QUEUE_FULL:
+            full.append(tid)
+    if full:
+        # worker 池满：把没投出去的退回 todo，否则成员任务永远停在 running，
+        # 会话既不会 done 也不会 failed（"并行执行中"卡到用户手动删除）
+        await db.execute(
+            update(WarRoomTask)
+            .where(WarRoomTask.id.in_(full), WarRoomTask.status == "running")
+            .values(status="todo")
+            .execution_options(synchronize_session=False))
+        await db.commit()
+        logger.warning("war-room 投递队列已满，退回 %d 个成员任务 sid=%s",
+                       len(full), sess.id)
+    return len(dispatched) - len(full)
 
 
 # ---------- 6. 提交/审核 ----------
@@ -984,7 +1043,15 @@ async def finalize(sid: str, company_id: str = Query(...),
                    user: User = Depends(get_current_user)):
     """全部审核通过后，由负责人把各部分整合为最终产出物。"""
     await _owned(db, user.id, company_id)
-    sess, tasks = await _get_session(db, sid)
+    sess, tasks = await _get_session(db, sid, company_id)
+    if not any(t.status == "approved" for t in tasks):
+        raise HTTPException(409, "还没有任何已审核通过的产出物")
+    return await _merge_and_deliver(db, sess, tasks)
+
+
+async def _merge_and_deliver(db: AsyncSession, sess: WarRoomSession,
+                             tasks: list[WarRoomTask]) -> dict:
+    """把已审核通过的分项成果整合成最终交付物（端点与自动收口共用）。"""
     approved = [t for t in tasks if t.status == "approved"]
     if not approved:
         raise HTTPException(409, "还没有任何已审核通过的产出物")

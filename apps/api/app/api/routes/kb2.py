@@ -33,6 +33,34 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/kb2", tags=["knowledge-p4"])
 
 
+def _extract_text(raw: bytes, suffix: str) -> str:
+    """按扩展名从原始字节提取文本；解析失败返回空串（调用方保留原始文件）。"""
+    if suffix in (".txt", ".md", ".csv", ".json"):
+        return raw.decode("utf-8", errors="replace")
+    if suffix == ".pdf":
+        try:
+            import io
+
+            from pypdf import PdfReader
+
+            reader = PdfReader(io.BytesIO(raw))
+            return "\n".join((pg.extract_text() or "") for pg in reader.pages)
+        except Exception as e:
+            logger.warning("PDF 文本提取失败：%s: %s", type(e).__name__, e)
+            return ""
+    if suffix == ".docx":
+        try:
+            import io
+
+            from docx import Document as Docx
+
+            return "\n".join(p.text for p in Docx(io.BytesIO(raw)).paragraphs)
+        except Exception as e:
+            logger.warning("docx 文本提取失败：%s: %s", type(e).__name__, e)
+            return ""
+    return raw.decode("utf-8", errors="replace")
+
+
 def _resolve_upload_dir() -> Path:
     """知识库原文上传目录。
 
@@ -204,36 +232,14 @@ async def upload_private_file(agent_id: str, file: UploadFile = File(...),
     save_path, size = await stream_upload(
         file, original_dir, generate_stored_name(suffix))
 
-    # 转换需要原始字节：此时大小已被上限约束，读回内存是有界的
-    raw = save_path.read_bytes()
-    safe_name = original_name
+    # 转换需要原始字节：此时大小已被上限约束，读回内存是有界的。
+    # PDF/docx 解析是纯 CPU + 同步 IO，直接 await 函数体里会把整个事件循环
+    # 卡住几十秒（期间所有请求都不响应），统一丢到线程里跑。
+    import asyncio
 
-    # 机器可读转换：按类型提取文本
-    text = ""
-    if suffix in (".txt", ".md", ".csv", ".json"):
-        text = raw.decode("utf-8", errors="replace")
-    elif suffix == ".pdf":
-        try:
-            from pypdf import PdfReader
-            import io
-            reader = PdfReader(io.BytesIO(raw))
-            text = "\n".join((pg.extract_text() or "") for pg in reader.pages)
-        except Exception as e:
-            text = ""
-            extract_note = f"PDF 解析失败: {e}"
-        else:
-            extract_note = None
-    elif suffix in (".docx",):
-        try:
-            from docx import Document as Docx
-            import io
-            dx = Docx(io.BytesIO(raw))
-            text = "\n".join(p.text for p in dx.paragraphs)
-        except Exception:
-            text = ""
-    else:
-        # 尝试当纯文本读
-        text = raw.decode("utf-8", errors="replace")
+    raw = await asyncio.to_thread(save_path.read_bytes)
+    safe_name = original_name
+    text = await asyncio.to_thread(_extract_text, raw, suffix)
 
     if not text.strip():
         # 转换失败也保留原始文件，如实标注

@@ -520,7 +520,14 @@ export default function TasksPage() {
           );
         })}
 
-        {!filtered.length && (
+        {loadError && (
+          <div className="card card-static text-center py-10 col-span-full space-y-3">
+            <p className="text-sm" style={{ color: "#fca5a5" }}>❌ 任务列表加载失败：{loadError}</p>
+            <button className="btn-primary !py-1.5 !px-4 text-xs" onClick={() => refresh()}>重试</button>
+          </div>
+        )}
+
+        {!loadError && !filtered.length && (
           <div className="card card-static text-center py-16 col-span-full text-sm" style={{ color: "var(--muted)" }}>
             {search || dimValue !== "全部" ? "没有符合筛选条件的任务" : "暂无任务"}
           </div>
@@ -726,7 +733,7 @@ export default function TasksPage() {
                 全选
               </label>
               {batchSel.size > 0 && (
-                <button onClick={() => () => setBatchSel(new Set())} className="text-[11px] hover:text-[var(--foreground)] transition-colors">清空</button>
+                <button onClick={() => setBatchSel(new Set())} className="text-[11px] hover:text-[var(--foreground)] transition-colors">清空</button>
               )}
             </div>
             <div className="max-h-[50vh] overflow-y-auto p-4 grid grid-cols-2 gap-2">

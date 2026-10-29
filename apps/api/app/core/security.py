@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from jose import jwt
 from passlib.context import CryptContext
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -81,14 +81,22 @@ async def rotate_refresh_token(
     """
     from app.models.refresh_token import RefreshToken
 
+    token_hash = _hash_refresh_token(raw_token or "")
+    now = _utcnow_naive()
+    # 用条件 UPDATE 抢占吊销权（CAS）：两个并发刷新拿着同一个 refresh token
+    # 时，先到者把 revoked 置真，后到者的 WHERE 不成立 → rowcount=0 → 拒绝。
+    # 改造前是"先 SELECT 判断、再赋值"，两个请求能同时通过，等于 token 可复用。
+    claimed = await db.execute(
+        update(RefreshToken)
+        .where(RefreshToken.token_hash == token_hash,
+               RefreshToken.revoked.is_(False),
+               RefreshToken.expires_at > now)
+        .values(revoked=True)
+        .execution_options(synchronize_session=False))
+    if claimed.rowcount != 1:
+        return None
     row = (await db.execute(select(RefreshToken).where(
-        RefreshToken.token_hash == _hash_refresh_token(raw_token or "")
-    ))).scalar_one_or_none()
-    if row is None or row.revoked:
-        return None
-    if row.expires_at <= _utcnow_naive():
-        return None
-    row.revoked = True  # 轮换：旧 token 立即失效
+        RefreshToken.token_hash == token_hash))).scalar_one()
     pair = await issue_token_pair(db, row.user_id)
     await db.flush()
     return pair["access_token"], pair["refresh_token"], row.user_id

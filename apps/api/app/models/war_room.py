@@ -5,7 +5,7 @@
 - war_room_sessions   一次作战会话（对应一个项目的启动/阶段）
 - war_room_tasks      拆解后的分工任务（含宣告/确认状态、产出物、审核链）
 """
-from sqlalchemy import Column, String, Text, JSON, DateTime, func, Index
+from sqlalchemy import Boolean, Column, String, Text, JSON, DateTime, func, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -32,6 +32,9 @@ class WarRoomSession(Base, _TS):
     deliverable_format: Mapped[str | None] = mapped_column(String(30))  # 统一交付格式 word/md/ppt...
     deliverable_rule: Mapped[str | None] = mapped_column(Text)          # 统一交付规则描述
     final_output_path: Mapped[str | None] = mapped_column(String(500))  # 最终整合产出物
+    # 一句话直达：老板已用一句指令授权，跳过逐人校对与逐条审核，
+    # 全部成员交付后自动整合出最终文件（不再需要人点"整合交付"）。
+    auto_run: Mapped[bool | None] = mapped_column(Boolean, default=False)
 
 
 class WarRoomTask(Base, _TS):

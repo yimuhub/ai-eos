@@ -22,7 +22,7 @@ async def _agent(client, user, company_id, name="分析师") -> dict:
     return r.json()
 
 
-async def _fake_model_id(_db) -> str:
+async def _fake_model_id(_db, _company_id) -> str:
     return "m1"
 
 

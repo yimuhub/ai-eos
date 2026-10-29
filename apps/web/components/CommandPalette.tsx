@@ -23,11 +23,12 @@ import { useRouter } from "next/navigation";
 import { ALL_PAGES, type NavItem } from "@/lib/nav";
 import { clearToken } from "@/lib/api";
 import { notify } from "@/components/Toast";
+import { openApp } from "@/lib/apps";
 
 const RECENT_KEY = "aieos_recent_pages";
 const RECENT_MAX = 6;
 
-/** 读取最近访问的页面路径（由 Layout 在路由变化时写入） */
+/** 读取最近访问的页面路径（工作台打开标签、命令面板跳转时写入） */
 export function readRecentPages(): string[] {
   if (typeof window === "undefined") return [];
   try {
@@ -142,6 +143,9 @@ export default function CommandPalette() {
   const results = useMemo<Result[]>(() => {
     const query = q.trim().toLowerCase();
 
+    // "/" 只是跳转到工作台的别名，不能当成可打开的页面（会套娃）
+    const reachable = ALL_PAGES.filter((p) => p.href !== "/");
+
     const pageHit = (p: (typeof ALL_PAGES)[number]): Result => ({
       kind: "page",
       id: `page:${p.href}`,
@@ -157,13 +161,13 @@ export default function CommandPalette() {
       // 这里刻意读一次 `open`：面板关闭时不需要算最近访问，而重新打开时必须重算，
       // 否则第二次打开会显示上一次的过期列表（查询串没变 → memo 不会重跑）。
       const recent = (open ? readRecentPages() : [])
-        .map((href) => ALL_PAGES.find((p) => p.href === href))
+        .map((href) => reachable.find((p) => p.href === href))
         .filter((p): p is (typeof ALL_PAGES)[number] => !!p)
         .map(pageHit);
       return [...recent, ...actions];
     }
 
-    const scored = ALL_PAGES.map((p) => ({ p, s: scoreOf(query, p) }))
+    const scored = reachable.map((p) => ({ p, s: scoreOf(query, p) }))
       .filter((x) => x.s > 0)
       .sort((a, b) => b.s - a.s);
     const pages = scored.map((x) => pageHit(x.p));
@@ -188,10 +192,15 @@ export default function CommandPalette() {
     (r: Result | undefined) => {
       if (!r) return;
       close();
-      if (r.kind === "page") router.push(r.href);
-      else void r.run();
+      // 页面不再整页跳走：工作台会把它开成右栏标签；没有工作台时才回退成跳转
+      if (r.kind === "page") {
+        pushRecentPage(r.href);
+        openApp(r.href);
+      } else {
+        void r.run();
+      }
     },
-    [close, router],
+    [close],
   );
 
   // ---------- 全局快捷键 ----------
@@ -369,7 +378,7 @@ export default function CommandPalette() {
           <span><kbd className="opacity-80">↑↓</kbd> 选择</span>
           <span><kbd className="opacity-80">↵</kbd> 打开</span>
           <span><kbd className="opacity-80">Esc</kbd> 关闭</span>
-          <span className="ml-auto opacity-70">{ALL_PAGES.length} 个页面可直达</span>
+          <span className="ml-auto opacity-70">{ALL_PAGES.length - 1} 个页面可直达 · 开在右栏</span>
         </div>
       </div>
     </div>

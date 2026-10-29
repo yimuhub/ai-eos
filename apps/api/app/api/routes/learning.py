@@ -15,11 +15,11 @@ from app.models.user import User
 router = APIRouter(prefix="/learning", tags=["learning"])
 
 
-async def _agent(db: AsyncSession, agent_id: str) -> Agent:
-    a = await db.get(Agent, agent_id)
-    if not a:
-        raise HTTPException(404, "Agent not found")
-    return a
+async def _agent(db: AsyncSession, agent_id: str, user_id: str) -> Agent:
+    """取 Agent 并校验归属：成长档案属员工私有数据，不能凭 id 读改别家员工。"""
+    from app.api.deps import assert_agent_owned
+
+    return await assert_agent_owned(db, user_id, agent_id)
 
 
 @router.get("/agents/{agent_id}/profile")
@@ -29,7 +29,7 @@ async def profile(
     user: User = Depends(get_current_user),
 ):
     """Agent 完整成长档案（自动建档）。"""
-    a = await _agent(db, agent_id)
+    a = await _agent(db, agent_id, user.id)
     return await get_full_profile(db, a)
 
 
@@ -48,7 +48,7 @@ async def patch_profile(
     user: User = Depends(get_current_user),
 ):
     """更新档案（自动记 Growth Event + 能力版本化）。"""
-    a = await _agent(db, agent_id)
+    a = await _agent(db, agent_id, user.id)
     profile = await ensure_profile(db, a, a.company_id)
 
     changes = {}
@@ -90,7 +90,7 @@ async def create_learning_record(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    a = await _agent(db, agent_id)
+    a = await _agent(db, agent_id, user.id)
     rec = AgentLearningRecord(id=str(uuid.uuid4()), agent_id=a.id,
                               goal=data.goal, plan=data.plan or {})
     db.add(rec)

@@ -18,18 +18,28 @@ from app.model_gateway import ModelGateway, set_usage_context
 from app.models.agent import Agent, AgentModelConfig
 
 
-async def _first_model_id(db: AsyncSession) -> str:
-    mq = await db.execute(select(AgentModelConfig).limit(1))
+async def _first_model_id(db: AsyncSession, company_id: str) -> str:
+    """本公司第一个可用模型。
+
+    此前是全表取第一条：任何公司说一句话，都可能用上别家公司绑定的模型
+    （花别人的钱、走别人的密钥），多租户下属于跨租户越权。
+    """
+    mq = await db.execute(
+        select(AgentModelConfig)
+        .join(Agent, Agent.id == AgentModelConfig.agent_id)
+        .where(Agent.company_id == company_id)
+        .order_by(AgentModelConfig.created_at)
+        .limit(1))
     m = mq.scalars().first()
     if not m:
-        raise RuntimeError("没有可用模型，请先在模型配置页接入")
+        raise RuntimeError("本公司还没有可用模型，请先在模型配置页接入并绑定到员工")
     return m.model_id
 
 
 async def command_plan(db: AsyncSession, company_id: str,
                        phrase: str, attachments: list | None = None) -> dict:
     """一句话 → 结构化方案（path + targets/team_goal + 预计耗时），不执行。"""
-    mid = await _first_model_id(db)
+    mid = await _first_model_id(db, company_id)
     gw = ModelGateway(db)
     set_usage_context(company_id=company_id, scenario="COMMAND")
 

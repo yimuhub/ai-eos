@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, get_db
 from app.core.permissions import Capability, require_company_scope
 from app.learning_engine import add_growth_event
-from app.models.agent import Agent
 from app.models.learning import GrowthEventType
 from app.models.review import AgentReview, ReviewCycle, ReviewSource
 from app.models.user import User
@@ -46,9 +45,9 @@ async def submit_review(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    a = await db.get(Agent, agent_id)
-    if not a:
-        raise HTTPException(404, "Agent not found")
+    # 给别家员工打考核分会污染对方的档案与成长事件，必须校验归属。
+    from app.api.deps import assert_agent_owned
+    a = await assert_agent_owned(db, user.id, agent_id)
     if not 0 <= data.score <= 100:
         raise HTTPException(400, "score must be 0-100")
 
@@ -110,9 +109,8 @@ async def auto_review(
 ):
     """基于真实指标的自动化考核。分数来自 performance_engine，非模型编造。"""
     from app.performance_engine import compute_agent_metrics
-    a = await db.get(Agent, agent_id)
-    if not a:
-        raise HTTPException(404, "Agent not found")
+    from app.api.deps import assert_agent_owned
+    await assert_agent_owned(db, user.id, agent_id)
     m = await compute_agent_metrics(db, agent_id)
     if not m.get("tasks_total"):
         raise HTTPException(409, "无真实执行数据")

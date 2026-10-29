@@ -27,6 +27,14 @@ export class ApiError extends Error {
   }
 }
 
+// token 过期（401）时由 Provider 注册的回调清掉本地凭据并回登录页。
+// 没有这个钩子，token 过期后每个页面都只是把 "401 ..." 当文本显示出来，
+// 用户既不知道要重新登录，也没有入口可点。
+let unauthorizedHandler: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: (() => void) | null) {
+  unauthorizedHandler = fn;
+}
+
 async function call(
   base: string,
   token: string,
@@ -58,6 +66,7 @@ async function call(
     data = text ? JSON.parse(text) : {};
   } catch {}
   if (!res.ok) {
+    if (res.status === 401 && token) unauthorizedHandler?.();
     // 404 单独文案：多半是客户端落后于后端路由（例如旧版把 company_id
     // 当 query 传给只接受路径参数的接口），升级客户端通常即可解决。
     if (res.status === 404) {
@@ -78,20 +87,32 @@ export class Api {
   constructor(private base: string, private token: string) {}
 
   // ---- 鉴权 ----
-  static async login(base: string, identifier: string, password: string): Promise<{ token: string }> {
+  // 后端 LoginIn 字段是 identity（支持邮箱或用户名），响应是 access_token；
+  // 这里统一映射成 {token} 给上层，别再让 store 直接读不存在的 r.token。
+  static async login(base: string, identity: string, password: string): Promise<{ token: string }> {
     const d = await call(base, "", "/auth/login", {
       method: "POST",
-      body: JSON.stringify({ identifier, password }),
+      body: JSON.stringify({ identity, password }),
     });
-    return d;
+    return { token: d?.access_token || "" };
   }
 
-  static async register(base: string, identifier: string, password: string): Promise<{ token: string }> {
-    const d = await call(base, "", "/auth/register", {
+  static async register(base: string, identity: string, password: string): Promise<{ token: string }> {
+    // 后端注册要 email + username：移动端只有一个输入框，
+    // 因此注册时必须是邮箱，用户名取 @ 前缀；登录仍可用用户名。
+    const email = (identity || "").trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      throw new ApiError("注册需要邮箱地址（如 boss@example.com），登录可用用户名", 400);
+    }
+    await call(base, "", "/auth/register", {
       method: "POST",
-      body: JSON.stringify({ identifier, password }),
+      body: JSON.stringify({
+        email,
+        username: email.split("@")[0],
+        password,
+      }),
     });
-    return d;
+    return Api.login(base, email, password);
   }
 
   // ---- 一句话指挥台 ----
@@ -113,10 +134,13 @@ export class Api {
     return call(this.base, this.token, `/command/report/${ref}?company_id=${companyId}&as_json=1`);
   }
 
-  notify(ref: string, companyId: string, webhook: string): Promise<any> {
+  async notify(ref: string, companyId: string, webhook: string): Promise<any> {
+    // 后端 NotifyIn 要的是报告正文（report）+ webhook，不是 ref
+    const r = await this.report(ref, companyId);
+    const text = [r?.title, ...(r?.lines || [])].filter(Boolean).join("\n");
     return call(this.base, this.token, "/command/notify", {
       method: "POST",
-      body: JSON.stringify({ ref, company_id: companyId, webhook_url: webhook }),
+      body: JSON.stringify({ report: text || String(r?.title || ref), webhook }),
     });
   }
 

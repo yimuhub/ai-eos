@@ -2,9 +2,9 @@
 import asyncio
 
 import json
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import assert_agent_owned, assert_company_owned, get_current_user
@@ -70,8 +70,12 @@ async def create_task(data: TaskIn, db: AsyncSession = Depends(get_db),
             raise HTTPException(404, "Agent not found")
     payload = data.model_dump()
     payload.pop("priority", None)
+    try:
+        priority = TaskPriority(data.priority)
+    except ValueError:
+        raise HTTPException(400, "priority 必须是 LOW/NORMAL/HIGH/URGENT 之一")
     t = Task(**payload, status=TaskStatus.TODO,
-             priority=TaskPriority(data.priority), created_by=user.id)
+             priority=priority, created_by=user.id)
     db.add(t)
     await db.flush()
     await add_task_event(db, t.id, TaskEventType.CREATED, "user", user.id,
@@ -226,8 +230,28 @@ def _run_in_background(task_id: str, agent_id: str):
     return background_jobs.submit_async(_job, on_timeout=_on_timeout)
 
 
+async def _dispatch_or_revert(db: AsyncSession, task_id: str, agent_id: str) -> None:
+    """投递后台执行；队列满则把刚置的 RUNNING 退回 TODO 并回 503。
+
+    原先用 `background.add_task(...)` 丢弃了返回值：worker 池满时任务已经是
+    RUNNING 却没有任何 worker，前端只能一直转圈，用户也取消不掉预期结果。
+    """
+    import app.background_jobs as background_jobs
+
+    if _run_in_background(task_id, agent_id) is background_jobs.QUEUE_FULL:
+        # RUNNING→TODO 不在状态机白名单里（正常流程没有"回退"语义），
+        # 这是投递失败的补偿，用条件 UPDATE 而不是 transition。
+        await db.execute(
+            update(Task)
+            .where(Task.id == task_id, Task.status == TaskStatus.RUNNING)
+            .values(status=TaskStatus.TODO)
+            .execution_options(synchronize_session=False))
+        await db.commit()
+        raise HTTPException(503, "后台执行队列已满，请稍后重试")
+
+
 @router.post("/{tid}/start")
-async def start_task(tid: str, background: BackgroundTasks,
+async def start_task(tid: str,
                      db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     t = await _task_owned(db, user.id, tid)
     if not t.assigned_agent_id:
@@ -236,12 +260,12 @@ async def start_task(tid: str, background: BackgroundTasks,
     # SQLITE_BUSY_SNAPSHOT，先 commit 让下面的抢占从一个干净写事务开始。
     await db.commit()
     # CAS 抢占：双击/重试/双端并发时只有一个请求能把 TODO/PAUSED 改成 RUNNING，
-    # 也就只有一个请求会 add_task(_run_in_background) —— 不会重复执行、重复计费。
+    # 也就只有一个请求会投递后台执行 —— 不会重复执行、重复计费。
     try:
         await transition(db, t, TaskStatus.RUNNING, "user", user.id)
     except IllegalTransition as e:
         raise HTTPException(409, str(e))
-    background.add_task(_run_in_background, tid, t.assigned_agent_id)
+    await _dispatch_or_revert(db, tid, t.assigned_agent_id)
     return {"detail": "started", "task_id": tid}
 
 
@@ -361,7 +385,7 @@ async def resolve_takeover(tid: str, data: InterventionIn,
 
 
 @router.post("/{tid}/retry")
-async def retry_task(tid: str, background: BackgroundTasks,
+async def retry_task(tid: str,
                      db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     """失败任务重试：FAILED→PLANNING→RUNNING，重新提交后台执行。
 
@@ -380,7 +404,7 @@ async def retry_task(tid: str, background: BackgroundTasks,
         await transition(db, t, TaskStatus.RUNNING, "user", user.id)
     except IllegalTransition as e:
         raise HTTPException(409, str(e))
-    background.add_task(_run_in_background, tid, t.assigned_agent_id)
+    await _dispatch_or_revert(db, tid, t.assigned_agent_id)
     return {"detail": "retrying", "task_id": tid}
 
 
@@ -423,7 +447,10 @@ async def add_intervention(tid: str, data: InterventionIn,
                     {"type": data.type})
     applied = {}
     if data.new_priority and data.type == "PRIORITY_CHANGE":
-        t.priority = TaskPriority(data.new_priority)
+        try:
+            t.priority = TaskPriority(data.new_priority)
+        except ValueError:
+            raise HTTPException(400, "priority 必须是 LOW/NORMAL/HIGH/URGENT 之一")
         applied["priority"] = data.new_priority
     if data.new_agent_id and data.type == "AGENT_CHANGE":
         # 换负责人同样要校验 agent 归属，且必须与任务同公司
@@ -625,6 +652,11 @@ async def patch_task(tid: str, data: TaskPatchIn,
         t.assigned_agent_id = data.assigned_agent_id
         changes["assigned_agent_id"] = data.assigned_agent_id
     if data.priority is not None:
+        # 枚举外取值会写坏数据库：自动派活的优先级 CASE 与前端排序都按枚举匹配，
+        # 写成 "Urgent!" 这类值会让任务永远排在最后且无人察觉。
+        valid = {p.value for p in TaskPriority}
+        if data.priority not in valid:
+            raise HTTPException(400, f"priority 必须是 {sorted(valid)} 之一")
         t.priority = data.priority
         changes["priority"] = data.priority
     if data.description is not None:

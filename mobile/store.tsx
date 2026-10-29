@@ -4,7 +4,7 @@
  */
 import { createContext, useContext, useState, useCallback, useEffect } from "react";
 import * as SecureStore from "expo-secure-store";
-import { Api, defaults } from "./lib/api";
+import { Api, defaults, setUnauthorizedHandler } from "./lib/api";
 
 type Svc = { base: string; companyId: string };
 type Ctx = {
@@ -45,6 +45,15 @@ export function AieosProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const api = new Api(svc.base, token);
+
+  // token 过期 → 清凭据回登录态（各页面不再只显示一行 401 文本）
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      SecureStore.deleteItemAsync("aieos.token").catch(() => {});
+      setToken("");
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
 
   const login = useCallback(
     async (identifier: string, password: string) => {

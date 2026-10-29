@@ -4,7 +4,7 @@
 
 **The AI-Native Enterprise Operating System — Found an AI Company, Hire Digital Employees, Delegate Work**
 
-[![Phase](https://img.shields.io/badge/version-v5.12.0-blue.svg?style=flat-square)](#-latest-v5120)
+[![Phase](https://img.shields.io/badge/version-v5.13.0-blue.svg?style=flat-square)](#-latest-v5130)
 [![License: BSL 1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12+-green.svg?style=flat-square)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688.svg?style=flat-square)](https://fastapi.tiangolo.com)
@@ -19,7 +19,7 @@
 
 **English** • [简体中文说明](README_ZH.md)
 
-[✨ Features](#-core-features) • [🚀 Quick Start](#-quick-start) • [🏗️ Architecture](#-system-architecture) • [🧪 Testing](#-testing) • [📦 Latest](#-latest-v5120) • [📜 License](#-license--copyright-terms)
+[✨ Features](#-core-features) • [🚀 Quick Start](#-quick-start) • [🏗️ Architecture](#-system-architecture) • [🧪 Testing](#-testing) • [📦 Latest](#-latest-v5130) • [📜 License](#-license--copyright-terms)
 
 </div>
 
@@ -70,6 +70,7 @@ AI chatbots answer questions — but the work still lands on your desk. Meanwhil
 
 ### 8. 🎭 Onboarding for Humans
 - A 3-step wizard (about 1 minute), a **keyless demo mode** to try before configuring models, Chinese actionable error messages, and a ⌘K command palette with pinyin search.
+- **One screen for everything**: `/workspace` is the only shell. Sidebar, ⌘K and in-page links open features as **tabs in the right panel** while the chat and left rail stay put; old direct URLs redirect into the workbench (tabs are closable, restored on reload, and go full-screen on narrow viewports).
 
 ---
 
@@ -108,7 +109,7 @@ flowchart TD
     Engines --> Storage
 ```
 
-**Scale (measured from source, v5.12.0)**: backend 31,893 lines / 168 files / 420 operations over 365 paths / 104 tables / 32 Alembic migrations; frontend 24,938 lines / 47 page routes; backend suite **295 passed** (plus 38 e2e checks).
+**Scale (measured from source, v5.13.0)**: backend 31,893 lines / 168 files / 420 operations over 365 paths / 104 tables / 32 Alembic migrations; frontend 24,938 lines / 47 page routes; backend suite **324 passed** (plus 38 e2e checks).
 
 > Two honest caveats, because "it works" and "it's been verified" are different claims:
 > - **`alembic upgrade head` is PostgreSQL-only.** One historical migration (`23e9b97bb927`) hits SQLite's
@@ -191,7 +192,18 @@ cd apps/web && npm run test          # vitest (frontend)
 
 ---
 
-## 📦 Latest: v5.12.0
+## 📦 Latest: v5.13.0
+
+*One interface, streaming answers: every feature opens as a tab inside the workbench — 2026-10-30. Full entry in [`CHANGELOG.md`](CHANGELOG.md).*
+
+- 🧩 **One interface for everything.** `/workspace` is now the only shell. The left rail, ⌘K and every in-page entry open features as **closable tabs in the right panel** — the chat and rail never navigate away. Tabs stay mounted (filters and scroll survive), closing one activates its left neighbour, and state is restored after a reload.
+- 🔗 **Old links still work.** Visiting `/tasks`, `/knowledge` and friends redirects into `/workspace?app=…`, so bookmarks, refreshes and pasted links always land in the same interface. On narrow screens the panel goes full-screen and the left drawer steps aside.
+- ⌨️ **Shortcuts never get swallowed.** ⌘K / ⌘B / ⌘J / ⌘N pressed while the focus is inside an embedded page are forwarded to the shell, so the command palette behaves the same everywhere.
+- 🌊 **Token streaming.** New `POST /agents/{id}/chat/stream` (SSE `status` / `delta` / `done` / `error`); gateway `stream()` downgrades automatically when a server rejects `stream_options`, and failover only happens **before** the first token so two models never mix text. Both the workbench chat and the employee chat render token by token with a caret, a stop button and an honest "this round was not saved" note.
+- 🚚 **Routing and desktop shell.** The command deck moved to `/dashboard`; the mac shell uses `hiddenInset` with a 34px drag strip. The old global sidebar shell was deleted so only one navigation model remains.
+- 🧪 Backend suite **324 passed**; `./tools/check.sh --fast` fully green (contracts / tsc strict / eslint), `next build` renders all 47 routes, plus browser walkthroughs for the tab flow, redirects, reload restore and the 390px layout.
+
+### Previous: v5.12.0
 
 *The "one-person company" loop, closed: one sentence in, whole company working, results out — 2026-10-29. Full entry in [`CHANGELOG.md`](CHANGELOG.md).*
 

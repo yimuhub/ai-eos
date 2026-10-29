@@ -138,3 +138,88 @@ body {
   .pulse-dot { animation: none; }
   * { transition-duration: 0.01ms !important; }
 }
+
+/* ---------- 桌面壳：无边框窗口的拖拽区 ---------- */
+/* Electron 用 hiddenInset 后，标题栏区域由页面自己负责：能拖窗口的区域加 app-drag，
+   里面的按钮/输入框必须加 app-no-drag，否则点击会被当成拖拽。 */
+.app-drag { -webkit-app-region: drag; }
+.app-no-drag { -webkit-app-region: no-drag; }
+
+/* ---------- 工作台：可拖动三栏 ---------- */
+.ws-splitter {
+  position: relative;
+  flex: 0 0 7px;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 5;
+  outline: none;
+}
+.ws-splitter::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--border);
+  transition: background 0.12s;
+}
+.ws-splitter-grip {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 3px;
+  height: 30px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: transparent;
+  transition: background 0.12s, height 0.12s;
+}
+.ws-splitter:hover .ws-splitter-grip,
+.ws-splitter:focus-visible .ws-splitter-grip {
+  background: rgba(99, 102, 241, 0.85);
+  height: 42px;
+}
+.ws-splitter:hover::after,
+.ws-splitter:focus-visible::after {
+  background: rgba(99, 102, 241, 0.45);
+}
+body.ws-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+/* 拖拽时右栏里的 iframe 会截获指针事件，先把它们关掉 */
+body.ws-resizing iframe { pointer-events: none; }
+
+.ws-scroll { scrollbar-width: thin; scrollbar-color: #2a2b38 transparent; }
+.ws-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.ws-scroll::-webkit-scrollbar-thumb {
+  background: #2a2b38;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.ws-scroll::-webkit-scrollbar-thumb:hover { background: #383a4c; background-clip: padding-box; }
+.ws-scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* 流式输出时的光标：跟在最后一个字后面闪 */
+.ws-caret {
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  margin-left: 2px;
+  vertical-align: -1px;
+  border-radius: 1px;
+  background: #818cf8;
+  animation: ws-blink 1s steps(1, end) infinite;
+}
+
+@keyframes ws-blink {
+  50% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-caret { animation: none; }
+}

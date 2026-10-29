@@ -15,7 +15,8 @@
 
 ## 边界
 
-* 只自动补**可空列**。非空且无默认值的列会被跳过并告警——
+* 只自动补**可空列**，以及非空但"老行有唯一正确答案"的 JSON 集合列
+  （`default=list/dict` → 补 '[]'/'{}'）。其余非空列会被跳过并告警——
   这类改动需要人工决策（老行填什么值），不该由启动流程替用户判断。
 * 不删除、不改类型、不改约束。它不是迁移框架，只是「让升级不炸」。
 * **只在 SQLite 方言下运行**。PostgreSQL 的结构变更统一走 Alembic
@@ -23,7 +24,7 @@
 """
 from __future__ import annotations
 
-from sqlalchemy import inspect, text
+from sqlalchemy import JSON, inspect, text
 
 from app.core.logging_config import get_logger
 from app.db.base import Base
@@ -64,7 +65,8 @@ async def ensure_columns(engine) -> list[str]:
                     if have:
                         continue
                     ddl = f'ALTER TABLE {table.name} ADD COLUMN IF NOT EXISTS ' \
-                          f'"{column.name}" {column.type.compile(dialect=dialect)}'
+                          f'"{column.name}" {column.type.compile(dialect=dialect)}' \
+                          f'{_default_clause(column)}'
                     await conn.execute(_text(ddl))
                     added.append(f"{table.name}.{column.name}")
                     logger.info("[migrate] PG 幂等补列 %s.%s", table.name, column.name)
@@ -95,10 +97,39 @@ async def ensure_columns(engine) -> list[str]:
 
 
 def _auto_addable(column) -> bool:
-    """只有可空列才能安全地在线补上。"""
-    return bool(column.nullable) and not column.primary_key
+    """可空列，或"老行能机械填默认值"的非空列（见 _default_clause）。"""
+    return not column.primary_key and (
+        bool(column.nullable) or _default_clause(column) != "")
+
+
+def _default_literal(column) -> str | None:
+    """非空列里可以安全机械补值的子集：JSON 集合列的 list/dict 默认值。
+
+    形如 `Mapped[list] = mapped_column(JSON, default=list)` 的列（附件列表
+    之类）语义上"没有就是空集合"，老行填 '[]' 是唯一正确答案；其余非空列
+    仍要人来决定老行该填什么，继续跳过并告警。
+    """
+    if column.nullable or column.primary_key:
+        return None
+    if not isinstance(column.type, JSON):
+        return None
+    arg = getattr(column.default, "arg", None)
+    # SQLAlchemy 会把 `default=list` 包一层（arg.__wrapped__ 才是内置 list），
+    # 直接 `arg is list` 永远不成立
+    inner = getattr(arg, "__wrapped__", arg)
+    if inner is list:
+        return "'[]'"
+    if inner is dict:
+        return "'{}'"
+    return None
+
+
+def _default_clause(column) -> str:
+    literal = _default_literal(column)
+    return f" DEFAULT {literal}" if literal else ""
 
 
 def _add_column_ddl(table_name: str, column, dialect) -> str:
     type_sql = column.type.compile(dialect=dialect)
-    return f'ALTER TABLE "{table_name}" ADD COLUMN "{column.name}" {type_sql}'
+    return (f'ALTER TABLE "{table_name}" ADD COLUMN "{column.name}" {type_sql}'
+            f'{_default_clause(column)}')

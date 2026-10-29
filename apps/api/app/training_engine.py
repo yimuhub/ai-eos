@@ -29,14 +29,21 @@ async def extract_learning(db: AsyncSession, session: TrainingSession) -> dict:
     user_prompt = f"训练类型：{session.training_type.value}\n标题：{session.title}\n内容：{(session.raw_input or '')[:4000]}"
 
     gw = ModelGateway(db)
-    # 用公司第一个可用模型（注意：chat_with_agent_models 需要 Model.id，
-    # 即 AgentModelConfig.model_id，而非 AgentModelConfig.id）
+    # 用本公司第一个可用模型（注意：chat_with_agent_models 需要 Model.id，
+    # 即 AgentModelConfig.model_id，而非 AgentModelConfig.id）。
+    # 必须按公司圈定：不限范围会取到别家公司的模型配置，
+    # 把训练用量记到别人账上、还可能用上别家的密钥。
     from sqlalchemy import select as _sel
-    from app.models.agent import AgentModelConfig
-    mq = await db.execute(_sel(AgentModelConfig).limit(1))
+    from app.models.agent import Agent, AgentModelConfig
+    mq = await db.execute(
+        _sel(AgentModelConfig)
+        .join(Agent, Agent.id == AgentModelConfig.agent_id)
+        .where(Agent.company_id == session.company_id)
+        .order_by(AgentModelConfig.created_at)
+        .limit(1))
     m = mq.scalars().first()
     if not m:
-        raise RuntimeError("没有可用模型")
+        raise RuntimeError("本公司还没有可用模型，请先给员工绑定模型")
     from app.model_gateway import usage_context
     with usage_context(agent_id=session.agent_id, company_id=session.company_id,
                        scenario="TRAINING", detail={"training": True}):

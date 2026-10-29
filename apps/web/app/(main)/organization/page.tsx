@@ -611,7 +611,7 @@ export default function OrganizationPage() {
                 全选
               </label>
               {selected.size > 0 && (
-                <button onClick={() => () => setSelected(new Set())} className="text-[11px] hover:text-[var(--foreground)] transition-colors">清空</button>
+                <button onClick={() => setSelected(new Set())} className="text-[11px] hover:text-[var(--foreground)] transition-colors">清空</button>
               )}
             </div>
             <div className="max-h-[50vh] overflow-y-auto p-4 grid grid-cols-3 gap-2">

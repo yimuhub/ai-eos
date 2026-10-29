@@ -100,7 +100,24 @@ async def test_login_unknown_user_same_message_as_wrong_password(client, make_us
     assert r_wrong_pw.json()["detail"] == r_no_user.json()["detail"]
 
 
-async def test_login_rate_limited_after_repeated_failures(client, make_user):
+@pytest.fixture
+def memory_rate_limit(monkeypatch):
+    """强制限流走内存实现。
+
+    限流在探测到 Redis 可用时会改用 Redis 计数（生产正确），此时内存字典
+    恒为空——用例若依赖"本机没跑 Redis"就等于依赖环境，开发机/CI 结果不一致。
+    """
+    from app.api.routes import auth as auth_mod
+
+    async def _no_redis():
+        return None
+
+    monkeypatch.setattr(auth_mod, "_rate_redis", _no_redis)
+    return auth_mod
+
+
+async def test_login_rate_limited_after_repeated_failures(client, make_user,
+                                                          memory_rate_limit):
     """限流是防爆破解的最低要求。改造前可以无限次尝试。"""
     from app.api.routes.auth import _MAX_FAILS, _login_failures
 
@@ -119,7 +136,8 @@ async def test_login_rate_limited_after_repeated_failures(client, make_user):
     _login_failures.clear()  # 不污染其它用例
 
 
-async def test_successful_login_clears_failure_counter(client, make_user):
+async def test_successful_login_clears_failure_counter(client, make_user,
+                                                       memory_rate_limit):
     from app.api.routes.auth import _login_failures
 
     _login_failures.clear()

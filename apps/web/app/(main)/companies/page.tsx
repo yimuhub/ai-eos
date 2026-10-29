@@ -121,7 +121,7 @@ export default function CompanyManagePage() {
             </p>
           </div>
           <div className="ml-auto flex items-center gap-2">
-            <button onClick={() => router.push("/")} className="btn-ghost text-xs">← 指挥中心</button>
+            <button onClick={() => router.push("/dashboard")} className="btn-ghost text-xs">← 指挥中心</button>
             <button onClick={() => setShowTeamGen(true)}
               className="text-xs px-4 py-2 rounded-lg font-medium text-white transition-all"
               style={{ background: "linear-gradient(135deg,#8b5cf6,#6366f1)" }}>

@@ -209,8 +209,13 @@ async def _fetch_raw_skill(raw_url: str) -> str:
 
 
 @router.post("/market/fetch-preview")
-async def market_fetch_preview(data: dict):
-    """拉取市场 skill 的 SKILL.md 内容做导入前预览 + 安全审核。"""
+async def market_fetch_preview(data: dict,
+                               user=Depends(get_current_user)):
+    """拉取市场 skill 的 SKILL.md 内容做导入前预览 + 安全审核。
+
+    必须登录：这是一个"服务端替任意人出站抓取"的口子，匿名可调用等于
+    把服务器当免费代理（也可被用来放大对 GitHub 的请求）。
+    """
     raw_url = data.get("raw_url") or ""
     if not raw_url.startswith("https://raw.githubusercontent.com"):
         raise HTTPException(400, "仅支持 GitHub raw 地址")
@@ -267,15 +272,26 @@ async def install_from_market(data: dict, company_id: str = Query(...),
 
 @router.patch("/{skill_id}/scope")
 async def set_scope(skill_id: str, scope: str = Query(...),
+                    company_id: str = Query(...),
                     db: AsyncSession = Depends(get_db),
                     user=Depends(get_current_user)):
-    """设置技能分类：public 公共 / exclusive 专属。"""
+    """设置技能分类：public 公共 / exclusive 专属。
+
+    必须带 company_id 并校验归属：此前只要登录就能改任意技能（含别家公司的），
+    而内置技能的 scope 是全局字段——改一次影响所有公司。
+    """
+    from app.api.deps import assert_company_owned
     from app.models.skill import Skill as SkillRow
     if scope not in ("public", "exclusive"):
         raise HTTPException(400, "scope must be public or exclusive")
+    await assert_company_owned(db, user.id, company_id)
     row = await db.get(SkillRow, skill_id)
     if not row:
         raise HTTPException(404)
+    if row.company_id != company_id:
+        # 内置技能（company_id 为空）是全局共享的，不能由某一家公司改公共/私有
+        raise HTTPException(
+            409, "系统内置技能或其它公司的技能不支持修改公共/私有属性")
     row.scope = scope
     await db.commit()
     return {"ok": True, "slug": row.slug, "scope": row.scope}

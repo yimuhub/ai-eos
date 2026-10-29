@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, describeError, downloadURL, fetchBlobURL } from "@/lib/api";
+import { api, describeError, downloadURL, fetchBlobURL, isCancelled, streamPost } from "@/lib/api";
 import { notify } from "@/components/Toast";
 
 /* ============================================================
@@ -8,7 +8,7 @@ import { notify } from "@/components/Toast";
    - 支持附件上传（图片/文字/PPT/Excel/Word/MD）→ 直接进私人知识库
    ============================================================ */
 
-type Msg = { id?: string; role: string; content: string; created_at?: string };
+type Msg = { id?: string; role: string; content: string; created_at?: string; streaming?: boolean };
 type FolderFile = { id?: string; name: string; size?: number };
 
 export default function AgentChat({
@@ -28,6 +28,9 @@ export default function AgentChat({
   const [folderFiles, setFolderFiles] = useState<FolderFile[]>([]);
   const endRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   const load = useCallback(async () => {
     try {
@@ -84,15 +87,57 @@ export default function AgentChat({
 
     setMsgs((p) => [...p, { role: "boss", content: text }]);
     setInput(""); setBusy(true);
+    const ac = new AbortController();
+    abortRef.current = ac;
+
+    // 流式回复：先把空气泡挂上，再逐字往里填
+    setMsgs((p) => [...p, { role: "agent", content: "", streaming: true }]);
+    const patchLast = (patch: (m: Msg) => Msg) => setMsgs((p) => {
+      if (!p.length) return p;
+      const next = p.slice();
+      next[next.length - 1] = patch(next[next.length - 1]);
+      return next;
+    });
+    let acc = "";
+    let started = false;
     try {
-      const d = await api.post<{ reply?: string }>(`/agents/${agentId}/chat`, { message: text },
-        // 员工回复要等模型生成，给足时间但仍有上限（原实现是无限等待）
-        { timeoutMs: 300_000 });
-      setMsgs((p) => [...p, { role: "agent",
-        content: d.reply || `❌ 未收到回复：${JSON.stringify(d).slice(0, 200)}` }]);
+      await streamPost(`/agents/${agentId}/chat/stream`, { message: text }, {
+        signal: ac.signal,
+        onEvent: (ev) => {
+          if (ev.type === "delta") {
+            started = true;
+            acc += String(ev.text || "");
+            patchLast((m) => ({ ...m, content: acc, streaming: true }));
+          } else if (ev.type === "done") {
+            acc = String(ev.reply ?? acc);
+            patchLast((m) => ({ ...m, content: acc, streaming: false }));
+          } else if (ev.type === "error") {
+            // 已经吐出的字保留，错误另起一行，避免半截回复被整段覆盖
+            patchLast((m) => ({
+              ...m,
+              content: m.content ? `${m.content}\n\n❌ ${ev.message}` : `❌ ${ev.message}`,
+              streaming: false,
+            }));
+          }
+        },
+      });
     } catch (e) {
-      setMsgs((p) => [...p, { role: "agent", content: `❌ ${describeError(e, "发送失败")}` }]);
+      if (isCancelled(e) || ac.signal.aborted) {
+        // 主动停止：保留已收到的字，并说明本轮没落库
+        patchLast((m) => ({
+          ...m,
+          content: m.content ? `${m.content}\n\n（已停止，这轮回复未保存到历史）` : "（已停止）",
+          streaming: false,
+        }));
+      } else {
+        patchLast((m) => ({
+          ...m,
+          content: started ? m.content : `❌ ${describeError(e, "发送失败")}`,
+          streaming: false,
+        }));
+      }
     }
+    if (abortRef.current === ac) abortRef.current = null;
     setBusy(false);
   }
 
@@ -157,6 +202,7 @@ export default function AgentChat({
               m.role === "boss" ? "bg-indigo-600 text-white rounded-br-sm" : "rounded-bl-sm"}`}
               style={m.role !== "boss" ? { background: "var(--surface-2)", color: "var(--foreground)" } : {}}>
               {m.content}
+              {m.streaming && <span className="ws-caret" aria-hidden />}
             </div>
           </div>
         ))}
@@ -166,7 +212,7 @@ export default function AgentChat({
               style={{ background: "var(--surface-2)" }}>正在解析附件并存入知识库…</div>
           </div>
         )}
-        {busy && (
+        {busy && !(msgs[msgs.length - 1]?.streaming && msgs[msgs.length - 1]?.content) && (
           <div className="flex justify-start">
             <div className="px-3 py-2 rounded-2xl rounded-bl-sm text-xs pulse-dot"
               style={{ background: "var(--surface-2)" }}>对方正在输入…</div>
@@ -216,8 +262,18 @@ export default function AgentChat({
           onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && send()}
           placeholder="输入消息，Enter 发送…"
           className="input flex-1 !py-2 text-xs" />
-        <button onClick={send} disabled={(!input.trim() && !pendingFiles.length) || busy}
-          className="btn-primary !py-2 !px-4 text-xs shrink-0 disabled:opacity-40">发送</button>
+        {busy ? (
+          <button onClick={() => abortRef.current?.abort()}
+            className="text-xs px-4 py-2 rounded-lg font-medium shrink-0"
+            style={{ background: "rgba(248,113,113,0.14)", color: "#fca5a5", border: "1px solid rgba(248,113,113,0.35)" }}>
+            停止
+          </button>
+        ) : (
+          <button onClick={send} disabled={!input.trim() && !pendingFiles.length}
+            className="btn-primary !py-2 !px-4 text-xs shrink-0 disabled:opacity-40">
+            发送
+          </button>
+        )}
       </div>
     </div>
   );

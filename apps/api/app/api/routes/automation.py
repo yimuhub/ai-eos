@@ -7,11 +7,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.automation_engine import run_automation
 from app.models.automation import AutomationDefinition, AutomationRunRecord
 from app.models.user import User
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_company_owned, get_current_user, get_db
 from app.core.permissions import Capability, require_company_scope
 
 router = APIRouter(prefix="/automations", tags=["automations"],
                    dependencies=[Depends(require_company_scope())])
+
+
+async def _owned_automation(db: AsyncSession, user_id: str, aid: str):
+    """按 {aid} 取定义并校验公司归属。
+
+    这些端点的路径里没有 company_id，router 级 require_company_scope 会直接
+    跳过——不在这里比对归属，任何登录用户知道 id 就能跑/停/归档别家的自动化。
+    """
+    d = await db.get(AutomationDefinition, aid)
+    if not d:
+        raise HTTPException(404, "not found")
+    await assert_company_owned(db, user_id, d.company_id)
+    return d
 class DefinitionIn(BaseModel):
     name: str
     trigger_type: str = "MANUAL"
@@ -66,9 +79,7 @@ async def run(
     user: User = Depends(get_current_user),
 ):
     """执行一次自动化（按定义的 mode：TEST=DryRun）。"""
-    d = await db.get(AutomationDefinition, aid)
-    if not d:
-        raise HTTPException(404, "not found")
+    d = await _owned_automation(db, user.id, aid)
     if d.status == "ARCHIVED":
         raise HTTPException(409, "已归档")
     run = await run_automation(db, d)
@@ -84,9 +95,7 @@ async def update_automation(
     user: User = Depends(get_current_user),
 ):
     """统一状态切换：pause / resume / archive。"""
-    d = await db.get(AutomationDefinition, aid)
-    if not d:
-        raise HTTPException(404, "not found")
+    d = await _owned_automation(db, user.id, aid)
     action = (payload or {}).get("action", "")
     if action == "pause":
         d.status = "PAUSED"
@@ -103,9 +112,7 @@ async def update_automation(
 @router.post("/{aid}/enable")
 async def enable(aid: str, db: AsyncSession = Depends(get_db),
                  user: User = Depends(get_current_user)):
-    d = await db.get(AutomationDefinition, aid)
-    if not d:
-        raise HTTPException(404, "not found")
+    d = await _owned_automation(db, user.id, aid)
     d.status = "ENABLED"
     await db.commit()
     return {"id": aid, "status": "ENABLED"}
@@ -118,11 +125,12 @@ async def approve_continue(rid: str, db: AsyncSession = Depends(get_db),
     run = await db.get(AutomationRunRecord, rid)
     if not run:
         raise HTTPException(404, "not found")
-    if run.status != "WAITING_APPROVAL":
-        raise HTTPException(409, f"status={run.status}")
     definition = await db.get(AutomationDefinition, run.definition_id)
     if not definition:
         raise HTTPException(404, "definition missing")
+    await assert_company_owned(db, user.id, definition.company_id)
+    if run.status != "WAITING_APPROVAL":
+        raise HTTPException(409, f"status={run.status}")
 
     # 记录人工批准，然后从断点恢复执行
     results = list(run.step_results or [])

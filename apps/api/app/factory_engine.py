@@ -67,13 +67,19 @@ async def generate_blueprint(db: AsyncSession, company_id: str,
                              goal: str) -> dict:
     """用 LLM 从目标生成 Agent 蓝图。"""
     from app.model_gateway import ModelGateway
-    from app.models.agent import AgentModelConfig
+    from app.models.agent import Agent, AgentModelConfig
     from sqlalchemy import select as _sel
 
-    mq = await db.execute(_sel(AgentModelConfig).limit(1))
+    # 只在本公司已绑定的模型里挑：全表取第一条会跨租户借用别家的模型配置
+    mq = await db.execute(
+        _sel(AgentModelConfig)
+        .join(Agent, Agent.id == AgentModelConfig.agent_id)
+        .where(Agent.company_id == company_id)
+        .order_by(AgentModelConfig.created_at)
+        .limit(1))
     m = mq.scalars().first()
     if not m:
-        raise RuntimeError("没有可用模型")
+        raise RuntimeError("本公司还没有可用模型，请先给员工绑定模型")
 
     sys_prompt = (
         "你是组织设计专家。根据部门目标设计一个 AI Agent，输出JSON：\n"

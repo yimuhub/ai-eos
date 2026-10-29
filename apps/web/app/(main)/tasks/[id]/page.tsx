@@ -16,6 +16,9 @@ import type { Company } from "@/lib/types";
    AI 聊天面板：换Agent / 换模型 / 加技能 / 下达指令 / 上传资料
    ============================================================ */
 
+// 终态：到此为止不再轮询（否则详情页开着就一直每 5s 打后端）
+const TERMINAL = ["COMPLETED", "FAILED", "CANCELLED"];
+
 type Detail = {
   id: string; title: string; description: string | null; status: string;
   priority: string; result: string | null; assigned_agent_id: string | null;
@@ -123,6 +126,9 @@ export default function TaskDetailPage() {
   const inflight = useRef(new Set<AbortController>());
   // 是否已拉过一次全量详情：轮询用 summary，但不能在首屏之前用它顶替
   const fullLoaded = useRef(false);
+  // 任务已到终态：停止轮询，否则页面开着一整天都在打后端
+  const terminal = useRef(false);
+  const [loadErr, setLoadErr] = useState("");
 
   const loadTrace = useCallback(async () => {
     if (!id) return;
@@ -149,7 +155,9 @@ export default function TaskDetailPage() {
         const data = await api.get<Detail>(`/tasks/${id}`, { signal: ctrl.signal });
         if (seq === detailSeq.current && !ctrl.signal.aborted) {
           setD(data);
+          setLoadErr("");
           fullLoaded.current = true;
+          terminal.current = TERMINAL.includes(data.status);
         }
       } else {
         const data = await api.get<Partial<Detail>>(`/tasks/${id}/summary`,
@@ -157,10 +165,16 @@ export default function TaskDetailPage() {
         if (seq === detailSeq.current && !ctrl.signal.aborted) {
           // summary 不含 result：合并而不是替换，避免把已加载的全文冲掉
           setD((prev) => (prev ? { ...prev, ...data } : (data as Detail)));
+          if (data.status) terminal.current = TERMINAL.includes(data.status);
         }
       }
-    } catch { /* 静默：网络抖动/后端重启/请求被取消时任务页不崩，5s 后自动重试 */ }
-    finally { inflight.current.delete(ctrl); }
+    } catch (e) {
+      // 静默吞错只在"已经有数据、等待下一轮"时成立。页面还是空的（404/越权/
+      // 后端 5xx）就一直显示"加载中…"，用户既看不到原因也没有重试入口。
+      if (!ctrl.signal.aborted && !fullLoaded.current) {
+        setLoadErr(describeError(e, "任务详情加载失败"));
+      }
+    } finally { inflight.current.delete(ctrl); }
   }, [id]);
 
   const [chatHist, setChatHist] = useState(false);
@@ -227,7 +241,10 @@ export default function TaskDetailPage() {
       if (cs.length) setCid(cs[0].id);
     }).catch((e) => { if (!isCancelled(e)) warnOnce("companies", `公司信息加载失败：${describeError(e)}`); });
     loadTrace();
-    const t = setInterval(() => { load(); loadTrace(); }, 5000);
+    const t = setInterval(() => {
+      if (terminal.current) return;
+      load(); loadTrace();
+    }, 5000);
     return () => {
       // 卸载：停掉轮询 + abort 全部在途请求（轮询、下拉数据、手动 load）
       clearInterval(t);
@@ -345,7 +362,22 @@ export default function TaskDetailPage() {
 
   if (!d) {
     return <div className="p-6 max-w-[1400px] mx-auto animate-fade-up">
-      <p className="text-sm text-center py-20" style={{ color: "var(--muted)" }}>加载中…</p>
+      {loadErr ? (
+        <div className="card card-static p-8 text-center space-y-3">
+          <p className="text-sm" style={{ color: "#fca5a5" }}>❌ {loadErr}</p>
+          <p className="text-xs" style={{ color: "var(--muted)" }}>
+            任务可能已被删除，或不属于当前账号。
+          </p>
+          <div className="flex gap-2 justify-center">
+            <button className="btn-primary !py-1.5 !px-4 text-xs"
+                    onClick={() => { setLoadErr(""); load(true); }}>重试</button>
+            <button className="btn-secondary !py-1.5 !px-4 text-xs"
+                    onClick={() => router.back()}>返回</button>
+          </div>
+        </div>
+      ) : (
+        <p className="text-sm text-center py-20" style={{ color: "var(--muted)" }}>加载中…</p>
+      )}
     </div>;
   }
 

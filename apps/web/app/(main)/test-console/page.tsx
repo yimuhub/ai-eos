@@ -63,7 +63,7 @@ export default function TestConsolePage() {
           <p className="text-sm" style={{ color: "var(--muted)" }}>
             全功能测试台仅在开发/测试环境对开发角色开放
           </p>
-          <button onClick={() => router.push("/")} className="btn-primary mt-6">返回指挥中心</button>
+          <button onClick={() => router.push("/dashboard")} className="btn-primary mt-6">返回指挥中心</button>
         </div>
       </div>
     );
