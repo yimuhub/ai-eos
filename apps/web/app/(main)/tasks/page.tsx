@@ -53,6 +53,9 @@ export default function TasksPage() {
   const [dimValue, setDimValue] = useState("全部");
   const [search, setSearch] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
+  // 中文输入法守卫：组合（选词）期间不回写 state，避免受控 value
+  // 每键一更导致候选窗被打断/字符抖动；compositionend 再一次性同步。
+  const searchComposing = useRef(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
   // 键盘导航高亮位（j/k 移动，空格多选，回车打开）
@@ -67,6 +70,8 @@ export default function TasksPage() {
   const [mounted, setMounted] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [ntForm, setNtForm] = useState({ title: "", description: "", priority: "NORMAL" });
+  // 创建后是否立即开工（后端按 worker 队列启动，队满则排队稍后自动启动）
+  const [ntAutoStart, setNtAutoStart] = useState(true);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [deptOpen, setDeptOpen] = useState<Set<string>>(new Set());
   const [creating, setCreating] = useState(false);
@@ -196,7 +201,12 @@ export default function TasksPage() {
       // 走统一 api 层：自动注入鉴权与超时，错误也是可读中文。
       // 原实现是裸 fetch + 手工拼 token，且把 `detail` 直接塞进 Error.message，
       // 校验失败时会显示 "[object Object]"。
-      const data = await api.post<{ created_count: number }>("/task-dispatch/dispatch", {
+      const data = await api.post<{
+        created_count: number;
+        // 旧后端不返回 started_count / queued_count，按 0 兜底
+        started_count?: number;
+        queued_count?: number;
+      }>("/task-dispatch/dispatch", {
         company_id: cid,
         title: ntForm.title.trim(),
         description: (ntForm.description || null)
@@ -204,10 +214,18 @@ export default function TasksPage() {
         priority: ntForm.priority,
         target_type: "multi_agent_list",
         agent_ids: Array.from(picked),
+        auto_start: ntAutoStart,
       });
-      setMsg(`✅ 已创建任务「${ntForm.title.trim()}」· 分发给 ${data.created_count} 名成员`);
+      if (ntAutoStart) {
+        const started = data.started_count ?? 0;
+        const queued = data.queued_count ?? 0;
+        setMsg(`✅ 已创建 ${data.created_count} 个任务，其中 ${started} 个已开始执行，${queued} 个排队中`);
+      } else {
+        setMsg(`✅ 已创建任务「${ntForm.title.trim()}」· 分发给 ${data.created_count} 名成员`);
+      }
       setShowCreate(false);
       setNtForm({ title: "", description: "", priority: "NORMAL" });
+      setNtAutoStart(true);
       setPicked(new Set()); setNtAttach([]);
       await load();
     } catch (e) { setMsg(`❌ ${describeError(e, "创建任务失败")}`); }
@@ -358,7 +376,12 @@ export default function TasksPage() {
           </select>
         )}
         <input placeholder="搜索…（按 / 快速聚焦）" value={search} ref={searchRef}
-          onChange={(e) => setSearch(e.target.value)}
+          onCompositionStart={() => { searchComposing.current = true; }}
+          onCompositionEnd={(e) => {
+            searchComposing.current = false;
+            setSearch(e.currentTarget.value);
+          }}
+          onChange={(e) => { if (!searchComposing.current) setSearch(e.target.value); }}
           className="input w-40 !py-1.5 text-xs" />
       </div>
 
@@ -532,6 +555,18 @@ export default function TasksPage() {
             <textarea rows={2} placeholder="任务详情（可留空）" value={ntForm.description}
               onChange={(e) => setNtForm({ ...ntForm, description: e.target.value })} className="input resize-none" />
             <AttachmentPicker value={ntAttach} onChange={setNtAttach} label="添加任务附件" />
+
+            {/* 创建后立即开工：后端按 worker 队列启动，队满则先排队、稍后自动启动 */}
+            <label className="flex items-center gap-2 text-xs cursor-pointer select-none py-0.5"
+              style={{ color: "var(--muted)" }}>
+              <input type="checkbox" checked={ntAutoStart}
+                onChange={(e) => setNtAutoStart(e.target.checked)}
+                className="accent-indigo-500 w-3.5 h-3.5" />
+              <span>创建后立即开工</span>
+              <span className="text-[10px]" style={{ color: "var(--muted)" }}>
+                {ntAutoStart ? "· 自动进入执行队列，队满时排队" : "· 先建为待办，稍后手动启动"}
+              </span>
+            </label>
 
             {/* 部门化选人 */}
             <div>

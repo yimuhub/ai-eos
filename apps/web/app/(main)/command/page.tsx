@@ -102,18 +102,38 @@ export default function CommandDeckPage() {
     if (r.path === "DIRECT" && r.jobs?.length) {
       setPolling(true);
       const ids = r.jobs.map((j: any) => j.task_id || j.id).filter(Boolean);
+      // 硬上限：队列拥堵时任务可能长期停在 TODO，不能无限轮询
+      const deadline = Date.now() + 10 * 60 * 1000;
+      let stopped = false;
+      const stop = (note?: string) => {
+        if (stopped) return;
+        stopped = true;
+        if (timerRef.current) clearInterval(timerRef.current);
+        timerRef.current = null;
+        setPolling(false);
+        if (note) setMsg(note);
+      };
       const tick = async () => {
+        if (stopped) return;
+        if (Date.now() >= deadline) {
+          // 结果面板保持不动，只提示去任务中心看
+          stop("⏳ 已停止轮询：任务仍在后台执行，可到任务中心查看进度。");
+          return;
+        }
         try {
           const rows = await Promise.all(
             ids.map((id: string) => api.get(`/tasks/${id}`).catch(() => null)));
+          if (stopped) return;
           const live = rows.filter(Boolean);
+          // 没有存量任务（全部 404/被删）或全部终态 → 停
+          if (!live.length) { stop(); return; }
           if (live.every((t: any) => ["COMPLETED", "FAILED", "CANCELLED"].includes(t.status))) {
-            clearInterval(timerRef.current); setPolling(false);
+            stop();
           }
         } catch { /* keep polling */ }
       };
       tick();
-      timerRef.current = setInterval(tick, 8000);
+      if (!stopped) timerRef.current = setInterval(tick, 8000);
     } else if (r.path === "PROJECT" && r.session_id) {
       setPolling(true);
       const tick = async () => {
@@ -127,6 +147,22 @@ export default function CommandDeckPage() {
       tick();
       timerRef.current = setInterval(tick, 8000);
     }
+  };
+
+  // 一句话直达：解析 + 开工一步完成，跳过确认弹窗。
+  // 老板说一句就是授权，中间不再要求逐个签字；进度仍可在下方盯。
+  const doRun = async () => {
+    if (!phrase.trim()) return;
+    setPlanning(true); setMsg(""); setResult(null); setPlan(null);
+    try {
+      const r = (await api.post("/command/run", { phrase, attachments })) as ExecResult & { plan: Plan };
+      setPlan(r.plan);
+      setResult(r);
+      setConfirmOpen(false);
+      setMsg("⚡ 已直接开工（" + PATH_META[r.path]?.label + "）：不用逐个签字，进度在下面盯着。");
+      startPolling(r);
+    } catch (e) { setMsg("❌ " + describeError(e)); }
+    setPlanning(false);
   };
 
   const openReport = async (ref: string) => {
@@ -182,7 +218,8 @@ export default function CommandDeckPage() {
     <div className="p-6 max-w-[1100px] mx-auto animate-fade-up">
       <h1 className="text-2xl font-bold mb-1">📣 一句话指挥台</h1>
       <p className="text-sm text-[var(--muted)] mb-5">
-        说一句话，AI 判断最合适的路：直接派活 / 专家组队 / 作战室立项 —— 每一步都有你的确认点
+        说一句话：想先看方案就「先看方案」，想让公司直接开干就「⚡ 一句话直达」
+        —— 直达会跳过中间确认，进度与产出在下方追踪
       </p>
 
       {/* 主输入区 */}
@@ -208,8 +245,14 @@ export default function CommandDeckPage() {
             {listening ? "● 听…" : "🎙 说"}
           </button>
           <button onClick={doPlan} disabled={planning || !phrase.trim()}
-            className="btn-primary self-stretch disabled:opacity-40">
-            {planning ? "AI 判断中…" : "下达"}
+            className="self-stretch px-3 rounded-lg text-sm border border-[var(--border)] text-[var(--muted)] hover:text-white hover:bg-white/[0.06] disabled:opacity-40 transition-all"
+            title="先看方案，确认后再执行">
+            {planning ? "AI 判断中…" : "先看方案"}
+          </button>
+          <button onClick={doRun} disabled={planning || !phrase.trim()}
+            className="btn-primary self-stretch disabled:opacity-40"
+            title="一句话直达：不再二次确认，直接派活开工">
+            {planning ? "AI 开工中…" : "⚡ 一句话直达"}
           </button>
         </div>
         <div className="mt-3 flex items-center justify-between">

@@ -1,7 +1,7 @@
 """Task engine + runtime execution state (P1-07/08/14/15)."""
 import enum
 
-from sqlalchemy import JSON, Enum, Float, ForeignKey, Index, String, Text
+from sqlalchemy import JSON, Boolean, Enum, Float, ForeignKey, Index, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -55,6 +55,10 @@ class Task(TimestampMixin, Base):
     # 启动时 ensure_columns 会自动给老表补上这两列（可空），无需手写迁移。
     progress: Mapped[float | None] = mapped_column(Float, default=0.0)
     current_stage: Mapped[str | None] = mapped_column(String(200))
+    # 批量派活「创建后立即开工」的持久意图：入队时置 True，启动后清掉。
+    # 用列而不是内存标记，是因为积压任务要由调度循环在 worker 空闲后
+    # 再拉起——重启后排队意图不能丢。可空列，老库由 ensure_columns 自动补。
+    auto_start: Mapped[bool | None] = mapped_column(Boolean, default=False)
 
 
 class TaskEvent(TimestampMixin, Base):

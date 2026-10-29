@@ -3,18 +3,35 @@
 All workflow state lives in the database. The runtime advances an execution
 by processing currently-active nodes; every transition is persisted, so the
 execution survives server restarts and supports pause/resume/cancel/retry.
+
+并发与取消（P0-6）：
+- 同一个执行实例同一时刻只允许一个 worker 推进（runtime_locks 租约
+  `workflow:<id>`，10 分钟自动过期）——重复调度、重启恢复、用户连点「运行」
+  都只会有一个赢家，不会同一批节点跑两遍（每个 AGENT 节点都会建任务+计费）。
+- 取消/暂停立即生效：推进循环每步前重读状态，读到 CANCELLED/PAUSED 就退出，
+  并且所有状态落地都用 CAS（只有仍处于预期状态才写），不会把已取消的实例
+  又写回 RUNNING/COMPLETED。
+- 长耗时节点（AGENT/WAIT）之前先 commit，不持写锁跨网络调用。
 """
 import asyncio
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
+from app.core.logging_config import get_logger
 from app.models.task import Task, TaskPriority, TaskStatus
 from app.models.workflow import (NodeType, RunStatus, WorkflowDefinition,
                                  WorkflowEdge, WorkflowExecution, WorkflowNode,
                                  WorkflowStep)
 from app.services.event_system import log_event
+
+logger = get_logger(__name__)
+
+# 租约时长：要覆盖一个长 AGENT 节点（LLM 调用）+ WAIT(≤60s)，又不能让
+# 崩溃后的实例永久卡住。
+WORKFLOW_LEASE_S = 10 * 60
 
 
 def utcnow_iso() -> str:
@@ -94,7 +111,16 @@ class WorkflowRuntime:
             await transition_task(self.db, task, TaskStatus.COMPLETED)
             return {"task_id": task.id, "output": task.result or ""}
         except Exception:
-            await self.db.rollback()
+            # 此前 `except Exception: await self.db.rollback()` 会隐式返回 None，
+            # 被上层 execute_step 当作 "worker 异步处理/等待人工" commit 掉，
+            # 本步记录也被回滚抹掉 → 实例永久挂起。
+            # 现在：把任务标 FAILED（证据落库由 run_agent_on_task 失败路径负责），
+            # 再原样上抛，交给 advance_execution 对称地写 _finish_step(FAILED)+commit。
+            try:
+                await transition_task(self.db, task, TaskStatus.FAILED)
+            except Exception:
+                task.status = TaskStatus.FAILED
+            raise
 
     def exec_input_company(self) -> str:
         return (self.exec.input_data or {}).get("company_id", "")
@@ -108,10 +134,9 @@ class WorkflowRuntime:
             return {"finished": True}
 
         if node.node_type == NodeType.AGENT:
-            result = await self._exec_agent_node(node, ctx)
-            if result is None:
-                return None  # worker handles it asynchronously
-            return result
+            # _exec_agent_node 要么返回 output dict，要么上抛异常（标 FAILED），
+            # 不会再返回 None —— None 只保留给真正的"等待人工"（审批/输入）语义。
+            return await self._exec_agent_node(node, ctx)
 
         if node.node_type == NodeType.CONDITION:
             keyword = (node.config or {}).get("keyword", "")
@@ -165,10 +190,64 @@ async def transition_task(db: AsyncSession, task: Task, new_status: TaskStatus):
 
 async def advance_execution(db: AsyncSession, execution_id: str,
                             max_steps: int = 50) -> WorkflowExecution:
-    """推进一个执行实例，直到完成/失败/需要人工。可重入（服务重启后调用）。"""
+    """推进一个执行实例，直到完成/失败/需要人工。可重入（服务重启后调用）。
+
+    互斥由 `workflow:<id>` 租约保证：拿不到锁说明已有 worker 在推进
+    （或刚崩溃、租约未过期），本次直接返回当前状态而不是并行再跑一遍。
+    """
+    from app.task_engine import acquire_lock, new_lock_owner, release_lock
+
+    lock_key = f"workflow:{execution_id}"
+    holder = new_lock_owner()
+    if not await acquire_lock(db, lock_key, holder, ttl_seconds=WORKFLOW_LEASE_S):
+        ex = await db.get(WorkflowExecution, execution_id)
+        if ex is None:
+            raise ValueError("execution not found")
+        logger.info("[workflow %s] 已有 worker 在推进，跳过重复调度", execution_id)
+        return ex
+    try:
+        return await _advance_locked(db, execution_id, max_steps=max_steps)
+    finally:
+        try:
+            await release_lock(db, lock_key, holder)
+        except Exception as lease_err:  # 释放失败最多等租约自然过期
+            logger.warning("[workflow %s] 释放租约失败: %s", execution_id, lease_err)
+
+
+async def _cas_status(db: AsyncSession, execution_id: str,
+                      expected: RunStatus, new: RunStatus, **extra) -> bool:
+    """只有当前仍处于 expected 才写 new（避免把已取消的实例"复活"）。"""
+    res = await db.execute(
+        update(WorkflowExecution)
+        .where(WorkflowExecution.id == execution_id,
+               WorkflowExecution.status == expected)
+        .values(status=new, **extra)
+        .execution_options(synchronize_session=False))
+    return res.rowcount == 1
+
+
+async def _advance_locked(db: AsyncSession, execution_id: str,
+                          max_steps: int = 50) -> WorkflowExecution:
     ex = await db.get(WorkflowExecution, execution_id)
     if not ex:
         raise ValueError("execution not found")
+
+    # 终态 / 等人工 / 已暂停：不自动推进
+    if ex.status in (RunStatus.COMPLETED, RunStatus.CANCELLED, RunStatus.FAILED,
+                     RunStatus.PAUSED, RunStatus.WAITING_APPROVAL,
+                     RunStatus.WAITING_INPUT):
+        return ex
+
+    # PENDING→RUNNING 用 CAS 落地：这是"本次由我推进"的唯一凭据。
+    if ex.status == RunStatus.PENDING:
+        res = await _cas_status(db, execution_id, RunStatus.PENDING,
+                                RunStatus.RUNNING)
+        await db.commit()
+        if not res:
+            await db.refresh(ex)
+            return ex
+        set_committed_value(ex, "status", RunStatus.RUNNING)
+
     rt = WorkflowRuntime(db, ex)
     nodes, out_edges = await rt._load_graph()
 
@@ -191,6 +270,12 @@ async def advance_execution(db: AsyncSession, execution_id: str,
             if not node:
                 continue
 
+            # 取消/暂停立即生效：每步前重读状态。读到就退出，不再开新节点。
+            await db.refresh(ex)
+            if ex.status in (RunStatus.CANCELLED, RunStatus.PAUSED,
+                             RunStatus.FAILED):
+                return ex
+
             # MERGE：等待所有上游分支完成
             if node.node_type == NodeType.MERGE:
                 upstream_done = all(
@@ -199,12 +284,17 @@ async def advance_execution(db: AsyncSession, execution_id: str,
                 pass
 
             step = await rt._open_step(node, {})
+            # 先把 step 行（RUNNING）落库并释放写锁，再去调可能很慢的节点
+            await db.commit()
             try:
                 output = await rt.execute_step(node, done_nodes)
             except Exception as e:
                 await rt._finish_step(step, {}, RunStatus.FAILED, str(e))
-                ex.status = RunStatus.FAILED
-                ex.error = f"node {key}: {e}"
+                if await _cas_status(db, ex.id, RunStatus.RUNNING,
+                                     RunStatus.FAILED,
+                                     error=f"node {key}: {e}"):
+                    set_committed_value(ex, "status", RunStatus.FAILED)
+                    ex.error = f"node {key}: {e}"
                 await log_event(db, "workflow.failed", "workflow_execution",
                                 ex.id, "system", None, {"node": key})
                 await db.commit()
@@ -215,11 +305,25 @@ async def advance_execution(db: AsyncSession, execution_id: str,
                 await db.commit()
                 return ex
 
+            # 节点执行期间用户可能已取消：结果不再写回，也不再推进后继节点
+            await db.refresh(ex)
+            if ex.status in (RunStatus.CANCELLED, RunStatus.PAUSED,
+                             RunStatus.FAILED):
+                await rt._finish_step(
+                    step, output,
+                    RunStatus.CANCELLED if ex.status == RunStatus.CANCELLED
+                    else RunStatus.PENDING)
+                await db.commit()
+                return ex
+
             await rt._finish_step(step, output)
 
             # END 节点：整个执行完成
             if node.node_type == NodeType.END:
-                ex.status = RunStatus.COMPLETED
+                if await _cas_status(db, ex.id, RunStatus.RUNNING,
+                                     RunStatus.COMPLETED,
+                                     current_nodes=[key]):
+                    set_committed_value(ex, "status", RunStatus.COMPLETED)
                 ex.current_nodes = [key]
                 ex.output_data = {k: v for k, v in done_nodes.items()}
                 await log_event(db, "workflow.completed", "workflow_execution",
@@ -245,26 +349,54 @@ async def advance_execution(db: AsyncSession, execution_id: str,
         if not progressed:
             break
 
-        # 去重保序
+        # 去重保序。注意这里**只写 current_nodes**（不写 status）：
+        # 状态若被并发取消成 CANCELLED，一个属于 RUNNING→RUNNING 的赋值
+        # 会在 flush 时把它覆盖回去。
         seen = set()
         current = [k for k in next_nodes if not (k in seen or seen.add(k))]
         ex.current_nodes = current
-        ex.status = RunStatus.RUNNING
         await db.commit()
         steps_taken += 1
 
     if current and steps_taken >= max_steps:
         # 还有未走完的节点（例如 AGENT 节点由外部 worker 执行），挂起等待
-        ex.status = RunStatus.WAITING_INPUT
+        if await _cas_status(db, ex.id, RunStatus.RUNNING,
+                             RunStatus.WAITING_INPUT):
+            set_committed_value(ex, "status", RunStatus.WAITING_INPUT)
+            ex.current_nodes = current
         await db.commit()
     return ex
+
+
+async def execution_is_orphaned(db: AsyncSession, ex: WorkflowExecution,
+                                grace_seconds: float = 30.0) -> bool:
+    """执行实例是否"没人管"（重启后残留 / 后台调度丢失）。
+
+    判断依据：状态还在 RUNNING/PENDING、没有 worker 持有租约、且已过宽限期。
+    用于服务重启后惰性恢复 —— 看板轮询（GET /executions/{id}）时把孤儿实例
+    重新踢起来，而不是让它们永远停在"执行中"。
+    """
+    from app.task_engine import lock_is_held
+
+    if ex.status not in (RunStatus.RUNNING, RunStatus.PENDING):
+        return False
+    if await lock_is_held(db, f"workflow:{ex.id}"):
+        return False
+    created = ex.created_at
+    if created is None:
+        return True
+    if created.tzinfo is not None:
+        created = created.replace(tzinfo=None)
+    return (datetime.utcnow() - created).total_seconds() > grace_seconds
 
 
 async def start_workflow(db: AsyncSession, workflow_id: str, started_by: str,
                          project_id: str | None = None,
                          input_data: dict | None = None) -> WorkflowExecution:
+    # 初始状态 PENDING：真正的"开跑"由 advance_execution 用 CAS 抢 PENDING→RUNNING，
+    # 这样"提交后台任务"与"后台开始执行"之间没有可被重复利用的窗口。
     ex = WorkflowExecution(workflow_id=workflow_id, project_id=project_id,
-                           status=RunStatus.RUNNING, input_data=input_data or {},
+                           status=RunStatus.PENDING, input_data=input_data or {},
                            started_by=started_by)
     db.add(ex)
     await db.flush()

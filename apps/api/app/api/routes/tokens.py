@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_company_owned, get_current_user, get_db
 from app.core.logging_config import get_logger
 from app.models.agent import Agent, Model
 from app.models.company import Company, Department
@@ -23,6 +23,15 @@ SCENARIOS = ["CHAT", "MEETING", "TASK", "RUNTIME", "FACTORY", "TRAINING",
 
 def _now_utc():
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _owned_company_ids(user_id: str):
+    """调用者拥有的公司 id 子查询（统计类端点的"可访问范围"）。
+
+    统计端点不能简单把 company_id 改成必填（现有页面有不传的调用），
+    也不能不传就聚合全平台——改为服务端自行推导可访问公司集合。
+    """
+    return select(Company.id).where(Company.owner_id == user_id)
 
 
 # ================= 计费设置 =================
@@ -80,6 +89,15 @@ async def upsert_pricing(data: PricingIn, db: AsyncSession = Depends(get_db),
     if data.billing_mode not in ("USAGE", "SUBSCRIPTION"):
         raise HTTPException(400, "billing_mode 必须是 USAGE 或 SUBSCRIPTION")
     m = await db.get(Model, data.model_id)
+    if not m:
+        raise HTTPException(404, "model not found")
+    # 归属校验：计费标准挂在模型上，任何登录用户都能按 model_id
+    # 覆盖任意模型的单价（成本口径随之失真），必须确认模型归自己
+    if m.company_id is None:
+        raise HTTPException(
+            409, "该模型未归属任何公司，无法确认所有权。"
+                 "请先在自己的公司下重新登记模型，再配置计费标准。")
+    await assert_company_owned(db, user.id, m.company_id)
     q = await db.execute(select(PricingConfig).where(
         PricingConfig.model_id == data.model_id, PricingConfig.enabled.is_(True)))
     p = q.scalars().first()
@@ -211,7 +229,10 @@ async def stats_summary(company_id: str = Query(None),
                         user: User = Depends(get_current_user)):
     """总览卡片：总量/费用/调用次数/平均延迟 + 按天趋势。"""
     conds = _parse_range(days, start, end)
+    # 归属范围：默认只统计调用者自己的公司；显式传 company_id 时再校验它属于自己
+    conds.append(TokenUsage.company_id.in_(_owned_company_ids(user.id)))
     if company_id:
+        await assert_company_owned(db, user.id, company_id)
         conds.append(TokenUsage.company_id == company_id)
     inp_s, out_s, tot_s, cost_s, cnt = _sum_cols()
     row = (await db.execute(
@@ -236,6 +257,7 @@ async def stats_by_agent(company_id: str = Query(...), days: int = Query(30),
                          db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
     """(a) 个人维度：每个 Agent 用了多少。"""
+    await assert_company_owned(db, user.id, company_id)
     conds = [TokenUsage.company_id == company_id]
     conds += _parse_range(days, None, None)
     rows = await _group_stats(db, TokenUsage.agent_id, conds)
@@ -248,6 +270,7 @@ async def stats_by_department(company_id: str = Query(...), days: int = Query(30
                               db: AsyncSession = Depends(get_db),
                               user: User = Depends(get_current_user)):
     """(b) 部门维度：经 Agent.department 归属。"""
+    await assert_company_owned(db, user.id, company_id)
     # agent→department 映射
     aq = await db.execute(select(Agent.id, Agent.department_id).where(
         Agent.company_id == company_id))
@@ -275,7 +298,11 @@ async def stats_by_company(days: int = Query(30),
                            db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
     """(c) 公司维度。"""
-    rows = await _group_stats(db, TokenUsage.company_id, _parse_range(days, None, None))
+    # 不传 company_id 时按调用者拥有的公司聚合，而不是全平台
+    rows = await _group_stats(
+        db, TokenUsage.company_id,
+        [TokenUsage.company_id.in_(_owned_company_ids(user.id)),
+         *_parse_range(days, None, None)])
     return await _attach_names(db, rows, "company")
 
 
@@ -284,6 +311,7 @@ async def stats_by_project(company_id: str = Query(...), days: int = Query(30),
                            db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
     """(d) 项目维度。"""
+    await assert_company_owned(db, user.id, company_id)
     conds = [TokenUsage.company_id == company_id,
              TokenUsage.project_id.isnot(None)]
     conds += _parse_range(days, None, None)
@@ -297,6 +325,7 @@ async def stats_by_task(company_id: str = Query(...), days: int = Query(30),
                         db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
     """(e) 任务维度（Top N）。"""
+    await assert_company_owned(db, user.id, company_id)
     conds = [TokenUsage.company_id == company_id,
              TokenUsage.task_id.isnot(None)]
     conds += _parse_range(days, None, None)
@@ -320,6 +349,7 @@ async def stats_by_scenario(company_id: str = Query(...), days: int = Query(30),
                             db: AsyncSession = Depends(get_db),
                             user: User = Depends(get_current_user)):
     """(f) 学习/场景维度 + V5.8 ⑩ 成本分维：占比 + 优化建议（可规则化）。"""
+    await assert_company_owned(db, user.id, company_id)
     conds = [TokenUsage.company_id == company_id]
     conds += _parse_range(days, None, None)
     rows = await _group_stats(db, TokenUsage.scenario, conds)
@@ -357,6 +387,7 @@ async def usage_logs(company_id: str = Query(...), limit: int = Query(100, le=50
                      db: AsyncSession = Depends(get_db),
                      user: User = Depends(get_current_user)):
     """明细流水（最新在前），可按场景/Agent 筛选。"""
+    await assert_company_owned(db, user.id, company_id)
     conds = [TokenUsage.company_id == company_id]
     if scenario:
         conds.append(TokenUsage.scenario == scenario)

@@ -29,14 +29,20 @@ class DispatchIn(BaseModel):
     agent_ids: list[str] = []          # single_agent / multi_agent_list 用
     department_ids: list[str] = []     # agent_org 用（支持多部门）
     priority: str = "NORMAL"           # LOW|NORMAL|HIGH|URGENT
+    # 创建后立即开工：队满时未启动的保留 auto_start 标记，由调度循环
+    # 在 worker 空闲后拉起（见 app/task_runner.py）。默认关闭，保持老行为。
+    auto_start: bool = False
 
 
 async def _resolve_targets_async(db: AsyncSession, data: DispatchIn) -> list[Agent]:
+    # 所有分支都必须带上 company_id 过滤：只校验"agent 存在"会允许把任务
+    # 派给别家公司的员工（跨租户写入），department_ids 同理。
     if data.target_type in ("single_agent", "multi_agent_list"):
         ids = data.agent_ids[:1] if data.target_type == "single_agent" else data.agent_ids
         if not ids:
             raise HTTPException(400, "未指定执行 Agent")
-        q = await db.execute(select(Agent).where(Agent.id.in_(ids)))
+        q = await db.execute(select(Agent).where(
+            Agent.id.in_(ids), Agent.company_id == data.company_id))
         found = list(q.scalars().all())
         if len(found) != len(set(ids)):
             raise HTTPException(404, "部分执行 Agent 不存在")
@@ -45,7 +51,8 @@ async def _resolve_targets_async(db: AsyncSession, data: DispatchIn) -> list[Age
         if not data.department_ids:
             raise HTTPException(400, "未指定部门")
         q = await db.execute(select(Agent).where(
-            Agent.department_id.in_(data.department_ids)))
+            Agent.department_id.in_(data.department_ids),
+            Agent.company_id == data.company_id))
         found = list(q.scalars().all())
         if not found:
             raise HTTPException(400, "所选部门下没有员工")
@@ -111,7 +118,7 @@ async def dispatch_tasks(data: DispatchIn,
         t = Task(company_id=data.company_id, title=data.title,
                  description=data.description, status=TaskStatus.TODO,
                  priority=prio, assigned_agent_id=agent.id,
-                 created_by=user.id)
+                 created_by=user.id, auto_start=data.auto_start)
         db.add(t)
         created.append((t, agent))
     await db.flush()
@@ -121,13 +128,29 @@ async def dispatch_tasks(data: DispatchIn,
                     "user", user.id,
                     {"title": data.title, "target_type": data.target_type,
                      "targets": [a.name for _, a in created],
-                     "priority": data.priority})
+                     "priority": data.priority, "auto_start": data.auto_start})
     await db.commit()
+
+    task_ids = [t.id for t, _ in created]
+
+    # 一键开工：提交后台执行。队满的留在队列里，由调度循环接手；
+    # 这样"派给全公司 20 人"不会被 8 个 worker 的瞬时容量卡成 12 条僵尸任务。
+    if data.auto_start and task_ids:
+        from app.task_runner import dispatch_auto_queue
+        await dispatch_auto_queue(db, limit=len(task_ids) + 1)
+
+    status_rows = (await db.execute(
+        select(Task.id, Task.status).where(Task.id.in_(task_ids)))).all()
+    status_of = {r[0]: r[1].value for r in status_rows}
+    started = sum(1 for s in status_of.values() if s == "RUNNING")
 
     return {
         "created_count": len(created),
+        "started_count": started,
+        "queued_count": len(created) - started,
         "tasks": [{"task_id": t.id, "agent_id": a.id, "agent_name": a.name,
-                   "priority": t.priority.value}
+                   "priority": t.priority.value,
+                   "status": status_of.get(t.id, "TODO")}
                   for t, a in created],
     }
 
@@ -233,44 +256,44 @@ async def delete_tasks(data: DeleteTasksIn,
         if not t:
             failed.append({"id": tid, "reason": "不存在"})
             continue
+        title = t.title  # 提前取值：删除/回滚后 ORM 对象过期，避免再触发懒加载
         try:
             async with db.begin_nested():
+                # 跨方言：IN 子查询在 PostgreSQL / MySQL / SQLite 上都合法
                 await db.execute(text(
-                    "DELETE FROM execution_checkpoints USING agent_executions "
-                    "WHERE execution_checkpoints.execution_id = agent_executions.id "
-                    "AND agent_executions.task_id = CAST(:tid AS varchar)"), {"tid": tid})
-                await db.execute(text(
-                    "DELETE FROM agent_executions WHERE task_id = CAST(:tid AS varchar)"),
+                    "DELETE FROM execution_checkpoints WHERE execution_id IN "
+                    "(SELECT id FROM agent_executions WHERE task_id = :tid)"),
                     {"tid": tid})
                 await db.execute(text(
-                    "DELETE FROM task_events WHERE task_id = CAST(:tid AS varchar)"),
-                    {"tid": tid})
+                    "DELETE FROM agent_executions WHERE task_id = :tid"), {"tid": tid})
+                await db.execute(text(
+                    "DELETE FROM task_events WHERE task_id = :tid"), {"tid": tid})
                 # 该任务产出的记忆（context_ref 指向此任务的）一并删除
                 await db.execute(text(
-                    "DELETE FROM agent_memories WHERE context_ref = CAST(:tid AS varchar)"),
-                    {"tid": tid})
+                    "DELETE FROM agent_memories WHERE context_ref = :tid"), {"tid": tid})
                 # 子任务（parent_task_id 引用，递归一层足够）
                 await db.execute(text(
-                    "DELETE FROM tasks WHERE parent_task_id = CAST(:tid AS varchar)"),
-                    {"tid": tid})
+                    "DELETE FROM tasks WHERE parent_task_id = :tid"), {"tid": tid})
                 # 人工介入记录
                 await db.execute(text(
-                    "DELETE FROM interventions WHERE task_id = CAST(:tid AS varchar)"),
-                    {"tid": tid})
+                    "DELETE FROM interventions WHERE task_id = :tid"), {"tid": tid})
                 # 任务产出的资产解绑（保留文件）
                 await db.execute(text(
-                    "UPDATE assets SET task_id = NULL WHERE task_id = CAST(:tid AS varchar)"),
-                    {"tid": tid})
+                    "UPDATE assets SET task_id = NULL WHERE task_id = :tid"), {"tid": tid})
                 # 会议行动项解绑（保留记录）
                 await db.execute(text(
-                    "UPDATE meeting_action_items SET task_id = NULL WHERE task_id = CAST(:tid AS varchar)"),
+                    "UPDATE meeting_action_items SET task_id = NULL WHERE task_id = :tid"),
                     {"tid": tid})
                 await db.delete(t)
-            deleted.append({"id": tid, "title": t.title})
+                # 显式 flush：让本条的约束错误在 savepoint 内就暴露，
+                # 而不是拖到整批 commit 才一起失败。
+                await db.flush()
+            deleted.append({"id": tid, "title": title})
         except (IntegrityError, DBAPIError) as e:
+            # savepoint 已由 begin_nested 上下文回滚；不要再 db.rollback()，
+            # 否则会把此前已成功删除的任务一起撤销，却仍报告为成功。
             failed.append({"id": tid,
                            "reason": f"约束冲突: {str(getattr(e, 'orig', e))[:100]}"})
-            await db.rollback()
             db.expire_all()
 
     if deleted:
@@ -279,7 +302,11 @@ async def delete_tasks(data: DeleteTasksIn,
                          "titles": [x["title"][:50] for x in deleted]})
     try:
         await db.commit()
-    except Exception:
+    except Exception as e:
+        # 最终提交失败时整批都未落库，不能继续把它们报成成功
         await db.rollback()
+        failed.extend({"id": x["id"], "reason": f"提交失败: {str(e)[:80]}"}
+                      for x in deleted)
+        deleted = []
 
     return {"deleted_count": len(deleted), "deleted": deleted, "failed": failed}

@@ -267,10 +267,18 @@ def test_production_accepts_hardened_config(monkeypatch):
 
 
 def test_development_starts_but_warns(monkeypatch):
-    """开发环境必须放行（否则"克隆下来就能跑"不成立），但要给出告警。"""
+    """开发环境必须放行（否则"克隆下来就能跑"不成立），但要给出告警。
+
+    V5.10 起，"放行"不等于"继续用公开密钥跑"：空/占位密钥会被自动替换成
+    随机密钥（尽量落盘）。所以这里断言的是**更强**的契约——
+    开发环境既不能崩，也绝不能还在用那个仓库里公开可见的值。
+    """
     s = _build_settings(monkeypatch, AIEOS_ENV="development")
     assert s.is_production is False
-    assert s.using_default_jwt_secret is True
+    assert s.using_default_jwt_secret is False, "开发环境仍在使用公开占位密钥"
+    assert s.jwt_secret_is_generated is True
+    assert len(s.jwt_secret) >= 32, f"自动生成的密钥过弱：{len(s.jwt_secret)}"
+
     warnings = s.security_warnings()
     assert any("JWT_SECRET" in w for w in warnings), f"默认密钥未告警：{warnings}"
     assert any("DEBUG" in w for w in warnings), f"debug 未告警：{warnings}"
@@ -404,4 +412,57 @@ def test_nav_items_have_description_and_keywords():
         f"有 {total - len(entries)} 条导航缺少 desc（命令面板将无法向用户说明这个页面能做什么）"
     )
     assert src.count("keywords:") >= total - 1, "导航项应尽量都带检索关键词"
+
+
+# ---------------------------------------------------------------------------
+# 版本一致性
+#
+# 本次升级前的实测：pyproject=0.1.0、desktop=5.9.0、web=5.0.0、mobile=4.1.0、
+# mDNS 广播=5.4、FastAPI docs=0.1.0 —— 六个地方六个值。
+# 后果不是"不好看"：用户报障时截图里的版本号无法对应到任何一次发布，
+# 升级检查、灰度、回滚判断全部失去依据。所以把它钉成一条测试。
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = API_ROOT.parents[1]
+
+
+def test_version_strings_are_consistent():
+    """后端/前端/桌面/移动端的版本号必须是同一个值。"""
+    from app.version import __version__ as backend_version
+
+    def _json_version(p: pathlib.Path, key: str = "version") -> str:
+        import json
+        return json.loads(p.read_text(encoding="utf-8"))[key]
+
+    sources = {
+        "apps/api/pyproject.toml": re.search(
+            r'^version = "([^"]+)"',
+            (API_ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+            re.M).group(1),
+        "app/version.py": backend_version,
+        "apps/web/package.json": _json_version(REPO_ROOT / "apps" / "web" / "package.json"),
+        "desktop/package.json": _json_version(REPO_ROOT / "desktop" / "package.json"),
+        "mobile/package.json": _json_version(REPO_ROOT / "mobile" / "package.json"),
+    }
+
+    # app.json 的 expo.version 与 schemaVersion 不是一回事，单独取
+    app_json = (REPO_ROOT / "mobile" / "app.json").read_text(encoding="utf-8")
+    m = re.search(r'"version"\s*:\s*"([^"]+)"', app_json)
+    if m:
+        sources["mobile/app.json"] = m.group(1)
+
+    distinct = {v for v in sources.values()}
+    assert len(distinct) == 1, (
+        "版本号不一致，请统一到 app/version.py 的值：\n  "
+        + "\n  ".join(f"{k} = {v}" for k, v in sorted(sources.items()))
+    )
+
+
+def test_mdns_advertises_the_release_version():
+    """mDNS 广播给发现方的版本必须跟发布版本一致，不能是手写的历史值。"""
+    from app import mdns_advertise
+    from app.version import __version__
+
+    assert mdns_advertise._ADVERTISE_VERSION == __version__
+
 

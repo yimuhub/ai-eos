@@ -1,4 +1,6 @@
 """员工离职继承：把离职 Agent 的技能、成果、记忆转移给接替者。"""
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, text
@@ -8,6 +10,7 @@ from app.api.deps import get_current_user
 from app.api.routes.agents import _verify_agent_access
 from app.db.session import get_db
 from app.models.agent import Agent, AgentModelConfig
+from app.models.memory import AgentMemory
 from app.services.event_system import log_event
 
 router = APIRouter(prefix="/agents/offboarding", tags=["offboarding"])
@@ -77,6 +80,7 @@ async def execute_offboarding(data: OffboardIn,
     from app.core.permissions import Capability, ensure_capability
     await ensure_capability(db, user.id, succ.company_id, Capability.DESTRUCTIVE)
     sid = str(succ.id)
+    succ_name = succ.name  # 提前取值：避免 savepoint 回滚后惰性加载
 
     user_id = user.id  # 提前缓存，防 rollback 过期后触发同步懒加载
 
@@ -99,6 +103,7 @@ async def execute_offboarding(data: OffboardIn,
         if not a:
             failed.append({"id": aid, "reason": "不存在"})
             continue
+        aname = a.name  # 提前取值：回滚/删除后 ORM 对象过期
         try:
             async with db.begin_nested():
                 # 1) 技能继承：继承人不具备的技能补给他
@@ -117,16 +122,23 @@ async def execute_offboarding(data: OffboardIn,
                         "UPDATE assets SET agent_id = CAST(:sid AS varchar) WHERE agent_id = CAST(:aid AS varchar)"),
                         {"aid": aid, "sid": sid})
 
-                # 3) 记忆复制（标注传承来源）—— 兼容 PG/SQLite 的随机 id 生成
+                # 3) 记忆复制（标注传承来源）—— id 在 Python 侧生成，跨方言可用
                 if data.transfer_memories:
-                    await db.execute(text(
-                        "INSERT INTO agent_memories "
-                        "(id, agent_id, company_id, memory_type, content, importance, keywords, context_ref, expires_at) "
-                        "SELECT lower(hex(randomblob(16))), CAST(:sid AS varchar), company_id, "
-                        "memory_type, '[来自「' || :src_name || '」的传承] ' || content, "
-                        "importance, keywords, context_ref, expires_at "
-                        "FROM agent_memories WHERE agent_id = CAST(:aid AS varchar)"),
-                        {"aid": aid, "sid": sid, "src_name": a.name})
+                    src_memories = (await db.execute(select(AgentMemory).where(
+                        AgentMemory.agent_id == aid))).scalars().all()
+                    for m in src_memories:
+                        db.add(AgentMemory(
+                            id=str(uuid.uuid4()),
+                            agent_id=sid,
+                            company_id=m.company_id,
+                            memory_type=m.memory_type,
+                            content=f"[来自「{aname}」的传承] {m.content}",
+                            importance=m.importance,
+                            keywords=m.keywords,
+                            context_ref=m.context_ref,
+                            expires_at=m.expires_at,
+                        ))
+                    await db.flush()
 
                 # 4) 任务全部改派给继承人
                 if data.reassign_open_tasks:
@@ -146,9 +158,9 @@ async def execute_offboarding(data: OffboardIn,
 
                 # 6) 清理剩余引用后删除本体
                 await db.execute(text(
-                    "DELETE FROM execution_checkpoints USING agent_executions "
-                    "WHERE execution_checkpoints.execution_id = agent_executions.id "
-                    "AND agent_executions.agent_id = CAST(:aid AS varchar)"), {"aid": aid})
+                    "DELETE FROM execution_checkpoints WHERE execution_id IN "
+                    "(SELECT id FROM agent_executions WHERE agent_id = CAST(:aid AS varchar))"),
+                    {"aid": aid})
                 for stmt in (
                     "DELETE FROM agent_model_configs WHERE agent_id = CAST(:aid AS varchar)",
                     "DELETE FROM meeting_participants WHERE agent_id = CAST(:aid AS varchar)",
@@ -172,11 +184,13 @@ async def execute_offboarding(data: OffboardIn,
                 ):
                     await db.execute(text(stmt), {"aid": aid})
                 await db.delete(a)
-            offboarded.append({"id": aid, "name": a.name})
+                # 显式 flush：本条失败在 savepoint 内回滚，不影响其他离职交接
+                await db.flush()
+            offboarded.append({"id": aid, "name": aname})
         except (IntegrityError, DBAPIError) as e:
+            # savepoint 已回滚；不要 rollback 外层事务（会撤销此前成功的交接）
             failed.append({"id": aid,
                            "reason": f"约束冲突: {str(getattr(e, 'orig', e))[:100]}"})
-            await db.rollback()
             db.expire_all()
         except HTTPException:
             failed.append({"id": aid, "reason": "无权限"})
@@ -184,7 +198,7 @@ async def execute_offboarding(data: OffboardIn,
     if offboarded:
         await log_event(db, "agent.offboarded", "agent", None, "user", user.id,
                         {"count": len(offboarded),
-                         "successor": succ.name,
+                         "successor": succ_name,
                          "names": [o["name"] for o in offboarded],
                          "transfer": {"skills": data.transfer_skills,
                                       "assets": data.transfer_assets,
@@ -192,8 +206,11 @@ async def execute_offboarding(data: OffboardIn,
                                       "tasks": data.reassign_open_tasks}})
     try:
         await db.commit()
-    except Exception:
+    except Exception as e:
         await db.rollback()
+        failed.extend({"id": x["id"], "reason": f"提交失败: {str(e)[:80]}"}
+                      for x in offboarded)
+        offboarded = []
 
     return {"offboarded": offboarded, "offboarded_count": len(offboarded),
             "failed": failed}

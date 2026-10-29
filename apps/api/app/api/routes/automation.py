@@ -8,10 +8,10 @@ from app.automation_engine import run_automation
 from app.models.automation import AutomationDefinition, AutomationRunRecord
 from app.models.user import User
 from app.api.deps import get_current_user, get_db
+from app.core.permissions import Capability, require_company_scope
 
-router = APIRouter(prefix="/automations", tags=["automations"])
-
-
+router = APIRouter(prefix="/automations", tags=["automations"],
+                   dependencies=[Depends(require_company_scope())])
 class DefinitionIn(BaseModel):
     name: str
     trigger_type: str = "MANUAL"

@@ -78,6 +78,10 @@ export default function WarRoomDetail() {
   const timelineRef = useRef<HTMLDivElement>(null);
   const prev_ref = useRef<any>(null);
   prev_ref.current = active; // keep latest for load()
+  // 公司/员工列表与会话 id 只解析一次：轮询走 snapshot，不再重复拉全量列表
+  const cidRef = useRef("");
+  const sidRef = useRef("");
+  const lastChatIdRef = useRef<string | null>(null);
 
   const [team, setTeam] = useState<any | null>(null);
   const [chatMsgs, setChatMsgs] = useState<any[]>([]);
@@ -87,36 +91,70 @@ export default function WarRoomDetail() {
   useEffect(() => { setMounted(true); }, []);
 
   const load = useCallback(async () => {
-    const cs = await api.get<Company[]>("/companies");
-    if (!cs.length) return;
-    setCid(cs[0].id);
-    setAgents(await api.get(`/agents?company_id=${cs[0].id}`));
+    let companyId = cidRef.current;
+    if (!companyId) {
+      const cs = await api.get<Company[]>("/companies");
+      if (!cs.length) return;
+      companyId = cs[0].id;
+      cidRef.current = companyId;
+      setCid(companyId);
+      setAgents(await api.get(`/agents?company_id=${companyId}`));
+    }
     try {
       let sid: string | undefined;
       if (projectId) {
-        const d = await api.get(`/war-room/sessions?company_id=${cs[0].id}&project_id=${projectId}`);
+        const d = await api.get(`/war-room/sessions?company_id=${companyId}&project_id=${projectId}`);
         setSessions(d.sessions || []);
         const a = (prev_ref.current ?? (d.sessions || [])[0]) || null;
         setActive(a);
         sid = a?.id;
       } else if (sidParam) {
-        const d = await api.get(`/war-room/${sidParam}?company_id=${cs[0].id}`);
+        const d = await api.get(`/war-room/${sidParam}?company_id=${companyId}`);
         setSessions([d]);
         setActive(d);
         sid = d.id;
       }
       if (sid) {
-        try { setTeam(await api.get(`/war-room/sessions/${sid}/team?company_id=${cs[0].id}`)); } catch {}
+        if (sidRef.current !== sid) lastChatIdRef.current = null;
+        sidRef.current = sid;
+        try { setTeam(await api.get(`/war-room/sessions/${sid}/team?company_id=${companyId}`)); } catch {}
         try {
-          const ch = await api.get(`/war-room/sessions/${sid}/chat?company_id=${cs[0].id}`);
+          const ch = await api.get(`/war-room/sessions/${sid}/chat?company_id=${companyId}`);
           // 保留较长历史：响应缺 messages 时不清空已拉到的聊天
           setChatMsgs((prev) => (ch.messages?.length >= prev.length ? ch.messages : prev));
+          const last = ch.messages?.[ch.messages.length - 1];
+          if (last?.id) lastChatIdRef.current = last.id;
         } catch {}
-      } else { setTeam(null); setChatMsgs([]); }
+      } else { setTeam(null); setChatMsgs([]); sidRef.current = ""; lastChatIdRef.current = null; }
     } catch {}
   }, [projectId, sidParam]);
 
   useEffect(() => { load(); }, [load]);
+
+  // 轮询只打一个 snapshot：会话 + 团队 + 聊天增量，替代改造前的 5 个串行请求。
+  const syncSnapshot = useCallback(async () => {
+    const sid = sidRef.current;
+    const companyId = cidRef.current;
+    if (!sid || !companyId) return;
+    try {
+      const q = lastChatIdRef.current ? `&since_id=${lastChatIdRef.current}` : "";
+      const snap = await api.get<any>(
+        `/war-room/sessions/${sid}/snapshot?company_id=${companyId}${q}`);
+      if (snap.session) setActive(snap.session);
+      if (snap.team) setTeam(snap.team);
+      const msgs: any[] = snap.chat?.messages || [];
+      if (snap.chat?.incremental) {
+        setChatMsgs((prev) => {
+          const seen = new Set(prev.map((m) => m.id));
+          const add = msgs.filter((m) => !seen.has(m.id));
+          return add.length ? [...prev, ...add] : prev;
+        });
+      } else if (msgs.length) {
+        setChatMsgs(msgs);
+      }
+      if (snap.chat?.latest_id) lastChatIdRef.current = snap.chat.latest_id;
+    } catch {}
+  }, []);
 
   useEffect(() => {
     if (chatBoxRef.current) chatBoxRef.current.scrollTop = chatBoxRef.current.scrollHeight;
@@ -127,9 +165,10 @@ export default function WarRoomDetail() {
   const activeStatus = active?.status;
   useEffect(() => {
     if (!activeStatus || !["analyzing", "announcing", "executing", "confirmed"].includes(activeStatus)) return;
-    const t = setInterval(load, activeStatus === "analyzing" ? 3000 : 6000);
+    const t = setInterval(() => { syncSnapshot(); },
+                           activeStatus === "analyzing" ? 3000 : 6000);
     return () => clearInterval(t);
-  }, [activeStatus, load]);
+  }, [activeStatus, syncSnapshot]);
 
   async function kickoff() {
     if (!goal.trim() || !leaderId) return;

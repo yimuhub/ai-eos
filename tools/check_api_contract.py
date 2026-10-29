@@ -37,15 +37,25 @@ import sys
 API_DIR = pathlib.Path(__file__).resolve().parent.parent / "apps" / "api"
 WEB_DIR = pathlib.Path(__file__).resolve().parent.parent / "apps" / "web"
 
-# 动态动作名候选：末段为变量时，只要有一个候选命中就视为通过
+# 动态动作名候选：末段为变量时，先按候选动作名定位资源族，再用「文件内实际用到的
+# 动作字面量」逐个校验（见 _harvest_actions）。这里的候选只用于兜底，
+# 拼出的完整路径必须真实存在于后端路由表，命中候选不等于通过。
 ACTION_CANDIDATES = [
     "pause", "resume", "cancel", "start", "end", "decide", "approve",
     "reject", "rollback", "install", "uninstall", "deploy", "revoke",
     "convert", "sync", "test", "run", "enable", "disable",
+    "retry", "takeover",
 ]
 
 _CALL_RE = re.compile(r'api\.(get|post|put|patch|del)\s*\(\s*[`"\']([^`"\']+)')
 _METHOD_MAP = {"del": "DELETE"}
+
+# 模板串里的变量段：`${ep}` / `${id}` / `${detail!.id}`
+_VAR_SEG_RE = re.compile(r'\$\{[^}]*\}')
+# 函数定义行（用于定位动态调用所在的函数）
+_FN_DEF_RE = re.compile(
+    r'^(?P<indent>[ \t]*)(?:export\s+)?(?:async\s+)?function\s+(?P<name>[A-Za-z0-9_]+)\s*\('
+)
 
 # 字符串拼接续段：`api.get("/kb2/agents/" + agentId + "/documents")`
 # 注意开头的 [`"'] 用于消费**首个字面量的收尾引号**（正则捕获到的路径
@@ -105,8 +115,77 @@ def frontend_calls() -> list[tuple[str, int, str, str]]:
     return calls
 
 
+def _read_web(rel_file: str) -> str:
+    """按相对路径读回前端源文件（供动态动作字面量还原用）。"""
+    return (WEB_DIR / rel_file).read_text(encoding="utf-8", errors="replace")
+
+
+def _ends_with_var(raw: str) -> bool:
+    """模板末段是否为变量（`/tasks/${id}/${ep}` → True；`/tasks/${id}/takeover` → False）。"""
+    return raw.rstrip().endswith("}")
+
+
+def _last_var(raw: str):
+    segs = _VAR_SEG_RE.findall(raw)
+    if not segs:
+        return None
+    m = re.match(r'[A-Za-z_$][A-Za-z0-9_$]*', segs[-1][2:-1])
+    return m.group(0) if m else None
+
+
+def _resolve_action(base: str, action: str, method: str, routes) -> bool:
+    """拼出的完整路径（含正确的斜杠形态）是否真实存在于后端路由表。"""
+    for cand in (base + action, base.rstrip("/") + "/" + action):
+        if cand in routes and method in routes[cand]:
+            return True
+    return False
+
+
+def _enclosing_fn(lines, lineno0: int):
+    """从调用行向上找最近的 function 定义 → (起始行, 函数名, 签名行)。"""
+    for i in range(lineno0, -1, -1):
+        m = _FN_DEF_RE.match(lines[i])
+        if m:
+            return i, m.group("name"), lines[i]
+    return None, None, None
+
+
+def _harvest_actions(rel_file: str, lineno: int, raw: str) -> list[str]:
+    """尽量静态还原末段变量的取值集合：本地 map 值 → 形参联合类型 → 调用点实参。"""
+    var = _last_var(raw)
+    if not var:
+        return []
+    text = _read_web(rel_file)
+    lines = text.splitlines()
+    start, fname, sig = _enclosing_fn(lines, lineno - 1)
+    if start is None:
+        return []
+    chunk = "\n".join(lines[start: start + 90])
+
+    tokens: list[str] = []
+    # 1) 变量是本地 map：`const ep = { pause: "pause", ... }[op]` → 取冒号后的值
+    m = re.search(re.escape(var) + r"\s*=\s*\{([^}]*)\}", chunk)
+    if m:
+        tokens = re.findall(r':\s*"([A-Za-z][A-Za-z0-9_-]*)"', m.group(1))
+    # 2) 变量是形参且带字面量联合类型：`action: "a" | "b"` → 取签名里的引号串
+    if not tokens and var and re.search(r'[(,]\s*' + re.escape(var) + r'\s*:', sig or ""):
+        tokens = re.findall(r'"([A-Za-z][A-Za-z0-9_-]*)"', sig)
+    # 3) 都不像 → 从调用点还原：`act("/start")` / `control("retry")`
+    if not tokens and fname:
+        tokens = re.findall(
+            r'\b' + re.escape(fname) + r'\(\s*[`"\']/?([A-Za-z][A-Za-z0-9_-]*)', text)
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tokens:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
 def check() -> tuple[list[tuple], list[tuple]]:
-    """返回 (确凿的不匹配, 需人工确认的动态调用)。"""
+    """返回 (确凿的不匹配, 已校验/需人工确认的动态调用)。"""
     routes = backend_routes()
     broken: list[tuple] = []
     dynamic: list[tuple] = []
@@ -123,15 +202,26 @@ def check() -> tuple[list[tuple], list[tuple]]:
         if norm in routes and method in routes[norm]:
             continue
 
-        # 路径中存在变量段：末段可能是拼接出来的动作名，做宽松匹配。
-        # 例如 `/meetings/{}{}`（实为 `${id}` + `${path}`）还原为 `/meetings/` + 动作名。
-        if "{}" in norm:
+        # 末段是变量、且整条不是后端已有路由 → 动态动作名调用。
+        if "{}" in norm and _ends_with_var(raw):
             base = norm[: norm.rfind("{}")]
-            cands = [f"{base}{a}" for a in ACTION_CANDIDATES]
-            # 变量紧跟在斜杠后时，base 可能已含斜杠，两种都试
-            cands += [f"{base.rstrip('/')}/{a}" for a in ACTION_CANDIDATES]
-            if any(c in routes and method in routes[c] for c in cands):
-                dynamic.append((file, line, method, raw))
+            actions = _harvest_actions(file, line, raw)
+            if actions:
+                missing = [a for a in actions
+                           if not _resolve_action(base, a, method, routes)]
+                if missing:
+                    broken.append((file, line, method,
+                                   raw + "  → 动作未命中后端路由："
+                                   + "/".join(missing), []))
+                    continue
+                dynamic.append((file, line, method,
+                                raw + "  → 已逐个校验：" + "/".join(actions)))
+                continue
+            # 拿不到具体动作字面量（变量来源无法静态判定）→ 沿用候选族兜底，
+            # 但必须标注「需人工确认」，不再当成"任一候选命中即通过"。
+            if any(_resolve_action(base, a, method, routes) for a in ACTION_CANDIDATES):
+                dynamic.append((file, line, method,
+                                raw + "  ← 动作变量无法静态判定，需人工确认"))
                 continue
 
         broken.append((file, line, method, raw, sorted(routes.get(norm, []))))

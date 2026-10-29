@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_agent_owned, assert_company_owned, get_current_user, get_db
 from app.computer_workspace import (HIGH_RISK_ACTIONS, MOCK_SCREENSHOT, ComputerSession,
                                  ComputerWorkspace, SessionAction, WorkspaceFile,
                                  WorkspaceProvider)
@@ -25,6 +25,7 @@ async def create_workspace(
 ):
     w = ComputerWorkspace(id=str(__import__("uuid").uuid4()),
                           company_id=company_id, name=name, provider=provider)
+    await assert_company_owned(db, user.id, company_id)
     db.add(w)
     await db.commit()
     return {"id": w.id, "name": w.name, "provider": w.provider.value}
@@ -34,6 +35,7 @@ async def create_workspace(
 async def list_workspaces(company_id: str = Query(...),
                           db: AsyncSession = Depends(get_db),
                           user: User = Depends(get_current_user)):
+    await assert_company_owned(db, user.id, company_id)
     q = await db.execute(select(ComputerWorkspace).where(
         ComputerWorkspace.company_id == company_id))
     return [{"id": w.id, "name": w.name, "provider": w.provider.value}
@@ -57,6 +59,12 @@ async def start_session(
     w = await db.get(ComputerWorkspace, wid)
     if not w:
         raise HTTPException(404, "workspace not found")
+    await assert_company_owned(db, user.id, w.company_id)
+    if agent_id:
+        # agent_id 由调用者指定，必须确实属于工作区所在公司
+        agent = await assert_agent_owned(db, user.id, agent_id)
+        if agent.company_id != w.company_id:
+            raise HTTPException(404, "agent not found")
     s = ComputerSession(id=str(__import__("uuid").uuid4()), workspace_id=wid,
                         company_id=w.company_id, agent_id=agent_id,
                         goal=(data.goal if data else None))
@@ -65,10 +73,12 @@ async def start_session(
     return {"id": s.id, "status": s.status}
 
 
-async def _session(db, sid) -> ComputerSession:
+async def _session(db, sid, user_id: str) -> ComputerSession:
+    """按 session id 取会话并校验归属；他人会话一律 404。"""
     s = await db.get(ComputerSession, sid)
     if not s:
         raise HTTPException(404, "session not found")
+    await assert_company_owned(db, user_id, s.company_id)
     return s
 
 
@@ -82,7 +92,7 @@ def _check_running(s: ComputerSession):
 @router.post("/sessions/{sid}/pause")
 async def pause_session(sid: str, db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
-    s = await _session(db, sid)
+    s = await _session(db, sid, user.id)
     if s.status != "RUNNING":
         raise HTTPException(409, f"status={s.status}")
     s.status = "PAUSED"
@@ -95,7 +105,7 @@ async def pause_session(sid: str, db: AsyncSession = Depends(get_db),
 @router.post("/sessions/{sid}/resume")
 async def resume_session(sid: str, db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
-    s = await _session(db, sid)
+    s = await _session(db, sid, user.id)
     if s.status != "PAUSED":
         raise HTTPException(409, f"status={s.status}")
     s.status = "RUNNING"
@@ -107,7 +117,7 @@ async def resume_session(sid: str, db: AsyncSession = Depends(get_db),
 async def cancel_session(sid: str, db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
     from datetime import datetime, timezone
-    s = await _session(db, sid)
+    s = await _session(db, sid, user.id)
     if s.status in ("COMPLETED", "CANCELLED"):
         raise HTTPException(409, f"status={s.status}")
     s.status = "CANCELLED"
@@ -148,7 +158,7 @@ async def act(
     user: User = Depends(get_current_user),
 ):
     """执行一步操作。Observe → Act → Verify，记录 before/after 截图。"""
-    s = await _session(db, sid)
+    s = await _session(db, sid, user.id)
     _check_running(s)
 
     high_risk = data.action_type in HIGH_RISK_ACTIONS
@@ -232,6 +242,8 @@ async def approve_action(aid: str, db: AsyncSession = Depends(get_db),
     a = await db.get(SessionAction, aid)
     if not a or not a.high_risk:
         raise HTTPException(404, "not found")
+    # 动作本身没有 company_id，经所属会话反查归属
+    await _session(db, a.session_id, user.id)
     a.approved_by = user.id
     a.result = {**(a.result or {}), "approved": True}
     await db.commit()
@@ -241,6 +253,7 @@ async def approve_action(aid: str, db: AsyncSession = Depends(get_db),
 @router.get("/sessions/{sid}/actions")
 async def list_actions(sid: str, db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
+    await _session(db, sid, user.id)
     q = await db.execute(select(SessionAction).where(
         SessionAction.session_id == sid).order_by(SessionAction.seq))
     return [{"seq": a.seq, "action": a.action_type, "high_risk": a.high_risk,
@@ -252,6 +265,10 @@ async def list_actions(sid: str, db: AsyncSession = Depends(get_db),
 @router.get("/workspaces/{wid}/files")
 async def list_files(wid: str, db: AsyncSession = Depends(get_db),
                      user: User = Depends(get_current_user)):
+    w = await db.get(ComputerWorkspace, wid)
+    if not w:
+        raise HTTPException(404, "workspace not found")
+    await assert_company_owned(db, user.id, w.company_id)
     q = await db.execute(select(WorkspaceFile).where(
         WorkspaceFile.workspace_id == wid))
     return [{"path": f.path, "size": f.size, "content": (f.content or "")[:200]}

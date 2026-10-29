@@ -1,8 +1,10 @@
 """AI-EOS API entrypoint."""
+import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.routes import (access, agents, artifacts, assets, auth, browser_agent, group_chat, growth_center, doc_styles,
                             agent_chat, delivery, departments_batch, kb2, offboarding, task_dispatch,
@@ -22,6 +24,7 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             tokens, experts, command, org_presets, prometheus_metrics)
 from app.core.config import settings
 from app.core.logging_config import get_logger, setup_logging
+from app.version import __version__
 
 # 尽早配置日志：保证后续所有模块（含第三方库降噪）都走统一格式，
 # 也让"失败出声"从进程启动第一秒就生效。
@@ -84,11 +87,25 @@ async def lifespan(app: FastAPI):
     try:
         from app import mdns_advertise
         mdns_advertise.stop()
-    except Exception:
-        pass
+    except Exception as e:
+        # 关停阶段的失败同样要出声：mDNS 组播套接字没关掉会残留广播，
+        # 但绝不能因为清理失败而吞掉其它关停步骤或静默退出
+        logger.warning("[shutdown] mDNS 广播停止失败（服务已在退出，仅记录）：%s",
+                       e, exc_info=True)
 
 
-app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
+# docs/redoc/openapi 只在 DEBUG=True 时挂载：匿名 GET /openapi.json 过去会把
+# 312KB 的完整 API 面（路径、字段、模型名）交给任何扫到端口的人，等于给
+# 攻击者一份接口清单。关掉后路由根本不存在（404），不是靠鉴权兜底。
+# 注意：app.openapi() 仍可按需生成 schema，"API 面完整性"的护栏测试不受影响。
+app = FastAPI(
+    title=settings.app_name,
+    version=__version__,
+    lifespan=lifespan,
+    docs_url="/docs" if settings.debug else None,
+    redoc_url="/redoc" if settings.debug else None,
+    openapi_url="/openapi.json" if settings.debug else None,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -100,6 +117,58 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"}
+# 运维端点：暴露指标/接口面，默认不给匿名公网/局域网访客看
+_METRICS_PATH = "/metrics/prometheus"
+
+
+def _is_loopback_client(request) -> bool:
+    """请求是否来自本机回环地址。
+
+    只看 socket 层的 request.client.host——X-Forwarded-For 是客户端可伪造的，
+    用它判定"是否本机"等于没有判定。反代场景请显式配置 METRICS_TOKEN。
+    """
+    client = getattr(request, "client", None)
+    host = (getattr(client, "host", "") or "").strip()
+    return host in _LOOPBACK_HOSTS or host.startswith("127.")
+
+
+def _metrics_token_ok(request) -> bool:
+    """是否带上了正确的 metrics token（Authorization: Bearer 或 ?token=）。"""
+    expected = (settings.metrics_token or "").strip()
+    if not expected:
+        return False
+    supplied = ""
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        supplied = auth[7:].strip()
+    else:
+        # 兼容 Prometheus 常用的 bearer_token 抓取配置之外的 ?token= 写法
+        supplied = request.query_params.get("token", "")
+    return bool(supplied) and secrets.compare_digest(supplied, expected)
+
+
+@app.middleware("http")
+async def guard_ops_endpoints(request, call_next):
+    """收紧匿名可访问的元信息端点。
+
+    - DEBUG=True（开发/便携默认）：保持现状，文档与指标全开，不破坏开发体验。
+    - DEBUG=False：
+      * /docs、/redoc、/openapi.json 已在 FastAPI 构造时关掉（路由根本不存在）
+      * /metrics/prometheus：配了 METRICS_TOKEN 就按 token 校验；
+        没配则只允许回环地址，其他来源一律 404（不暴露"这里有个端点"）。
+    """
+    if request.url.path == _METRICS_PATH and not settings.debug:
+        if (settings.metrics_token or "").strip():
+            if not _metrics_token_ok(request):
+                return JSONResponse(status_code=401,
+                                    content={"detail": "metrics 需要有效的 METRICS_TOKEN"},
+                                    headers={"WWW-Authenticate": "Bearer"})
+        elif not _is_loopback_client(request):
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+    return await call_next(request)
 
 
 @app.exception_handler(Exception)

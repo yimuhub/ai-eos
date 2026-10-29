@@ -1,6 +1,7 @@
 """Auth endpoints."""
 from __future__ import annotations
 
+import asyncio
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -38,20 +39,24 @@ _redis_client = None
 _redis_probed = False
 
 
-def _rate_redis():
-    """返回可用的 Redis 客户端；不可用则返回 None（调用方走内存回退）。
+async def _rate_redis():
+    """返回可用的异步 Redis 客户端；不可用则返回 None（调用方走内存回退）。
 
-    探测只做一次并缓存：便携形态下没有 Redis 服务，不应每次登录都等超时。
+    此前用的是同步 redis 客户端：get/incr/ttl 都是阻塞 IO，
+    在 async 路由里会卡住整个事件循环。改用 redis.asyncio 后
+    探测/读写全程 await，不再阻塞。探测只做一次并缓存：
+    便携形态下没有 Redis 服务，不应每次登录都等超时。
     """
     global _redis_client, _redis_probed
     if _redis_probed:
         return _redis_client
     _redis_probed = True
     try:
-        import redis
-        client = redis.Redis.from_url(
+        import redis.asyncio as aioredis
+        client = aioredis.Redis.from_url(
             settings.redis_url, socket_connect_timeout=2, socket_timeout=2)
-        client.ping()
+        # ping 加总超时兜底：连不上/DNS 挂起都不能拖住登录
+        await asyncio.wait_for(client.ping(), timeout=3)
     except Exception as exc:
         logger.warning("登录限流：Redis 不可用（%s），回退进程内存实现：%s",
                        settings.redis_url, exc)
@@ -66,9 +71,10 @@ def _redis_rate_key(key: str) -> str:
     return f"aieos:login_fail:{key}"
 
 
-def _check_rate_limit(key: str) -> None:
+async def _check_rate_limit(key: str) -> None:
     """超过阈值则拒绝，并明确告知还需等待多久。"""
-    r = _rate_redis()
+    global _redis_client, _redis_probed
+    r = await _rate_redis()
     if r is None:
         now = time.time()
         count, first = _login_failures.get(key, (0, now))
@@ -82,17 +88,36 @@ def _check_rate_limit(key: str) -> None:
                 f"登录失败次数过多，请 {max(wait, 1)} 秒后重试。")
         return
     rk = _redis_rate_key(key)
-    count = int(r.get(rk) or 0)
-    if count < _MAX_FAILS:
+    try:
+        count = int((await r.get(rk)) or 0)
+        if count < _MAX_FAILS:
+            return
+        wait = await r.ttl(rk)
+    except Exception as exc:
+        # Redis 探测成功后中途故障（重启/网络抖动）：降级内存计数而不是拒绝登录，
+        # 并重新探测（下次登录再尝试连 Redis）
+        _redis_probed = False
+        _redis_client = None
+        logger.warning("登录限流 Redis 读写失败，本次降级内存实现：%s", exc)
+        return _check_memory(key)
+
+
+def _check_memory(key: str) -> None:
+    now = time.time()
+    count, first = _login_failures.get(key, (0, now))
+    if now - first > _FAIL_WINDOW_SECONDS:
+        _login_failures.pop(key, None)
         return
-    wait = r.ttl(rk)
-    raise HTTPException(
-        429,
-        f"登录失败次数过多，请 {max(int(wait) if wait else 0, 1)} 秒后重试。")
+    if count >= _MAX_FAILS:
+        wait = int(_FAIL_WINDOW_SECONDS - (now - first))
+        raise HTTPException(
+            429,
+            f"登录失败次数过多，请 {max(wait, 1)} 秒后重试。")
 
 
-def _record_failure(key: str) -> None:
-    r = _rate_redis()
+async def _record_failure(key: str) -> None:
+    global _redis_client, _redis_probed
+    r = await _rate_redis()
     if r is None:
         now = time.time()
         count, first = _login_failures.get(key, (0, now))
@@ -101,18 +126,35 @@ def _record_failure(key: str) -> None:
         _login_failures[key] = (count + 1, first)
         return
     rk = _redis_rate_key(key)
-    count = r.incr(rk)
-    if count == 1:
-        # 窗口锚定在首次失败（与内存实现语义一致），而非滑动窗口
-        r.expire(rk, _FAIL_WINDOW_SECONDS)
+    try:
+        count = await r.incr(rk)
+        if count == 1:
+            # 窗口锚定在首次失败（与内存实现语义一致），而非滑动窗口
+            await r.expire(rk, _FAIL_WINDOW_SECONDS)
+    except Exception as exc:
+        _redis_probed = False
+        _redis_client = None
+        logger.warning("登录限流 Redis 计数失败，本次记入内存：%s", exc)
+        now = time.time()
+        count, first = _login_failures.get(key, (0, now))
+        if now - first > _FAIL_WINDOW_SECONDS:
+            count, first = 0, now
+        _login_failures[key] = (count + 1, first)
 
 
-def _clear_failures(key: str) -> None:
-    r = _rate_redis()
+async def _clear_failures(key: str) -> None:
+    global _redis_client, _redis_probed
+    r = await _rate_redis()
     if r is None:
         _login_failures.pop(key, None)
-    else:
-        r.delete(_redis_rate_key(key))
+        return
+    try:
+        await r.delete(_redis_rate_key(key))
+    except Exception as exc:
+        _redis_probed = False
+        _redis_client = None
+        logger.warning("登录限流 Redis 清理失败，本次清内存计数：%s", exc)
+        _login_failures.pop(key, None)
 
 # 唯一性冲突时为了不泄露"哪个字段被占用"，统一给一句提示
 _DUP_MSG = "该邮箱或用户名已被注册，请更换后重试"
@@ -188,7 +230,7 @@ async def login(data: LoginIn, request: Request = None,
     对一个本机部署、保存着模型密钥与企业数据的系统风险过高。
     """
     key = _rate_key(data.identity, request)
-    _check_rate_limit(key)
+    await _check_rate_limit(key)
 
     result = await db.execute(
         select(User).where((User.email == data.identity) | (User.username == data.identity))
@@ -196,12 +238,12 @@ async def login(data: LoginIn, request: Request = None,
     user = result.scalar_one_or_none()
     # 用户不存在与密码错误返回同一提示，避免账号枚举
     if not user or not verify_password(data.password, user.password_hash):
-        _record_failure(key)
+        await _record_failure(key)
         raise HTTPException(401, "邮箱/用户名或密码不正确")
     if not user.is_active:
         raise HTTPException(403, "该账号已被停用")
 
-    _clear_failures(key)
+    await _clear_failures(key)
     pair = await issue_token_pair(db, user.id)
     await db.commit()
     return {

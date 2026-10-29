@@ -16,6 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.computer_agent import ComputerActionLog
+from app.core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 def _resolve_screenshot_dir() -> str:
@@ -82,11 +85,72 @@ async def real_screenshot(params: dict) -> dict:
             "note": "真实截屏（screencapture -x 静默模式）"}
 
 
-async def real_type_text(params: dict) -> dict:
-    """osascript 真实键入文本到前台应用。"""
+# 终端/Shell 宿主：type_text 落在这些应用上等价于执行命令。
+TERMINAL_APP_NAMES = frozenset({
+    "terminal", "iterm", "iterm2", "console", "gnome-terminal",
+    "konsole", "xterm", "alacritty", "kitty", "warp", "wezterm",
+    "hyper", "tabby", "ghostty", "rio", "tmux",
+})
+
+
+def _normalize_app_name(name: str | None) -> str:
+    n = str(name or "").strip().strip("'\"").lower()
+    if n.endswith(".app"):
+        n = n[:-4]
+    return os.path.basename(n)
+
+
+def is_terminal_app(name: str | None) -> bool:
+    """应用名（进程名或 .app 路径）是否属于终端类。"""
+    return _normalize_app_name(name) in TERMINAL_APP_NAMES
+
+
+async def frontmost_app_name() -> str | None:
+    """当前前台应用进程名；查询失败或无输出返回 None（调用方按允许处理）。"""
+    ok, out = await _run_osascript(
+        'tell application "System Events" to get name of first '
+        'application process whose frontmost is true')
+    if not ok:
+        return None
+    text = out.strip()
+    if not text:
+        return None
+    return text.splitlines()[0].strip() or None
+
+
+async def real_type_text(params: dict, app_hint: str | None = None) -> dict:
+    """osascript 真实键入文本到前台应用。
+
+    ## 为什么检查前台应用
+
+    `type_text` 是 AppleScript keystroke：如果前台是 Terminal/iTerm，
+    先 `open -a Terminal` 再 type_text 就等价于执行任意主机命令，
+    完全绕开 `core/sandbox.py` 的 shell 白名单。因此键入前先查前台
+    进程名，命中终端类就拒绝。
+
+    该检查刻意保守：**查不到前台应用时按允许处理并记 warning**，
+    避免辅助功能权限未授予等环境问题把功能直接锁死。
+    `app_hint` 是可选的调用方上下文（期望的目标应用），只用于日志与
+    拒绝说明，不参与放行判断。
+    """
     text = str((params or {}).get("text", ""))[:500]
     if not text:
         return {"ok": False, "error": "text is required"}
+    hint = str(app_hint or (params or {}).get("app_hint") or "").strip()
+
+    front = await frontmost_app_name()
+    if front is None:
+        logger.warning("type_text 无法获取前台应用名，按允许处理"
+                       "（app_hint=%r）", hint or None)
+    elif is_terminal_app(front):
+        msg = (f"拒绝键入：前台应用 {front!r} 属于终端/Shell 宿主，"
+               "键入内容可能被当作命令执行。请先切换到目标应用。")
+        logger.warning("type_text 被拒绝：前台应用=%r app_hint=%r",
+                       front, hint or None)
+        return {"ok": False, "blocked": True, "typed": text[:100],
+                "frontmost_app": front, "app_hint": hint or None,
+                "error": msg}
+
     # AppleScript 转义
     esc = text.replace("\\", "\\\\").replace('"', '\\"')
     ok, out = await _run_osascript(
@@ -94,7 +158,8 @@ async def real_type_text(params: dict) -> dict:
     if not ok and "不允许发送按键" in out:
         out += (" —— 需要辅助功能权限：系统设置 → 隐私与安全性 → 辅助功能，"
                 "为运行本服务的终端 App 勾选权限")
-    return {"ok": ok, "typed": text[:100], "error": None if ok else out}
+    return {"ok": ok, "typed": text[:100], "frontmost_app": front,
+            "app_hint": hint or None, "error": None if ok else out}
 
 
 async def real_click(params: dict) -> dict:

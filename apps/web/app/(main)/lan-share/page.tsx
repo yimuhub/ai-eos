@@ -31,6 +31,9 @@ export default function LanSharePage() {
   const [isDesktop, setIsDesktop] = useState(false);
   const [autoLaunch, setAutoLaunch] = useState(false);
   const [alBusy, setAlBusy] = useState(false);
+  // V5.10：桌面版默认只监听 127.0.0.1，共享需显式开启
+  const [lanShare, setLanShare] = useState(false);
+  const [lanBusy, setLanBusy] = useState(false);
   // V5.4 配对码 + 设备授权
   const [pairToken, setPairToken] = useState("");
   const [pairBusy, setPairBusy] = useState(false);
@@ -41,6 +44,11 @@ export default function LanSharePage() {
     setIsDesktop(!!window.aieosDesktop);
     if (window.aieosDesktop?.getAutoLaunch) {
       window.aieosDesktop.getAutoLaunch().then(setAutoLaunch).catch(() => {});
+    }
+    if (window.aieosDesktop?.getLanShare) {
+      window.aieosDesktop.getLanShare()
+        .then((d) => setLanShare(!!d?.enabled))
+        .catch(() => {});
     }
     // 推断 API 端口——与 lib/api.ts 的 resolveApiBase 同一规则：
     // 前端 8000（便携/桌面壳）→ API 8001；其余（dev 3000）→ API 8000
@@ -111,6 +119,28 @@ export default function LanSharePage() {
     }
   };
 
+  const toggleLanShare = async () => {
+    if (!window.aieosDesktop?.setLanShare) return;
+    setLanBusy(true);
+    try {
+      const next = await window.aieosDesktop.setLanShare(!lanShare);
+      setLanShare(!!next?.enabled);
+      if (next?.needsRestart) {
+        notify("success", next.enabled
+          ? "已开启局域网共享，下次启动后端时生效"
+          : "已关闭局域网共享，下次启动后端时生效");
+      } else {
+        notify("success", next.enabled
+          ? "局域网共享已开启，后端现在监听 0.0.0.0"
+          : "局域网共享已关闭，后端只监听 127.0.0.1（仅本机可达）");
+      }
+    } catch (e: any) {
+      notify("error", "切换局域网共享失败：" + (e?.message || ""));
+    } finally {
+      setLanBusy(false);
+    }
+  };
+
   const copy = async (txt: string, label: string) => {
     try {
       await navigator.clipboard.writeText(txt);
@@ -130,16 +160,28 @@ export default function LanSharePage() {
           </p>
         </div>
         {isDesktop && (
-          <button
-            onClick={() => toggleAutoLaunch()}
-            disabled={alBusy}
-            className={`card px-3 py-2 text-xs flex items-center gap-2 transition ${autoLaunch ? "ring-1 ring-[var(--accent)]" : ""}`}
-            style={{ borderColor: autoLaunch ? "var(--accent)" : "var(--border)" }}
-            title="随系统启动 AI-EOS 桌面版（Mac/Win 登录项 · Linux 桌面自启）"
-          >
-            <span>{autoLaunch ? "✅" : "⭕"}</span>
-            <span>{autoLaunch ? "开机自启：开" : "开机自启：关"}</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => toggleLanShare()}
+              disabled={lanBusy}
+              className={`card px-3 py-2 text-xs flex items-center gap-2 transition ${lanShare ? "ring-1 ring-[var(--accent)]" : ""}`}
+              style={{ borderColor: lanShare ? "var(--accent)" : "var(--border)" }}
+              title="关闭时后端只监听 127.0.0.1（局域网设备连不上）；开启后绑定 0.0.0.0 并重启后端"
+            >
+              <span>{lanShare ? "📡" : "🔒"}</span>
+              <span>{lanShare ? "局域网共享：开" : "局域网共享：关（仅本机）"}</span>
+            </button>
+            <button
+              onClick={() => toggleAutoLaunch()}
+              disabled={alBusy}
+              className={`card px-3 py-2 text-xs flex items-center gap-2 transition ${autoLaunch ? "ring-1 ring-[var(--accent)]" : ""}`}
+              style={{ borderColor: autoLaunch ? "var(--accent)" : "var(--border)" }}
+              title="随系统启动 AI-EOS 桌面版（Mac/Win 登录项 · Linux 桌面自启）"
+            >
+              <span>{autoLaunch ? "✅" : "⭕"}</span>
+              <span>{autoLaunch ? "开机自启：开" : "开机自启：关"}</span>
+            </button>
+          </div>
         )}
       </div>
 
@@ -255,7 +297,7 @@ export default function LanSharePage() {
       {/* 说明与边界 */}
       <div className="card p-4 text-xs flex flex-col gap-2 fade-up" style={{ color: "var(--muted-foreground)" }}>
         <div className="text-sm font-medium" style={{ color: "var(--foreground)" }}>边界与安全</div>
-        <div>· 桌面版后端已监听 <code>0.0.0.0</code>：同局域网设备可访问，<b style={{ color: "var(--foreground)" }}>所有写接口仍需登录</b>，没有账号就进不了数据。</div>
+        <div>· 桌面版后端<b style={{ color: "var(--foreground)" }}>默认只监听 <code>127.0.0.1</code></b>（仅本机可达）。要让手机/其他设备连进来，需用上面的「局域网共享：开」——它会把后端改绑 <code>0.0.0.0</code> 并重启。共享开着期间，<b style={{ color: "var(--foreground)" }}>同局域网内任何人都能访问该端口</b>，所有接口仍需登录，用完建议关。</div>
         <div>· 手机浏览器看到的是与桌面版<b style={{ color: "var(--foreground)" }}>同一份数据</b>（本机 SQLite / 服务器 Postgres），操作实时互见。</div>
         <div>· <b style={{ color: "var(--foreground)" }}>配对码</b>：一次性 + 10 分钟过期 + 吊销设备立即失效（学 Home Assistant 配对模型，手机免输密码）。</div>
         <div>· <b style={{ color: "var(--foreground)" }}>mDNS 广播</b>：服务起来后在局域网宣告 <code>ai-eos-端口.local</code>（zeroconf），未来 App/发现页可自动定位，无需手敲 IP（AI_EOS_MDNS=0 可关）。</div>

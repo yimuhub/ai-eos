@@ -71,13 +71,18 @@ async def list_agents(company_id: str | None = None, department_id: str | None =
         q = q.where(Agent.status == AgentStatus(status))
     result = await db.execute(q)
     agents = result.scalars().all()
+    # 一次查出全部绑定，Python 侧分组——避免每员工一次 SELECT 的 N+1
+    bindings_by_agent: dict[str, list[dict]] = {}
+    if agents:
+        rows = await db.execute(select(AgentModelConfig).where(
+            AgentModelConfig.agent_id.in_([a.id for a in agents])))
+        for b in rows.scalars():
+            bindings_by_agent.setdefault(b.agent_id, []).append(
+                {"role": b.role, "model_id": b.model_id})
     out = []
     for a in agents:
-        bindings = await db.execute(
-            select(AgentModelConfig).where(AgentModelConfig.agent_id == a.id))
         a_dict = {c.key: getattr(a, c.key) for c in a.__table__.columns}
-        a_dict["model_configs"] = [
-            {"role": b.role, "model_id": b.model_id} for b in bindings.scalars()]
+        a_dict["model_configs"] = bindings_by_agent.get(a.id, [])
         out.append(a_dict)
     return out
 
@@ -339,17 +344,19 @@ async def batch_delete_agents(data: BatchDeleteIn,
                 await db.execute(text(
                     "DELETE FROM agent_skills WHERE agent_id = :aid"), {"aid": aid})
                 await db.execute(text(
-                    "DELETE FROM execution_checkpoints USING agent_executions "
-                    "WHERE execution_checkpoints.execution_id = agent_executions.id "
-                    "AND agent_executions.agent_id = :aid"), {"aid": aid})
+                    "DELETE FROM execution_checkpoints WHERE execution_id IN "
+                    "(SELECT id FROM agent_executions WHERE agent_id = :aid)"),
+                    {"aid": aid})
                 await db.execute(text(
                     "DELETE FROM agent_executions WHERE agent_id = :aid"), {"aid": aid})
                 # 3) 删除本体（其余关联表为 CASCADE 自动清理）
                 await db.delete(a)
+                # 显式 flush：单条失败在 savepoint 内暴露，不影响其他条目
+                await db.flush()
             deleted.append(aid)
         except (IntegrityError, DBAPIError) as e:
+            # savepoint 已由 begin_nested 上下文回滚；此处不能再 rollback 外层事务
             failed.append({"id": aid, "reason": f"数据库约束: {str(getattr(e, 'orig', e))[:120]}"})
-            await db.rollback()
             db.expire_all()  # 回滚后 ORM 对象已过期，避免后续触发同步 IO
         except HTTPException:
             failed.append({"id": aid, "reason": "无权限"})
@@ -358,8 +365,10 @@ async def batch_delete_agents(data: BatchDeleteIn,
                         {"count": len(deleted)})
     try:
         await db.commit()
-    except Exception:
+    except Exception as e:
         await db.rollback()
+        failed.extend({"id": aid, "reason": f"提交失败: {str(e)[:80]}"} for aid in deleted)
+        deleted = []
     return {"deleted": deleted, "deleted_count": len(deleted), "failed": failed}
 
 

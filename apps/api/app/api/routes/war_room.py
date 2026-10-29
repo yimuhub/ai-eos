@@ -10,22 +10,29 @@
 7. POST /war-room/tasks/{tid}/review 可视化审核（负责人审 / 老板人工干预）
 8. POST /war-room/{sid}/finalize    全部通过 → 负责人整合最终产出物
 """
+import logging
+import re
+import shutil
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.doc_generator import generate_document
 from app.db.session import get_db
 from app.models.agent import Agent, AgentModelConfig
+from app.models.asset import Asset, AssetType
 from app.models.company import Company
 from app.models.user import User
 from app.models.war_room import WarRoomSession, WarRoomTask
 from app.model_gateway import ModelGateway
 
 router = APIRouter(prefix="/war-room", tags=["war-room"])
+logger = logging.getLogger("war_room")
 
 DELIVERABLE_FORMATS = {
     "md": "Markdown 文档（.md）",
@@ -33,6 +40,94 @@ DELIVERABLE_FORMATS = {
     "ppt": "PPT 演示文稿（.pptx）",
     "excel": "Excel 表格（.xlsx）",
 }
+# session.deliverable_format → doc_generator 的 doc_type
+_FORMAT_ALIAS = {"word": "word", "ppt": "ppt", "excel": "excel", "md": "md"}
+_ASSET_TYPE_BY_EXT = {
+    ".md": AssetType.DOCUMENT, ".txt": AssetType.DOCUMENT,
+    ".docx": AssetType.DOCUMENT, ".pptx": AssetType.DOCUMENT,
+    ".xlsx": AssetType.DATA,
+}
+
+
+def _safe_filename(name: str) -> str:
+    """把 LLM 产出的标题收敛成安全文件名片段。"""
+    return re.sub(r"[^\w\u4e00-\u9fa5-]", "_", name or "")[:40] or "untitled"
+
+
+def _war_room_dir(sid: str) -> Path:
+    return Path(__file__).resolve().parents[3] / "storage" / "war_room" / sid
+
+
+async def _render_and_register_file(*, session: AsyncSession, company_id: str,
+                                    project_id: str | None, agent_id: str,
+                                    title: str, content: str, fmt: str,
+                                    session_dir: Path,
+                                    fname_hint: str | None = None) -> dict:
+    """渲染交付内容为真实文件（Office 走 doc_generator），落盘到会话目录并登记 Asset。
+
+    - word/ppt/excel：doc_generator 先写 storage/artifacts/<agent_id>/，再同盘
+      move 到会话目录（文件名不变）；移动失败则保留 artifacts 下的真实路径，
+      保证 deliverable_path 永远指向一个能打开的文件。
+    - md：纯文本直接写进会话目录。
+    返回 {file_path, file_name, size, mime, asset_id}。
+    """
+    fmt = _FORMAT_ALIAS.get((fmt or "").lower(), "md")
+    session_dir = Path(session_dir)
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    if fmt == "md":
+        fname = fname_hint or f"{_safe_filename(title)}.md"
+        fpath = session_dir / fname
+        fpath.write_text(content, encoding="utf-8")
+        size, mime = len(content.encode("utf-8")), "text/markdown"
+    else:
+        gen = generate_document(fmt, title, content, agent_id=agent_id)
+        src = Path(gen["file_path"])
+        fname, fpath = gen["file_name"], src
+        size, mime = gen["size"], gen["mime"]
+        try:
+            target = session_dir / fname
+            if src.resolve() != target.resolve():
+                shutil.move(str(src), str(target))
+                fpath = target
+        except OSError as e:
+            # 移动失败（跨盘/权限）不丢弃已渲染文件：保留 artifacts 下的路径
+            logger.warning("war_room 交付物移入会话目录失败，保留 %s: %s", src, e)
+
+    fpath = Path(fpath).resolve()
+    asset = Asset(
+        company_id=company_id, name=fname,
+        type=_ASSET_TYPE_BY_EXT.get(fpath.suffix.lower(), AssetType.OTHER),
+        path=str(fpath), mime_type=mime, size=size,
+        created_by=agent_id, creator_type="agent",
+        project_id=project_id, task_id=None, agent_id=agent_id)
+    session.add(asset)
+    await session.flush()
+    return {"file_path": str(fpath), "file_name": fname, "size": size,
+            "mime": mime, "asset_id": asset.id}
+
+
+async def _render_war_room_deliverable(session: AsyncSession, task: WarRoomTask,
+                                       agent_id: str, out: str, fmt: str | None,
+                                       session_dir: Path) -> dict:
+    """把成员 LLM 输出渲染成会话交付物，并回填任务字段（status=submitted）。
+
+    单独抽出便于测试：不依赖后台线程与真实模型。
+    """
+    war = await session.get(WarRoomSession, task.session_id)
+    if not war:
+        raise ValueError(f"war room session not found: {task.session_id}")
+    title = task.title or f"任务{task.seq}"
+    fname_hint = f"{task.seq}_{_safe_filename(title)}.md"
+    meta = await _render_and_register_file(
+        session=session, company_id=war.company_id, project_id=war.project_id,
+        agent_id=agent_id, title=title, content=out or "", fmt=fmt or "md",
+        session_dir=session_dir, fname_hint=fname_hint)
+    task.deliverable_path = meta["file_path"]
+    task.deliverable_name = meta["file_name"]
+    task.deliverable_note = (out or "")[:500]
+    task.status = "submitted"
+    return meta
 
 
 async def _owned(db: AsyncSession, user_id: str, company_id: str) -> Company:
@@ -71,6 +166,7 @@ def _session_out(sess: WarRoomSession, tasks: list[WarRoomTask], agents_by_id: d
             "status": t.status,
             "deliverable_name": t.deliverable_name,
             "deliverable_path": t.deliverable_path,
+            "deliverable_note": t.deliverable_note,
             "reviewed_by": t.reviewed_by,
             "review_comment": t.review_comment,
         } for t in tasks],
@@ -144,20 +240,24 @@ async def kickoff(data: KickoffIn, db: AsyncSession = Depends(get_db),
         deliverable_format=data.deliverable_format)
     db.add(sess)
 
+    # **先 commit 再投递后台任务**：后台 worker 用的是独立引擎/独立连接，
+    # 未提交的行它读不到。原来的"先 submit 后 commit"会让后台在会话行
+    # 还不存在时返回，会话就永远卡在 analyzing（前端一直转圈）。
+    await db.commit()   # 持久化项目+成员+会话
+
     # 后台分析完成后把团队成员也加入项目成员
     import app.background_jobs as bg
 
-    import app.background_jobs as bg
     bg.submit_async(_make_kickoff(
         data.company_id, sid, data.goal, data.leader_agent_id,
         data.deliverable_format, project_id))
-    await db.commit()   # 持久化项目+成员+会话
     return {"id": sid, "status": "analyzing", "project_id": project_id}
 
 
 def _make_kickoff(company_id: str, sid: str, goal: str,
                   leader_agent_id: str, fmt_override: str | None,
-                  project_id: str | None = None):
+                  project_id: str | None = None,
+                  auto_run: bool = False):
     async def _kickoff_analysis(db):
         """后台执行负责人分析拆解。"""
         import json as _json, re as _re
@@ -196,6 +296,8 @@ def _make_kickoff(company_id: str, sid: str, goal: str,
                 f"3. 团队规模控制在 2-8 条。{fmt_hint}\n\n"
                 f"公司员工名册：\n{roster_lines}"},
                 {"role": "user", "content": f"老板的目标：{goal}"}]
+            # 短事务：LLM 调用前先提交，别把读事务/写锁举过整段网络调用
+            await db.commit()
             llm = await gw.chat_with_agent_models_by_agent(leader, messages)
             content = (llm.get("content") or "").strip()
             m = _re.search(r"\{[\s\S]*\}", content)
@@ -258,6 +360,25 @@ def _make_kickoff(company_id: str, sid: str, goal: str,
                                              member_type="agent", member_id=t.agent_id,
                                              role_in_project="member"))
             await db.commit()
+
+            # 一句话直达：老板已经用一句指令授权，跳过"逐人宣告 → 负责人校对"
+            # 的人工环节，直接确认分工并开工。走的是与 /start 完全相同的
+            # _dispatch_members（含批量 CAS），不会绕过防重复投递。
+            if auto_run and sess.status == "announcing":
+                rows = (await db.execute(select(WarRoomTask).where(
+                    WarRoomTask.session_id == sid))).scalars().all()
+                for t in rows:
+                    t.announce_status = "acknowledged"
+                sess.status = "confirmed"
+                await db.commit()
+                try:
+                    await _dispatch_members(db, sess, rows)
+                except Exception as run_err:
+                    import logging
+                    logging.getLogger("war_room").error(
+                        "auto_run 启动失败 sid=%s: %s", sid, run_err, exc_info=True)
+                    sess.status = "failed"
+                    await db.commit()
         except Exception as e:
             sess2 = await db.get(WarRoomSession, sid)
             if sess2:
@@ -522,6 +643,62 @@ async def session_chat(sid: str, company_id: str = Query(...),
     return {"messages": out}
 
 
+@router.get("/sessions/{sid}/snapshot")
+async def session_snapshot(sid: str, company_id: str = Query(...),
+                           since_id: str | None = Query(None),
+                           db: AsyncSession = Depends(get_db),
+                           user: User = Depends(get_current_user)):
+    """作战室轮询快照：一次返回 session + team + chat 增量。
+
+    - 归属校验与既有端点一致（`_owned` + 会话存在性）；
+    - chat 无 since_id 时只回最近 100 条；带 since_id 时回该消息之后
+      （含同一秒的消息，按 id 由前端去重）的增量。
+    """
+    from app.api.routes.group_chat import GroupChatMessage
+
+    await _owned(db, user.id, company_id)
+    sess, tasks = await _get_session(db, sid)
+    agents = (await db.execute(select(Agent).where(
+        Agent.company_id == company_id))).scalars().all()
+    session_out = _session_out(sess, tasks, {str(a.id): a.name for a in agents})
+    # 复用团队面板的聚合逻辑（同样会做归属校验，保证口径一致）
+    team_out = await session_team(sid=sid, company_id=company_id, db=db, user=user)
+
+    chat_scope = sess.project_id or sess.id
+    base = select(GroupChatMessage).where(
+        GroupChatMessage.scope == "project",
+        GroupChatMessage.scope_id == chat_scope)
+    incremental = False
+    since_row = await db.get(GroupChatMessage, since_id) if since_id else None
+    if since_row and since_row.scope == "project" and since_row.scope_id == chat_scope:
+        # 用 >= 而不是 >：SQLite 的 created_at 只到秒，同一秒的多条消息
+        # 用 > 会漏；重复的那条由前端按 id 去重。
+        rows = (await db.execute(
+            base.where(GroupChatMessage.created_at >= since_row.created_at)
+            .order_by(GroupChatMessage.created_at, GroupChatMessage.id)
+            .limit(500))).scalars().all()
+        incremental = True
+    else:
+        rows = (await db.execute(
+            base.order_by(GroupChatMessage.created_at.desc(),
+                          GroupChatMessage.id.desc())
+            .limit(100))).scalars().all()
+        rows = list(reversed(rows))
+
+    chat = [{"id": m.id, "role": m.role, "agent_name": m.agent_name,
+             "text": (m.content or {}).get("text", ""),
+             "created_at": str(m.created_at)} for m in rows]
+    return {
+        "session": session_out,
+        "team": team_out,
+        "chat": {
+            "messages": chat,
+            "incremental": incremental,
+            "latest_id": chat[-1]["id"] if chat else (since_id or None),
+        },
+    }
+
+
 # ---------- 2. 宣告协议 ----------
 @router.post("/{sid}/announce")
 async def announce(sid: str, company_id: str = Query(...),
@@ -618,69 +795,159 @@ async def acknowledge(sid: str, data: AckIn,
 
 
 # ---------- 5. 开始并行执行 ----------
+def _make_runner(task_id: str, agent_id: str, session_snapshot: dict):
+    """构造单个成员任务的执行协程（独立后台连接由调用方提供）。
+
+    模块级而非闭包：测试可以直接驱动它，不必真的投递后台线程。
+    """
+    async def _run_one(session):
+        t2 = await session.get(WarRoomTask, task_id)
+        a2 = await session.get(Agent, agent_id)
+        s3 = await session.get(WarRoomSession, session_snapshot["id"])
+        if not t2 or not a2 or not s3:
+            return
+        gw2 = ModelGateway(session)
+        messages = [{"role": "system", "content":
+            f"你是「{a2.name}」（{a2.role or '数字员工'}），正在执行项目中的独立任务。\n"
+            f"统一交付规则：{s3.deliverable_rule or '按常规专业标准交付'}\n"
+            f"直接输出完整的交付内容本体（不要寒暄）。若为文档类任务输出成文内容；若为媒体/账号类任务输出执行步骤与结果说明。"},
+            {"role": "user", "content": f"项目目标：{session_snapshot['goal']}\n你的任务：{t2.title}\n详情：{t2.detail or ''}"}]
+        try:
+            llm = await gw2.chat_with_agent_models_by_agent(a2, messages)
+            out = (llm.get("content") or "").strip()
+            if not out:
+                raise ValueError("模型返回空内容")
+        except Exception as e:
+            # 失败绝不落盘、绝不标 submitted：假成功比失败更伤用户
+            t2.status = "failed"
+            t2.deliverable_path = None
+            t2.deliverable_name = None
+            t2.deliverable_note = f"执行失败：{type(e).__name__}: {e}"[:500]
+            await session.commit()
+            logger.warning("war-room task %s failed: %s: %s", task_id,
+                           type(e).__name__, e)
+            await _settle_session_after_failure(session, s3.id)
+            return
+
+        try:
+            await _render_war_room_deliverable(
+                session, t2, agent_id, out, s3.deliverable_format,
+                _war_room_dir(s3.id))
+        except Exception as e:
+            # 渲染失败同样不能留下不存在的 deliverable 记录
+            t2.status = "failed"
+            t2.deliverable_path = None
+            t2.deliverable_name = None
+            t2.deliverable_note = f"交付物生成失败：{type(e).__name__}: {e}"[:500]
+            await session.commit()
+            logger.warning("war-room task %s render failed: %s: %s", task_id,
+                           type(e).__name__, e)
+            await _settle_session_after_failure(session, s3.id)
+            return
+
+        await session.commit()
+        logger.info("task %s submitted: %s", task_id, t2.deliverable_name)
+    return _run_one
+
+
+async def _settle_session_after_failure(session, sid: str) -> None:
+    """成员任务失败后收敛会话状态。
+
+    没有任何 todo/running 成员任务却仍有 failed，会话就不该继续显示
+    「并行执行中」；标 failed 后仍可通过重新开工（todo 任务存在时）恢复。
+    收敛失败只记日志，不影响任务本身已写入的失败状态。
+    """
+    try:
+        war = await session.get(WarRoomSession, sid)
+        if not war or war.status != "executing":
+            return
+        rows = (await session.execute(
+            select(WarRoomTask.status).where(WarRoomTask.session_id == sid))).all()
+        statuses = [r[0] for r in rows]
+        if any(st in ("todo", "running") for st in statuses):
+            return
+        if any(st == "failed" for st in statuses):
+            war.status = "failed"
+            await session.commit()
+            logger.warning("war-room session %s marked failed (all tasks settled)", sid)
+    except Exception as e:  # 状态收敛失败不能掩盖任务失败事实
+        logger.warning("war-room session %s settle failed: %s", sid, e)
+
+
 @router.post("/{sid}/start")
 async def start_exec(sid: str, company_id: str = Query(...),
                      db: AsyncSession = Depends(get_db),
                      user: User = Depends(get_current_user)):
-    """全员确认完毕 → 各成员并行开工（真实后台执行各自任务）。"""
+    """全员确认完毕 → 各成员并行开工；也用于「驳回后重做」的增量重跑。
+
+    - confirmed：首次开工，CAS confirmed → executing；
+    - executing / failed：不强制重新确认，只把仍是 todo 的成员任务重新拉起
+      （审核驳回会把任务打回 todo；全部失败时会话会被标 failed）。
+    """
     await _owned(db, user.id, company_id)
     sess, tasks = await _get_session(db, sid)
-    if sess.status != "confirmed":
-        raise HTTPException(409, f"尚有未确认的宣告（当前 {sess.status}），不能开工")
-    sess.status = "executing"
-    for t in tasks:
-        if str(t.agent_id) != str(sess.leader_agent_id):
-            t.status = "running"
+
+    member_todo = [t.id for t in tasks
+                   if str(t.agent_id) != str(sess.leader_agent_id) and t.status == "todo"]
+    if sess.status == "confirmed":
+        # CAS：concurrent 双击「开始」只有一次能从 confirmed 翻到 executing，
+        # 否则同一个成员任务会被提交两次执行（重复 LLM 调用、重复计费）。
+        res = await db.execute(
+            update(WarRoomSession)
+            .where(WarRoomSession.id == sid, WarRoomSession.status == "confirmed")
+            .values(status="executing")
+            .execution_options(synchronize_session=False))
+        if res.rowcount != 1:
+            await db.commit()
+            raise HTTPException(409, f"会话已被处理（当前 {sess.status}），不能重复开工")
+    elif sess.status in ("executing", "failed"):
+        if not member_todo:
+            raise HTTPException(409, "没有待执行的任务（全部已提交或已审核）")
+        if sess.status == "failed":
+            # 条件更新：只有仍是 failed 时才恢复 executing，避免覆盖并发状态
+            await db.execute(
+                update(WarRoomSession)
+                .where(WarRoomSession.id == sid, WarRoomSession.status == "failed")
+                .values(status="executing")
+                .execution_options(synchronize_session=False))
+    else:
+        raise HTTPException(409, f"尚未完成分工确认（当前 {sess.status}），不能开工")
+
+    # 只拉起仍是 todo 的成员任务：已提交/已通过的不重复执行。
+    dispatched = await _dispatch_members(db, sess, tasks)
+    return {"ok": True, "dispatched": dispatched}
+
+
+async def _dispatch_members(db: AsyncSession, sess: WarRoomSession,
+                            tasks: list[WarRoomTask]) -> int:
+    """把仍是 todo 的成员任务批量置 running 并投递后台执行。
+
+    用 UPDATE ... RETURNING 拿"真正翻转成功"的 id：并发双击时第二个请求
+    的 WHERE status='todo' 匹配不到行，拿不到 id，也就不会重复投递。
+    lead 自己的汇总任务不在此处执行（由 finalize 负责）。
+    """
+    agent_of = {t.id: t.agent_id for t in tasks}
+    member_todo = [t.id for t in tasks
+                   if str(t.agent_id) != str(sess.leader_agent_id)
+                   and t.status == "todo"]
+    if not member_todo:
+        return 0
+    flipped = await db.execute(
+        update(WarRoomTask)
+        .where(WarRoomTask.id.in_(member_todo), WarRoomTask.status == "todo")
+        .values(status="running")
+        .returning(WarRoomTask.id)
+        .execution_options(synchronize_session=False))
+    dispatched = [row[0] for row in flipped.all()]
+    # 先落库再投递：后台 worker 用独立连接，看不到未提交的行
     await db.commit()
 
-    # 后台并行执行每个成员的任务（LLM 真实干活）
     import app.background_jobs as bg
     session_snapshot = {"id": sess.id, "company_id": sess.company_id,
                         "goal": sess.goal, "format": sess.deliverable_format}
-
-    def _make_runner(task_id: str, agent_id: str):
-        async def _run_one(session):
-            import logging
-            t2 = await session.get(WarRoomTask, task_id)
-            a2 = await session.get(Agent, agent_id)
-            s3 = await session.get(WarRoomSession, session_snapshot["id"])
-            if not t2 or not a2 or not s3:
-                return
-            gw2 = ModelGateway(session)
-            messages = [{"role": "system", "content":
-                f"你是「{a2.name}」（{a2.role or '数字员工'}），正在执行项目中的独立任务。\n"
-                f"统一交付规则：{s3.deliverable_rule or '按常规专业标准交付'}\n"
-                f"直接输出完整的交付内容本体（不要寒暄）。若为文档类任务输出成文内容；若为媒体/账号类任务输出执行步骤与结果说明。"},
-                {"role": "user", "content": f"项目目标：{session_snapshot['goal']}\n你的任务：{t2.title}\n详情：{t2.detail or ''}"}]
-            try:
-                llm = await gw2.chat_with_agent_models_by_agent(a2, messages)
-                out = (llm.get("content") or "").strip()
-            except Exception as e:
-                out = f"(执行失败：{e})"
-            from pathlib import Path
-            import re as _re
-            root = Path(__file__).resolve().parents[3] / "storage" / "war_room" / session_snapshot["id"]
-            root.mkdir(parents=True, exist_ok=True)
-            ext = {"word": ".docx", "md": ".md", "ppt": ".pptx", "excel": ".xlsx"}.get(
-                s3.deliverable_format or "", ".md")
-            fname = "{}_{}{}".format(
-                t2.seq,
-                _re.sub(r"[^\w\u4e00-\u9fa5-]", "_", t2.title)[:40],
-                ext)
-            fpath = root / fname
-            fpath.write_text(out, encoding="utf-8")
-            t2.deliverable_path = str(fpath)
-            t2.deliverable_name = fname
-            t2.deliverable_note = out[:500]
-            t2.status = "submitted"
-            await session.commit()
-            logging.getLogger("war_room").info("task %s submitted: %s", task_id, fname)
-        return _run_one
-
-    for t in tasks:
-        if str(t.agent_id) != str(sess.leader_agent_id) and t.status == "running":
-            bg.submit_async(_make_runner(t.id, t.agent_id))
-    return {"ok": True, "dispatched": len([t for t in tasks if t.status == "running"])}
+    for tid in dispatched:
+        bg.submit_async(_make_runner(tid, agent_of[tid], session_snapshot))
+    return len(dispatched)
 
 
 # ---------- 6. 提交/审核 ----------
@@ -724,10 +991,15 @@ async def finalize(sid: str, company_id: str = Query(...),
     leader = await db.get(Agent, sess.leader_agent_id)
     parts = []
     for t in approved:
+        content = ""
         if t.deliverable_path:
-            from pathlib import Path
             p = Path(t.deliverable_path)
-            content = p.read_text(encoding="utf-8") if p.exists() else (t.deliverable_note or "")
+            # 二进制 Office 文件不能按 UTF-8 读（会 UnicodeDecodeError）；
+            # 这类文件用提交时留的文本摘要拼整合输入。
+            if p.suffix.lower() in (".md", ".txt", ".csv", ".json"):
+                content = p.read_text(encoding="utf-8") if p.exists() else ""
+            if not content:
+                content = t.deliverable_note or ""
         else:
             content = t.deliverable_note or ""
         parts.append(f"# 第{t.seq}部分 · {t.title}\n（{t.deliverable_name or '无文件'}）\n\n{content[:3000]}")
@@ -742,16 +1014,21 @@ async def finalize(sid: str, company_id: str = Query(...),
         {"role": "user", "content": f"项目目标：{sess.goal}\n\n以下是各部分成果：\n\n{merged_input}"}]
     llm = await gw.chat_with_agent_models_by_agent(leader, messages)
     final = (llm.get("content") or "").strip()
+    if not final:
+        # 汇总失败不能产出空文件并把会话标成 done
+        raise HTTPException(502, "负责人未返回最终文档内容，请重试整合")
 
-    from pathlib import Path
-    ext = {"word": ".docx", "md": ".md", "ppt": ".pptx", "excel": ".xlsx"}.get(
-        sess.deliverable_format or "", ".md")
-    root = Path(__file__).resolve().parents[3] / "storage" / "war_room" / sess.id
-    root.mkdir(parents=True, exist_ok=True)
-    fpath = root / f"FINAL_{sess.goal[:30].replace(' ', '_')}{ext}"
-    fpath.write_text(final, encoding="utf-8")
-    sess.final_output_path = str(fpath)
+    # 最终交付物同样走真实渲染器，而不是把 markdown 塞进 .docx/.pptx/.xlsx
+    root = _war_room_dir(sess.id)
+    fmt = _FORMAT_ALIAS.get((sess.deliverable_format or "").lower(), "md")
+    final_title = f"最终交付-{sess.goal[:30]}"
+    gen = await _render_and_register_file(
+        session=db, company_id=sess.company_id, project_id=sess.project_id,
+        agent_id=str(sess.leader_agent_id), title=final_title, content=final,
+        fmt=fmt, session_dir=root,
+        fname_hint=f"FINAL_{_safe_filename(sess.goal[:30])}.md")
+    sess.final_output_path = gen["file_path"]
     sess.status = "done"
     await db.commit()
-    return {"final_output": str(fpath), "merged_parts": len(approved),
+    return {"final_output": gen["file_path"], "merged_parts": len(approved),
             "preview": final[:800]}

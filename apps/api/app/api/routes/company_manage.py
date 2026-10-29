@@ -94,35 +94,40 @@ async def batch_delete(data: DeleteIn, db: AsyncSession = Depends(get_db),
     from sqlalchemy.ext.asyncio import create_async_engine
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)
     try:
-        async with engine.begin() as conn:
-            # 先校验归属
-            valid_ids = []
-            for cid in data.company_ids:
-                c = await db.get(Company, cid)
-                if not c or c.owner_id != user.id:
-                    failed.append({"id": cid, "reason": "not found"})
-                    continue
-                # 批量删除公司会级联清除项目/员工/成果/日志，是最重的一档。
-                # 走统一权限层而不是就地比较 owner_id：将来引入"管理员"角色时，
-                # 这里不需要任何改动。
-                from app.core.permissions import Capability, ensure_capability
+        # 先校验归属
+        valid_ids = []
+        for cid in data.company_ids:
+            c = await db.get(Company, cid)
+            if not c or c.owner_id != user.id:
+                failed.append({"id": cid, "reason": "not found"})
+                continue
+            # 批量删除公司会级联清除项目/员工/成果/日志，是最重的一档。
+            # 走统一权限层而不是就地比较 owner_id：将来引入"管理员"角色时，
+            # 这里不需要任何改动。
+            from app.core.permissions import Capability, ensure_capability
+            try:
                 await ensure_capability(db, user.id, cid, Capability.DESTRUCTIVE)
-                valid_ids.append(cid)
-            async with engine.begin() as trans:
-                for cid in valid_ids:
-                    try:
-                        # 先查 id 是否存在防止空 delete
-                        r2 = await trans.execute(
-                            text("SELECT id FROM companies WHERE id=:cid"), {"cid": cid})
-                        if not r2.scalar():
-                            continue
-                        for sql in CASCADE_SQLS:
-                            await trans.execute(text(sql), {"cid": cid})
-                        await trans.execute(
-                            text("DELETE FROM companies WHERE id=:cid"), {"cid": cid})
-                        deleted += 1
-                    except Exception as e2:
-                        failed.append({"id": cid, "reason": str(e2)[:120]})
+            except HTTPException:
+                failed.append({"id": cid, "reason": "not found"})
+                continue
+            valid_ids.append(cid)
+        # 每家公司一个独立事务：单家失败只回滚它自己，不会污染同批其他公司；
+        # deleted 只在事务提交成功后 +1，保证数字与实际落库一致。
+        for cid in valid_ids:
+            try:
+                async with engine.begin() as trans:
+                    # 先查 id 是否存在防止空 delete
+                    r2 = await trans.execute(
+                        text("SELECT id FROM companies WHERE id=:cid"), {"cid": cid})
+                    if not r2.scalar():
+                        raise RuntimeError("not found")
+                    for sql in CASCADE_SQLS:
+                        await trans.execute(text(sql), {"cid": cid})
+                    await trans.execute(
+                        text("DELETE FROM companies WHERE id=:cid"), {"cid": cid})
+                deleted += 1
+            except Exception as e2:
+                failed.append({"id": cid, "reason": str(e2)[:120]})
     except Exception as e:
         failed.append({"id": "*", "reason": str(e)[:150]})
     finally:

@@ -73,25 +73,60 @@ export default function Dashboard() {
   );
 }
 
-// 容错渲染：dashboard 返回结构可能带 agent_count/task_count/token_stats 等
+// 容错渲染：后端 GET /dashboard/{company_id} 的真实返回结构：
+//   { company, agents: {total, active, idle, ...}, tasks: {...状态计数, active, recently_completed},
+//     recent_assets: [], recent_events: [] }
+// 同时兼容历史上 /dashboard 可能返回的扁平字段（agent_count 等）。
 function renderKpi(d: any) {
   const cards: { label: string; value: string; emoji: string }[] = [];
-  const pick = (k: string, suffix = "") => {
-    const v = d?.[k];
-    if (v !== undefined && v !== null)
-      cards.push({ label: k, value: typeof v === "object" ? JSON.stringify(v) : String(v) + suffix, emoji: "📈" });
+  const add = (label: string, value: any, emoji: string) => {
+    if (value === undefined || value === null || value === "") return;
+    cards.push({
+      label,
+      value: typeof value === "object" ? JSON.stringify(value) : String(value),
+      emoji,
+    });
   };
-  pick("agent_count", " 位 Agent");
-  pick("task_count");
-  pick("project_count", " 个项目");
-  pick("expert_count", " 位专家");
-  if (Array.isArray(d?.lines)) {
-    cards.push({ label: "报告行数", value: String(d.lines.length), emoji: "📋" });
+
+  const agents = d?.agents;
+  if (agents && typeof agents === "object") {
+    add("Agent 总数", agents.total, "🤖");
+    add("运行中 Agent", agents.running, "⚡");
+    add("空闲 Agent", agents.idle, "💤");
+  } else {
+    add("Agent 总数", d?.agent_count, "🤖");
   }
+
+  const tasks = d?.tasks;
+  if (tasks && typeof tasks === "object") {
+    const statusKeys = [
+      "todo", "planning", "running", "waiting",
+      "paused", "review", "completed", "failed", "cancelled",
+    ];
+    const total = statusKeys.reduce(
+      (n, k) => n + (typeof tasks[k] === "number" ? tasks[k] : 0),
+      0,
+    );
+    add("任务总数", total, "🗂");
+    const active = Array.isArray(tasks.active)
+      ? tasks.active.length
+      : (typeof tasks.running === "number" ? tasks.running : undefined);
+    add("进行中", active, "🏃");
+    add("已完成", tasks.completed, "✅");
+  } else {
+    add("任务总数", d?.task_count, "🗂");
+  }
+
+  add("项目数", d?.project_count, "📁");
+  add("专家数", d?.expert_count, "👥");
+  if (Array.isArray(d?.recent_assets)) add("近期产出", d.recent_assets.length, "📦");
+  if (Array.isArray(d?.recent_events)) add("近期事件", d.recent_events.length, "🔔");
+  if (Array.isArray(d?.lines)) add("报告行数", d.lines.length, "📋");
+
   if (cards.length === 0) {
     return (
       <View style={{ padding: 24, backgroundColor: "rgba(255,255,255,0.05)", borderRadius: 12 }}>
-        <Text style={{ color: "#8a93a6" }}>后端已连通，但 /dashboard 暂无可展示字段。</Text>
+        <Text style={{ color: "#8a93a6" }}>后端已连通，但未识别到可展示的 KPI 字段（请升级客户端或检查后端版本）。</Text>
         <Text style={{ color: "#5a6272", fontSize: 12, marginTop: 8 }}>原始数据：</Text>
         <Text style={{ color: "#5a6272", fontSize: 11, marginTop: 4 }}>{JSON.stringify(d, null, 2)?.slice(0, 400)}</Text>
       </View>

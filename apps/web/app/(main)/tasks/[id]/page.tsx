@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { api, describeError, downloadURL, fetchBlobURL } from "@/lib/api";
+import { api, describeError, downloadURL, fetchBlobURL, isCancelled } from "@/lib/api";
 import { TASK_STATUS_ZH, EVENT_TYPE_ZH, EXEC_STATUS_ZH, zh } from "@/lib/i18n";
 import { DeliverablesPanel, TaskLogsPanel } from "@/components/DeliverablesLogs";
 import { createPortal } from "react-dom";
@@ -21,6 +21,8 @@ type Detail = {
   priority: string; result: string | null; assigned_agent_id: string | null;
   project_id: string | null; company_id?: string;
   subtasks: string[]; executions: any[]; events: any[]; interventions: any[];
+  /** summary 端点附带的总执行数（executions 列表可能被裁剪） */
+  executions_total?: number;
   /** Worker A 在后端任务模型新增：0.0-1.0 执行进度；缺失时界面降级隐藏 */
   progress?: number | null;
   /** Worker A 在后端任务模型新增：当前阶段文案；可空，缺失时不展示 */
@@ -105,17 +107,60 @@ export default function TaskDetailPage() {
   // V5.5 B4：节点级执行轨迹（每 Agent 每步 + 成本 + 检查点）
   const [trace, setTrace] = useState<{ nodes: any[]; total: any } | null>(null);
   const [traceOpen, setTraceOpen] = useState(false);
+
+  /* ---------- 轮询竞态防护 ----------
+   *
+   * 此前每 5s `load()+loadTrace()`，但请求层不接受外部 signal、默认 180s 超时：
+   * 后端慢时上一轮响应晚到、覆盖新状态；页面卸载后在途请求也无法取消。
+   * 现在：
+   * - 每次请求带自己的 AbortController，统一登记在 inflight，卸载时全部 abort；
+   * - 序列号守卫（detailSeq/traceSeq 各自独立）：只接受**最后一次发起**的请求
+   *   结果，晚到的旧响应直接丢弃；
+   * - 被 abort 的请求在 api 层报"请求已取消"且不再全局广播。
+   */
+  const detailSeq = useRef(0);
+  const traceSeq = useRef(0);
+  const inflight = useRef(new Set<AbortController>());
+  // 是否已拉过一次全量详情：轮询用 summary，但不能在首屏之前用它顶替
+  const fullLoaded = useRef(false);
+
   const loadTrace = useCallback(async () => {
     if (!id) return;
-    try { setTrace(await api.get(`/tasks/${id}/trace`)); } catch { /* 静默 */ }
+    const ctrl = new AbortController();
+    inflight.current.add(ctrl);
+    const seq = ++traceSeq.current;
+    try {
+      const data = await api.get<{ nodes: any[]; total: any }>(`/tasks/${id}/trace`, { signal: ctrl.signal });
+      if (seq === traceSeq.current && !ctrl.signal.aborted) setTrace(data);
+    } catch { /* 静默：轮询失败保留旧轨迹；取消/旧响应已被序列号拦下 */ }
+    finally { inflight.current.delete(ctrl); }
   }, [id]);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (full = false) => {
     if (!id) return;
     // 轮询失败不抛（否则每 5s 一条未处理 rejection）：保留旧数据，下轮再试
+    const ctrl = new AbortController();
+    inflight.current.add(ctrl);
+    const seq = ++detailSeq.current;
     try {
-      setD(await api.get(`/tasks/${id}`));
-    } catch { /* 静默：网络抖动/后端重启时任务页不崩，5s 后自动重试 */ }
+      // 轮询走 summary（不带 result 全文、execution 输出截断 2KB）；
+      // 首次进入与操作后刷新走全量，保证 result/完整输出可见。
+      if (full || !fullLoaded.current) {
+        const data = await api.get<Detail>(`/tasks/${id}`, { signal: ctrl.signal });
+        if (seq === detailSeq.current && !ctrl.signal.aborted) {
+          setD(data);
+          fullLoaded.current = true;
+        }
+      } else {
+        const data = await api.get<Partial<Detail>>(`/tasks/${id}/summary`,
+                                                    { signal: ctrl.signal });
+        if (seq === detailSeq.current && !ctrl.signal.aborted) {
+          // summary 不含 result：合并而不是替换，避免把已加载的全文冲掉
+          setD((prev) => (prev ? { ...prev, ...data } : (data as Detail)));
+        }
+      }
+    } catch { /* 静默：网络抖动/后端重启/请求被取消时任务页不崩，5s 后自动重试 */ }
+    finally { inflight.current.delete(ctrl); }
   }, [id]);
 
   const [chatHist, setChatHist] = useState(false);
@@ -137,7 +182,7 @@ export default function TaskDetailPage() {
       });
       setMsg("🧑 已接管：任务已暂停，你的指令将在恢复执行时生效");
       setTakeoverOpen(false); setTakeoverNote(""); setTakeoverAttached([]);
-      await load();
+      await load(true);
     } catch (e: any) { setMsg(`❌ 接管失败：${e.message || e}`); }
     setTakeoverBusy(false);
   };
@@ -150,25 +195,45 @@ export default function TaskDetailPage() {
       });
       setMsg("✅ 已按你的指令从检查点恢复执行");
       setTakeoverOpen(false); setTakeoverNote("");
-      await load();
+      await load(true);
     } catch (e: any) { setMsg(`❌ 恢复失败：${e.message || e}`); }
     setTakeoverBusy(false);
   };
   useEffect(() => {
-    load();
-    api.get("/agents").then(setAgents).catch(() => {});
+    load(true);
+    // 下拉数据（负责人/模型/技能/公司）失败不再 `.catch(() => {})` 吞掉——
+    // 空白下拉框对小白用户等于"系统坏了"。silent 关掉 api 层的通用广播，
+    // 由页面给出带业务语境的 Toast（哪类数据没加载出来、失败原因）。
+    const onceCtrl = new AbortController();
+    inflight.current.add(onceCtrl);
+    const once = { signal: onceCtrl.signal, silent: true };
+    const warnOnce = (key: string, text: string) =>
+      notify("error", `${text}，指派/换模型/加技能面板可能为空，请刷新重试`, `task-deps:${key}`);
+    // isCancelled：卸载 abort 属预期流程（StrictMode 双挂载也会触发），不误报失败
+    api.get<Agent[]>("/agents", once)
+      .then(setAgents)
+      .catch((e) => { if (!isCancelled(e)) warnOnce("agents", `执行 Agent 列表加载失败：${describeError(e)}`); });
+    api.get<ModelRow[]>("/models", once)
+      .then(setAllModels)
+      .catch((e) => { if (!isCancelled(e)) warnOnce("models", `模型列表加载失败：${describeError(e)}`); });
+    api.get<SkillRow[]>("/skills", once)
+      .then(setAvailableSkills)
+      .catch((e) => { if (!isCancelled(e)) warnOnce("skills", `技能列表加载失败：${describeError(e)}`); });
     // 注：群聊历史在此处曾有一份重复实现（与下方 useEffect 完全同款请求）。
     // 两份都靠 chatHist 布尔量互斥，谁先跑谁生效——行为上无害，但等于
     // 同一段逻辑维护两遍，且让本 effect 的依赖数组失真。
     // 现统一归到下方"cid 就绪后触发一次"的 effect。
-    api.get("/models").then(setAllModels).catch(() => {});
-    api.get("/skills").then(setAvailableSkills).catch(() => {});
-    api.get<Company[]>("/companies").then(async (cs) => {
+    api.get<Company[]>("/companies", once).then(async (cs) => {
       if (cs.length) setCid(cs[0].id);
-    }).catch(() => {});
+    }).catch((e) => { if (!isCancelled(e)) warnOnce("companies", `公司信息加载失败：${describeError(e)}`); });
     loadTrace();
     const t = setInterval(() => { load(); loadTrace(); }, 5000);
-    return () => clearInterval(t);
+    return () => {
+      // 卸载：停掉轮询 + abort 全部在途请求（轮询、下拉数据、手动 load）
+      clearInterval(t);
+      inflight.current.forEach((c) => c.abort());
+      inflight.current.clear();
+    };
   }, [load, loadTrace]);
 
   // 群聊历史加载（cid 就绪后触发一次）
@@ -202,7 +267,7 @@ export default function TaskDetailPage() {
     try {
       await api.post(`/tasks/${id}/${action}`);
       setMsg(`✅ ${zhLabel[action]}`);
-      await load();
+      await load(true);
     } catch (e: any) { setMsg(`❌ ${e.message || e}`); }
     setBusy(false);
   }
@@ -225,7 +290,7 @@ export default function TaskDetailPage() {
         replies.map((rep) => ({ role: rep.agent_name || rep.agent_id || "agent",
                                 text: rep.text || "", isAgent: true,
                                 agent: rep.agent_name, search: rep.search_used || false }))));
-      await load();
+      await load(true);
     } catch (e) {
       setChatLog((prev) => [...prev, { role: "assistant", text: `出错了：${describeError(e, "发送失败")}`, isBoss: false }]);
     }
@@ -256,7 +321,7 @@ export default function TaskDetailPage() {
           }).catch(() => {});
         }
       }
-      await load();
+      await load(true);
     } catch (e) { setMsg(`❌ ${describeError(e, "更换失败")}`); }
     setBusy(false);
   }
@@ -530,7 +595,7 @@ export default function TaskDetailPage() {
                       await api.patch(`/tasks/${id}`, { assigned_agent_id: null });
                       setMsg("已清空负责人");
                       setAssignPanelOpen(false);
-                      load();
+                      load(true);
                     }} className="btn-ghost text-xs">清空负责人</button>
                   )}
                 </div>
@@ -598,6 +663,12 @@ export default function TaskDetailPage() {
                         {zh(EXEC_STATUS_ZH, e.status)}
                       </span>
                     </summary>
+                    {/* 执行用到的工具（后端可选字段，旧数据无此字段则整行隐藏） */}
+                    {Array.isArray(e.tools_used) && e.tools_used.length > 0 && (
+                      <p className="mt-2 text-[11px]" style={{ color: "var(--muted)" }}>
+                        🔧 使用工具：{e.tools_used.map((t: { name: string }) => t.name).join(", ")}
+                      </p>
+                    )}
                     <pre className="mt-2 text-[11px] whitespace-pre-wrap overflow-auto max-h-56"
                       style={{ color: "var(--muted)" }}>{e.output || e.error}</pre>
                   </details>
@@ -616,7 +687,9 @@ export default function TaskDetailPage() {
             <h2 className="font-semibold text-sm mb-3">事件流</h2>
             <div className="divide-y max-h-64 overflow-y-auto" style={{ borderColor: "var(--border)" }}>
               {d.events.slice().reverse().map((e, i) => (
-                <div key={i} className="py-2 text-xs flex justify-between items-center gap-2">
+                // 轮询会让新事件插到列表头部，纯 index 的 key 会导致整列错位重渲染；
+                // 事件无 id，用「类型+时间+序号」组合成稳定 key。
+                <div key={`ev-${e.type}-${e.at}-${i}`} className="py-2 text-xs flex justify-between items-center gap-2">
                   <span className="flex items-center gap-2 min-w-0">
                     <span className="w-1 h-1 rounded-full bg-indigo-400/60 shrink-0" />
                     <span className="truncate">{zh(EVENT_TYPE_ZH, e.type)}</span>
@@ -797,15 +870,17 @@ export default function TaskDetailPage() {
                 const isBoss = m.isBoss === true;
                 const isAgent = m.isAgent === true;
                 const isErr = !isAgent && !isBoss && m.role === "assistant";
+                // chatLog 只追加不改序，「角色+序号」组合在轮询/历史合并下保持稳定
+                const chatKey = `chat-${m.role}-${i}`;
                 if (m.role === "system") return null;
                 if (isErr) return (
-                  <div key={i} className="flex justify-start">
+                  <div key={`${chatKey}-err`} className="flex justify-start">
                     <div className="max-w-[82%] rounded-2xl px-3 py-2 text-xs whitespace-pre-wrap"
                       style={{ background: "rgba(239,68,68,0.12)" }}>⚠️ {m.text}</div>
                   </div>
                 );
                 return (
-                  <div key={i} className={`flex ${isBoss ? "justify-end" : "justify-start"}`}>
+                  <div key={chatKey} className={`flex ${isBoss ? "justify-end" : "justify-start"}`}>
                     <div className="max-w-[82%] rounded-2xl px-3 py-2 text-xs whitespace-pre-wrap leading-relaxed"
                       style={isBoss ? { background: "linear-gradient(135deg,#4f46e5,#7c3aed)", color: "#fff" }
                         : { background: "var(--surface-2)", color: "var(--foreground)" }}>

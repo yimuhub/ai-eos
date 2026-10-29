@@ -17,7 +17,8 @@ CAPABILITY_PACKS: dict[str, dict] = {
         "label": "🖥 电脑操作",
         "description": "可以操作计算机完成实际工作：打开应用、读写文件、执行命令",
         "risk": "high",
-        "tools": ["computer_screenshot", "computer_click", "computer_type", "computer_run_command"],
+        "tools": ["computer_screenshot", "computer_click", "computer_type_text",
+                  "computer_run_shell", "computer_run_write", "computer_run_app"],
         "system_prompt": (
             "你具备【电脑操作】能力：可以通过 computer-agent 工具集截图屏幕、点击、"
             "输入文字、执行终端命令来完成需要真实计算机操作的任务。"
@@ -29,7 +30,7 @@ CAPABILITY_PACKS: dict[str, dict] = {
         "label": "🌐 网页浏览",
         "description": "可以访问网页、搜索资料、抓取内容（含安全域名校验）",
         "risk": "medium",
-        "tools": ["browser_fetch", "browser_search"],
+        "tools": ["web_search", "web_fetch"],
         "system_prompt": (
             "你具备【网页浏览】能力：可以通过 browser-agent 工具访问 URL、"
             "获取网页文本内容、进行网络调研。写报告或查资料时先去真实网页取证，"

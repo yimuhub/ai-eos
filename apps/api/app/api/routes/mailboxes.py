@@ -10,19 +10,46 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_agent_owned, get_current_user, get_db
 from app.models.user import User
 from app.models.mailbox import AgentMailbox, MailMessage
 from app.models.agent import Agent
+from app.models.company import Company
 
 router = APIRouter(prefix="/mailboxes", tags=["mailboxes"])
 
 
-async def _agent_owned(db: AsyncSession, agent_id: str) -> Agent:
-    agent = await db.get(Agent, agent_id)
-    if not agent:
-        raise HTTPException(404, "agent not found")
-    return agent
+async def _agent_owned(db: AsyncSession, user_id: str, agent_id: str) -> Agent:
+    """Agent 归属校验（经其所属公司）；不存在或不属于调用者一律 404。
+
+    邮箱与邮件都没有可直接校验的 company_id（历史数据还写着 "default"），
+    统一从关联 Agent 反查公司再校验。
+    """
+    return await assert_agent_owned(db, user_id, agent_id)
+
+
+async def _mailbox_owned(db: AsyncSession, user_id: str,
+                         mailbox_id: str) -> AgentMailbox:
+    mb = await db.get(AgentMailbox, mailbox_id)
+    if not mb:
+        raise HTTPException(404, "邮箱不存在")
+    await _agent_owned(db, user_id, mb.agent_id)
+    return mb
+
+
+async def _message_owned(db: AsyncSession, user_id: str,
+                         msg_id: str) -> MailMessage:
+    m = await db.get(MailMessage, msg_id)
+    if not m:
+        raise HTTPException(404, "邮件不存在")
+    await _mailbox_owned(db, user_id, m.mailbox_id)
+    return m
+
+
+def _owned_agent_ids(user_id: str):
+    """调用者拥有的 Agent id 子查询（邮箱/邮件的可访问范围）。"""
+    return select(Agent.id).where(Agent.company_id.in_(
+        select(Company.id).where(Company.owner_id == user_id)))
 
 
 class MailboxIn(BaseModel):
@@ -47,7 +74,7 @@ async def create_mailbox(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    await _agent_owned(db, data.agent_id)
+    agent = await _agent_owned(db, user.id, data.agent_id)
     exists = (await db.execute(
         select(AgentMailbox).where(AgentMailbox.alias == data.alias)
     )).scalar_one_or_none()
@@ -55,7 +82,7 @@ async def create_mailbox(
         raise HTTPException(409, "别名已存在")
     mb = AgentMailbox(
         id=str(uuid.uuid4()), agent_id=data.agent_id,
-        company_id="default",
+        company_id=agent.company_id,
         alias=data.alias,
         smtp_env=data.smtp_env, imap_env=data.imap_env,
         auto_reply=data.auto_reply)
@@ -71,8 +98,10 @@ async def list_mailboxes(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    q = select(AgentMailbox)
+    q = select(AgentMailbox).where(AgentMailbox.agent_id.in_(
+        _owned_agent_ids(user.id)))
     if agent_id:
+        await _agent_owned(db, user.id, agent_id)
         q = q.where(AgentMailbox.agent_id == agent_id)
     rows = (await db.execute(q)).scalars().all()
     return [
@@ -90,11 +119,7 @@ async def receive_message(
     user: User = Depends(get_current_user),
 ):
     """外部来信（站内/局域网入口或 IMAP 同步器调用）→ 收件箱。"""
-    mb = (await db.execute(
-        select(AgentMailbox).where(AgentMailbox.id == data.mailbox_id)
-    )).scalar_one_or_none()
-    if not mb:
-        raise HTTPException(404, "邮箱不存在")
+    mb = await _mailbox_owned(db, user.id, data.mailbox_id)
     msg = MailMessage(
         id=str(uuid.uuid4()), mailbox_id=mb.id, direction="in",
         from_addr=data.from_addr, to_addr=mb.alias,
@@ -114,10 +139,15 @@ async def list_messages(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    q = select(MailMessage).order_by(MailMessage.created_at.desc()).limit(limit)
+    owned_mailboxes = select(AgentMailbox.id).where(
+        AgentMailbox.agent_id.in_(_owned_agent_ids(user.id)))
+    q = (select(MailMessage).where(MailMessage.mailbox_id.in_(owned_mailboxes))
+         .order_by(MailMessage.created_at.desc()).limit(limit))
     if mailbox_id:
+        await _mailbox_owned(db, user.id, mailbox_id)
         q = q.where(MailMessage.mailbox_id == mailbox_id)
     elif agent_id:
+        await _agent_owned(db, user.id, agent_id)
         sub = (await db.execute(
             select(AgentMailbox.id).where(AgentMailbox.agent_id == agent_id)
         )).scalars().all()
@@ -138,11 +168,7 @@ async def mark_read(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    m = (await db.execute(
-        select(MailMessage).where(MailMessage.id == msg_id)
-    )).scalar_one_or_none()
-    if not m:
-        raise HTTPException(404, "邮件不存在")
+    m = await _message_owned(db, user.id, msg_id)
     m.status = "read" if m.status == "unread" else m.status
     await db.commit()
     return {"id": m.id, "status": m.status}
@@ -156,11 +182,7 @@ async def reply(
     user: User = Depends(get_current_user),
 ):
     """老板代答 / Agent 回复 → 记 out 件并把原信标 replied。"""
-    m = (await db.execute(
-        select(MailMessage).where(MailMessage.id == msg_id)
-    )).scalar_one_or_none()
-    if not m:
-        raise HTTPException(404, "邮件不存在")
+    m = await _message_owned(db, user.id, msg_id)
     out = MailMessage(
         id=str(uuid.uuid4()), mailbox_id=m.mailbox_id, direction="out",
         from_addr="boss@aieos.local", to_addr=m.from_addr or m.to_addr,

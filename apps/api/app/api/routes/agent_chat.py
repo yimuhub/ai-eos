@@ -190,12 +190,16 @@ async def boss_chat(aid: str, data: ChatIn,
     await _save_msg(db, a, "boss", text)
 
     # ---------- 自然语言电脑操作（傻瓜式）----------
+    # 必须带 company_id/agent_id：execute_nl 内部按公司能力授权做门禁，
+    # 无授权的动作返回 denied 而不是静默执行（此前这里直接裸调用，
+    # 等于绕过了 ComputerPermission 与审批）。
     from app.nl_computer import detect_intent
     nl_intent = detect_intent(text)
     if nl_intent:
         from app.nl_computer import execute_nl
-        result = await execute_nl(nl_intent)
-        reply_text = f"{result.get('message', '操作完成')}"
+        result = await execute_nl(nl_intent, company_id=str(a.company_id),
+                                  agent_id=str(a.id))
+        reply_text = f"{result.get('message') or result.get('error') or '操作完成'}"
         detail = result.get("detail")
         if detail:
             lines = [f"• {m['file']} → {m['category']}/" for m in detail[:8]]

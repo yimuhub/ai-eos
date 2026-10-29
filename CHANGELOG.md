@@ -3,6 +3,264 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的组织方式。
 完整的工程质量改造记录见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
 
+## [5.12.0] 一人公司主线打通：一句话 → 全公司干活 → 拿到结果 — 2026-10-29
+
+> 目标形态：老板说一句，公司各个岗位自己把活干完，老板直接拿结果。
+> 本轮带着这个目标重读代码，发现主链路上有四处**功能上是断的**——
+> 派活不启动、任务没工具、Office 产出物打不开、简报时区偏 8 小时——
+> 先把它们接上，再补「一句话直达」入口。检查：295 个后端用例 + e2e 38 项全绿。
+
+### 👑 一句话直达（新入口）
+
+- `POST /command/run`：一次请求完成「理解 + 执行」，返回 `plan`（让老板看到 AI 怎么理解的）
+  与执行结果。`auto_run=true`（默认）。
+- DIRECT 路径：把 `DispatchIn(auto_start=True)` 传下去，任务创建即入队执行。
+- PROJECT 路径：作战室 `kickoff` 跳过逐人宣告（成员任务直接标 acknowledged）
+  与负责人校对，直接进入 `confirmed` 并派发全员后台执行。
+- 指挥台前端：新增「⚡ 一句话直达」按钮，原「下达」改名「先看方案」保留两步式；
+  直达同样复用轮询（全终态 / 无存活任务 / 10 分钟硬上限即停）。
+- `GET /command/report-templates`：对外暴露报告骨架，前端与 Agent 共用同一份定义。
+
+### 🚀 派活真的会开工
+
+- 新增 `app/task_runner.py`：`start_task`（CAS TODO→RUNNING + 投递）/ `dispatch_auto_queue`
+  （按 URGENT/HIGH/NORMAL 拉起，单拍最多 8 个）。
+- `Task.auto_start`（可空 Boolean，默认 false）：`ensure_columns` 幂等补列，老库升级无需手工迁移。
+- worker 池满（`QUEUE_FULL`）：任务退回 TODO 且**保留** `auto_start`，调度循环下一拍再拉起——
+  不再出现「RUNNING 但没有 worker 在跑」的僵尸行。
+- 调度循环每拍（10s）独立 try/except 调用自动排队，单次失败不影响其它定时任务。
+- `POST /task-dispatch/dispatch` 增加 `auto_start`，返回 `started_count` / `queued_count` /
+  每条任务状态；前端「创建后立即开工」默认勾选。
+
+### 🔧 Agent 真正具备取数能力
+
+- 新增 `app/tools.py`：统一工具注册表（`web_search` / `web_fetch`）、唯一执行入口、文本形式
+  `<tool_call>` 兜底解析。网络类工具复用 `fetch_page_text` 的 SSRF 闸门与审计日志。
+- `run_agent_on_task` 改为工具循环：最多 4 轮、12 次调用，结果截断 6000 字符回填；
+  工具失败转结构化 error 让模型换源，不拖垮任务；`metadata_json.tools_used` 留痕。
+- `build_context` 注入工具纪律提示（先搜索再作答、标注来源、error 要换源）。
+- 能力包工具名对齐真实实现（`web_browsing` → `web_search/web_fetch`；
+  `computer_use` → 真实的 `computer_*` 工具名）。
+- 任务详情 / 摘要接口返回 `tools_used`，前端执行记录显示「🔧 使用工具」。
+
+### 📊 专业报表与报告
+
+- 新增 `app/report_templates.py`：5 类骨架（行业研究 / 经营分析 / 周报 / 项目复盘 / 方案书），
+  按标题+描述关键词命中；自动注入章节结构、数据表规则、「暂缺（建议采集方式）」占位与
+  `[GENERATE_DOC]` 产出规范。
+- `doc_generator` 重写：
+  - Word：真实表格（`Table Grid`）、h1–h4、有序/无序列表、`**加粗**`、
+    Normal 字体（中文 eastAsia=宋体）、页边距；
+  - Excel：按 `##` 小节拆多 Sheet，数值/百分比还原为数字类型，表头样式、冻结首行、自动筛选；
+  - PPT：按 `##` 分页（h1 不再重复封面也不再产生空页）、原生表格；
+  - `[GENERATE_DOC]` 标记中的 `\\n` 还原为真实换行。
+- 战报/作战室交付物：word/ppt/excel 走真实渲染并登记 `Asset`；LLM 失败时**不落文件**、
+  任务标 `failed`（不再把「执行失败」写成交付物）。
+
+### 🕘 简报与收口
+
+- 晨间简报：数据库时间戳是 naive UTC，原实现用本地 `datetime.now()` 比较，
+  UTC+8 下"昨日/今日/今日成本"整体偏 8 小时；改为本地自然日 0 点换算 UTC。
+- 修掉 `company.created_by` 引用不存在字段导致的 500（非属主访问简报直接崩）。
+- 自动化 `call_webhook` 补 SSRF：出站前校验 URL，连接建立后复核真实对端（防 DNS rebinding）。
+- 模板建公司（`create_from_template`）补公司归属校验；任务派活目标一律按 `company_id` 过滤。
+
+### 🧪 测试
+
+- 新增 `test_doc_generator.py` / `test_auto_dispatch.py` / `test_agent_tools.py` /
+  `test_command_run.py` / `test_briefing.py`，并在 `test_outbound_security.py`
+  增补自动化 webhook 的 SSRF 用例；后端 261 → **295**。
+
+## [5.11.0] 按技术方向复审后的第二轮加固 — 2026-10-28
+
+> 来源：按技术方向重做的复审（`docs/审查报告_AI-EOS_2026-10-28.md`，54 项发现 / 10 个 P0）。
+> 本轮把其中的 P0 与第二批 P1 全部落地；每一项都跑了对应门禁（261 个后端用例 + e2e 38 项）。
+> 升级前请先备份 `data/`（新增的 `event_log.company_id` 由启动时幂等补列）。
+
+### 🚪 安全：越权读清零 + 出站加固
+
+- 15 个「双租户探针确认真的能读到」的端点（专家库、协作消息/协作图、定时任务、
+  Agent 记忆、复盘概览、治理自主档位/概览/自改进案例、技能列表、技能成长树、
+  应用别名规则、自动化列表、考核周期创建）全部补上归属校验，越权统一 **404**。
+- 新增 `require_company_scope()` 路由级门禁（`app/core/permissions.py`）：
+  请求带 `company_id` 即校验归属，不带则跳过——挂到 router 上，新增端点默认被覆盖。
+  接入 experts / collaboration / memory / reflection / governance / skills /
+  skill_growth / automation / review / schedules / command 共 11 个 router；
+  app-alias 逐端点加 `assert_company_owned`（`/platform` 不读租户数据，不挂）。
+- 静态越权读债务登记表：**52 → 1**（仅剩 `/app-alias/platform` 这一条扫描误报，
+  已有行为用例钉住）。护栏同时学会识别 route 级门禁与 `assert_agent_owned` /
+  `_assert_selectable_company` 两种既有守卫，不再误报。
+- 事件日志补 `company_id` 列与严格读过滤（NULL 不返回）；导出上限 5000 行。
+- 模型配置禁止引用服务端敏感环境变量：写入侧（create/update/test/list-models）
+  校验之外，`settings.resolved_api_key` 在**读取侧**再兜一层——升级前落库的
+  `api_key_env=JWT_SECRET` 历史行，运行时同样取不到值。
+- 出站：外部 Agent / 网页抓取 / webhook 关闭自动重定向、逐跳校验对端地址；
+  云元数据地址在任何场景（含本地模型）都拒绝。
+- Computer Agent：`type_text/click/key/run_shell/run_write/run_app` 纳入高危能力，
+  走审批；`execute_nl` 带 `company_id` 并限制在存储根目录内。
+- 上传（S9）：1MB 块流式落盘 + `Settings.max_upload_mb`（默认 25）+ 扩展名白名单 +
+  服务端生成文件名 + 落盘路径根内校验；超限 413 且不留半成品。
+- 技能插件（S8）：删除 `sys.path.insert`，改为唯一模块名加载；manifest 必填
+  name/version/module，入口只允许点分模块名且必须位于插件根内；插件根不可写时告警。
+  （签名/发布者校验仍未实现，已在代码注释中明确标注。）
+
+### ⚙️ 并发与数据层正确性
+
+- SQLite：WAL + `foreign_keys=ON` + `busy_timeout=15s` + `connect_args timeout=15`，
+  每个连接复用 PRAGMA；后台执行器加信号量（`AIEOS_JOB_WORKERS`）与 `QUEUE_FULL` 背压。
+- 审批决策、任务/工作流/会议状态迁移改 **CAS**（`UPDATE ... WHERE status=:old` +
+  `rowcount`），新增 `runtime_locks` 租约表（TTL），副作用只发生一次。
+- 删除路径去掉 `DELETE ... USING` 与 `randomblob()` 等 PG/SQLite 专属写法；
+  批量接口修 savepoint 误用；事务拆短，避免长事务持锁。
+
+### ⚡ 性能
+
+- 首页合并为 `/dashboard/{company_id}/bootstrap`：一次返回仪表盘 + 部门概览 +
+  运行中任务（`limit 20`，不含 description/result）；计数全部改 `GROUP BY`；
+  前端串行 3 请求 → 1 请求，轮询 5s → 15s。
+- 新增 `/tasks/{id}/summary` 供轮询：不返回 `result` 全文，execution 输出截断 2KB，
+  事件只回最近 100 条；前端首屏与操作后走全量，轮询走 summary。
+- 作战室新增 `/war-room/sessions/{sid}/snapshot`：session + team + 聊天增量
+  （`since_id`，默认最近 100 条），替代每 3 秒 5 个串行请求；`/agents`、`/companies` 只拉一次。
+- RAG：SQL 侧按查询 token 收窄候选集（`limit top_k*20`）后再精排，无命中时回退到
+  有界窗口；知识块不再每次全表拉进 Python。技能 scope 批量查询。
+- 群聊：显式 `max_tokens=512`、单次 90s、按公司 `Semaphore(4)` 限流、任务描述截断。
+
+### 🖥 Electron / 移动端
+
+- 更新包：URL 白名单 + basename + 强制 sha256 + 解压目录根内校验；`will-navigate` /
+  `will-redirect` 拦截；`sandbox: true`；spawn 子进程加 `error` 监听；表单窗口改 `data:` URL。
+- 移动端：`/dashboard/{companyId}` 路径修正；审批改为真实端点
+  （`GET /intervention/requests` / `POST .../decide`）；Android 增加
+  `network_security_config`（targetSdk 34 禁止明文）。
+
+### 🧪 测试与门禁
+
+- 新增：`test_tenancy_read_attacks`（29）、`test_outbound_security`（11）、
+  `test_concurrency_guards`、`test_sqlite_concurrency`、`test_delete_portability`、
+  `test_events_isolation`、`test_computer_gate`、`test_upload_limits`（8）、
+  `test_read_views`（4）、`test_lifespan`（2）。
+- 覆盖率门禁进 CI：`--cov=app/api/routes --cov=app/core`，实测 35%，阈值 30。
+- `lifespan` 首次被真实执行（此前 ASGITransport 直连，启动副作用从未跑过）。
+- 后端用例 **171 → 261**，e2e 38/38 通过。
+
+## [5.10.0] 安全与正确性加固 — 2026-10-27
+
+> 来源：一份五视角独立检测（`docs/检测报告_AI-EOS_2026-10-27.md`）。
+> 本轮只做**已复现**的缺陷修复，不加新功能——三个 P0 都是"看起来正常、实际从未生效"的类别。
+> 升级前请先备份 `data/`（老库会自动补列，见下文）。
+
+### 🔐 P0-1 JWT 空密钥/公开密钥可伪造 token（最严重）
+
+`jwt.encode(payload, "", "HS256")` 在**空密钥**下照样能签出合法 token，而 `get_current_user`
+用同一个空密钥校验通过。`.env.example` 里 `JWT_SECRET=` 是空的，桌面/便携版又不设
+`AIEOS_ENV=production`，于是旧的安全闸门形同不存在——实测用空密钥签出的 token
+可直接读到他人公司的员工与数据。
+
+- `jwt_secret` 默认值改为空串**并触发密钥引导**：`secrets.token_urlsafe(32)`，
+  按 `AIEOS_JWT_SECRET_FILE` → SQLite 同目录 → `storage/` → `apps/api/data/` 顺序落盘（0600、`O_EXCL` 防并发互踢）；
+  目录不可写则降级为进程内随机密钥 + 大声 WARNING。**任何路径都不会退回空密钥或公开常量。**
+- 生产环境（`AIEOS_ENV=production`）**不自动生成**：仍用公开/空密钥直接拒绝启动。
+  自动生成会把"忘记配密钥"这件事悄无声息地糊过去，生产必须炸。
+- 桌面壳自己生成并注入密钥（`userData/jwt-secret.key`），不再依赖后端可写。
+- 便携启动脚本导出 `AIEOS_JWT_SECRET_FILE` 并提示备份。
+- 复验：用 `""` / `aieos-portable-secret` / `change-me` / `secret` / `ai-eos` 伪造 token → **5/5 全部 401**（改造前 `""` 与公开常量均可通过）。
+
+### 🚪 P0-2 跨租户越权（读面为主）
+
+写路径原本有归属校验，**读路径几乎没有**：带着别人的 `company_id` 就能列出对方成果、
+知识库文档、审批策略与白名单。
+
+- `deps.py` 新增 `is_company_owned`（批量跳过用，不抛异常）、`assert_kb_doc_owned`。
+- `kb2 / artifacts / intervention / tasks / orchestrate` 读写全部补 `assert_company_owned`，
+  越权统一 **404 而非 403**（403 会告诉攻击者"这个 ID 存在"，等于租户枚举）。
+- 新增护栏测试 `test_every_company_id_endpoint_has_an_ownership_guard`：AST 扫描 GET 端点，
+  认「本文件内一跳校验辅助函数」；存量债务登记为 `_READ_DEBT_ALLOWLIST`（69 条，
+  **修一处删一处，新增未登记的越权读直接红**）。
+- **但静态护栏挡不住"伪校验"**（校验的是调用方自己传进来的 `company_id`，代码里确实"有校验"，
+  扫描器看到的是绿灯）。所以再加一份运行时攻击用例 `tests/test_tenancy_attacks.py`（9 例）：
+  真实 HTTP 打过去，断 404 且断属主仍可用（防止"用 404 把功能一起锁死"的假修复）。
+  并做了反向验证——临时摘掉 `list_artifacts` 的归属校验，用例立刻红（200=泄露），确认后还原。
+- 复验：31 项跨租户攻击实测 **31/31 全部拦截**，且正常属主 0 误伤。
+
+### 🗄 P0-3 SQLite 上没有 `NOW()`：发布功能从来没成功过
+
+`POST /artifacts/{id}/publish` 里 `SET published_at = NOW()`——SQLite 无此函数，
+必抛 `no such function: NOW`。更根本的是 **`Artifact` 模型压根没有 `published_at` 列**，
+所以"发布"这一步在 SQLite（即桌面/便携主形态）上从未生效过。
+
+- 模型补 `published_at` 列 + Alembic 迁移 `a1c7e9c0ffee`；
+  启动 `ensure_columns` 对 SQLite/PG 均幂等补列，老库无需手工迁移。
+- 写入改绑定参数，统一 **naive UTC**，与 `created_at` / `_now()` 可比。
+- 审批策略读取失败改为 **fail-closed**（默认需要审批）——读不到策略不能等于放行交付物出内网。
+- 复验：`submit → review approve → publish` 全链路 200，`published_at` 真实落库，重复调用幂等不覆盖。
+
+### 🖥 桌面版默认只监听 127.0.0.1
+
+此前无条件 `--host 0.0.0.0`，同一 WiFi 下任何人都能打到你的后端端口。
+
+- 默认绑定 `127.0.0.1`；新增「局域网共享」开关（开→绑 `0.0.0.0` 并重启后端，关→回到仅本机）。
+- `docs / redoc / openapi.json` 只在 `DEBUG=true` 挂载：关 DEBUG 后路由根本不存在（实测 404），
+  不再把 312KB 接口清单交给任何扫到端口的人。
+- `/metrics/prometheus` 加中间件守卫：配了 `METRICS_TOKEN` 走常量时间比较，未配则**仅回环地址**可抓。
+- mDNS 广播与共享开关联动：只监听回环时不再对外宣告一个连不上的服务。
+
+### ⚙️ 后端正确性（本轮一并修的已复现项）
+
+- **会议纪要**：LLM 抽取路径存在死代码/重复取模型，无模型时曾会崩 closing 流程；改为带日志的关键词兜底。
+- **预算暂停恢复**：`status == "PAUSED"` 大小写不匹配，超预算后**点提高上限也恢复不了**；改 `func.lower(...)`，兼容历史两种写法。
+- **日预算窗口**：`TokenUsage.created_at` 实为 naive UTC，而窗口边界用了 aware datetime → 比较异常导致当日统计失真；统一 naive UTC。
+- **工作流**：Agent 节点失败 `rollback` 后隐式返回 `None`，被当成"等待人工"永远挂着；现在标 FAILED 并对称写回错误。
+- **阻塞 IO**：`skills.py` 三处 `urlopen` → `httpx.AsyncClient` + 并发抓取（单仓失败只记日志）；`auth.py` 登录限流改 `redis.asyncio`，Redis 不可用降级内存计数。
+- **静默异常清零**：`clients / command / experts / performance_engine / mdns_advertise / main / config` 的 `except: pass` 全部补 `logger.warning/error`；`redis_url` 那句"未实际使用"的注释已失效并更正。
+
+### 🎨 前端
+
+- 收口最后一批裸 fetch（`pair`、`UpdateBanner`），下载与轮询走统一层。
+- 任务详情页竞态：快速切换任务时旧请求会覆盖新数据 → 加序列号守卫 + 卸载时 `AbortController`。
+- `lib/api.ts`：登录入口的 401 不再触发"刷新—重试—再 401"风暴；支持外部 `signal` 取消与 `silent`。
+- 错误不再被 `.catch(()=>{})` 吃掉，统一 Toast 播报。
+
+### 🧨 版本字符串六个地方六个值
+
+实测 `pyproject=0.1.0`、`desktop=5.9.0`、`web=5.0.0`、`mobile=4.1.0`、mDNS 广播 `5.4`、
+FastAPI docs `0.1.0`——用户报障时截图里的版本号对不上任何一次发布。
+新增 `apps/api/app/version.py` 作为后端唯一来源，其余位置从这里取，
+并由 `test_version_strings_are_consistent` 跨端钉死（改乱会立刻红）。
+五端版本统一到 **5.10.0**（5.3–5.9 仅发布于 GitHub Release，CHANGELOG 未记录，属文档缺口）。
+
+### 🛡 CI 门禁
+
+新增 `.github/workflows/ci.yml`：backend（pytest + compileall，**显式不起 Redis**——
+`test_auth` 断言内存回退字典，起了会让限流失效）/ frontend（tsc + vitest）/ contract（OpenAPI、
+mapper、`check_api_contract.py --strict`）三个 job，`concurrency` 取消旧任务，无部署步骤。
+`tools/check_api_contract.py` 补 `retry`/`takeover` 动作，并把"路径中段变量"从宽松匹配
+改成还原真实字面量后**逐条要求后端路由存在**（拼错动作名不再报绿）。
+
+### ✅ 验证
+
+| 项目 | 改造前 | 改造后 |
+|---|---|---|
+| `uv run pytest` | 159 例，**3 失败** | **171 passed, 1 skipped, 0 失败** |
+| 跨租户攻击实测 | 读路径普遍可越权 | **31/31 拦截**，属主 0 误伤 |
+| 伪造 token（公开/空密钥） | 可通过 | **5/5 拒绝（401）** |
+| `npx tsc --noEmit` | — | 0 错误 |
+| `npm run test`（vitest） | — | 39/39 通过 |
+| 契约门禁 `--strict` | 3 处红 | 通过 |
+| `./tools/check.sh`（含端到端主链路真进程试跑） | — | **全部通过，e2e 38/38** |
+
+### ⚠️ 已知限制与待决策
+
+- **`alembic upgrade head` 只支持 PostgreSQL**：链路里 `23e9b97bb927` 在 SQLite 上会抛
+  `No support for ALTER of constraints`（历史遗留，非本轮引入）。桌面/便携形态走
+  `create_all + ensure_columns`，不受影响；`服务器一键部署.sh` 已容忍该失败。
+  但 `docs/08_DEPLOYMENT_GUIDE.md` 让 SQLite 用户直接跑 alembic，属文档错误。
+- **Mac 代码签名私钥已提交进仓库**（`packaging/mac-signing/*.p12(.b64)`，口令 `aieos2026`，
+  且脚本会把它装进系统信任根）。这是不可逆操作（改写 git 历史 / 轮换证书），
+  **需要 maintainer 决策**，本轮未改动。
+- 注册接口仍匿名开放；绑定收口后风险面已从"整个局域网"缩到"本机 + 显式开启共享"。
+- 读端点归属债务 69 条为**基线登记**，非"已修完"。
+
 ## [5.2.0] 客户端自动升级 — 2026-10-18
 
 > 各端客户端启动后自动从「你自己的服务器」检查并升级，不再需要手动找 Release 重新下载。

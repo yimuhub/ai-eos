@@ -8,14 +8,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.core.permissions import Capability, require_company_scope
 from app.models.scheduler import (AutomationRun, AutomationSchedule,
                                   ScheduleStatus, compute_next_run)
 from app.models.user import User
 from app.scheduler_engine import run_due_schedules
 
-router = APIRouter(prefix="/schedules", tags=["schedules"])
-
-
+router = APIRouter(prefix="/schedules", tags=["schedules"],
+                   dependencies=[Depends(require_company_scope())])
 class ScheduleIn(BaseModel):
     name: str
     trigger_type: str            # interval / daily
@@ -155,9 +155,17 @@ async def list_runs(
 
 @router.post("/tick")
 async def tick(
+    company_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """手动触发一次调度扫描（测试/调试用；后台循环也在跑）。"""
-    n = await run_due_schedules(db)
+    """手动触发一次调度扫描（仅本公司 OWNER；后台循环也在跑）。
+
+    改造前任何登录用户都能调，且一次扫描会执行**全平台**所有公司的
+    到期任务。现在要求显式传 company_id 并校验 OWNER，扫描也限定在该公司，
+    返回本次真正抢占到的数量（并发调用时只有一个能看到非零值）。
+    """
+    from app.core.permissions import Capability, ensure_capability
+    await ensure_capability(db, user.id, company_id, Capability.ADMIN)
+    n = await run_due_schedules(db, company_id=company_id)
     return {"executed": n}

@@ -33,21 +33,40 @@ async function call(
   path: string,
   init?: RequestInit,
 ): Promise<any> {
-  const res = await fetch(base + path, {
-    method: init?.method || "GET",
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(init?.headers || {}),
-    },
-    body: init?.body,
-  });
+  let res: Response;
+  try {
+    res = await fetch(base + path, {
+      method: init?.method || "GET",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(init?.headers || {}),
+      },
+      body: init?.body,
+    });
+  } catch (e: any) {
+    // fetch 自身抛错 = 服务连不上（地址错/端口未开/网络不通），
+    // 与"接口不存在"必须区分，否则用户会误以为客户端坏了。
+    throw new ApiError(
+      `无法连接服务（请检查服务地址与网络）：${e?.message || base}`,
+      0,
+    );
+  }
   const text = await res.text();
   let data: any = text;
   try {
     data = text ? JSON.parse(text) : {};
   } catch {}
   if (!res.ok) {
+    // 404 单独文案：多半是客户端落后于后端路由（例如旧版把 company_id
+    // 当 query 传给只接受路径参数的接口），升级客户端通常即可解决。
+    if (res.status === 404) {
+      const route = path.split("?")[0];
+      throw new ApiError(
+        `接口不存在（客户端版本过旧，请升级）：${init?.method || "GET"} ${route}`,
+        404,
+      );
+    }
     const detail = data?.detail || data?.error || res.statusText || "请求失败";
     const msg = typeof detail === "string" ? detail : JSON.stringify(detail);
     throw new ApiError(`${res.status} ${msg}`, res.status);
@@ -102,8 +121,36 @@ export class Api {
   }
 
   // ---- 老板视角 KPI ----
+  // 后端路由是 GET /dashboard/{company_id}（路径参数），不是 ?company_id=。
   dashboard(companyId: string): Promise<any> {
-    return call(this.base, this.token, `/dashboard?company_id=${companyId}`);
+    return call(this.base, this.token, `/dashboard/${encodeURIComponent(companyId)}`);
+  }
+
+  // ---- 签字门：待审批队列 + 通过/驳回 ----
+  // 后端：GET  /intervention/requests?company_id=&status=PENDING
+  //       POST /intervention/requests/{request_id}/decide {decision: approve|reject}
+  pendingApprovals(companyId: string): Promise<any[]> {
+    return call(
+      this.base,
+      this.token,
+      `/intervention/requests?company_id=${encodeURIComponent(companyId)}&status=PENDING`,
+    );
+  }
+
+  decideApproval(
+    requestId: string,
+    decision: "approve" | "reject",
+    note?: string,
+  ): Promise<any> {
+    return call(
+      this.base,
+      this.token,
+      `/intervention/requests/${encodeURIComponent(requestId)}/decide`,
+      {
+        method: "POST",
+        body: JSON.stringify({ decision, ...(note ? { note } : {}) }),
+      },
+    );
   }
 
   // ---- 专家库 ----

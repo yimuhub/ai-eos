@@ -3,10 +3,10 @@ import urllib.parse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_company_owned, get_current_user, get_db
 from app.models.intervention import (ApprovalRequest, InterventionPolicy,
                                      OverrideLog, new_id, requires_approval)
 from app.models.user import User
@@ -31,6 +31,7 @@ async def get_policy(
     user: User = Depends(get_current_user),
 ):
     """查询生效策略（项目级优先于公司级，无则返回默认 level=2）。"""
+    await assert_company_owned(db, user.id, company_id)
     if project_id:
         q = await db.execute(select(InterventionPolicy).where(
             InterventionPolicy.company_id == company_id,
@@ -65,6 +66,8 @@ async def set_policy(
 ):
     if not 0 <= data.level <= 4:
         raise HTTPException(400, "level must be 0-4")
+    # 归属校验：此前任何登录用户带别人的 company_id 就能改掉该公司的审批档位
+    await assert_company_owned(db, user.id, company_id)
     q = await db.execute(select(InterventionPolicy).where(
         InterventionPolicy.company_id == company_id,
         InterventionPolicy.project_id == data.project_id))
@@ -90,6 +93,7 @@ async def check_action(
     user: User = Depends(get_current_user),
 ):
     """Agent 执行动作前调用：是否需要审批。"""
+    await assert_company_owned(db, user.id, company_id)
     policy = await _resolve(db, company_id, project_id)
     if policy is None:
         need = requires_approval(2, action_type)
@@ -130,6 +134,7 @@ async def create_request(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await assert_company_owned(db, user.id, company_id)
     policy = await _resolve(db, company_id, project_id)
     need = requires_approval((policy.level if policy else 2), data.action_type,
                              policy.approval_actions if policy else None)
@@ -154,6 +159,7 @@ async def list_requests(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await assert_company_owned(db, user.id, company_id)
     q = select(ApprovalRequest).where(ApprovalRequest.company_id == company_id)
     if status:
         q = q.where(ApprovalRequest.status == status)
@@ -179,18 +185,39 @@ async def decide_request(
     req = await db.get(ApprovalRequest, request_id)
     if not req:
         raise HTTPException(404, "Request not found")
+    # 归属校验：否则任何登录用户都能代批他人的审批单
+    # （含高危本机命令/外部 Agent 自动补执行）
+    await assert_company_owned(db, user.id, req.company_id)
     if req.status != "PENDING":
         raise HTTPException(409, f"Already decided: {req.status}")
     if data.decision not in ("approve", "reject"):
         raise HTTPException(400, "decision must be approve/reject")
+
     from datetime import datetime as dt, timezone as tz
-    req.status = "APPROVED" if data.decision == "approve" else "REJECTED"
-    req.decided_by = user.id
-    req.decision_note = data.note
-    req.decided_at = dt.now(tz.utc).replace(tzinfo=None)
+
+    new_status = "APPROVED" if data.decision == "approve" else "REJECTED"
+    # 结束只读事务：SQLite/WAL 下"读快照 → 升级写"会直接 BUSY。此处无待写数据。
+    await db.commit()
+
+    # ---- 抢占裁定权（CAS）----
+    # 原实现是"读 status → 改内存 → 跑真实副作用 → 最后 commit"：双击、
+    # 前端重试、双端同时点「批准」时两个请求都会通过 PENDING 检查，
+    # 于是一条高危本机命令 / 一次对外发送被执行两遍。
+    # 现在只有把 PENDING 改成终态的那**一个**请求继续往下走副作用。
+    decided_at = dt.now(tz.utc).replace(tzinfo=None)
+    res = await db.execute(
+        update(ApprovalRequest)
+        .where(ApprovalRequest.id == request_id,
+               ApprovalRequest.status == "PENDING")
+        .values(status=new_status, decided_by=user.id,
+                decision_note=data.note, decided_at=decided_at)
+        .execution_options(synchronize_session=False))
+    if res.rowcount != 1:
+        raise HTTPException(409, "该审批单已被处理（并发/重复提交）")
 
     # V5.6.1：老板批准时勾"始终允许"→ 写免批白名单（参数模式取本次 params 的
     # 命令/输入子串；run_shell 取 cmd，其余取关键参数值）
+    # 白名单与裁定在同一个事务里落库：裁定成功而白名单丢失会让下次同一操作被拦。
     if data.decision == "approve" and data.always_allow and req.action_type in (
             "computer_command", "external_agent"):
         from app.models.whitelist import ApprovalWhitelist
@@ -207,54 +234,90 @@ async def decide_request(
             param_pattern=pattern,
             note=(data.note or "老板批准时勾「始终允许」")[:300],
             created_by=user.id))
+    # 抢占结果**立即 commit**：之后的真实副作用（本机命令/对外发送）绝不能在
+    # 事务里跑，否则慢操作会长期持锁，而且崩溃回滚会让"已裁定"凭空消失。
+    await db.commit()
+    await db.refresh(req)
 
-    # V5.5 P0：批准"高危本机操作"审批单后，自动补执行挂起的高危命令
+    payload = dict(req.payload or {})
     execution_result = None
-    if req.status == "APPROVED" and req.action_type == "computer_command" \
-            and (req.payload or {}).get("awaiting_execution"):
+    awaiting = bool(payload.get("awaiting_execution"))
+
+    # V5.5 P0 / A3：批准挂起的高危本机命令 / 外部 Agent 外发 → 自动补执行。
+    # 幂等由第二道 CAS 保证：只有把一个 APPROVED 且待执行的单子推到 EXECUTING
+    # 的调用者才真正执行。执行记录（EXECUTING + 结果）先落库再调外部：
+    # 进程在外部调用中途崩溃时单子停在 EXECUTING，重试看到非 APPROVED 即跳过
+    # ——宁可不做，也不重复做。
+    if new_status == "APPROVED" and awaiting and req.action_type in (
+            "computer_command", "external_agent"):
+        claim = await db.execute(
+            update(ApprovalRequest)
+            .where(ApprovalRequest.id == request_id,
+                   ApprovalRequest.status == "APPROVED")
+            .values(status="EXECUTING")
+            .execution_options(synchronize_session=False))
+        if claim.rowcount == 1:
+            await db.commit()
+            execution_result = await _perform_approved_action(db, req, payload)
+            final_payload = dict(payload)
+            final_payload["awaiting_execution"] = False
+            final_payload["execution"] = execution_result
+            await db.execute(
+                update(ApprovalRequest)
+                .where(ApprovalRequest.id == request_id,
+                       ApprovalRequest.status == "EXECUTING")
+                .values(status="APPROVED", payload=final_payload)
+                .execution_options(synchronize_session=False))
+            await db.commit()
+            await db.refresh(req)
+        else:
+            # 别的请求已经/正在执行：返回已有结果，不重复执行副作用
+            await db.refresh(req)
+            execution_result = (req.payload or {}).get("execution")
+
+    out = {"id": req.id, "status": req.status}
+    if execution_result is not None:
+        out["execution"] = execution_result
+    return out
+
+
+async def _perform_approved_action(db: AsyncSession, req: ApprovalRequest,
+                                   payload: dict) -> dict:
+    """执行审批通过后挂起的真实副作用（本机命令 / 外部 Agent 外发）。
+
+    只做"一次"：调用方已通过 EXECUTING CAS 抢占执行权。
+    """
+    if req.action_type == "computer_command":
         from app.services.computer_service import (
             ComputerActionDenied, execute_computer_action)
-        payload = req.payload or {}
         try:
             outcome = await execute_computer_action(
                 db, company_id=req.company_id,
                 capability=payload.get("capability", ""),
                 params=payload.get("params"),
                 agent_id=payload.get("agent_id"))
-            execution_result = {"ok": True, "result": outcome.get("result")}
-            payload["awaiting_execution"] = False
+            return {"ok": True, "result": outcome.get("result")}
         except (ComputerActionDenied, ValueError) as exc:
-            execution_result = {"ok": False, "error": str(exc)}
-        req.payload = payload
-    # V5.5 A3：批准「外部 Agent 外发」审批单后，自动执行外发
-    elif req.status == "APPROVED" and req.action_type == "external_agent" \
-            and (req.payload or {}).get("awaiting_execution"):
+            return {"ok": False, "error": str(exc)}
+
+    if req.action_type == "external_agent":
         from app.external_agents import ExternalAgentConnection
-        from app.api.routes.external_agents import _run_external
-        payload = req.payload or {}
+        from app.api.routes.external_agents import ExecuteIn, _run_external
         conn = await db.get(ExternalAgentConnection, payload.get("connection_id", ""))
         if conn is None:
-            execution_result = {"ok": False, "error": "外部连接已删除，无法执行"}
-        else:
-            from app.api.routes.external_agents import ExecuteIn
-            try:
-                edata = ExecuteIn(task_input=payload.get("task_input") or "",
-                                   config=payload.get("config"))
-                out = await _run_external(conn, edata, db)
-                if "_error" in out:
-                    execution_result = {"ok": False, "error": out["_error"]}
-                else:
-                    out.pop("_code", None)
-                    execution_result = {"ok": True, "result": out}
-            except Exception as exc:
-                execution_result = {"ok": False, "error": str(exc)}
-        payload["awaiting_execution"] = False
-        req.payload = payload
-    await db.commit()
-    out = {"id": req.id, "status": req.status}
-    if execution_result is not None:
-        out["execution"] = execution_result
-    return out
+            return {"ok": False, "error": "外部连接已删除，无法执行"}
+        try:
+            edata = ExecuteIn(task_input=payload.get("task_input") or "",
+                              config=payload.get("config"))
+            out = await _run_external(conn, edata, db)
+            if "_error" in out:
+                return {"ok": False, "error": out["_error"]}
+            out.pop("_code", None)
+            return {"ok": True, "result": out}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    return {"ok": False, "error": f"unsupported action_type {req.action_type}"}
 
 
 # ---------- 人工覆盖 ----------
@@ -274,6 +337,7 @@ async def create_override(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await assert_company_owned(db, user.id, company_id)
     log = OverrideLog(id=new_id(), company_id=company_id,
                       target_type=data.target_type, target_id=data.target_id,
                       original_decision=data.original_decision,
@@ -290,6 +354,7 @@ async def list_overrides(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await assert_company_owned(db, user.id, company_id)
     rows = (await db.execute(select(OverrideLog).where(
         OverrideLog.company_id == company_id).order_by(
         OverrideLog.created_at.desc()))).scalars().all()
@@ -307,6 +372,7 @@ async def list_whitelist(
     user: User = Depends(get_current_user),
 ):
     """公司当前免批白名单（前端干预中心展示/撤销）。"""
+    await assert_company_owned(db, user.id, company_id)
     from app.models.whitelist import ApprovalWhitelist
     rows = (await db.execute(select(ApprovalWhitelist).where(
         ApprovalWhitelist.company_id == company_id)
@@ -327,6 +393,9 @@ async def delete_whitelist(
 ):
     """撤销一条白名单 → 同类操作立即恢复拦截（老板随时收权）。"""
     from app.models.whitelist import ApprovalWhitelist
+    # 归属校验：此前只比对请求参数里的 company_id，调用者带谁的 id
+    # 就能删谁的白名单——参数自比对不构成校验
+    await assert_company_owned(db, user.id, company_id)
     w = await db.get(ApprovalWhitelist, wl_id)
     if not w or w.company_id != company_id:
         raise HTTPException(404, "whitelist not found")

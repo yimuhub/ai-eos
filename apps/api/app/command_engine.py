@@ -88,8 +88,13 @@ async def command_plan(db: AsyncSession, company_id: str,
 
 
 async def command_execute(db: AsyncSession, company_id: str,
-                          plan: dict, user_id: str) -> dict:
-    """老板确认后的方案 → 实际执行（全部走既有引擎）。"""
+                          plan: dict, user_id: str,
+                          auto_run: bool = False) -> dict:
+    """老板确认后的方案 → 实际执行（全部走既有引擎）。
+
+    auto_run=True 用于「一句话直达」：作战室跳过逐人宣告/校对，直接确认
+    分工并开工；DIRECT 路径创建的每个任务也立即入队执行。
+    """
     path = plan.get("path", "PROJECT")
 
     if path == "DIRECT":
@@ -102,7 +107,8 @@ async def command_execute(db: AsyncSession, company_id: str,
                           title=f"指挥台：{plan.get('phrase', '')[:40]}",
                           description=t.get("task") or plan.get("phrase", ""),
                           target_type="single_agent",
-                          agent_ids=[t["agent_id"]])
+                          agent_ids=[t["agent_id"]],
+                          auto_start=True)
             r = await dispatch_tasks(d, db=db, user=user)
             outs.append(r if isinstance(r, dict) else {"task_id": str(r)})
         return {"path": "DIRECT", "jobs": outs}
@@ -153,8 +159,11 @@ async def command_execute(db: AsyncSession, company_id: str,
                           goal=plan.get("team_goal") or plan.get("phrase", ""),
                           leader_agent_id=leader_id, status="analyzing")
     db.add(sess)
+    # 先落库再投递：后台 worker 用独立连接，看不到本事务里未提交的会话/项目行，
+    # 否则会拿不到会话而卡在 analyzing。
+    await db.commit()
     bg.submit_async(_make_kickoff(company_id, sid,
                                    plan.get("team_goal") or plan.get("phrase", ""),
-                                   leader_id, None, project_id))
-    await db.commit()
+                                   leader_id, None, project_id,
+                                   auto_run=auto_run))
     return {"path": "PROJECT", "session_id": sid, "project_id": project_id}

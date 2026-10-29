@@ -10,7 +10,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, api } from "@/lib/api";
 
 interface UpdateInfo {
   has_update: boolean;
@@ -42,12 +42,14 @@ export default function UpdateBanner() {
 
     d.getEnv().then(async (env) => {
       try {
-        const res = await fetch(
-          `${API_BASE}/clients/update/check?platform=${env.platform}&arch=${env.arch}&current=${env.version}`,
-          { cache: "no-store" },
+        // 收口到 api 层：URL/方法/查询参数与原裸 fetch 完全一致。
+        // 保留原语义：cache no-store（更新检查不能被缓存）+ 静默
+        // （更新通道不可达不影响主流程，原实现失败时直接 return，
+        // silent:true 避免 api 层把这个"可忽略的探测失败"广播成全局红色 Toast）。
+        const data = await api.get<UpdateInfo>(
+          `/clients/update/check?platform=${env.platform}&arch=${env.arch}&current=${env.version}`,
+          { cache: "no-store", silent: true },
         );
-        if (!res.ok) return;
-        const data: UpdateInfo = await res.json();
         if (!alive) return;
         if (data.has_update && data.url && data.file) setInfo(data);
       } catch { /* 更新通道不可达 → 静默 */ }

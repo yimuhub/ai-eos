@@ -13,9 +13,13 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import (assert_company_owned, assert_kb_doc_owned,
+                          get_current_user, get_db, is_company_owned)
 from app.core.config import settings
 from app.core.logging_config import get_logger
+from app.core.uploads import (KB_ALLOWED_EXTENSIONS, ensure_within,
+                              generate_stored_name, safe_original_name,
+                              stream_upload, validate_extension)
 from app.kb_engine import (COST_PROFILES, cache_invalidate,
                            cost_optimized_rag)
 from app.kb_templates import SKILL_KB_TEMPLATES, list_templates
@@ -47,7 +51,8 @@ def _resolve_upload_dir() -> Path:
     return base
 
 
-UPLOAD_DIR = _resolve_upload_dir()
+# 注意：上传目录在每次请求时用 _resolve_upload_dir() 现算，
+# 不在导入期固化成常量——否则测试/运维无法在进程内改 AIEOS_KB_UPLOAD_DIR。
 
 
 def _now():
@@ -128,9 +133,8 @@ async def edit_doc(doc_id: str, data: DocIn,
                    db: AsyncSession = Depends(get_db),
                    user: User = Depends(get_current_user)):
     """编辑文档内容（重建切片与索引）。"""
-    doc = await db.get(KBDocument, doc_id)
-    if not doc:
-        raise HTTPException(404)
+    # 归属校验：与 delete_doc 同理，只按 id 取文档会让任何登录用户改他家文档
+    doc = await assert_kb_doc_owned(db, user.id, doc_id)
     doc.title = data.title or doc.title
     if data.content:
         doc.content = data.content
@@ -157,12 +161,8 @@ async def edit_doc(doc_id: str, data: DocIn,
 @router.delete("/documents/{doc_id}")
 async def delete_doc(doc_id: str, db: AsyncSession = Depends(get_db),
                      user: User = Depends(get_current_user)):
-    doc = await db.get(KBDocument, doc_id)
-    if not doc:
-        raise HTTPException(404)
     # 归属校验：原先只按 id 取文档，任何登录用户都能删掉别家公司的知识库文档
-    from app.api.deps import assert_company_owned
-    await assert_company_owned(db, user.id, doc.company_id)
+    doc = await assert_kb_doc_owned(db, user.id, doc_id)
     cid = doc.company_id
     # 原始文件一并删除
     if doc.original_path and os.path.exists(doc.original_path):
@@ -192,15 +192,23 @@ async def upload_private_file(agent_id: str, file: UploadFile = File(...),
     """
     a = await _owned_agent(db, user.id, agent_id)
 
-    raw = await file.read()
-    safe_name = file.filename.replace("/", "_").replace("\\", "_")
-    original_dir = UPLOAD_DIR / agent_id
-    original_dir.mkdir(parents=True, exist_ok=True)
-    save_path = original_dir / f"{uuid.uuid4().hex[:8]}_{safe_name}"
-    save_path.write_bytes(raw)  # 原始格式保留
+    # 审查 S9：原实现 `raw = await file.read()` 整文件进内存且无上限，
+    # 且把用户文件名（仅替换斜杠）拼进落盘路径。现在：
+    # 1) 文件名只清洗成元数据；2) 扩展名走白名单（否则 400）；
+    # 3) 1MB 块流式落盘，超 Settings.max_upload_mb 立即删除半成品并 413。
+    original_name = safe_original_name(file.filename)
+    suffix = validate_extension(original_name, KB_ALLOWED_EXTENSIONS)
+    upload_root = _resolve_upload_dir()
+    # agent_id 来自路径参数，拼出目录后必须确认 resolve() 后仍在根内
+    original_dir = ensure_within(upload_root, upload_root / agent_id)
+    save_path, size = await stream_upload(
+        file, original_dir, generate_stored_name(suffix))
+
+    # 转换需要原始字节：此时大小已被上限约束，读回内存是有界的
+    raw = save_path.read_bytes()
+    safe_name = original_name
 
     # 机器可读转换：按类型提取文本
-    suffix = Path(safe_name).suffix.lower()
     text = ""
     if suffix in (".txt", ".md", ".csv", ".json"):
         text = raw.decode("utf-8", errors="replace")
@@ -262,7 +270,7 @@ async def upload_private_file(agent_id: str, file: UploadFile = File(...),
     await db.commit()
     cache_invalidate(a.company_id)
     return {"id": doc_id, "converted": True, "chunks": len(chunks),
-            "original_saved": str(save_path), "size": len(raw)}
+            "original_saved": str(save_path), "size": size}
 
 
 # ---------------- 全局公用库管理 ----------------
@@ -272,6 +280,9 @@ async def create_global_doc(data: DocIn, company_id: str = Query(...),
                             db: AsyncSession = Depends(get_db),
                             user: User = Depends(get_current_user)):
     """添加全局公用文档。"""
+    # 归属校验：此前只认 query 里的 company_id，任何登录用户都能
+    # 往他人公司的 RAG 语料里植入文档（提示词注入面）
+    await assert_company_owned(db, user.id, company_id)
     doc_id = str(uuid.uuid4())
     doc = KBDocument(id=doc_id, company_id=company_id, title=data.title,
                      source_type="text", content=data.content,
@@ -296,6 +307,8 @@ async def create_global_doc(data: DocIn, company_id: str = Query(...),
 async def list_global_docs(company_id: str = Query(...),
                            db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
+    # 归属校验：不带校验时可直接枚举他家公司知识库文档清单
+    await assert_company_owned(db, user.id, company_id)
     rows = (await db.execute(select(KBDocument).where(
         KBDocument.company_id == company_id,
         KBDocument.scope == "global").order_by(
@@ -309,10 +322,17 @@ async def list_global_docs(company_id: str = Query(...),
 async def copy_docs(data: CopyIn, db: AsyncSession = Depends(get_db),
                     user: User = Depends(get_current_user)):
     """把文档复制到目标 Agent 私人库（doc_ids 可来自公用库或另一 Agent）。"""
+    # 目标私人库必须属于调用者（sync-from-global 也经此校验）
+    if data.target_agent_id != "global":
+        await _owned_agent(db, user.id, data.target_agent_id)
     copied = []
     for did in data.doc_ids:
         src = await db.get(KBDocument, did)
         if not src:
+            continue
+        # 归属校验：不属于调用者公司的源文档按"不存在"跳过，
+        # 否则可把他人文档整篇复制进自己的库（内容泄露）
+        if not await is_company_owned(db, user.id, src.company_id):
             continue
         new_id = str(uuid.uuid4())
         target_agent = None if data.target_agent_id == "global" else data.target_agent_id

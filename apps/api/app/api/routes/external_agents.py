@@ -1,13 +1,21 @@
-"""External Agent Integration API (P3-09)."""
+"""External Agent Integration API (P3-09).
+
+安全约束：
+* `auth_env_var` 只允许模型服务密钥白名单（见 app.external_agents），
+  拒绝 JWT_SECRET / *_SECRET / *_PASSWORD 等服务端敏感变量。
+* `endpoint` 一律过出站闸门（allow_private=True，本地 LLM 可用，元数据拒绝）。
+* 所有按 id 的端点都校验公司归属，越权一律 404。
+"""
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_company_owned, get_current_user, get_db
+from app.core.net_guard import OutboundURLRejected, validate_outbound_url_async
 from app.external_agents import (ADAPTERS, AgentProviderType,
                                  ConnectionStatus, ExternalAgentConnection,
-                                 get_adapter)
+                                 get_adapter, validate_auth_env_var)
 from app.models.user import User
 
 router = APIRouter(prefix="/external-agents", tags=["external-agents"])
@@ -22,6 +30,23 @@ class ConnectionIn(BaseModel):
     attachments: list[dict] | None = None  # 📎 附件口
 
 
+async def _validate_endpoint(endpoint: str | None) -> str | None:
+    if not endpoint:
+        return endpoint
+    try:
+        await validate_outbound_url_async(endpoint, allow_private=True)
+    except OutboundURLRejected as e:
+        raise HTTPException(400, f"endpoint 不安全：{e}")
+    return endpoint
+
+
+def _validate_env_var(name: str | None) -> str | None:
+    try:
+        return validate_auth_env_var(name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @router.post("", status_code=201)
 async def register(
     data: ConnectionIn,
@@ -31,10 +56,15 @@ async def register(
 ):
     if data.provider_type not in ADAPTERS:
         raise HTTPException(400, "invalid provider_type")
+    # 不能凭一个公司 id 就往别人公司里注册外部 Agent
+    await assert_company_owned(db, user.id, company_id)
+    # 先校验密钥引用名（纯字符串判断、不依赖 DNS），再校验 endpoint
+    auth_env_var = _validate_env_var(data.auth_env_var)
+    endpoint = await _validate_endpoint(data.endpoint)
     conn = ExternalAgentConnection(
         id=str(__import__("uuid").uuid4()), company_id=company_id,
         name=data.name, provider_type=data.provider_type,
-        endpoint=data.endpoint, auth_env_var=data.auth_env_var,
+        endpoint=endpoint, auth_env_var=auth_env_var,
         capabilities=data.capabilities or [],
         attachments=data.attachments or [],
         supported_actions=["execute", "get_status", "pause", "resume",
@@ -51,6 +81,7 @@ async def list_connections(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await assert_company_owned(db, user.id, company_id)
     q = await db.execute(select(ExternalAgentConnection).where(
         ExternalAgentConnection.company_id == company_id).order_by(
         ExternalAgentConnection.created_at.desc()))
@@ -62,15 +93,22 @@ async def list_connections(
              "last_test_ok": c.last_test_ok} for c in rows]
 
 
+async def _get_owned_connection(db: AsyncSession, user: User,
+                                cid: str) -> ExternalAgentConnection:
+    conn = await db.get(ExternalAgentConnection, cid)
+    if not conn:
+        raise HTTPException(404, "not found")
+    await assert_company_owned(db, user.id, conn.company_id)
+    return conn
+
+
 @router.post("/{cid}/test")
 async def test_connection(
     cid: str,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    conn = await db.get(ExternalAgentConnection, cid)
-    if not conn:
-        raise HTTPException(404, "not found")
+    conn = await _get_owned_connection(db, user, cid)
     if conn.provider_type == AgentProviderType.NATIVE:
         result = {"ok": True, "note": "native agent"}
     else:
@@ -89,9 +127,7 @@ async def test_connection(
 @router.post("/{cid}/enable")
 async def enable(cid: str, db: AsyncSession = Depends(get_db),
                  user: User = Depends(get_current_user)):
-    conn = await db.get(ExternalAgentConnection, cid)
-    if not conn:
-        raise HTTPException(404, "not found")
+    conn = await _get_owned_connection(db, user, cid)
     conn.status = ConnectionStatus.ENABLED
     await db.commit()
     return {"id": cid, "status": "ENABLED"}
@@ -100,9 +136,7 @@ async def enable(cid: str, db: AsyncSession = Depends(get_db),
 @router.post("/{cid}/disable")
 async def disable(cid: str, db: AsyncSession = Depends(get_db),
                   user: User = Depends(get_current_user)):
-    conn = await db.get(ExternalAgentConnection, cid)
-    if not conn:
-        raise HTTPException(404, "not found")
+    conn = await _get_owned_connection(db, user, cid)
     conn.status = ConnectionStatus.DISABLED
     await db.commit()
     return {"id": cid, "status": "DISABLED"}
@@ -111,12 +145,7 @@ async def disable(cid: str, db: AsyncSession = Depends(get_db),
 @router.delete("/{cid}")
 async def delete_connection(cid: str, db: AsyncSession = Depends(get_db),
                             user: User = Depends(get_current_user)):
-    conn = await db.get(ExternalAgentConnection, cid)
-    if not conn:
-        raise HTTPException(404, "not found")
-    # 归属校验：原先按 id 就删，任何登录用户都能删掉别家公司的外部 Agent 接入
-    from app.api.deps import assert_company_owned
-    await assert_company_owned(db, user.id, conn.company_id)
+    conn = await _get_owned_connection(db, user, cid)
     await db.delete(conn)
     await db.commit()
     return {"deleted": True}
@@ -136,9 +165,7 @@ async def execute(cid: str, data: ExecuteIn,
     V5.5 A3 审批门：公司策略开启「外部 Agent 外发」审批时，
     先建 external_agent 审批单挂起，老板批准后自动执行。
     """
-    conn = await db.get(ExternalAgentConnection, cid)
-    if not conn:
-        raise HTTPException(404, "not found")
+    conn = await _get_owned_connection(db, user, cid)
     if conn.status != ConnectionStatus.ENABLED:
         raise HTTPException(409, f"连接未启用（{conn.status.value}）")
     if await _external_send_needs_approval(db, conn.company_id):

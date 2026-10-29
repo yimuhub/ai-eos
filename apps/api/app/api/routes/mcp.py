@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import assert_company_owned, get_current_user, get_db
 from app.models.user import User
+from app.version import __version__
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 
@@ -211,7 +212,7 @@ async def mcp_rpc(data: McpCallIn, request: Request,
         return {"jsonrpc": "2.0", "id": rpc_id, "result": {
             "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "ai-eos", "version": "5.5"}}}
+            "serverInfo": {"name": "ai-eos", "version": __version__}}}
     if method == "tools/list":
         return {"jsonrpc": "2.0", "id": rpc_id,
                 "result": {"tools": TOOLS}}

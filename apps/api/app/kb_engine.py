@@ -21,7 +21,7 @@ import json
 import re
 from dataclasses import dataclass, field
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.knowledge_engine import _tokens
@@ -155,10 +155,36 @@ async def two_level_retrieve(db: AsyncSession, company_id: str,
         )
         if scope == "private" and agent_id:
             q = q.where(KBDocument.agent_id == agent_id)
-        rows = (await db.execute(q)).all()
+
+        q_tokens = set(_tokens(query))
+        # SQL 侧先收窄候选集：把查询 token 当 LIKE 条件，只取命中块再进 Python
+        # 精排。用 LOWER(content) LIKE 的写法在 SQLite / PostgreSQL 语义一致
+        # （PG 的 LIKE 区分大小写，必须显式 lower）；keywords 是 JSON 列，
+        # CAST 成文本后同样可跨方言匹配。这样不需要 FTS5/pg_trgm 之类的
+        # 方言专属扩展，也不会再把该公司全部知识块拉进内存。
+        probe_tokens = sorted(q_tokens, key=len, reverse=True)[:10]
+        candidate_limit = max(k * 20, 20)
+        rows = []
+        if probe_tokens:
+            conds = []
+            for tok in probe_tokens:
+                escaped = (tok.replace("\\", "\\\\")
+                           .replace("%", "\\%").replace("_", "\\_"))
+                pattern = f"%{escaped}%"
+                conds.append(func.lower(KBChunk.content).like(pattern, escape="\\"))
+                conds.append(func.lower(cast(KBChunk.keywords, String)).like(
+                    pattern, escape="\\"))
+            rows = (await db.execute(
+                q.where(or_(*conds)).limit(candidate_limit))).all()
+        if not rows:
+            # 回退：关键词一个都没命中（或查询没有 token）时不能直接返回空。
+            # 取有界窗口（top_k*20）继续在 Python 里打分，宁可多扫一屏，
+            # 也不让"知识库明明有内容却检索不到"。
+            rows = (await db.execute(
+                q.order_by(KBDocument.created_at.desc())
+                .limit(candidate_limit))).all()
         if not rows:
             return []
-        q_tokens = set(_tokens(query))
         scored = []
         for chunk, doc in rows:
             r_tokens = set(chunk.keywords or []) or set(_tokens(chunk.content))
@@ -167,6 +193,9 @@ async def two_level_retrieve(db: AsyncSession, company_id: str,
                 score = overlap / (len(q_tokens) ** 0.5 * len(r_tokens) ** 0.5)
                 scored.append((score, chunk, doc))
         scored.sort(key=lambda x: -x[0])
+        if not scored:
+            # 兜底：仍无 token 重叠时按候选顺序返回（score=0），保证有上下文
+            scored = [(0.0, chunk, doc) for chunk, doc in rows[:k]]
         out = []
         for score, chunk, doc in scored[:k]:
             out.append({

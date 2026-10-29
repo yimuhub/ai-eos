@@ -5,6 +5,7 @@ from sqlalchemy import select, func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import assert_agent_owned, get_current_user, get_db
+from app.core.permissions import Capability, require_company_scope
 from app.models.agent import Agent
 from app.models.company import Department
 from app.models.reflection import (AgentExperience, AgentReflection,
@@ -13,9 +14,8 @@ from app.models.reflection import (AgentExperience, AgentReflection,
 from app.models.user import User
 from app.reflection_engine import record_experience, reflect
 
-router = APIRouter(prefix="/reflection", tags=["reflection"])
-
-
+router = APIRouter(prefix="/reflection", tags=["reflection"],
+                   dependencies=[Depends(require_company_scope())])
 class ExperienceIn(BaseModel):
     agent_id: str
     title: str

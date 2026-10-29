@@ -5,15 +5,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.core.permissions import Capability, require_company_scope
 from app.learning_engine import add_growth_event
 from app.models.agent import Agent
 from app.models.learning import GrowthEventType
 from app.models.review import AgentReview, ReviewCycle, ReviewSource
 from app.models.user import User
 
-router = APIRouter(prefix="/reviews", tags=["reviews"])
-
-
+router = APIRouter(prefix="/reviews", tags=["reviews"],
+                   dependencies=[Depends(require_company_scope())])
 class ReviewIn(BaseModel):
     source: ReviewSource
     score: float                      # 0-100

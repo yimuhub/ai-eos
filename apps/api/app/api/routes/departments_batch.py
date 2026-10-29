@@ -73,6 +73,7 @@ async def batch_delete_departments(data: BatchDeleteIn,
         if not d:
             failed.append({"id": did, "reason": "不存在"})
             continue
+        dname = d.name  # 提前取值：回滚/删除后 ORM 对象过期
         try:
             async with db.begin_nested():
                 # 子部门处理
@@ -125,11 +126,14 @@ async def batch_delete_departments(data: BatchDeleteIn,
                     "WHERE CAST(department_id AS varchar) = CAST(:did AS varchar)"),
                     {"did": did})
                 await db.delete(d)
-            deleted.append({"id": did, "name": d.name})
+                # 显式 flush：本条失败在 savepoint 内回滚，不影响同批其他部门
+                await db.flush()
+            deleted.append({"id": did, "name": dname})
         except (IntegrityError, DBAPIError) as e:
+            # savepoint 已由 begin_nested 回滚；不能 rollback 外层事务，
+            # 否则此前成功删除的部门会被一并撤销，却仍报告成功。
             failed.append({"id": did,
                            "reason": f"约束冲突: {str(getattr(e, 'orig', e))[:100]}"})
-            await db.rollback()
             db.expire_all()
 
     if deleted:
@@ -138,7 +142,10 @@ async def batch_delete_departments(data: BatchDeleteIn,
                         {"count": len(deleted), "names": [x["name"] for x in deleted]})
     try:
         await db.commit()
-    except Exception:
+    except Exception as e:
         await db.rollback()
+        failed.extend({"id": x["id"], "reason": f"提交失败: {str(e)[:80]}"}
+                      for x in deleted)
+        deleted = []
 
     return {"deleted": deleted, "deleted_count": len(deleted), "failed": failed}

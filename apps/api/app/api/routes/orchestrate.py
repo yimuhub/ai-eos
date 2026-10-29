@@ -3,10 +3,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import assert_agent_owned, assert_company_owned, get_current_user
 from app.db.session import AsyncSessionLocal, get_db
 from app.models.agent import Agent, AgentStatus
-from app.models.company import Company
 from app.models.task import Task, TaskPriority, TaskStatus
 from app.orchestrator import orchestrate
 from app.services.event_system import log_event
@@ -26,11 +25,11 @@ class OrchestrateIn(BaseModel):
 async def orchestrate_task(data: OrchestrateIn,
                            db: AsyncSession = Depends(get_db),
                            user=Depends(get_current_user)):
-    c = await db.get(Company, data.company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
-    coordinator = await db.get(Agent, data.coordinator_agent_id)
-    if not coordinator:
+    await assert_company_owned(db, user.id, data.company_id)
+    # 协调者必须属于调用者且就在该公司：此前只查 agent 存在，
+    # 带别人的 coordinator_agent_id 就能驱动他家员工执行
+    coordinator = await assert_agent_owned(db, user.id, data.coordinator_agent_id)
+    if coordinator.company_id != data.company_id:
         raise HTTPException(404, "Coordinator agent not found")
 
     parent = Task(company_id=data.company_id, title=data.title,

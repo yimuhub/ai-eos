@@ -4,16 +4,30 @@ from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_agent_owned, assert_company_owned, get_current_user, get_db
 from app.core.logging_config import get_logger
 from app.factory_engine import (AgentFactoryJob, FactoryJobStatus,
                                 check_quota, generate_blueprint)
-from app.models.agent import Agent, AgentModelConfig
+from app.models.agent import Agent, AgentModelConfig, Model
 from app.models.user import User
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/factory", tags=["factory"])
+
+
+async def _owned_job(db: AsyncSession, user_id: str,
+                     job_id: str) -> AgentFactoryJob:
+    """按 job_id 取任务并校验归属；不存在或不属于调用者一律 404。
+
+    此前 6 个按 job_id 的端点都直接 db.get 后开工，知道 id 就能替
+    他人公司批准蓝图（进而以对方公司名义建 Agent / 技能 / 训练）。
+    """
+    job = await db.get(AgentFactoryJob, job_id)
+    if not job:
+        raise HTTPException(404, "factory job not found")
+    await assert_company_owned(db, user_id, job.company_id)
+    return job
 
 
 class BlueprintIn(BaseModel):
@@ -29,6 +43,8 @@ async def create_blueprint(
     user: User = Depends(get_current_user),
 ):
     """根据目标生成 Agent 蓝图（Proposal，未创建 Agent）。"""
+    # 归属校验：company_id 由调用者指定，不校验即可替他人公司建蓝图
+    await assert_company_owned(db, user.id, company_id)
     if not await check_quota(db, company_id):
         raise HTTPException(429, "今日创建配额已用尽（防无限创建）")
     try:
@@ -60,10 +76,19 @@ async def approve_job(
     user: User = Depends(get_current_user),
 ):
     """用户批准蓝图 → 创建 Agent（TESTING 状态）+ 绑定模型。"""
-    job = await db.get(AgentFactoryJob, job_id)
-    if not job or job.status != FactoryJobStatus.BLUEPRINT:
+    job = await _owned_job(db, user.id, job_id)
+    if job.status != FactoryJobStatus.BLUEPRINT:
         raise HTTPException(409, "只有 BLUEPRINT 状态可批准")
     bp = (data.blueprint if data and data.blueprint else job.blueprint) or {}
+
+    # 显式指定的模型也必须归属调用者（或为未归属的共享模型），
+    # 否则可把他人公司的模型额度挂到新建 Agent 上
+    if bind_model_id:
+        model = await db.get(Model, bind_model_id)
+        if not model:
+            raise HTTPException(404, "model not found")
+        if model.company_id is not None:
+            await assert_company_owned(db, user.id, model.company_id)
 
     # 创建真实 Agent（DISABLED=测试期不可上岗，通过测试后转 IDLE）
     agent = Agent(
@@ -76,10 +101,15 @@ async def approve_job(
     db.add(agent)
     await db.flush()
 
-    # 模型绑定：显式指定或复制公司第一个 Agent 的配置
+    # 模型绑定：显式指定或复制本公司第一个 Agent 的配置
     model_id = bind_model_id
     if not model_id:
-        mq = await db.execute(select(AgentModelConfig).limit(1))
+        # 限定在本公司内：原先 `select(AgentModelConfig).limit(1)` 会拿到
+        # 任意公司的模型，等于把别人的模型配置复制过来
+        mq = await db.execute(
+            select(AgentModelConfig)
+            .join(Agent, Agent.id == AgentModelConfig.agent_id)
+            .where(Agent.company_id == job.company_id).limit(1))
         first = mq.scalars().first()
         model_id = first.model_id if first else None
     if model_id:
@@ -177,8 +207,8 @@ async def submit_test_result(
     user: User = Depends(get_current_user),
 ):
     """提交测试任务结果：通过 → ACTIVE；不通过 → FAILED。"""
-    job = await db.get(AgentFactoryJob, job_id)
-    if not job or job.status != FactoryJobStatus.TESTING:
+    job = await _owned_job(db, user.id, job_id)
+    if job.status != FactoryJobStatus.TESTING:
         raise HTTPException(409, "只有 TESTING 状态可提交测试结果")
     agent = await db.get(Agent, job.agent_id) if job.agent_id else None
 
@@ -203,6 +233,8 @@ async def list_jobs(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # 归属校验：company_id 由调用者传入，校验后再作为过滤条件
+    await assert_company_owned(db, user.id, company_id)
     q = await db.execute(select(AgentFactoryJob).where(
         AgentFactoryJob.company_id == company_id).order_by(
         AgentFactoryJob.created_at.desc()))
@@ -221,9 +253,7 @@ async def training_detail(job_id: str,
     """培训验收数据：训练会话、学习点、提案、建议测试任务。"""
     from app.models.training import (TrainingSession, TrainingLearningPoint,
                                      TrainingProposal)
-    job = await db.get(AgentFactoryJob, job_id)
-    if not job:
-        raise HTTPException(404)
+    job = await _owned_job(db, user.id, job_id)
 
     sessions = (await db.execute(select(TrainingSession).where(
         TrainingSession.agent_id == job.agent_id).order_by(
@@ -268,8 +298,8 @@ async def review_training(job_id: str, data: ReviewIn,
                           db: AsyncSession = Depends(get_db),
                           user: User = Depends(get_current_user)):
     """老板审查培训结果：批准 → Agent 转正式（ACTIVE/IDLE）；驳回 → FAILED 重新培训。"""
-    job = await db.get(AgentFactoryJob, job_id)
-    if not job or job.status != FactoryJobStatus.TESTING:
+    job = await _owned_job(db, user.id, job_id)
+    if job.status != FactoryJobStatus.TESTING:
         raise HTTPException(409, "只有 TESTING 状态可提交验收")
     agent = await db.get(Agent, job.agent_id) if job.agent_id else None
 
@@ -308,12 +338,14 @@ async def exam_ask(job_id: str, data: AskIn,
     """验收考试：让被培训的 Agent 真实回答问题（调用其记忆/技能/知识库）。"""
     from app.kb_engine import cost_optimized_rag
     from app.model_gateway import ModelGateway
-    job = await db.get(AgentFactoryJob, job_id)
-    if not job or not job.agent_id:
+    job = await _owned_job(db, user.id, job_id)
+    if not job.agent_id:
         raise HTTPException(404)
     agent = await db.get(Agent, job.agent_id)
     if not agent:
         raise HTTPException(404, "agent missing")
+    # 验收考试会把 Agent 的记忆与知识库拼进提示词，归属必须再确认一次
+    await assert_agent_owned(db, user.id, str(agent.id))
 
     messages = [{"role": "system", "content":
         f"你是「{agent.name}」，{agent.role or '数字员工'}。这是你的岗前验收考试："

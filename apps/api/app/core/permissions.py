@@ -126,6 +126,28 @@ async def ensure_capability(db: AsyncSession, user_id: str,
     return role
 
 
+def require_company_scope(capability: Capability | str = Capability.VIEW):
+    """生成 FastAPI 依赖：**路由级**租户门禁。
+
+    与 `require_capability` 的区别：请求没带 `company_id` 时跳过而不是拒绝。
+    因为同一个 router 里常混有"不按公司取数"的端点（如公开市场检索），
+    逐端点挂容易漏，挂到 router 上则新加的端点默认被覆盖。
+
+    带 `company_id` 却无归属 → 404（不泄露"公司存在但你没权限"）。
+    """
+
+    async def _dep(request: Request, db: AsyncSession = Depends(get_db),
+                   user=Depends(get_current_user)) -> None:
+        # 从请求里取：不能用 Query 声明，否则与带 /{company_id} 路径参数的
+        # 端点冲突（FastAPI 会直接拒绝注册）。
+        company_id = (request.path_params.get("company_id")
+                      or request.query_params.get("company_id"))
+        if company_id:
+            await ensure_capability(db, user.id, company_id, capability)
+
+    return _dep
+
+
 def require_capability(capability: Capability, company_param: str = "cid"):
     """生成 FastAPI 依赖：要求当前用户在该公司拥有指定能力。
 

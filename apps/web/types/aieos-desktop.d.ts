@@ -17,6 +17,11 @@ interface AieosDesktopApi {
   // V5.3 局域网共享页「开机自启」开关（mac/win 系统登录项 · linux XDG autostart）
   getAutoLaunch: () => Promise<boolean>;
   setAutoLaunch: (on: boolean) => Promise<boolean>;
+  // V5.10 局域网共享开关：默认仅监听 127.0.0.1，开启后后端重启并绑定 0.0.0.0
+  getLanShare: () => Promise<{ enabled: boolean; host: string; port: number; repo: boolean }>;
+  setLanShare: (on: boolean) => Promise<{
+    enabled: boolean; host: string; restarted: boolean; needsRestart: boolean;
+  }>;
 }
 
 interface Window {

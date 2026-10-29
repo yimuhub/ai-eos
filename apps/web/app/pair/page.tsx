@@ -5,7 +5,7 @@
  * 全程免输密码；token 一次性、10 分钟过期，过期/已用都有明确提示。
  */
 import { useCallback, useEffect, useState } from "react";
-import { API_BASE, setToken, setRefreshToken } from "@/lib/api";
+import { ApiError, api, setToken, setRefreshToken } from "@/lib/api";
 import { useRouter } from "next/navigation";
 
 export default function PairPage() {
@@ -17,13 +17,13 @@ export default function PairPage() {
     const token = new URLSearchParams(window.location.search).get("token") || "";
     if (!token) { setState("bad"); setDetail("链接缺少配对码。请在电脑端「局域网共享」重新生成。"); return; }
     try {
-      const r = await fetch(`${API_BASE}/pair?token=***`, { method: "GET" });
-      const d = await r.json();
-      if (!r.ok || !d.access_token) {
-        setState("bad");
-        setDetail(d.detail || "配对失败，请重新生成配对码。");
-        return;
-      }
+      // 收口到 api 层（超时/错误规范化/契约校验都挂在那里）。
+      // GET /pair?token=... 与原裸 fetch 的 URL、方法、字段完全一致；
+      // 非 2xx 现在抛 ApiError，message 即后端 detail（配对码无效/已使用/已过期），
+      // 在本页内联呈现。/pair 不会返回 401，不会触发全局跳转。
+      const d = await api.get<{
+        access_token: string; refresh_token?: string; device?: { name?: string };
+      }>(`/pair?token=${encodeURIComponent(token)}`);
       setToken(d.access_token);
       if (d.refresh_token) setRefreshToken(d.refresh_token);
       setState("ok");
@@ -31,7 +31,10 @@ export default function PairPage() {
       setTimeout(() => router.replace("/"), 600);
     } catch (e: any) {
       setState("bad");
-      setDetail("连不上服务器：" + (e?.message || e));
+      // status 0 = 网络层失败/超时，保持原有"连不上服务器"语境；
+      // 其余（400/404/409/410）直接展示 api 层规范化后的后端提示。
+      if (e instanceof ApiError && !e.isNetwork) setDetail(e.message || "配对失败，请重新生成配对码。");
+      else setDetail("连不上服务器：" + (e?.message || e));
     }
   }, [router]);
 

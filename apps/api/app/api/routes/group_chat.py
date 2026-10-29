@@ -4,6 +4,7 @@
 - 后发言的 Agent 能看到先发言 Agent 的内容（互相可见，像开会）
 - 消息持久化到 group_chat_messages 表
 """
+import asyncio
 import json
 from datetime import datetime, timezone
 
@@ -123,12 +124,34 @@ WEB_SEARCH_TOOL = {
     },
 }
 
+# 群聊回复要求 200 字以内，显式 max_tokens=512 避免沿用默认 8192；
+# 单次 90s（共享 client 的默认 read=120s，这里再收紧到前端 300s 预算内），
+# 仍复用 model_gateway 的共享连接池与超时/重试机制。
+GROUP_CHAT_LLM_CONFIG = {"max_tokens": 512, "timeout": 90}
+GROUP_CHAT_CONCURRENCY = 4
+# 任务/话题描述入 prompt 前截断，防止超长需求把上下文撑爆
+GROUP_CHAT_TOPIC_LIMIT = 1200
+
+# 按公司限流：同一公司最多 GROUP_CHAT_CONCURRENCY 个群聊发言在跑
+# （多老板/多标签页同时发言时不会把模型配额打满）。单进程内有效。
+_COMPANY_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
+
+
+def _company_semaphore(company_id: str) -> asyncio.Semaphore:
+    sem = _COMPANY_SEMAPHORES.get(company_id)
+    if sem is None:
+        sem = asyncio.Semaphore(GROUP_CHAT_CONCURRENCY)
+        _COMPANY_SEMAPHORES[company_id] = sem
+    return sem
+
 
 async def _agent_speak(db, gw, agent, topic, history_lines):
     """单个 Agent 发言：知识库 + 可选 web_search + 同事发言可见。"""
     from app.kb_engine import cost_optimized_rag
     from app.public_doc_skill import get_public_doc_system_prompt
     import re as _re
+
+    topic = (topic or "").strip()[:GROUP_CHAT_TOPIC_LIMIT]
 
     messages = [{"role": "system", "content":
         f"你是「{agent.name}」，{agent.role or '数字员工'}。"
@@ -190,8 +213,8 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
             "然后对搜索结果进行总结提炼（3-5条要点）后回答。严禁凭记忆编造数据。"})
     messages.append({"role": "user", "content": topic})
 
-    llm = await gw.chat_with_agent_models_by_agent(agent, messages,
-                                                   tools=[WEB_SEARCH_TOOL])
+    llm = await gw.chat_with_agent_models_by_agent(
+        agent, messages, tools=[WEB_SEARCH_TOOL], config=GROUP_CHAT_LLM_CONFIG)
     content = (llm.get("content") or "").strip()
     # agnes-2.5-flash 可能返回空 content 但有 tool_calls，走下方工具调用分支
     if not content and not (llm.get("tool_calls") or []):
@@ -236,8 +259,9 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
                                         + "\n\n请基于以上搜索结果总结提炼（3-5条要点），从你的专业角度回答。"})
             # 多轮工具调用循环（最多3轮），直到模型给出总结性回答
             for _ in range(3):
-                second = await gw.chat_with_agent_models_by_agent(agent, messages,
-                                                                   tools=[WEB_SEARCH_TOOL])
+                second = await gw.chat_with_agent_models_by_agent(
+                    agent, messages, tools=[WEB_SEARCH_TOOL],
+                    config=GROUP_CHAT_LLM_CONFIG)
                 s_content = (second.get("content") or "").strip()
                 s_struct = second.get("tool_calls") or []
                 s_text = _parse_text_tool_calls(s_content)
@@ -362,6 +386,8 @@ async def group_chat(scope: str, scope_id: str, data: GroupChatIn,
         GroupChatMessage.created_at))).scalars().all()
     history = [(m.agent_name or ("我" if m.role == "boss" else "同事"),
                 (m.content or {}).get("text", "")) for m in prev]
+    # 先把老板消息落库，避免整个群聊期间（含多次 LLM 调用）一直持有写事务
+    await db.commit()
 
     # 3. 依次发言（后说的能看到先说的）；未配置模型的回退全局默认模型
     from app.models.agent import AgentModelConfig
@@ -377,11 +403,16 @@ async def group_chat(scope: str, scope_id: str, data: GroupChatIn,
             await db.flush()
 
     replies = []
+    sem = _company_semaphore(company_id)
     for ag in agents:
         try:
             await _ensure_model(ag)
-            out = await _agent_speak(db, gw, ag, data.message,
-                                     [f"{n}: {t}" for n, t in history])
+            # 模型配置（及此前发言）先落库再调 LLM，避免写事务跨越网络等待
+            await db.commit()
+            # 按公司限制同时进行的群聊 LLM 调用数（含工具续轮）
+            async with sem:
+                out = await _agent_speak(db, gw, ag, data.message,
+                                         [f"{n}: {t}" for n, t in history])
         except Exception as e:
             out = {"text": f"（{ag.name} 发言失败：{e}）", "search_used": False}
         msg = GroupChatMessage(
@@ -389,9 +420,10 @@ async def group_chat(scope: str, scope_id: str, data: GroupChatIn,
             scope_id=scope_id, agent_id=str(ag.id), agent_name=ag.name,
             role="agent", content=dict(out))
         db.add(msg)
+        # 每个 Agent 的发言单独提交：其余 Agent 立刻可见，也缩短事务
+        await db.commit()
         replies.append({"agent_id": str(ag.id), "agent_name": ag.name, **out})
         history.append((ag.name, out["text"]))
-    await db.commit()
     return {"replies": replies}
 
 

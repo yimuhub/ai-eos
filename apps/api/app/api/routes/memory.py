@@ -4,13 +4,13 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.core.permissions import Capability, require_company_scope
 from app.memory_engine import cleanup_expired, forget, recall, remember
 from app.models.memory import MemoryType
 from app.models.user import User
 
-router = APIRouter(prefix="/memory", tags=["memory"])
-
-
+router = APIRouter(prefix="/memory", tags=["memory"],
+                   dependencies=[Depends(require_company_scope())])
 class RememberIn(BaseModel):
     agent_id: str
     memory_type: MemoryType

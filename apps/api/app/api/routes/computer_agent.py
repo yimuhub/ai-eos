@@ -18,7 +18,12 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import assert_company_owned, get_current_user, get_db
+from app.api.deps import (
+    assert_agent_owned,
+    assert_company_owned,
+    get_current_user,
+    get_db,
+)
 from app.computer_agent import ComputerActionLog, ComputerPermission
 from app.computer_real import EXTENDED_CAPABILITIES
 from app.core.logging_config import get_logger
@@ -118,7 +123,14 @@ async def list_capabilities(
 # V5.5 P0 审批门：高危本机能力。公司在「干预中心」策略里勾选
 # "computer_command"（approval_actions）后，这些操作先建审批单，
 # 老板批准后才真正执行（见 intervention /requests/{id}/decide）。
-HIGH_RISK_CAPABILITIES = {"run_shell", "run_write", "run_app"}
+#
+# 注意：type_text / click / key 同样是高危能力。它们通过 AppleScript
+# 向前台应用注入键鼠事件——先 `open -a Terminal` 再 type_text 就等价于
+# 主机命令执行，完全绕开 core/sandbox.py 的 shell 白名单。
+HIGH_RISK_CAPABILITIES = {
+    "run_shell", "run_write", "run_app",
+    "type_text", "click", "key",
+}
 
 
 async def _high_risk_needs_approval(db: AsyncSession, company_id: str) -> bool:
@@ -140,6 +152,14 @@ async def execute_action(
 ):
     """Agent 请求执行本机操作：审批门 → 检查授权 → 真实执行 → 审计落库。"""
     await assert_company_owned(db, user.id, company_id)
+
+    # Agent 归属校验：此前只要知道 agent_id 就能把它写进审批单 / 审计日志，
+    # 可跨公司冒用他人 Agent 的身份发起主机操作。这里同时要求该 Agent
+    # 属于当前 company_id，避免「自己的 Agent + 别人的公司」错配。
+    if agent_id:
+        agent = await assert_agent_owned(db, user.id, agent_id)
+        if agent.company_id != company_id:
+            raise HTTPException(404, "Agent not found")
 
     # ---- V5.5 P0：高危操作审批门 ----
     if data.action_type in HIGH_RISK_CAPABILITIES and await _high_risk_needs_approval(db, company_id):

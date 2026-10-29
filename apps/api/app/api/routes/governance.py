@@ -7,8 +7,10 @@ from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.core.permissions import Capability, require_company_scope
 from app.learning_engine import add_growth_event
 from app.models.agent import Agent
+from app.models.company import Company
 from app.models.learning import GrowthEventType
 from app.models.p3_governance import (AgentSandbox, AgentVersion,
                                       AutonomousExecutionLog,
@@ -18,9 +20,8 @@ from app.models.p3_governance import (AgentSandbox, AgentVersion,
                                       SelfImprovementCase)
 from app.models.user import User
 
-router = APIRouter(prefix="/governance", tags=["governance"])
-
-
+router = APIRouter(prefix="/governance", tags=["governance"],
+                   dependencies=[Depends(require_company_scope())])
 def _id():
     return str(uuid.uuid4())
 
@@ -329,8 +330,11 @@ async def list_templates(company_id: str | None = Query(None),
                     "departments": len(t["departments"]),
                     "agents": sum(len(d["agents"]) for d in t["departments"])})
     if company_id:
+        # EnterpriseTemplate 是全局目录（无 company_id 字段）：模板本身不含租户
+        # 数据，按公司过滤既无意义、也会因属性不存在直接 500。租户边界由
+        # router 级 require_company_scope 负责。
         q = await db.execute(select(EnterpriseTemplate).where(
-            EnterpriseTemplate.company_id == company_id))
+            EnterpriseTemplate.is_builtin.is_(False)))
         out += [{"key": e.key, "name": e.name, "builtin": False}
                 for e in q.scalars().all()]
     return out
@@ -352,6 +356,10 @@ async def create_from_template(
     tpl = BUILTIN_TEMPLATES.get(data.template_key)
     if not tpl:
         raise HTTPException(404, "template not found")
+    # owner_company_id 来自调用方：不查库就等于允许往他人公司塞员工
+    owned = await db.get(Company, owner_company_id)
+    if not owned or owned.owner_id != user.id:
+        raise HTTPException(404, "Company not found")
 
     job = CompanyCreationJob(id=_id(),
                              company_id=owner_company_id,

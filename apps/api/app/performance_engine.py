@@ -5,11 +5,14 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging_config import get_logger
 from app.models.agent import Agent
 from app.models.collaboration import AgentMessage
 from app.models.meeting import MeetingParticipant
 from app.models.performance import PerformanceSnapshot
 from app.models.task import AgentExecution
+
+logger = get_logger(__name__)
 
 
 def _now():
@@ -70,8 +73,10 @@ async def compute_agent_metrics(db: AsyncSession, agent_id: str,
         if since:
             c_q = c_q.where(TokenUsage.created_at >= since)
         cost_sum = float((await db.execute(c_q)).scalar() or 0.0)
-    except Exception:
-        pass
+    except Exception as e:
+        # 成本聚合失败不阻断绩效计算，但 cost/ROI 会是 0，必须留痕
+        logger.warning("Agent %s 成本聚合失败（cost/ROI 按 0 计）：%s: %s",
+                       agent_id, type(e).__name__, e, exc_info=True)
     cost_per_task = round(cost_sum / completed, 4) if completed else (
         round(cost_sum / total, 4) if total else 0.0)
     # ROI = (产出价值 − 成本) / 成本；产出价值按完成任务数 × 50¥（≈0.5h 人工基准）

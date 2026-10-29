@@ -3,6 +3,7 @@ import io
 import json
 import uuid
 import zipfile
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -10,13 +11,15 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_company_owned, get_current_user, get_db
+from app.core.logging_config import get_logger
 from app.models.artifact import (ALLOWED_TRANSITIONS, Artifact, ArtifactStatus,
                                  ArtifactVersion, can_transition)
 from app.models.company import Company
 from app.models.user import User
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
+logger = get_logger(__name__)
 
 
 class ArtifactCreate(BaseModel):
@@ -46,6 +49,7 @@ async def create_artifact(
     user: User = Depends(get_current_user),
 ):
     """创建成果并写入 v1 草稿。"""
+    await assert_company_owned(db, user.id, company_id)
     art = Artifact(id=str(uuid.uuid4()), company_id=company_id,
                    project_id=data.project_id, name=data.name,
                    artifact_type=data.artifact_type, current_version=1,
@@ -68,6 +72,8 @@ async def list_artifacts(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # 读路径同样要归属校验（此前只有写路径有，带别人的 company_id 即可列其成果）
+    await assert_company_owned(db, user.id, company_id)
     q = select(Artifact).where(Artifact.company_id == company_id)
     if project_id:
         q = q.where(Artifact.project_id == project_id)
@@ -85,9 +91,7 @@ async def get_artifact(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    art = await db.get(Artifact, artifact_id)
-    if not art:
-        raise HTTPException(404, "Artifact not found")
+    art = await _owned_artifact(artifact_id, db, user)
     vq = await db.execute(select(ArtifactVersion).where(
         ArtifactVersion.artifact_id == artifact_id).order_by(
         ArtifactVersion.version.desc()))
@@ -112,6 +116,8 @@ async def get_version_content(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # 版本全文是最敏感的读取面：先做成果归属校验再取版本
+    await _owned_artifact(artifact_id, db, user)
     vq = await db.execute(select(ArtifactVersion).where(
         ArtifactVersion.artifact_id == artifact_id,
         ArtifactVersion.version == version))
@@ -130,9 +136,7 @@ async def submit_new_version(
     user: User = Depends(get_current_user),
 ):
     """提交新版本（草稿或被驳回后重新提交）。"""
-    art = await db.get(Artifact, artifact_id)
-    if not art:
-        raise HTTPException(404, "Artifact not found")
+    art = await _owned_artifact(artifact_id, db, user)
     if art.status not in (ArtifactStatus.DRAFT, ArtifactStatus.REJECTED):
         raise HTTPException(409, f"Cannot submit new version in status {art.status.value}")
 
@@ -164,9 +168,7 @@ async def submit_for_review(
     user: User = Depends(get_current_user),
 ):
     """提交审核：DRAFT/REJECTED → IN_REVIEW。"""
-    art = await db.get(Artifact, artifact_id)
-    if not art:
-        raise HTTPException(404, "Artifact not found")
+    art = await _owned_artifact(artifact_id, db, user)
     if not can_transition(art.status, ArtifactStatus.IN_REVIEW):
         raise HTTPException(409, f"Cannot submit from {art.status.value}")
 
@@ -197,9 +199,7 @@ async def review_artifact(
     user: User = Depends(get_current_user),
 ):
     """审核：approve / reject / withdraw。"""
-    art = await db.get(Artifact, artifact_id)
-    if not art:
-        raise HTTPException(404, "Artifact not found")
+    art = await _owned_artifact(artifact_id, db, user)
 
     decision_map = {
         "approve": ArtifactStatus.APPROVED,
@@ -240,6 +240,27 @@ async def _owned_artifact(artifact_id: str, db: AsyncSession, user: User) -> Art
     return art
 
 
+async def _ensure_published_at_column(db: AsyncSession) -> None:  # pragma: no cover
+    """兼容旧库：published_at 已进模型，启动时 ensure_columns/Alembic 会补列。
+
+    仍保留一次幂等探测，防止"发布早于迁移"的老库把 SQL 打死。
+    """
+    from sqlalchemy import inspect, text
+
+    def _missing(sync_sess) -> bool:
+        conn = sync_sess.connection()
+        cols = {c["name"] for c in inspect(conn).get_columns("artifacts")}
+        return "published_at" not in cols
+
+    if await db.run_sync(_missing):
+        dialect = db.get_bind().dialect.name
+        col_type = "TIMESTAMP" if dialect == "postgresql" else "DATETIME"
+        await db.execute(text(
+            f"ALTER TABLE artifacts ADD COLUMN published_at {col_type}"))
+        await db.commit()
+        logger.warning("[artifacts] 已为旧库幂等补列 artifacts.published_at")
+
+
 @router.post("/{artifact_id}/publish")
 async def publish_artifact(
     artifact_id: str,
@@ -259,14 +280,12 @@ async def publish_artifact(
         raise HTTPException(409, f"只有审核通过（APPROVED）的成果可以发布，当前：{art.status.value}")
 
     from sqlalchemy import text
+    await _ensure_published_at_column(db)
     # 已发布 → 幂等返回
-    row = (await db.execute(
-        text("SELECT published_at FROM artifacts WHERE id = :id"),
-        {"id": artifact_id})).first()
-    if row and row[0]:
-        return {"id": artifact_id, "published_at": str(row[0]), "already": True}
+    if art.published_at:
+        return {"id": artifact_id, "published_at": str(art.published_at),
+                "already": True}
 
-    needs_approval = False
     try:
         from app.models.intervention import InterventionPolicy
         pol = (await db.execute(
@@ -274,8 +293,12 @@ async def publish_artifact(
                 InterventionPolicy.company_id == art.company_id,
                 InterventionPolicy.level >= 1))).scalars().first()
         needs_approval = bool(pol and "artifact_publish" in (pol.approval_actions or []))
-    except Exception:
-        needs_approval = False
+    except Exception as e:  # noqa: BLE001
+        # 读不到策略时**默认需要审批**：宁可多一道确认，也不能因为
+        # 查询失败就把"成果离开内网"这个动作静默放行（fail-closed）。
+        needs_approval = True
+        logger.warning("[artifacts] 读取公司审批策略失败，按需要审批处理：%s", e,
+                       exc_info=True)
 
     if needs_approval:
         from app.models.intervention import ApprovalRequest
@@ -289,11 +312,16 @@ async def publish_artifact(
         return {"status": "pending_approval", "approval_id": req.id,
                 "message": "发布需老板二次确认（交付流水线三分离）"}
 
+    # SQLite 没有 NOW() 函数（实测 OperationalError: no such function: NOW）。
+    # 改为绑定参数；写入 naive UTC，与 models/base.py 的 DateTime(timezone=True)
+    # 在 SQLite 下的存储格式（以及本仓库 _now()/decided_at 的写法）保持一致，
+    # 避免 aware datetime 带来 '+00:00' 后缀导致与 created_at 不可比。
+    published_at = datetime.now(timezone.utc).replace(tzinfo=None)
     await db.execute(
-        text("UPDATE artifacts SET published_at = NOW() WHERE id = :id"),
-        {"id": artifact_id})
+        text("UPDATE artifacts SET published_at = :now WHERE id = :id"),
+        {"id": artifact_id, "now": published_at})
     await db.commit()
-    return {"id": artifact_id, "published_at": str(row[0] or "now"),
+    return {"id": artifact_id, "published_at": str(published_at),
             "message": "已发布：交付物可对外交付"}
 
 
@@ -323,9 +351,11 @@ async def decide_publish(
     req.status = "APPROVED" if data.decision == "approve" else "REJECTED"
     req.decided_by = user.id
     if data.decision == "approve":
+        await _ensure_published_at_column(db)
         await db.execute(
-            text("UPDATE artifacts SET published_at = NOW() WHERE id = :id"),
-            {"id": artifact_id})
+            text("UPDATE artifacts SET published_at = :now WHERE id = :id"),
+            {"id": artifact_id,
+             "now": datetime.now(timezone.utc).replace(tzinfo=None)})
     await db.commit()
     return {"id": artifact_id, "decision": data.decision,
             "published": data.decision == "approve"}

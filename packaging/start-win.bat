@@ -14,6 +14,10 @@ set PYTHONUNBUFFERED=1
 set "DB_PATH=%WORK_DIR%data\aieos.db"
 set "DB_PATH=%DB_PATH:\=/%"
 set "DATABASE_URL=sqlite+aiosqlite:///%DB_PATH%"
+:: 密钥引导：JWT_SECRET 留空时后端会自动生成随机密钥并落盘到这里。
+:: 显式指定路径，避免 uvicorn 的工作目录（apps\api）把密钥写进包外。
+:: 备份 data\ 时请连同该文件一起备份：丢了 = 所有登录态失效。
+set "AIEOS_JWT_SECRET_FILE=%WORK_DIR%data\jwt_secret.key"
 set NEXT_PUBLIC_API_URL=http://localhost:%API_PORT%
 set "API_LOG=%WORK_DIR%logs\api.log"
 set "FRONT_LOG=%WORK_DIR%logs\front.log"

@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import assert_agent_owned, assert_company_owned, get_current_user
 from app.agent_runtime import pause_execution, run_agent_on_task, resume_execution, utcnow_iso
 from app.core.logging_config import get_logger
 from app.db.session import AsyncSessionLocal, get_db
@@ -61,9 +61,13 @@ async def list_tasks(company_id: str | None = None, status: str | None = None,
 @router.post("", status_code=201)
 async def create_task(data: TaskIn, db: AsyncSession = Depends(get_db),
                       user=Depends(get_current_user)):
-    c = await db.get(Company, data.company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
+    await assert_company_owned(db, user.id, data.company_id)
+    # 被指派的员工也必须属于该公司（且属于调用者）：此前只校验 company，
+    # 带他人公司的 agent_id 即可把任务挂到别家员工身上
+    if data.assigned_agent_id:
+        agent = await assert_agent_owned(db, user.id, data.assigned_agent_id)
+        if agent.company_id != data.company_id:
+            raise HTTPException(404, "Agent not found")
     payload = data.model_dump()
     payload.pop("priority", None)
     t = Task(**payload, status=TaskStatus.TODO,
@@ -89,7 +93,8 @@ async def get_task(tid: str, db: AsyncSession = Depends(get_db),
     execs = await db.execute(select(AgentExecution).where(AgentExecution.task_id == tid))
     d["executions"] = [
         {"id": e.id, "agent_id": e.agent_id, "status": e.status,
-         "output": e.output, "error": e.error}
+         "output": e.output, "error": e.error,
+         "tools_used": (e.metadata_json or {}).get("tools_used") or []}
         for e in execs.scalars()]
     events = []
     from app.models.task import TaskEvent as TE
@@ -105,20 +110,70 @@ async def get_task(tid: str, db: AsyncSession = Depends(get_db),
     return d
 
 
+@router.get("/{tid}/summary")
+async def get_task_summary(tid: str, db: AsyncSession = Depends(get_db),
+                           user=Depends(get_current_user)):
+    """轮询专用轻量视图：去掉 result 全文，execution 输出截断到 2KB。
+
+    归属校验直接复用 `_task_owned`（与 GET /tasks/{id} 完全同一条守卫），
+    避免两套校验逻辑漂移。
+    """
+    t = await _task_owned(db, user.id, tid)
+    # Task 全列里唯一可能上万字的是 result；summary 不返回它（首屏详情已拉过）
+    d = {c.key: getattr(t, c.key) for c in t.__table__.columns if c.key != "result"}
+
+    subs = await db.execute(select(Task.id).where(Task.parent_task_id == tid))
+    d["subtasks"] = list(subs.scalars())
+
+    execs = (await db.execute(select(AgentExecution).where(
+        AgentExecution.task_id == tid).order_by(AgentExecution.created_at))).scalars().all()
+    output_limit = 2048
+    d["executions"] = [
+        {"id": e.id, "agent_id": e.agent_id, "status": e.status,
+         "output": (e.output or "")[:output_limit] if e.output else e.output,
+         "error": (e.error or "")[:output_limit] if e.error else e.error,
+         "output_truncated": bool(e.output and len(e.output) > output_limit),
+         "tools_used": (e.metadata_json or {}).get("tools_used") or []}
+        for e in execs]
+    d["executions_total"] = len(execs)
+
+    from app.models.task import TaskEvent as TE
+    # 事件流只保留最近 100 条（按时间正序回传，前端直接渲染）
+    ev_rows = (await db.execute(
+        select(TE).where(TE.task_id == tid)
+        .order_by(TE.created_at.desc()).limit(100))).scalars().all()
+    d["events"] = [
+        {"type": ev.event_type.value, "actor_type": ev.actor_type,
+         "payload": ev.payload, "at": str(ev.created_at)}
+        for ev in reversed(ev_rows)]
+
+    inter = await db.execute(select(Intervention).where(Intervention.task_id == tid))
+    d["interventions"] = [
+        {"id": i.id, "type": i.type, "content": i.content, "status": i.status}
+        for i in inter.scalars()]
+    return d
+
+
 def _run_in_background(task_id: str, agent_id: str):
     """Run agent in a worker thread with a fresh engine (asyncpg is loop-bound)."""
     import app.background_jobs as background_jobs
 
     async def _on_timeout(session, timeout_s: float):
         # 超时先写事件告知用户（事件先落库，避免被回滚吞掉），再标 FAILED
+        from sqlalchemy import update as _update
+
         from app.models.task import TaskStatus as TS
         await log_event(session, "task.timeout", "task", task_id,
                         "system", None,
                         {"agent_id": agent_id, "timeout_s": timeout_s,
                          "hint": "如需更长执行时间，可调大环境变量 AIEOS_TASK_TIMEOUT_S"})
-        t = await session.get(Task, task_id)
-        if t and t.status == TS.RUNNING:
-            t.status = TS.FAILED
+        # CAS：只有仍处于 RUNNING 才落 FAILED，不覆盖期间被用户取消/暂停的状态
+        res = await session.execute(
+            _update(Task).where(Task.id == task_id, Task.status == TS.RUNNING)
+            .values(status=TS.FAILED)
+            .execution_options(synchronize_session=False))
+        if res.rowcount != 1:
+            logger.info("任务超时但状态已被并发修改（未标 FAILED）task=%s", task_id)
         await session.commit()
 
     async def _job(session):
@@ -128,8 +183,15 @@ def _run_in_background(task_id: str, agent_id: str):
         try:
             await run_agent_on_task(session, agent, task, actor_type="system")
             if task.status != TS.COMPLETED:
-                await transition(session, task, TS.COMPLETED,
-                                 actor_type="agent", actor_id=agent_id)
+                try:
+                    await transition(session, task, TS.COMPLETED,
+                                     actor_type="agent", actor_id=agent_id)
+                except IllegalTransition as conflict:
+                    # 执行期间任务被老板取消/暂停：尊重最新状态，不硬转 COMPLETED。
+                    # 仍把执行结果提交落库（证据保留），但不改写任务状态。
+                    logger.info("任务状态已被并发修改，不再置 COMPLETED task=%s: %s",
+                                task_id, conflict)
+                    await session.commit()
             else:
                 await session.commit()
         except Exception as exc:
@@ -159,7 +221,9 @@ def _run_in_background(task_id: str, agent_id: str):
                 logger.error("任务失败状态落库失败 task=%s: %s",
                              task_id, mark_err, exc_info=True)
 
-    background_jobs.submit_async(_job, on_timeout=_on_timeout)
+    # 返回投递结果：QUEUE_FULL 时调用方（task_runner）要把任务退回 TODO，
+    # 否则会留下"RUNNING 但没有 worker 在跑"的僵尸行。
+    return background_jobs.submit_async(_job, on_timeout=_on_timeout)
 
 
 @router.post("/{tid}/start")
@@ -168,6 +232,11 @@ async def start_task(tid: str, background: BackgroundTasks,
     t = await _task_owned(db, user.id, tid)
     if not t.assigned_agent_id:
         raise HTTPException(400, "Task has no assigned agent")
+    # 先结束只读事务（此处无待写数据）：SQLite/WAL 下"读快照 → 升级写"会直接
+    # SQLITE_BUSY_SNAPSHOT，先 commit 让下面的抢占从一个干净写事务开始。
+    await db.commit()
+    # CAS 抢占：双击/重试/双端并发时只有一个请求能把 TODO/PAUSED 改成 RUNNING，
+    # 也就只有一个请求会 add_task(_run_in_background) —— 不会重复执行、重复计费。
     try:
         await transition(db, t, TaskStatus.RUNNING, "user", user.id)
     except IllegalTransition as e:
@@ -180,6 +249,7 @@ async def start_task(tid: str, background: BackgroundTasks,
 async def pause_task(tid: str, db: AsyncSession = Depends(get_db),
                      user=Depends(get_current_user)):
     t = await _task_owned(db, user.id, tid)
+    await db.commit()
     try:
         await transition(db, t, TaskStatus.PAUSED, "user", user.id)
     except IllegalTransition as e:
@@ -196,6 +266,9 @@ async def pause_task(tid: str, db: AsyncSession = Depends(get_db),
 async def resume_task(tid: str, db: AsyncSession = Depends(get_db),
                       user=Depends(get_current_user)):
     t = await _task_owned(db, user.id, tid)
+    await db.commit()
+    # 并发点击「继续」时只有一次能 PAUSED→RUNNING 成功；resume_execution
+    # 会提交新的后台执行，所以必须由 CAS 保证只提交一次。
     try:
         await transition(db, t, TaskStatus.RUNNING, "user", user.id)
     except IllegalTransition as e:
@@ -224,26 +297,28 @@ async def takeover_task(tid: str, data: InterventionIn,
     t = await _task_owned(db, user.id, tid)
     if t.status not in (TaskStatus.RUNNING, TaskStatus.PLANNING):
         raise HTTPException(409, f"只有执行中的任务可以接管，当前状态：{t.status.value}")
-    # 1) 暂停所有 running executions（写 execution 检查点保留现场）
+    note = (data.content or "老板接管：按最新要求继续").strip()
+    await db.commit()
+    # 1) 先抢占"接管权"：RUNNING/PLANNING → PAUSED 是 CAS，双击接管只有一次成功，
+    #    另一次 409 —— 否则会写两份 human_takeover 检查点、重复暂停。
+    try:
+        await transition(db, t, TaskStatus.PAUSED, "user", user.id,
+                         payload={"takeover": note[:200]})
+    except IllegalTransition as e:
+        raise HTTPException(409, str(e))
+    # 2) 暂停所有 running executions（写 execution 检查点保留现场）
     q = await db.execute(select(AgentExecution).where(
         AgentExecution.task_id == tid, AgentExecution.status == "running"))
     execs = q.scalars().all()
     for e in execs:
         await pause_execution(db, e)
-    # 2) 每个被暂停的执行写 human_takeover 检查点（恢复时取出指令注入）
+    # 3) 每个被暂停的执行写 human_takeover 检查点（恢复时取出指令注入）
     from app.models.task import ExecutionCheckpoint
-    note = (data.content or "老板接管：按最新要求继续").strip()
     for e in execs:
         db.add(ExecutionCheckpoint(
             execution_id=e.id, checkpoint_type="human_takeover",
             step_index=3,
             context_snapshot={"note": note[:2000], "taken_by": user.id}))
-    # 3) 任务进 PAUSED
-    if t.status == TaskStatus.RUNNING:
-        await transition(db, t, TaskStatus.PAUSED, "user", user.id,
-                         payload={"takeover": note[:200]})
-    else:
-        t.status = TaskStatus.PAUSED
     # 4) 干预留痕
     iv = Intervention(task_id=tid, user_id=user.id, type="TAKEOVER",
                      content=note, status="applied")
@@ -272,7 +347,12 @@ async def resolve_takeover(tid: str, data: InterventionIn,
                 execution_id=e.id, checkpoint_type="human_takeover",
                 step_index=4,
                 context_snapshot={"note": data.content[:2000], "taken_by": user.id}))
-    await transition(db, t, TaskStatus.RUNNING, "user", user.id)
+    await db.commit()
+    # CAS：并发解除接管只有一个请求能把 PAUSED 翻回 RUNNING，也就只会提交一次续跑
+    try:
+        await transition(db, t, TaskStatus.RUNNING, "user", user.id)
+    except IllegalTransition as e:
+        raise HTTPException(409, str(e))
     q = await db.execute(select(AgentExecution).where(
         AgentExecution.task_id == tid, AgentExecution.status == "paused"))
     for e in q.scalars():
@@ -292,6 +372,9 @@ async def retry_task(tid: str, background: BackgroundTasks,
         raise HTTPException(409, f"只有 FAILED 状态的任务可以重试，当前状态：{t.status.value}")
     if not t.assigned_agent_id:
         raise HTTPException(400, "Task has no assigned agent")
+    await db.commit()
+    # 第一步 FAILED→PLANNING 就是抢占点：并发重试只有一个请求能成功，
+    # 保证后台执行只被提交一次（重复提交=重复计费）。
     try:
         await transition(db, t, TaskStatus.PLANNING, "user", user.id)
         await transition(db, t, TaskStatus.RUNNING, "user", user.id)
@@ -305,6 +388,7 @@ async def retry_task(tid: str, background: BackgroundTasks,
 async def cancel_task(tid: str, reason: str | None = None,
                       db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     t = await _task_owned(db, user.id, tid)
+    await db.commit()
     try:
         await transition(db, t, TaskStatus.CANCELLED, "user", user.id,
                          payload={"reason": reason})
@@ -342,6 +426,10 @@ async def add_intervention(tid: str, data: InterventionIn,
         t.priority = TaskPriority(data.new_priority)
         applied["priority"] = data.new_priority
     if data.new_agent_id and data.type == "AGENT_CHANGE":
+        # 换负责人同样要校验 agent 归属，且必须与任务同公司
+        agent = await assert_agent_owned(db, user.id, data.new_agent_id)
+        if agent.company_id != t.company_id:
+            raise HTTPException(404, "Agent not found")
         t.assigned_agent_id = data.new_agent_id
         applied["assigned_agent_id"] = data.new_agent_id
     await db.commit()
@@ -529,6 +617,11 @@ async def patch_task(tid: str, data: TaskPatchIn,
     t = await _task_owned(db, user.id, tid)
     changes = {}
     if "assigned_agent_id" in data.model_fields_set:
+        if data.assigned_agent_id:
+            # 换负责人需校验 agent 归属，且必须与任务同公司
+            agent = await assert_agent_owned(db, user.id, data.assigned_agent_id)
+            if agent.company_id != t.company_id:
+                raise HTTPException(404, "Agent not found")
         t.assigned_agent_id = data.assigned_agent_id
         changes["assigned_agent_id"] = data.assigned_agent_id
     if data.priority is not None:

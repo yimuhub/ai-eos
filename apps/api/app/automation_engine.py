@@ -87,6 +87,10 @@ async def _execute_step(db: AsyncSession, company_id: str, step: dict,
 
     if stype == "call_webhook":
         import httpx
+
+        from app.core.net_guard import OutboundURLRejected, assert_peer_is_safe, \
+            validate_outbound_url_async
+
         url = (params.get("url") or "").strip()
         if not url:
             raise ValueError("call_webhook 需要 params.url")
@@ -97,14 +101,33 @@ async def _execute_step(db: AsyncSession, company_id: str, step: dict,
             timeout = float(params.get("timeout_s") or 30)
         except (TypeError, ValueError):
             timeout = 30.0
+        # URL 由用户配置，属于不可信输入：拦内网/元数据地址，挡 SSRF。
+        # 连接建立后再复核真实对端，堵 DNS rebinding。
+        try:
+            safe_url = await validate_outbound_url_async(url)
+        except OutboundURLRejected as exc:
+            raise ValueError(f"call_webhook 地址被拒绝：{exc}") from exc
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.request(method, url,
-                                        headers=params.get("headers"),
-                                        json=params.get("payload"))
-        # 非 2xx 视为步骤失败，走 on_failure/重试语义，而不是静默成功
-        resp.raise_for_status()
-        return {"status_code": resp.status_code,
-                "body": resp.text[:2000]}
+            async with client.stream(method, safe_url,
+                                     headers=params.get("headers"),
+                                     json=params.get("payload")) as resp:
+                stream = resp.extensions.get("network_stream")
+                peer = None
+                if stream is not None:
+                    try:
+                        peer = stream.get_extra_info("server_addr")
+                    except Exception:
+                        peer = None
+                if peer:
+                    try:
+                        assert_peer_is_safe(str(peer[0]))
+                    except OutboundURLRejected as exc:
+                        raise ValueError(
+                            f"call_webhook 实际连到了不允许的地址：{exc}") from exc
+                await resp.aread()
+                # 非 2xx 视为步骤失败，走 on_failure/重试语义，而不是静默成功
+                resp.raise_for_status()
+                return {"status_code": resp.status_code, "body": resp.text[:2000]}
 
     if stype == "update_task":
         from app.models.task import Task, TaskPriority, TaskStatus

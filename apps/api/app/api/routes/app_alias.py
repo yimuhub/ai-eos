@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, get_current_user
+from app.api.deps import assert_company_owned, get_db, get_current_user
 from app.app_registry import scan_apps, get_platform, build_launch_command, match_app
 from app.models.app_alias import AppAliasRule
 from app.models.user import User
@@ -61,6 +61,8 @@ async def get_platform_info(company_id: str = Query(...)):
 async def list_installed(company_id: str = Query(...),
                          user: Annotated[User, Depends(get_current_user)] = None,
                          db: AsyncSession = Depends(get_db)):
+    # 归属校验：此前的别名规则会覆盖本机应用路径，读他人公司 = 拿到对方路径
+    await assert_company_owned(db, user.id, company_id)
     rows = (await db.execute(
         select(AppAliasRule).where(AppAliasRule.company_id == company_id)
     )).scalars().all()
@@ -78,6 +80,7 @@ async def list_installed(company_id: str = Query(...),
 async def list_rules(company_id: str = Query(...),
                      user: Annotated[User, Depends(get_current_user)] = None,
                      db: AsyncSession = Depends(get_db)):
+    await assert_company_owned(db, user.id, company_id)
     rows = (await db.execute(
         select(AppAliasRule).where(AppAliasRule.company_id == company_id)
         .order_by(AppAliasRule.created_at.desc())
@@ -89,6 +92,7 @@ async def list_rules(company_id: str = Query(...),
 async def create_rule(data: AliasIn, company_id: str = Query(...),
                       user: Annotated[User, Depends(get_current_user)] = None,
                       db: AsyncSession = Depends(get_db)):
+    await assert_company_owned(db, user.id, company_id)
     alias = data.alias.strip().lower()
     if not alias:
         raise HTTPException(400, "口语词不能为空")
@@ -135,6 +139,7 @@ async def match_intent(data: dict, company_id: str = Query(...),
     text = (data.get("text") or "").strip()
     if not text:
         raise HTTPException(400, "empty text")
+    await assert_company_owned(db, user.id, company_id)
     rules = (await db.execute(select(AppAliasRule).where(
         AppAliasRule.company_id == company_id,
     ))).scalars().all()
@@ -158,6 +163,7 @@ async def run_app(data: dict, company_id: str = Query(...),
     rule_id = data.get("rule_id")
     if not text and not rule_id:
         raise HTTPException(400, "empty request")
+    await assert_company_owned(db, user.id, company_id)
     if rule_id:
         r = await db.get(AppAliasRule, rule_id)
         if not r or r.company_id != company_id:

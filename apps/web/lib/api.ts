@@ -12,6 +12,11 @@
 // 4. **全局错误广播**：失败时派发 `aieos-api-error` 事件，
 //    由全局 Toast 统一提示——避免"点了没反应"。
 // 5. **类型化**：api.get<T>() 支持泛型，逐步替代 any。
+// 6. **可取消 + 认证端点豁免跳转**：RequestOptions 支持外部 `signal`（与内部
+//    超时组合，页面卸载/轮询竞态时可 abort 在途请求）；`/auth/login`、
+//    `/auth/register`、`/auth/refresh` 的 401 只抛错给调用方就地内联提示，
+//    不再触发全局"登录已过期"跳转（此前会冲掉登录页的错误渲染、丢失输入）。
+//    `silent: true` 可关闭全局错误广播（更新检查等静默通道）。
 
 /**
  * 后端基地址。**运行时**推导，不再编译期写死。
@@ -168,7 +173,30 @@ function applyCompanyScope(path: string): string {
 export type RequestOptions = {
   /** 超时毫秒数，0 表示不限时（默认 180s） */
   timeoutMs?: number;
+  /**
+   * 外部取消信号：组件卸载 / 轮询竞态时用它 abort 在途请求。
+   * 与内部超时正确组合——两者任一触发都能终止请求，且被调用方取消时
+   * **不会**派发全局错误广播（取消不是故障）。
+   */
+  signal?: AbortSignal;
+  /** 失败时不派发 `aieos-api-error` 全局提示（由调用方自己静默处理或就地提示） */
+  silent?: boolean;
+  /** 透传给 fetch 的缓存策略（如更新检查通道需要 no-store） */
+  cache?: RequestCache;
 };
+
+/**
+ * 认证入口端点：它们的 401 含义是"凭据不对"，不是"登录已过期"。
+ *
+ * 此前登录页自己就用 `api.post("/auth/login")`，密码打错返回 401 后
+ * 被全局"过期 → window.location 跳转"拦下：错误提示还没渲染整页就被刷走，
+ * 用户输入的邮箱/密码全丢。这几个端点必须豁免全局跳转，
+ * 让调用方（登录页）自己处理错误并就地显示内联提示。
+ */
+const AUTH_ENTRY_PATHS = ["/auth/login", "/auth/register", "/auth/refresh"];
+function isAuthEntryPath(path: string): boolean {
+  return AUTH_ENTRY_PATHS.some((p) => path.startsWith(p));
+}
 
 /** 全局错误广播：由 Toast 组件监听，统一提示失败原因 */
 function broadcastError(err: ApiError) {
@@ -245,10 +273,19 @@ async function raw(
       : applyCompanyScope(path);
 
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // 外部取消信号（config.signal 或 RequestInit 自带的 signal）与内部超时组合：
+  // 内部始终用自己的 AbortController，外部信号"联动"它——
+  // 外部信号已 aborted 或稍后 abort 时，同步 abort 内部 controller。
+  // 超时逻辑不受影响：外部信号缺席时行为与旧版一致。
+  const externalSignal = config.signal ?? options.signal;
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
-  if (timeoutMs > 0 && !options.signal) {
+  if (timeoutMs > 0) {
     timer = setTimeout(() => controller.abort(), timeoutMs);
+  }
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener("abort", () => controller.abort(), { once: true });
   }
 
   let res: Response;
@@ -259,8 +296,9 @@ async function raw(
     // 改造前各页面的上传都是裸 fetch 自己拼 header——正是因为 api 层做不到这件事。
     const isForm = typeof FormData !== "undefined" && options.body instanceof FormData;
     res = await fetch(`${API}${scoped}`, {
+      ...(config.cache ? { cache: config.cache } : {}),
       ...options,
-      signal: options.signal ?? controller.signal,
+      signal: controller.signal,
       headers: {
         ...(isForm ? {} : { "Content-Type": "application/json" }),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -268,6 +306,11 @@ async function raw(
       },
     });
   } catch (e: any) {
+    // 调用方主动取消（组件卸载 / 轮询序列号守卫换新信号）：
+    // 这是预期流程而非故障——不广播、错误信息也说清是"取消"，避免误报超时。
+    if (externalSignal?.aborted) {
+      throw new ApiError("请求已取消", 0, scoped, "cancelled");
+    }
     // 区分"超时"与"网络不通"：两者给用户的下一步动作完全不同。
     // 网络层失败既可能是后端没起，也可能是跨域（CORS）被浏览器拦截——
     // 把请求目标地址带上，用户可对照 DevTools Network 判断。
@@ -280,7 +323,7 @@ async function raw(
       0,
       scoped,
     );
-    broadcastError(err);
+    if (!config.silent) broadcastError(err);
     throw err;
   } finally {
     if (timer) clearTimeout(timer);
@@ -288,14 +331,26 @@ async function raw(
 
   if (res.status === 401) {
     // 先尝试用 refresh_token 续期并重放原请求一次；
-    // 续期失败或根本没有 refresh_token 时，才走原有的"登录已过期"逻辑。
+    // 续期失败或根本没有 refresh_token 时，才走"登录已过期"逻辑。
     if (!_isRetry) {
       const replayed = await tryRefreshAndReplay(path, options, config);
       if (replayed) return replayed;
     }
+    if (isAuthEntryPath(path)) {
+      // 登录/注册入口的 401 = 凭据不对：不清 token、不整页跳转、不全局广播，
+      // 把后端 detail（如"用户名或密码错误"）规范化后交给调用方就地内联显示。
+      // （此前这里无条件跳转 /login，恰好把登录页自己的失败渲染冲掉了。）
+      const body = await res.json().catch(() => ({} as any));
+      throw new ApiError(
+        normalizeErrorDetail(body?.detail) || "账号或密码不正确",
+        401,
+        scoped,
+      );
+    }
     clearToken();
     const err = new ApiError("登录已过期，请重新登录", 401, scoped);
-    broadcastError(err);
+    if (!config.silent) broadcastError(err);
+    // 其他页面遇到"登录已过期"仍照旧跳转——这个行为是对的，保持不变。
     if (typeof window !== "undefined") window.location.href = "/login";
     throw err;
   }
@@ -316,7 +371,7 @@ async function raw(
       res.status,
       scoped,
     );
-    broadcastError(err);
+    if (!config.silent) broadcastError(err);
     throw err;
   }
 
@@ -439,4 +494,10 @@ export async function safeCall<T = any>(
       : new ApiError(e?.message || String(e), -1, "", e);
     return { ok: false, data: null, error: err };
   }
+}
+
+/** 判断错误是否为"调用方主动取消"（config.signal abort）。
+ * 取消不是故障：页面据此跳过失败提示，避免卸载/竞态时误报"加载失败"。 */
+export function isCancelled(e: unknown): boolean {
+  return e instanceof ApiError && e.detail === "cancelled";
 }

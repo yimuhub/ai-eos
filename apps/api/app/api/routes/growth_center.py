@@ -73,23 +73,22 @@ async def departments_overview(company_id: str = Query(...),
     dept_map = {d.id: d.name for d in depts}
 
     # 技能掌握数 + 记忆数（轻量聚合）
+    # 必须按公司过滤：agent_skills 本身没有 company_id，用本公司 Agent 子查询
+    # 收窄；agent_memories 直接带 company_id。此前两者都是全表聚合——一家公司
+    # 的部门概览会把别家数据也数进去，且随平台总数据量线性变慢。
     from app.models.skill import AgentSkill
-    ask_rows = (await db.execute(select(AgentSkill.agent_id))).scalars().all()
+    company_agent_ids = select(Agent.id).where(Agent.company_id == company_id)
+    ask_rows = (await db.execute(select(AgentSkill.agent_id).where(
+        AgentSkill.agent_id.in_(company_agent_ids)))).scalars().all()
     skill_count: dict[str, int] = {}
     for aid_ in ask_rows:
         skill_count[aid_] = skill_count.get(aid_, 0) + 1
 
     from sqlalchemy import func as F
-    mem_rows = (await db.execute(
-        select(AgentMemory.agent_id, F.count()).group_by(AgentMemory.agent_id)
-    )).all() if False else []
-    try:
-        from app.models.memory import AgentMemory
-        mr = (await db.execute(select(
-            AgentMemory.agent_id, F.count()).group_by(AgentMemory.agent_id))).all()
-        mem_count = {a_: c for a_, c in mr}
-    except Exception:
-        mem_count = {}
+    mr = (await db.execute(select(
+        AgentMemory.agent_id, F.count()).where(
+        AgentMemory.company_id == company_id).group_by(AgentMemory.agent_id))).all()
+    mem_count = {a_: c for a_, c in mr}
 
     plans = (await db.execute(select(LearningPlan).where(
         LearningPlan.company_id == company_id,

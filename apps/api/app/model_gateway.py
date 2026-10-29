@@ -3,22 +3,129 @@
 Agent Runtime NEVER calls an LLM directly — always through ModelGateway.
 每次调用自动记录 Token 用量流水（六维：公司/部门/个人/项目/任务/场景）。
 """
+import asyncio
 import contextlib
+import random
 import time
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+from functools import lru_cache
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import contextvars
 
 from app.core.logging_config import get_logger
+from app.db.session import AsyncSessionLocal
 from app.models.agent import Model, ModelProviderType
 from app.models.budget import TokenBudget
 from app.models.token_usage import TokenUsage
 
 logger = get_logger(__name__)
+
+# ---------------- 共享 HTTP client（连接复用 + 有界连接池） ----------------
+
+# 分阶段超时：建连 5s、读取 120s、写入 30s、等连接池 5s。
+# 之前用单一 timeout=300，慢模型会长时间占住 worker 线程；
+# 分阶段后连接故障会快速失败，真正生成阶段仍给足 120s。
+HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=30.0, pool=5.0)
+HTTP_LIMITS = httpx.Limits(max_connections=50, max_keepalive_connections=10)
+
+# 仅对超时 / 5xx / 429 做有限重试：2 次重试（共 3 次尝试），
+# 指数退避 + jitter，避免故障模型在瞬间把备用模型也打爆。
+MAX_HTTP_RETRIES = 2
+RETRY_BASE_DELAY_S = 0.5
+RETRY_MAX_DELAY_S = 8.0
+# 429 是限流，408/425 是"稍后重试"语义，与 5xx 一起视为可重试
+RETRYABLE_STATUS = frozenset({408, 425, 429})
+
+
+@lru_cache(maxsize=1)
+def get_http_client() -> httpx.AsyncClient:
+    """进程级共享 AsyncClient（懒创建）。
+
+    每次调用都新建 AsyncClient 会让连接无法复用、也失去了连接数上限；
+    这里用单例把连接池收敛到 HTTP_LIMITS。
+    """
+    return httpx.AsyncClient(timeout=HTTP_TIMEOUT, limits=HTTP_LIMITS)
+
+
+def reset_http_client() -> None:
+    """丢弃缓存的 client（仅供测试/事件循环切换时使用）。
+
+    调用方应先 ``await aclose()`` 关闭旧 client，再重置。
+    """
+    get_http_client.cache_clear()
+
+
+async def aclose() -> None:
+    """关闭共享 client。
+
+    main.py 的 lifespan 不在本工包改动范围内，因此这里暴露一个显式的
+    异步关闭入口；接入 lifespan 时调用 ``await model_gateway.aclose()``
+    即可。测试里先 ``await aclose()`` 再 ``reset_http_client()``。
+    """
+    if get_http_client.cache_info().currsize:
+        client = get_http_client()
+        get_http_client.cache_clear()
+        await client.aclose()
+
+
+def _is_retryable_status(code: int) -> bool:
+    return code in RETRYABLE_STATUS or code >= 500
+
+
+def _retry_delay(attempt: int) -> float:
+    """指数退避 + jitter；attempt 从 0 开始。"""
+    base = min(RETRY_MAX_DELAY_S, RETRY_BASE_DELAY_S * (2 ** attempt))
+    return base + random.uniform(0, 0.25)
+
+
+async def _post_with_retry(url: str, *, json: dict,
+                           headers: dict | None = None,
+                           timeout: float | httpx.Timeout | None = None) -> httpx.Response:
+    """POST 并在可重试错误上做有限退避重试。
+
+    4xx（除 408/425/429）直接抛出，不重试——配置错误/鉴权失败重试再多次
+    也不会成功，只会浪费预算。
+    ``timeout`` 可覆盖共享 client 的默认分阶段超时（群聊等短回复场景用）。
+    """
+    client = get_http_client()
+    kwargs = {"timeout": timeout} if timeout is not None else {}
+    last_exc: Exception | None = None
+    for attempt in range(MAX_HTTP_RETRIES + 1):
+        try:
+            resp = await client.post(url, json=json, headers=headers, **kwargs)
+        except (httpx.TimeoutException, httpx.NetworkError,
+                httpx.RemoteProtocolError) as exc:
+            last_exc = exc
+            if attempt >= MAX_HTTP_RETRIES:
+                raise
+            delay = _retry_delay(attempt)
+            logger.warning("模型请求网络异常（%s），%.2fs 后重试 %d/%d",
+                           type(exc).__name__, delay,
+                           attempt + 1, MAX_HTTP_RETRIES)
+            await asyncio.sleep(delay)
+            continue
+        if _is_retryable_status(resp.status_code) and attempt < MAX_HTTP_RETRIES:
+            delay = _retry_delay(attempt)
+            logger.warning("模型返回 HTTP %d，%.2fs 后重试 %d/%d",
+                           resp.status_code, delay,
+                           attempt + 1, MAX_HTTP_RETRIES)
+            await resp.aclose()
+            await asyncio.sleep(delay)
+            continue
+        resp.raise_for_status()
+        return resp
+    raise last_exc or RuntimeError("model request failed without exception")
+
+
+def is_non_retryable_4xx(exc: Exception) -> bool:
+    """是否为"换模型也没用"的 4xx（4xx 不 failover，直接失败）。"""
+    code = _http_status(exc)
+    return bool(code and 400 <= code < 500 and code not in RETRYABLE_STATUS)
 
 # 调用上下文（ContextVar 支持并发请求各自隔离）
 
@@ -179,10 +286,12 @@ class OpenAICompatProvider(BaseModelProvider):
         if tools:
             body["tools"] = tools
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        async with httpx.AsyncClient(timeout=300) as client:
-            resp = await client.post(f"{self.base_url}/chat/completions", json=body, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
+        # 复用模块级共享 client：连接池有上限、超时分阶段，
+        # 且对超时/5xx/429 做有限的指数退避重试。
+        resp = await _post_with_retry(
+            f"{self.base_url}/chat/completions", json=body, headers=headers,
+            timeout=cfg.get("timeout"))
+        data = resp.json()
         choice = data["choices"][0]
         return {
             "content": choice["message"].get("content") or "",
@@ -282,6 +391,10 @@ _PLUGIN_PROVIDERS = load_provider_plugins()
 
 # ---------------- 简易熔断/冷却（内存实现，无 Redis 也可用） ----------------
 
+# 【重要限制】下面是**进程内**状态：多 worker（uvicorn --workers N / 多机部署）
+# 下每个进程各自独立计数与冷却，A 进程熔断不影响 B 进程，重启即清零。
+# 这是有意的轻量实现（避免强依赖 Redis）；若需要全局一致的熔断，
+# 应把这两个字典迁移到 Redis/DB，而不是假设当前实现是全局的。
 # 每模型连续失败计数与冷却截止时间：key 为 Model.id
 _FAIL_STREAK: dict[str, int] = {}
 _COOL_UNTIL: dict[str, float] = {}
@@ -380,8 +493,12 @@ class ModelGateway:
                 TokenBudget.enabled == True))).scalars().all()  # noqa: E712
         if not budgets:
             return
-        from datetime import datetime as _dt
-        today_start = _dt.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        # 日预算窗口按 UTC 日起算：TokenUsage.created_at 列是 naive DateTime，
+        # 默认值写入的正是 UTC 时间（models/token_usage._now）。此前用本地时区
+        # 的当日 0 点比较，东八区下窗口错位 8 小时。这里保持 naive-UTC，
+        # 与库中存储格式一致，避免 naive/aware 比较异常。
+        today_start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
         for b in budgets:
             if b.scope_type == "agent" and b.scope_id != ctx.get("agent_id"):
                 continue
@@ -424,10 +541,21 @@ class ModelGateway:
                                 f" token, ¥{cost:.2f}/"
                                 f"{'∞' if not b.limit_cost else b.limit_cost:.2f}），已自动暂停"),
                 }, ensure_ascii=False)
+                # 关键修复：熔断状态必须落库，但不能在调用方的业务事务中间
+                # commit（那会把"任务已转 RUNNING"等半成品状态提前提交，
+                # 后续失败无法整体回滚）。这里用独立 session 只写这一行。
                 try:
-                    await self.db.commit()
-                except Exception:
-                    pass
+                    async with AsyncSessionLocal() as budget_db:
+                        await budget_db.execute(
+                            update(TokenBudget)
+                            .where(TokenBudget.id == b.id)
+                            .values(paused=True, paused_reason=b.paused_reason))
+                        await budget_db.commit()
+                except Exception as commit_err:
+                    # 暂停状态落库失败会导致预算"到顶不停"的账目缺口，
+                    # 属于成本护栏失效，必须留痕（但仍不阻断本次 BudgetExhausted 上抛）
+                    logger.error("预算暂停状态落库失败 budget=%s: %s",
+                                 getattr(b, "id", "?"), commit_err, exc_info=True)
             raise BudgetExhausted(
                 f"token 预算上限已触发，执行已自动暂停：已用 {tokens} token"
                 f"（上限 {b.limit_tokens or '∞'}）。老板可在「Token 统计 → 预算上限」"
@@ -520,7 +648,13 @@ class ModelGateway:
                 except Exception as usage_err:
                     logger.error("失败调用计量落库失败 model=%s mid=%s: %s",
                                  row.name, mid, usage_err, exc_info=True)
-                # HTTP 429（限流/配额耗尽）直接短路：不再逐个试后续模型
+                # 4xx（鉴权/参数/模型不存在等）换模型也没用：
+                # 直接失败，不再把同一份坏请求扩散到备用模型。
+                if is_non_retryable_4xx(e):
+                    logger.warning("模型 %s(%s) 返回不可重试的 4xx，"
+                                   "直接失败不 failover", row.name, mid)
+                    break
+                # 429（重试后仍限流）同样短路：继续打备用模型只会扩大限流
                 if _http_status(e) == 429:
                     logger.warning("模型 %s(%s) 返回 429，直接短路结束 failover",
                                    row.name, mid)
@@ -535,8 +669,12 @@ class ModelGateway:
             f"已绑定的 {attempted} 个模型全部调用失败：{'; '.join(failures)}")
 
     async def chat_with_agent_models_by_agent(self, agent, messages,
-                                              tools=None):
-        """按 Agent 的模型配置（primary→secondary→fallback）调用。"""
+                                              tools=None, config=None):
+        """按 Agent 的模型配置（primary→secondary→fallback）调用。
+
+        ``config`` 透传给 provider（max_tokens / temperature / timeout），
+        群聊等短回复场景用它显式限长并缩短单次超时。
+        """
         from sqlalchemy import select
         from app.models.agent import AgentModelConfig
         cfg_rows = (await self.db.execute(select(AgentModelConfig).where(
@@ -546,4 +684,5 @@ class ModelGateway:
                     key=lambda c: order.get(c.role, 3))]
         if not model_ids:
             raise RuntimeError(f"Agent {agent.name} 未配置模型")
-        return await self.chat_with_agent_models(model_ids, messages, tools=tools)
+        return await self.chat_with_agent_models(
+            model_ids, messages, tools=tools, config=config)

@@ -10,6 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.config import settings
+from app.core.uploads import (ASSET_ALLOWED_EXTENSIONS, ensure_within,
+                              generate_stored_name, safe_original_name,
+                              stream_upload, validate_extension)
 from app.db.session import get_db
 from app.models.asset import Asset, AssetType
 from app.models.company import Company
@@ -20,6 +23,10 @@ router = APIRouter(prefix="/assets", tags=["assets"])
 EXT_TYPE = {".md": AssetType.DOCUMENT, ".txt": AssetType.DOCUMENT,
             ".pdf": AssetType.DOCUMENT, ".docx": AssetType.DOCUMENT,
             ".png": AssetType.IMAGE, ".jpg": AssetType.IMAGE, ".jpeg": AssetType.IMAGE,
+            ".gif": AssetType.IMAGE, ".webp": AssetType.IMAGE, ".bmp": AssetType.IMAGE,
+            ".mp3": AssetType.OTHER, ".wav": AssetType.OTHER, ".m4a": AssetType.OTHER,
+            ".ogg": AssetType.OTHER, ".mp4": AssetType.OTHER, ".mov": AssetType.OTHER,
+            ".webm": AssetType.OTHER,
             ".py": AssetType.CODE, ".js": AssetType.CODE, ".ts": AssetType.CODE,
             ".json": AssetType.DATA, ".csv": AssetType.DATA}
 REPORT_HINTS = ("report", "报告")
@@ -55,9 +62,11 @@ def _resolve_asset_path(stored: str) -> Path:
 async def save_artifact(db: AsyncSession, company_id: str, name: str, content: str,
                         task_id: str | None = None, agent_id: str | None = None) -> Asset:
     """Called by Agent Runtime to auto-save text results into the Asset Center."""
-    root = storage_root()
-    fname = f"{uuid.uuid4().hex[:8]}_{name}"
-    fpath = root / "artifacts" / fname
+    root = storage_root().resolve()
+    # 名字可能来自 Agent 产出（间接来自 LLM），必须当不可信输入：
+    # 落盘只用 basename，保证文件一定在 artifacts/ 内（审查 S9 同一根因）。
+    fname = f"{uuid.uuid4().hex[:8]}_{safe_original_name(name)}"
+    fpath = ensure_within(root, root / "artifacts" / fname)
     fpath.write_text(content, encoding="utf-8")
     ext = fpath.suffix.lower()
     atype = AssetType.REPORT if any(h in name.lower() for h in REPORT_HINTS) \
@@ -97,20 +106,22 @@ async def upload(company_id: str, file: UploadFile,
     c = await db.get(Company, company_id)
     if not c or c.owner_id != user.id:
         raise HTTPException(404, "Company not found")
-    root = storage_root()
-    fname = f"{uuid.uuid4().hex[:8]}_{file.filename}"
-    fpath = root / "uploads" / fname
-    data = await file.read()
-    fpath.write_bytes(data)
-    ext = fpath.suffix.lower()
-    asset = Asset(company_id=company_id, name=file.filename,
+    root = storage_root().resolve()
+    # 用户文件名只作元数据：落盘名由服务端生成（uuid + 白名单扩展名），
+    # 扩展名不在白名单直接 400，超限由 stream_upload 流式拦截。
+    original_name = safe_original_name(file.filename)
+    ext = validate_extension(original_name, ASSET_ALLOWED_EXTENSIONS)
+    uploads_dir = ensure_within(root, root / "uploads")
+    fpath, size = await stream_upload(file, uploads_dir,
+                                      generate_stored_name(ext))
+    asset = Asset(company_id=company_id, name=original_name,
                   type=EXT_TYPE.get(ext, AssetType.OTHER),
                   path=str(fpath.relative_to(root)),
-                  mime_type=file.content_type, size=len(data), created_by=user.id,
+                  mime_type=file.content_type, size=size, created_by=user.id,
                   creator_type="user")
     db.add(asset)
     await log_event(db, "asset.uploaded", "asset", None, "user", user.id,
-                    {"name": file.filename})
+                    {"name": original_name})
     await db.commit()
     await db.refresh(asset)
     return {"id": asset.id, "name": asset.name, "type": asset.type.value,

@@ -1,6 +1,6 @@
 [project]
 name = "ai-eos-api"
-version = "0.1.0"
+version = "5.12.0"
 description = "AI-EOS Backend API"
 license = "BUSL-1.1"
 requires-python = ">=3.12"
@@ -34,6 +34,8 @@ dependencies = [
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
+    # 覆盖率门禁：CI 会对 app/api/routes + app/core 出报告并卡下限
+    "pytest-cov>=7",
     "aiosqlite>=0.20",
     # 静态检查：把"未定义名"这类会让整块功能静默失效的问题拦在提交前
     "pyflakes>=3.2",
@@ -53,7 +55,30 @@ asyncio_default_fixture_loop_scope = "session"
 addopts = "-q --strict-markers"
 markers = [
     "requires_llm: 需要真实模型密钥才能运行的端到端用例（无密钥时自动跳过）",
+    "known_leak: 双租户探针已确认的真实越权点；运行时 xfail，修复后应删除标记与 allowlist 条目",
+    "known_bug: 探针暴露的实现缺陷（如 500），不是越权但同样必须修",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:passlib.*",
 ]
+
+# ---------------------------------------------------------------------------
+# 覆盖率
+#
+# CI（.github/workflows/ci.yml）用：
+#   pytest --cov=app/api/routes --cov=app/core --cov-report=term-missing \
+#          --cov-fail-under=<见下面的 fail_under>
+# 阈值按"实测值向下取整到 5 的倍数"设定，只允许往上调。
+# 不要把 --cov 塞进 addopts：单跑一个测试文件时覆盖率天然很低，
+# 会让人误以为代码坏了；覆盖率是整套件的门禁，不是单文件的。
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["app"]
+omit = [
+    "app/__init__.py",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

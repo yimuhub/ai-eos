@@ -72,6 +72,8 @@ export default function LoginPage() {
       // 用 replace 避免用户回退时又落回登录页
       router.replace("/");
     } catch (err: any) {
+      // lib/api.ts 对 /auth/login、/auth/register 的 401 不再整页跳转，
+      // 错误在此内联呈现：文案可见、已输入内容不清空、loading 在 finally 恢复。
       setError(err?.message || "操作失败，请重试");
     } finally {
       setLoading(false);

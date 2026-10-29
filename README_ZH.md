@@ -4,13 +4,13 @@
 
 **AI 企业操作系统 —— 创建一家 AI 公司，雇佣数字员工，把工作交代下去**
 
-[![阶段](https://img.shields.io/badge/phase-Phase%203%20已完成-success.svg?style=flat-square)](#-最新动态phase-3--2026-10-14-加固)
+[![阶段](https://img.shields.io/badge/version-v5.12.0-blue.svg?style=flat-square)](#-最新动态v5120)
 [![许可证: BSL 1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12+-green.svg?style=flat-square)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688.svg?style=flat-square)](https://fastapi.tiangolo.com)
 [![Next.js](https://img.shields.io/badge/frontend-Next.js%2014-black.svg?style=flat-square)](https://nextjs.org/)
 [![平台](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20Docker-blueviolet.svg?style=flat-square)](#-快速开始)
-[![测试](https://img.shields.io/badge/tests-158%20个用例-informational.svg?style=flat-square)](#-测试)
+[![测试](https://img.shields.io/badge/tests-171%20通过-green.svg?style=flat-square)](#-测试)
 
 <p align="center">
   <b>一声令下，全公司为你开工</b><br>
@@ -19,7 +19,7 @@
 
 [English](README.md) • **简体中文**
 
-[✨ 核心功能](#-核心功能) • [🚀 快速开始](#-快速开始) • [🏗️ 系统架构](#-系统架构) • [🧪 测试](#-测试) • [📦 最新动态](#-最新动态phase-3--2026-10-14-加固) • [📜 许可协议](#-许可与版权说明)
+[✨ 核心功能](#-核心功能) • [🚀 快速开始](#-快速开始) • [🏗️ 系统架构](#-系统架构) • [🧪 测试](#-测试) • [📦 最新动态](#-最新动态v5120) • [📜 许可协议](#-许可与版权说明)
 
 </div>
 
@@ -53,18 +53,20 @@ AI 聊天机器人只会回答问题——活儿最后还是落在你自己桌�
 - 多轮次会议、用户随时插话、自动生成纪要，行动项一键转为任务。
 
 ### 4. 🖥️ Computer Agent（真实桌面自动化）
-- 真实截屏、真实键入点击，全部经过安全沙箱 guardrail：二进制白名单、路径沙箱、危险命令默认只预演不执行。
+- 真实截屏、真实键入点击，全部经过安全沙箱 guardrail：二进制白名单、路径沙箱、危险命令默认只预演不执行。**当前仅 macOS 落地**（`screencapture` + `osascript` + `open`），Windows/Linux 的执行链路尚未接上。
 
 ### 5. 🔌 模型网关：故障转移 + 计量
 - **首选 → 备选 → 兜底**多模型自动降级（OpenAI 兼容 / Anthropic / Gemini，另有插件目录可扩展）。
 - **六维 Token 计量**（公司 / 部门 / 员工 / 项目 / 任务 / 场景）+ 成本快照——做成本分摊和报价的原材料。
 
 ### 6. 🧠 知识库、工作流画布与自动化
-- 文档知识库检索；拖拽式**工作流画布**（节点连线、运行实时轮询）；带定时触发的自动化引擎。
+- 文档知识库检索——当前为**关键词重合度检索**（bigram 分词打分，SQL 层限制候选块数），**还不是向量/pgvector 语义检索**；`/knowledge/rag` 把检索到的片段注入 prompt，而非做 embedding 召回。另含拖拽式**工作流画布**（节点连线、运行实时轮询）与带定时触发的自动化引擎。
 
-### 7. 🛡️ 认真的安全与多租户
-- 登录限流（Redis）、密码策略、bcrypt 哈希、**refresh token 轮换与吊销**、越权统一返回 404（防租户 ID 枚举）。
-- Capability × 角色矩阵单一事实源，路由级归属校验。
+### 7. 🛡️ 认真的安全与隔离
+- 登录限流（Redis，Redis 不可用时降级为进程内计数）、密码策略、bcrypt 哈希、**refresh token 轮换与吊销**、越权统一返回 404（防 ID 枚举）。
+- **JWT 密钥绝不落在公开常量上**：`JWT_SECRET` 为空或仍是仓库里的占位值时，自动生成随机密钥并落盘（目录只读则降级为进程内随机密钥 + 大声告警）；生产环境（`AIEOS_ENV=production`）遇到不安全密钥**直接拒绝启动**，不静默兜底。
+- **桌面版默认只监听 `127.0.0.1`**——局域网共享是显式开关，开启才绑 `0.0.0.0` 并重启后端（mDNS 广播同步联动）；`/docs`、`/redoc`、`/openapi.json` 仅在 `DEBUG=true` 时存在，`/metrics/prometheus` 需要 `METRICS_TOKEN` 或来自回环地址。
+- Capability × 角色矩阵单一事实源，路由级归属校验。*说明：*矩阵定义了 OWNER/ADMIN/MEMBER/VIEWER，但**多成员协作尚未开放**——`resolve_role` 目前只对归属者返回 OWNER，所以今天的隔离粒度是「按用户」，不是共享组织的多租户。
 
 ### 8. 🎭 给人用的上手体验
 - 三步引导向导（约 1 分钟）、**免 Key 演示模式**（先体验再配模型）、中文可操作报错、带拼音搜索的 ⌘K 命令面板。
@@ -81,8 +83,8 @@ flowchart TD
     end
 
     subgraph API["接口层 (FastAPI + SQLAlchemy Async)"]
-        Router["REST 路由 (354 个端点)"]
-        Auth["鉴权 / RBAC / 多租户"]
+        Router["REST 路由 (415 个操作 / 360 条路径)"]
+        Auth["鉴权 / 归属隔离"]
         Gateway["模型网关 (故障转移 + 计量)"]
     end
 
@@ -106,7 +108,14 @@ flowchart TD
     Engines --> Storage
 ```
 
-**规模（源码实测）**：后端约 21,500 行 / 135 文件 / 354 端点 / 94 张表 / 28 个 Alembic 迁移；前端约 17,700 行 / 34 个一级页面；后端测试 158 用例。
+**规模（v5.12.0 源码实测）**：后端 31,893 行 / 168 文件 / 365 条路径共 420 个操作 / 104 张表 / 32 个 Alembic 迁移；前端 24,938 行 / 47 个页面路由；后端测试 **295 通过**（含 e2e 38 项）。
+
+> 两条如实说明，因为"能跑"和"验证过"不是一回事：
+> - **`alembic upgrade head` 只支持 PostgreSQL。** 历史迁移 `23e9b97bb927` 在 SQLite 上会抛
+>   `No support for ALTER of constraints`。桌面/便携形态不依赖 Alembic——它的 schema 演进走
+>   `create_all` + 幂等 `ensure_columns`，老 SQLite 库首次启动即自动补齐；只有服务器部署（Postgres）走 Alembic。
+> - **`plugins/skills/`、`plugins/providers/`、`plugins/models/` 与 `packages/*` 目前都是空目录。**
+>   动态加载的**代码是真实存在且会执行的**，但仓库尚未内置任何插件——别用"已安装插件列表"来判断扩展系统。
 
 ---
 
@@ -175,7 +184,7 @@ chmod +x 服务器一键部署.sh && ./服务器一键部署.sh
 ## 🧪 测试
 
 ```bash
-cd apps/api && uv run pytest        # 后端 158 个测试用例
+cd apps/api && uv run pytest        # 后端 171 通过、1 跳过
 cd apps/web && npm run test          # 前端 vitest
 ```
 
@@ -183,7 +192,48 @@ cd apps/web && npm run test          # 前端 vitest
 
 ---
 
-## 📦 最新动态：Phase 3 + 2026-10-14 加固
+## 📦 最新动态：v5.12.0
+
+*「一人公司」主线打通：一句话 → 全公司开工 → 拿到结果 — 2026-10-29。完整记录见 [`CHANGELOG.md`](CHANGELOG.md)。*
+
+- 👑 **一句话直达。** 新增 `POST /command/run`：解析与执行一次完成，不再需要中间确认。DIRECT 路径任务创建即入队执行；PROJECT 路径跳过逐人宣告与负责人校对，直接确认分工开工。指挥台新增「⚡ 一句话直达」按钮，「先看方案」保留原两步式。
+- 🚀 **派活真的会开工。** 修复"一键派给全公司"只产出 N 条永远不动的待办：新增 `auto_start` 标记 + 持久化排队（`app/task_runner.py`），CAS 启动、worker 池满自动退回待办并保留标记，调度循环每拍按紧急/高/普通优先级拉起——不会留下 RUNNING 但没有 worker 的僵尸行。
+- 🔧 **Agent 真的能取数。** 任务执行链首次真正下发工具（`web_search` / `web_fetch`，OpenAI function-calling + 弱模型文本兜底），多轮调用、结果截断回填、`tools_used` 进度留痕；能力包里"会网页浏览"不再只是提示词幻觉。
+- 📊 **报表与报告能交付。** 内置 5 类专业报告骨架（行业研究/经营分析/周报/项目复盘/方案书）；Word 渲染真实表格与中文字体，Excel 多 Sheet + 数值类型 + 冻结首行 + 筛选，PPT 原生表格与分页。
+- 🕘 **简报数字对齐时区。** 晨间简报的"昨日/今日/今日成本"改按本地自然日换算 naive UTC；顺带修掉一个引用不存在字段的 500（非属主请求 `company.created_by`）。
+- 🛡 **收口。** 自动化 `call_webhook` 补 SSRF 闸门（含连接后对端复核）；任务派活按公司过滤，跨租户派活不再可能。
+- 🧪 新增 34 个后端用例（文档渲染、自动排队、工具循环、一句话直达、简报、webhook SSRF），测试总数 261 → **295**；`./tools/check.sh` 全绿（契约 / tsc / eslint / e2e 38 项）。
+
+### 上一轮：v5.11.0
+
+*按技术方向复审后的第二轮加固 — 2026-10-28。*
+
+完整记录见 [`CHANGELOG.md`](CHANGELOG.md)，复审报告见 [`docs/审查报告_AI-EOS_2026-10-28.md`](docs/审查报告_AI-EOS_2026-10-28.md)。
+
+- 🚪 **越权读彻底清零。** 15 个此前"探针确认真的能读到"的端点（专家库、协作消息、定时任务、记忆、治理、技能、自动化、考核周期）全部补上归属校验；52 条静态债务登记表压到 **1 条已知误报**，护栏同时学会识别 router 级 `require_company_scope`。
+- ⚙️ **并发正确性。** SQLite `busy_timeout`/WAL/外键、审批决策与任务状态迁移改 CAS、"先提交再投递"、会议/工作流租约，并发 20 请求不再出现 `database is locked` 或副作用执行两次。
+- 🌐 **出站安全。** 模型配置不能再引用 `JWT_SECRET` 之类的服务端变量（写入侧拦截 + **运行时兜底**，历史遗留行也取不到值）；SSRF 改为逐跳校验；webhook/网页抓取不回显上游响应体。
+- ⚡ **性能。** 首页三个串行请求合并为 `/dashboard/{id}/bootstrap`（计数改 `GROUP BY`、活跃任务 `limit 20`、轮询 5s→15s）；任务详情轮询改 `/tasks/{id}/summary`（不传 `result` 全文、输出截断 2KB）；作战室改增量快照；RAG 先收窄候选集再精排；群聊显式 `max_tokens=512` + 按公司限流。
+- 📤 **上传与插件。** 1MB 块流式落盘 + 25MB 上限 + 扩展名白名单 + 服务端生成文件名；技能插件去掉 `sys.path.insert`，改为唯一模块名加载并校验 manifest/路径。
+- 🧪 **测试有效性。** 覆盖率门禁进 CI（路由+核心层 35%，阈值 30）、lifespan 首次被真实执行、护栏加反向验证；测试总数 171 → **261**。
+
+### 上一轮：v5.10.0
+
+*安全与正确性加固 — 2026-10-27。*
+
+完整记录见 [`CHANGELOG.md`](CHANGELOG.md)，催生这一轮的检测报告见
+[`docs/检测报告_AI-EOS_2026-10-27.md`](docs/检测报告_AI-EOS_2026-10-27.md)。
+下面每一项都是**先复现、再修复、再用攻击实测回归**——不是"看完代码顺手打个补丁"：
+
+- 🔑 **JWT 空密钥/公开密钥可伪造 token。** 空密钥照样能签出合法 token，也照样能校验通过。现在自动生成并落盘随机密钥；生产环境遇到不安全密钥直接拒绝启动。用 `""` 与仓库里的占位值伪造：**5/5 全部拒绝**。
+- 🚪 **跨租户读越权。** 写路径本来有校验，**读路径几乎没有**——带上别人的 `company_id` 就能列出对方成果、知识库文档、审批策略与白名单。现在 **31/31 攻击实测全部拦截、属主 0 误伤**，并新增 AST 护栏测试 + 一份**只许缩小**的存量债务登记表。
+- 🗄 **SQLite 上"发布"从来没成功过。** `SET published_at = NOW()`（SQLite 无此函数），而模型里**压根没有 `published_at` 这一列**。改为绑定参数 + naive UTC；列进模型、进 Alembic 迁移、并在启动时幂等补列。`提交 → 审核通过 → 发布` 全链路实测通过且幂等。
+- 🖥 **桌面版过去无条件监听 `0.0.0.0`。** 现在默认 `127.0.0.1`，局域网共享改成显式开关（同时联动 mDNS 广播）；`/docs` 与 `/openapi.json` 只在 `DEBUG` 下存在；`/metrics` 需要令牌或回环来源。
+- ⚙️ 预算恢复大小写不匹配（提高上限也恢复不了工作）、naive/aware UTC 混用导致当日统计失真、工作流 Agent 节点失败被当成"等待人工"永远挂着、会议纪要抽取的死代码、阻塞 `urlopen` 改异步，以及**静默 `except: pass` 清零**。
+- 🧨 版本号在六个地方六个值（`0.1.0` / `5.9.0` / `5.0.0` / `4.1.0` / `5.4`）——现在单一来源 + 一致性测试。
+- 🛡 新增 CI 门禁：后端 pytest（**明确不起 Redis**——`test_auth` 断言的是内存回退字典）、`tsc --noEmit`、vitest，以及收紧后的 OpenAPI 契约检查（拼错的动作名不再绿灯放行）。
+
+### Phase 3 + 2026-10-14 加固
 
 **Phase 3** 落地了员工成长体系（学习、绩效评估、技能市场、外部 Agent 接入、Computer Agent）。
 

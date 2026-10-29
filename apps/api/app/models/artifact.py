@@ -41,6 +41,7 @@ class Artifact(Base):
         index=True)
     created_by: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[datetime] = mapped_column(default=_now)
+    published_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
 
 
 class ArtifactVersion(Base):

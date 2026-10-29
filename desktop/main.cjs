@@ -56,9 +56,21 @@ function currentSettings() {
   };
 }
 
+// 主进程日志：stdout（终端可见）+ userData/logs/main.log（打包后用户可见）
+let _logFilePath = null;
 function log(...a) {
   const line = `[${new Date().toISOString().slice(11, 19)}] [AI-EOS Desktop] ${a.join(" ")}\n`;
   process.stdout.write(line);
+  try {
+    if (!_logFilePath) {
+      const dir = path.join(app.getPath("userData"), "logs");
+      fs.mkdirSync(dir, { recursive: true });
+      _logFilePath = path.join(dir, "main.log");
+    }
+    fs.appendFileSync(_logFilePath, line);
+  } catch (e) {
+    console.error("[AI-EOS Desktop] 主进程日志写入失败:", e && e.message);
+  }
 }
 
 function ensureDirs() {
@@ -105,30 +117,81 @@ function waitReady(url, tries, stepMs) {
   });
 }
 
+// ---------- JWT 密钥（桌面版不落盘到仓库 data/，改由壳自己保管并经 env 注入） ----------
+// 后端在 JWT_SECRET 为空/默认时会自己生成并写文件，但打包进 .app 后仓库目录
+// 可能只读（asar/Program Files），所以这里显式生成一个放在 userData（必定可写），
+// 用 env 传给子进程——桌面版的签名密钥从始至终不为空。
+function jwtSecretFile() { return path.join(app.getPath("userData"), "jwt-secret.key"); }
+let _jwtSecretCache = "";
+function ensureJwtSecret() {
+  if (_jwtSecretCache) return _jwtSecretCache;
+  const f = jwtSecretFile();
+  try {
+    const existing = fs.readFileSync(f, "utf8").trim();
+    // 历史遗留的公开占位值一律视为无效，重新生成
+    if (existing && existing !== "aieos-portable-secret") {
+      _jwtSecretCache = existing;
+      return existing;
+    }
+  } catch { /* 首次运行：没有文件 */ }
+  const secret = require("crypto").randomBytes(32).toString("hex");
+  try {
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, secret, { mode: 0o600 });
+    log(`已生成随机 JWT_SECRET 并保存到 ${f}；请备份该文件，丢失会导致所有登录态失效`);
+  } catch (e) {
+    log(`JWT_SECRET 文件写入失败（${e && e.message}），本次仅用内存密钥：重启后需重新登录`);
+  }
+  _jwtSecretCache = secret;
+  return secret;
+}
+
+// ---------- 监听地址：默认只绑回环 ----------
+// 0.0.0.0 + 匿名开放的注册接口 = 同一局域网里任何人都能建账号、撞库、
+// 拿到 /companies 与 /agents 数据。桌面版是单机产品，默认只服务本机；
+// 只有用户在「局域网共享」页显式打开开关（并重启后端）才对外监听。
+function apiBindHost() {
+  return loadSettings().lanShareEnabled === true ? "0.0.0.0" : "127.0.0.1";
+}
+
 // ---------- 启动便携后端（FastAPI + SQLite，仅仓库场景） ----------
 function startApi() {
   const py = isWin ? "py" : "python3";
   const logFile = fs.openSync(path.join(LOG_DIR, "desktop-api.log"), "a");
+  const useUv = fs.existsSync(path.join(ROOT, ".venv")) || process.env.UV === "1";
+  const host = apiBindHost();
   const env = {
     ...process.env,
     DATABASE_URL: `sqlite+aiosqlite:///${path.join(DATA_DIR, "aieos.db")}`,
     PYTHONUNBUFFERED: "1",
     PYTHONPATH: path.join(ROOT, "apps/api"),
     AIEOS_HTTP_PORT: String(DEFAULT_API_PORT),  // mDNS 广播用（零依赖降级，缺失不影响启动）
+    // 密钥由壳生成并显式注入：空密钥/默认密钥签出的 token 能通过鉴权，
+    // 这条路径不能再依赖后端"自己生成"（打包后仓库目录可能只读）
+    JWT_SECRET: process.env.JWT_SECRET || ensureJwtSecret(),
+    AIEOS_JWT_SECRET_FILE: jwtSecretFile(),
+    // 只监听 127.0.0.1 时不再向局域网广播：否则设备发现到的地址根本连不上，
+    // 等于对外宣告了一个不存在的服务（也平白多一份多播流量）
+    AI_EOS_MDNS: host === "0.0.0.0" ? "1" : "0",
   };
-  const useUv = fs.existsSync(path.join(ROOT, ".venv")) || process.env.UV === "1";
-  // 0.0.0.0：允许同局域网的手机/其他设备扫码接入（V5.3 局域网共享）；
-  // 数据仍是本机 SQLite，访问控制靠登录鉴权（不对外开放匿名写接口）
   const args = useUv
-    ? ["run", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", String(DEFAULT_API_PORT), "--log-level", "info"]
-    : ["-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", String(DEFAULT_API_PORT), "--log-level", "info"];
+    ? ["run", "-m", "uvicorn", "app.main:app", "--host", host, "--port", String(DEFAULT_API_PORT), "--log-level", "info"]
+    : ["-m", "uvicorn", "app.main:app", "--host", host, "--port", String(DEFAULT_API_PORT), "--log-level", "info"];
   apiProc = spawn(useUv ? "uv" : py, args, {
     cwd: path.join(ROOT, "apps/api"),
     env,
     stdio: ["ignore", logFile, logFile],
     detached: !isMac,
   });
-  log(`后端 uvicorn 已拉起 (PID ${apiProc.pid}) → http://localhost:${DEFAULT_API_PORT}`);
+  const thisProc = apiProc;
+  // 缺 Python / uv 时 spawn 会异步抛 error（无监听 = 主进程未捕获异常直接崩）
+  apiProc.on("error", (e) => {
+    const msg = String(e && e.message || e);
+    if (apiProc === thisProc) apiProc = null;
+    log(`后端进程启动失败（Python/uv 未安装或不可执行）：${msg}`);
+    showGuide(`后端启动失败：${msg}`);
+  });
+  log(`后端 uvicorn 已拉起 (PID ${apiProc.pid}) → http://localhost:${DEFAULT_API_PORT}（监听 ${host}${host === "127.0.0.1" ? "，仅本机可达" : "，局域网共享已开启"}）`);
   return apiProc;
 }
 
@@ -150,7 +213,14 @@ async function startFront() {
       env: { ...process.env, NEXT_PUBLIC_API_URL: API_BASE },
       stdio: ["ignore", logFile, logFile],
     });
-    await new Promise((res) => build.on("close", (code) => res(code === 0)));
+    await new Promise((res) => {
+      build.on("close", (code) => res(code === 0));
+      // 缺 npm / 无法执行时 'close' 不一定触发，必须在这里收口，否则启动流程永久挂起
+      build.on("error", (e) => {
+        log(`前端构建进程启动失败（npm 不可用？）：${e && e.message}`);
+        res(false);
+      });
+    });
     if (fs.existsSync(nextDir)) {
       try { fs.writeFileSync(stampFile, String(DEFAULT_API_PORT)); } catch {}
     }
@@ -162,13 +232,32 @@ async function startFront() {
     stdio: ["ignore", logFile, logFile],
     detached: !isMac,
   });
+  const thisProc = frontProc;
+  frontProc.on("error", (e) => {
+    const msg = String(e && e.message || e);
+    if (frontProc === thisProc) frontProc = null;
+    log(`前端进程启动失败（npm 未安装或不可执行）：${msg}`);
+    showGuide(`前端启动失败：${msg}`);
+  });
   log(`前端 next 已拉起 (PID ${frontProc.pid}) → http://localhost:${DEFAULT_FRONT_PORT}`);
   return frontProc;
 }
 
 // ---------- 服务未检测到 → 引导页（玻璃拟态风格） ----------
+// frontUrl/apiUrl 来自用户可编辑的 settings.json，插入 HTML 前必须转义
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function guideHtml() {
   const { frontUrl, apiUrl } = currentSettings();
+  const safeFrontUrl = escapeHtml(frontUrl);
+  const safeApiUrl = escapeHtml(apiUrl);
   const repo = REPO_PRESENT;
   return `<!doctype html><html><head><meta charset="utf-8"><style>
     :root{--bg:#0B0E14;--fg:#F5F8FF;--mut:#8B93A7;--card:rgba(255,255,255,.055);
@@ -205,7 +294,7 @@ function guideHtml() {
     <h1><span class="dot"></span>AI-EOS 服务未检测到</h1>
     <div class="sub">客户端是「壳」，需要一个正在运行的 AI-EOS 服务（前端 + 后端）。</div>
     <div class="box">
-      正在尝试连接 <b>${frontUrl}</b><br>
+      正在尝试连接 <b>${safeFrontUrl}</b><br>
       ${repo
         ? "当前在开发环境：服务拉起失败，请查看 <code>logs/desktop-*.log</code>。"
         : "在运行 AI-EOS 的电脑上：<br>① 本机已启动 → 点「重试连接」<br>② 还没启动 → 运行「服务器一键部署」或便携版脚本<br>③ 远程服务器 → 点「更换服务器」填 <code>http://服务器IP:8000</code>"}
@@ -215,9 +304,62 @@ function guideHtml() {
       <button class="g" onclick="window.aieosDesktop.changeServer()">更换服务器</button>
       ${repo ? '<button class="g" onclick="window.aieosDesktop.openDataDir()">数据目录</button>' : ''}
     </div>
-    <div class="hint">API 端点：${apiUrl} · 主进程日志：logs/desktop-*.log</div>
+    <div class="hint">API 端点：${safeApiUrl} · 主进程日志：userData/logs/main.log</div>
   </div>
   </body></html>`;
+}
+
+// 统一入口：加载引导页（连接失败 / 子进程 spawn 失败都走这里）
+function showGuide(reason) {
+  if (reason) log(`显示引导页：${reason}`);
+  if (!mainWindow) return; // 首次启动时 connectAndLoad 自己会兜底
+  try {
+    mainWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(guideHtml()));
+  } catch (e) {
+    log(`引导页加载失败：${e && e.message}`);
+  }
+}
+
+// ---------- 导航守卫：只允许留在当前服务器（frontUrl）同源内 ----------
+function frontOrigin() {
+  try { return new URL(currentSettings().frontUrl).origin; } catch { return ""; }
+}
+
+function isInternalNav(target) {
+  try {
+    const u = new URL(target);
+    if (u.protocol === "data:" || u.protocol === "about:") return true; // 引导页
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    if (u.origin === frontOrigin()) return true;
+    // 开发场景可能加载的是 localhost:8000 而非 settings.frontUrl：当前页同源也放行
+    try {
+      if (mainWindow) return u.origin === new URL(mainWindow.webContents.getURL()).origin;
+    } catch {}
+    return false;
+  } catch { return false; }
+}
+
+function openExternalSafe(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") {
+      log(`已拦截非 http(s) 外部跳转：${url}`);
+      return;
+    }
+    shell.openExternal(url).catch((e) => log(`打开外部链接失败：${e && e.message}`));
+  } catch (e) { log(`无效的外部链接：${url}`); }
+}
+
+// 远程页面（自托管服务器被投毒 / 前端 XSS）不能把主窗口导航走，更不能借此拿到 preload API
+function guardNavigation(w) {
+  const handler = (event, url) => {
+    if (isInternalNav(url)) return;
+    event.preventDefault();
+    log(`拦截跨源导航 → ${url}`);
+    openExternalSafe(url);
+  };
+  w.webContents.on("will-navigate", handler);
+  w.webContents.on("will-redirect", handler);
 }
 
 // ---------- 启动主窗口 ----------
@@ -235,13 +377,15 @@ function createWindow() {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // preload 只用 require("electron") 的 contextBridge/ipcRenderer，沙箱下可用
+      sandbox: true,
     },
   });
   w.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith("http")) shell.openExternal(url);
+    openExternalSafe(url);
     return { action: "deny" };
   });
+  guardNavigation(w);
   w.once("ready-to-show", () => { w.show(); });
   mainWindow = w;
   return w;
@@ -283,7 +427,7 @@ function buildMenu() {
       },
       {
         label: "更换服务器地址",
-        click: () => promptServerAndApply(),
+        click: () => openServerWindow(),
       },
       {
         label: "重新连接服务",
@@ -310,21 +454,74 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(tpl));
 }
 
-// ---------- 更换服务器地址 ----------
-function promptServerAndApply() {
+// ---------- 更换服务器地址（小窗口表单；Electron 的 showMessageBox 没有 inputBox） ----------
+let serverWin = null;
+
+function serverFormHtml(current) {
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0B0E14;color:#F5F8FF;font:14px/1.6 -apple-system,'PingFang SC','Microsoft YaHei',sans-serif;
+      padding:24px}
+    h1{font-size:16px;font-weight:650;margin-bottom:6px}
+    .sub{color:#8B93A7;font-size:12.5px;margin-bottom:16px}
+    input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.14);
+      background:rgba(0,0,0,.3);color:#F5F8FF;font:13px ui-monospace,Menlo,monospace;outline:none}
+    input:focus{border-color:#6366F1}
+    .err{color:#F87171;font-size:12.5px;min-height:18px;margin-top:8px}
+    .btns{display:flex;gap:10px;justify-content:flex-end;margin-top:8px}
+    button{cursor:pointer;border:none;border-radius:10px;font:13px/1 inherit;font-weight:600;padding:10px 16px}
+    .g{background:transparent;color:#F5F8FF;border:1px solid rgba(255,255,255,.14)}
+    .p{background:linear-gradient(135deg,#6366F1,#8B5CF6);color:#fff}
+  </style></head><body>
+    <h1>更换服务器地址</h1>
+    <div class="sub">填写运行 AI-EOS 服务的前端地址（如 http://192.168.1.10:8000），留空恢复本机默认。</div>
+    <input id="u" spellcheck="false" placeholder="http://192.168.1.10:8000" value="${escapeHtml(current)}">
+    <div class="err" id="e"></div>
+    <div class="btns">
+      <button class="g" onclick="window.close()">取消</button>
+      <button class="p" id="ok">保存</button>
+    </div>
+    <script>
+      const u = document.getElementById('u'), e = document.getElementById('e');
+      async function save() {
+        e.textContent = '';
+        try {
+          const r = await window.aieosDesktop.submitServer(u.value);
+          if (!r || !r.ok) e.textContent = (r && r.error) || '保存失败';
+        } catch (err) { e.textContent = String(err && err.message || err); }
+      }
+      document.getElementById('ok').onclick = save;
+      u.onkeydown = (ev) => { if (ev.key === 'Enter') save(); };
+      u.focus(); u.select();
+    </script>
+  </body></html>`;
+}
+
+function openServerWindow() {
+  if (serverWin) { serverWin.focus(); return; }
   const { frontUrl } = currentSettings();
-  dialog.showMessageBox(mainWindow, {
+  serverWin = new BrowserWindow({
+    width: 520,
+    height: 300,
+    parent: mainWindow || undefined,
+    modal: !!mainWindow,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    show: false,
     title: "更换服务器地址",
-    message: "当前服务器：" + frontUrl,
-    detail: "输入新的前端服务地址（http://IP:端口），留空恢复本机默认。",
-    buttons: ["取消", "确定"],
-    inputBox: frontUrl,
-  }).then((r) => {
-    if (r.response === 1 && r.inputBox && r.inputBox.trim()) {
-      saveSettings({ frontUrl: r.inputBox.trim().replace(/\/$/, ""), apiUrl: "" });
-      connectAndLoad();
-    }
+    backgroundColor: "#0b0e14",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
   });
+  serverWin.setMenuBarVisibility(false);
+  serverWin.once("ready-to-show", () => { if (serverWin) serverWin.show(); });
+  serverWin.on("closed", () => { serverWin = null; });
+  serverWin.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(serverFormHtml(frontUrl)));
 }
 
 // ---------- 自动升级（更新源：你自己服务器上的 /clients/update/*） ----------
@@ -368,6 +565,10 @@ async function downloadToFile(url, dest, onProgress) {
   // check 请求的 8s 超时保留在 checkUpdateRemote 里
   const res = await fetch(url);
   if (!res.ok) throw new Error(`下载失败 HTTP ${res.status}`);
+  // fetch 默认跟随 30x：必须校验重定向后的最终地址，否则白名单可被一次跳转绕过
+  try { assertUpdateUrl(res.url); } catch (e) {
+    throw new Error(`下载被重定向到不受信任的地址（${res.url || "?"}），已中止`);
+  }
   const total = Number(res.headers.get("content-length") || 0);
   const fileStream = fs.createWriteStream(dest);
   let got = 0;
@@ -380,8 +581,84 @@ async function downloadToFile(url, dest, onProgress) {
   return got;
 }
 
+// ---------- 升级包校验（不信任渲染进程传来的任何字段） ----------
+// 下载地址白名单：只认当前「更新源」——settings.apiBase / apiUrl / frontUrl 的 host。
+// https 强制；http 仅放行本机回环（且回环地址必须本来就是更新源，便携版 8001 即属此类）。
+const UPDATE_EXT = {
+  win32: [".exe"],
+  darwin: [".dmg", ".zip"],
+  linux: [".appimage", ".deb", ".zip", ".tar.gz"],
+};
+
+function isLoopbackHost(h) {
+  const host = String(h || "").toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+}
+
+function updateSourceHosts() {
+  const s = loadSettings();
+  const { frontUrl, apiUrl } = currentSettings();
+  const hosts = new Set();
+  for (const base of [s.apiBase, apiUrl, frontUrl]) {
+    if (!base) continue;
+    try {
+      const u = new URL(String(base));
+      if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+      hosts.add(u.hostname.toLowerCase());
+    } catch { /* 无效配置直接跳过 */ }
+  }
+  return hosts;
+}
+
+function assertUpdateUrl(raw) {
+  let u;
+  try { u = new URL(String(raw || "")); } catch { throw new Error("更新地址无效"); }
+  if (u.username || u.password) throw new Error("更新地址不得包含用户名/密码");
+  const host = u.hostname.toLowerCase();
+  const hosts = updateSourceHosts();
+  if (!hosts.has(host)) throw new Error(`更新地址不在可信更新源内：${host}`);
+  if (u.protocol === "https:") return u;
+  // http 只允许回环，且回环必须出现在白名单里（= 更新源本身就是本机）
+  if (u.protocol === "http:" && isLoopbackHost(host) && hosts.has(host)) return u;
+  throw new Error("更新地址必须使用 https（仅本机回环允许 http）");
+}
+
+// 只接受纯文件名：basename 后仍含路径分隔符/.. /隐藏文件一律拒绝；再按平台白名单校验扩展名
+function sanitizeUpdateFile(raw) {
+  const name = String(raw || "");
+  if (!name || name.length > 180) throw new Error("安装包文件名无效");
+  if (name !== path.basename(name)) throw new Error("安装包文件名不得包含路径");
+  if (name.includes("..") || /[\\/\u0000]/.test(name) || name.startsWith(".")) {
+    throw new Error("安装包文件名非法");
+  }
+  const exts = UPDATE_EXT[process.platform] || [];
+  const lower = name.toLowerCase();
+  if (!exts.some((ext) => lower.endsWith(ext))) {
+    throw new Error(`不支持的安装包类型：${name}`);
+  }
+  return name;
+}
+
+// manifest 必须带 64 位十六进制 SHA-256；缺失即拒绝升级（不再"没校验也照装"）
+function sanitizeSha256(raw) {
+  const v = String(raw || "").trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(v)) throw new Error("缺少有效的 SHA-256 校验值，已拒绝升级");
+  return v;
+}
+
+function updatesDir() { return path.join(app.getPath("userData"), "updates"); }
+
+function assertInsideUpdatesDir(dest) {
+  const base = path.resolve(updatesDir());
+  const target = path.resolve(dest);
+  if (target !== base && !target.startsWith(base + path.sep)) {
+    throw new Error("安装包路径越界，已拒绝");
+  }
+  return target;
+}
+
 async function applyUpdate(file) {
-  const dest = path.join(app.getPath("userData"), "updates", file);
+  const dest = assertInsideUpdatesDir(path.join(updatesDir(), sanitizeUpdateFile(file)));
   if (isWin) {
     // NSIS 静默覆盖安装 → 等安装进程退出后再重启（否则 relaunch 与安装器争抢 exe）
     updateEvents({ phase: "installing", file });
@@ -431,20 +708,34 @@ async function applyUpdate(file) {
   _updating = false; // 手动路径结束 → 允许重试
 }
 
-async function runUpdateFlow(info) {
+async function runUpdateFlow(rawInfo) {
   if (_updating) return { ok: false, error: "已有更新在下载中" };
+  // 渲染进程只能提供 {file, url, sha256} 三个字段，其余一律忽略；三项都过校验才下载
+  let info;
+  try {
+    const src = rawInfo && typeof rawInfo === "object" ? rawInfo : {};
+    info = {
+      file: sanitizeUpdateFile(src.file),
+      url: assertUpdateUrl(src.url).toString(),
+      sha256: sanitizeSha256(src.sha256),
+    };
+  } catch (e) {
+    const msg = String(e && e.message || e);
+    log(`拒绝升级请求：${msg}`);
+    updateEvents({ phase: "error", error: msg });
+    return { ok: false, error: msg };
+  }
   _updating = true;
   try {
     updateEvents({ phase: "downloading", pct: 0, file: info.file });
-    const dest = path.join(app.getPath("userData"), "updates", info.file);
+    const dest = assertInsideUpdatesDir(path.join(updatesDir(), info.file));
     const bytes = await downloadToFile(info.url, dest,
       (pct) => updateEvents({ phase: "downloading", pct, file: info.file }));
-    // 完整性校验：manifest 带 sha256 时，下载文件必须逐位一致才允许执行
-    if (info.sha256) {
-      const got = await sha256OfFile(dest);
-      if (got.toLowerCase() !== String(info.sha256).toLowerCase()) {
-        throw new Error("安装包完整性校验失败（SHA-256 不一致），已放弃本次升级");
-      }
+    // 完整性校验：sha256 必填，下载文件必须逐位一致才允许执行
+    const got = await sha256OfFile(dest);
+    if (got.toLowerCase() !== info.sha256) {
+      try { fs.unlinkSync(dest); } catch {}
+      throw new Error("安装包完整性校验失败（SHA-256 不一致），已放弃本次升级");
     }
     updateEvents({ phase: "done", file: info.file, bytes });
     await applyUpdate(info.file);
@@ -460,13 +751,23 @@ function checkNowSelf() {
   checkUpdateRemote().then((info) => {
     if (info.has_update && info.url) {
       const target = guessApiBase() + info.url;
+      // 清单缺 sha256 时不弹"立即升级"：宁可提示服务端补清单，也不装无校验的包
+      if (!/^[a-f0-9]{64}$/i.test(String(info.sha256 || ""))) {
+        dialog.showMessageBox(mainWindow, {
+          title: "升级清单不完整",
+          message: "更新清单缺少 SHA-256 校验值",
+          detail: "为防止安装被篡改的安装包，已拒绝升级。请在服务器 /clients/update 清单中补上 sha256 后重试。",
+          buttons: ["好"],
+        });
+        return;
+      }
       dialog.showMessageBox(mainWindow, {
         title: "发现新版本",
         message: `AI-EOS ${info.latest} 可用（当前 ${app.getVersion()}）`,
         detail: (info.notes || "").slice(0, 300) + "\n\n现在下载并升级？",
         buttons: ["稍后", "立即升级"],
       }).then((r) => {
-        if (r.response === 1) runUpdateFlow({ url: target, file: info.file, platform: process.platform, sha256: info.sha256 || undefined });
+        if (r.response === 1) runUpdateFlow({ url: target, file: info.file, sha256: info.sha256 });
       });
     } else {
       dialog.showMessageBox(mainWindow, {
@@ -498,6 +799,9 @@ function registerIpc() {
       dataDir: DATA_DIR,
       repo: REPO_PRESENT,
       version: app.getVersion(),
+      // 局域网共享状态（默认关闭 = 后端只听 127.0.0.1）
+      lanShareEnabled: loadSettings().lanShareEnabled === true,
+      apiBindHost: apiBindHost(),
     };
   });
   ipcMain.handle("desktop:openDataDir", async () => {
@@ -508,11 +812,41 @@ function registerIpc() {
     await connectAndLoad();
   });
   ipcMain.handle("desktop:changeServer", async () => {
-    promptServerAndApply();
+    openServerWindow();
   });
-  // 自动升级：前端横幅 / 菜单 都能触发
+  // 更换服务器表单提交：只接受来自表单窗口的调用，主进程重新校验 URL
+  ipcMain.handle("desktop:saveServerUrl", async (e, raw) => {
+    if (!serverWin || BrowserWindow.fromWebContents(e.sender) !== serverWin) {
+      return { ok: false, error: "无效的调用来源" };
+    }
+    const url = String(raw || "").trim().replace(/\/+$/, "");
+    if (url) {
+      let u;
+      try { u = new URL(url); } catch { return { ok: false, error: "地址格式不正确，例如 http://192.168.1.10:8000" }; }
+      if (u.protocol !== "http:" && u.protocol !== "https:") {
+        return { ok: false, error: "只支持 http:// 或 https:// 地址" };
+      }
+      if (u.username || u.password) return { ok: false, error: "地址不能包含用户名/密码" };
+    }
+    saveSettings({ frontUrl: url, apiUrl: "" });
+    log(`服务器地址已更新为 ${url || "（本机默认）"}（重启后生效）`);
+    if (serverWin) serverWin.close();
+    dialog.showMessageBox(mainWindow, {
+      title: "已保存",
+      message: "服务器地址已更新",
+      detail: `新地址：${url || "本机默认"}\n需要重启客户端后生效。`,
+      buttons: ["稍后", "立即重启"],
+    }).then((r) => {
+      if (r.response === 1) {
+        killProc(apiProc); killProc(frontProc);
+        app.relaunch();
+        app.exit(0);
+      }
+    });
+    return { ok: true, needsRestart: true };
+  });
+  // 自动升级：前端横幅 / 菜单 都能触发；runUpdateFlow 内部只取 {file,url,sha256} 并全量校验
   ipcMain.handle("desktop:startUpdate", (e, info) => {
-    // info: { url, file, platform } —— 前端用自己的 API base 拼好完整 url
     return runUpdateFlow(info);
   });
   ipcMain.handle("desktop:checkNow", () => {
@@ -554,6 +888,34 @@ function registerIpc() {
       }
     } catch (e) { log(`设置开机自启失败: ${e.message}`); }
     try { return ipcGetAutoLaunch(); } catch { return on; }
+  });
+  // 局域网共享开关（持久化在 userData/settings.json，默认关闭）
+  // 打开 → 后端 --host 0.0.0.0（同局域网设备可接入）；关闭 → 127.0.0.1（仅本机）。
+  // 绑定地址在 uvicorn 启动时确定，所以切换后需要重启后端进程才能生效。
+  ipcMain.handle("desktop:getLanShare", () => ({
+    enabled: loadSettings().lanShareEnabled === true,
+    host: apiBindHost(),
+    port: DEFAULT_API_PORT,
+    repo: REPO_PRESENT,
+  }));
+  ipcMain.handle("desktop:setLanShare", async (_e, enabled) => {
+    const on = !!enabled;
+    saveSettings({ lanShareEnabled: on });
+    let restarted = false;
+    if (REPO_PRESENT && apiProc && !apiProc.killed) {
+      try {
+        killProc(apiProc);
+        apiProc = null;
+        startApi();
+        restarted = await waitReady(`http://127.0.0.1:${DEFAULT_API_PORT}/health`, 30, 1000);
+        log(`局域网共享${on ? "已开启" : "已关闭"}，后端监听 ${apiBindHost()}（重启${restarted ? "成功" : "未就绪"}）`);
+      } catch (e) {
+        log(`切换局域网共享后重启后端失败: ${e && e.message}`);
+      }
+    } else {
+      log(`局域网共享${on ? "已开启" : "已关闭"}，将在下次启动后端时生效（监听 ${apiBindHost()}）`);
+    }
+    return { enabled: on, host: apiBindHost(), restarted, needsRestart: !(REPO_PRESENT && apiProc) };
   });
 }
 
@@ -618,9 +980,8 @@ async function connectAndLoad() {
   }
 
   // 3) 服务仍不可达 → 引导页
-  log("服务不可达，显示引导页");
   if (!mainWindow) createWindow();
-  mainWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(guideHtml()));
+  showGuide("服务不可达");
   return false;
 }
 

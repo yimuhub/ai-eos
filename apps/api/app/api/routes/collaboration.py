@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
+from app.core.permissions import Capability, require_company_scope
 from app.models.collaboration import (
     AgentCollaboration,
     AgentMessage,
@@ -17,9 +18,8 @@ from app.collaboration.routing import send_collaboration_message, route_message
 from app.api.deps import get_current_user
 from app.models.user import User
 
-router = APIRouter(prefix="/collaboration", tags=["collaboration"])
-
-
+router = APIRouter(prefix="/collaboration", tags=["collaboration"],
+                   dependencies=[Depends(require_company_scope())])
 class CollaborationCreate(BaseModel):
     source_agent_id: str
     target_agent_id: str

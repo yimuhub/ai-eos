@@ -1,0 +1,131 @@
+# AI-EOS 质量门禁流水线
+#
+# 三个彼此独立的 job，任何一个是红的都不该合并：
+#   backend  —— 后端测试套件 + 字节码编译
+#   frontend —— 前端类型检查 + 单元/契约测试
+#   contract —— 以 OpenAPI 为权威源的前后端接口契约门禁
+#
+# 触发：push + pull_request；用 concurrency 取消同分支上的旧运行（照 clients.yml 风格）。
+# 注意：本流水线只做校验，**不含任何部署 / 发布 / 上传产物步骤**。
+name: ci
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # job1：后端
+  # ---------------------------------------------------------------------------
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # 用 SQLite，CI 里不依赖 Postgres/MySQL。
+      DEBUG: "false"
+      DATABASE_URL: "sqlite+aiosqlite:////tmp/ci_eos.db"
+      # ★★ 绝对不能起 Redis ★★
+      # tests/test_auth.py 里的登录限流用例直接读写进程内存回退字典
+      # `_login_failures`（见 app/api/routes/auth.py:33：「现有测试直接读写
+      # _login_failures，内存回退实现必须原样保留」）。一旦有可达的 Redis，
+      # 限流计数走 Redis、内存字典恒为空，该用例就会假失败。
+      # 这里把一个「永远连不上」的地址写死，强制走内存回退，保证可重复、可离线。
+      REDIS_URL: "redis://127.0.0.1:1/0"
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: 安装后端依赖（含 dev：pytest / pytest-asyncio / pyflakes）
+        run: uv sync
+
+      - name: 后端测试套件（离线、SQLite、无 Redis）
+        # pyproject 已设 asyncio_mode=auto、testpaths=["tests"]，直接跑即可。
+        # 需要真实模型密钥的端到端用例打了 requires_llm 标记，无密钥时自动跳过。
+        # 覆盖率门禁：只统计路由与核心层（35% 实测），阈值向下取整到 30，
+        # 只允许往上调；不要把 --cov 塞进 addopts（单跑一个文件会天然低）。
+        run: >
+          uv run pytest -q
+          --cov=app/api/routes --cov=app/core
+          --cov-report=term-missing
+          --cov-fail-under=30
+
+      - name: 全模块字节码编译（把语法/编码错误钉死在合并前）
+        run: uv run python -m compileall -q app
+
+  # ---------------------------------------------------------------------------
+  # job2：前端
+  # ---------------------------------------------------------------------------
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: 安装依赖（严格锁定，缺 lock 直接失败）
+        run: npm ci --no-audit --no-fund
+
+      - name: TypeScript 类型检查（strict）
+        run: npx tsc --noEmit
+
+      - name: 前端测试（vitest run）
+        run: npm run test
+
+  # ---------------------------------------------------------------------------
+  # job3：契约（以 FastAPI OpenAPI 为后端唯一权威来源）
+  # ---------------------------------------------------------------------------
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DEBUG: "false"
+      DATABASE_URL: "sqlite+aiosqlite:////tmp/ci_contract.db"
+      REDIS_URL: "redis://127.0.0.1:1/0"
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: 安装后端依赖
+        run: uv sync
+
+      - name: 应用可导入 + OpenAPI 可生成
+        # 对应 tools/check.sh「后端：应用可导入 + OpenAPI 可生成」关卡。
+        run: uv run python -c "import app.main as m; print(len(m.app.openapi()['paths']), 'routes')"
+
+      - name: SQLAlchemy mapper 可配置
+        # 对应 tools/check.sh「后端：SQLAlchemy mapper 可配置」关卡。
+        run: |
+          uv run python -c "import app.models; from sqlalchemy.orm import configure_mappers; configure_mappers(); print('mappers ok')"
+
+      - name: 前后端接口契约门禁（404 / 405）
+        # 对应 tools/check.sh「前后端接口契约」关卡；--strict 有确凿不匹配即退出码 1。
+        run: uv run python ../../tools/check_api_contract.py --strict
+
+    # 关于 tools/check.sh 未纳入本流水线的关卡（均为本地/重复项，故意排除）：
+    #   - pyflakes「未定义名」：已由 backend 的 pytest 用例
+    #     test_no_undefined_names 覆盖（dev 依赖里装了 pyflakes），不在此重复。
+    #   - 前端 tsc / ESLint：tsc 归 job2；ESLint 按本次 job2 约定未纳入（仅 tsc + npm test）。
+    #   - 端到端主链路试跑 tools/e2e_smoke.py：需拉起真实进程、占用端口、
+    #     本地假模型服务，慢且易受 runner 网络影响 → 属本地交付前关卡，CI 不跑。

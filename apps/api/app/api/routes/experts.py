@@ -17,12 +17,16 @@ from sqlalchemy import or_, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.core.permissions import Capability, require_company_scope
+from app.core.logging_config import get_logger
 from app.expert_library import SOURCE_URL, DEPT_NAMES, parse_expert_md
 from app.models.expert_template import ExpertTemplate
 from app.models.user import User
 
-router = APIRouter(prefix="/experts", tags=["experts"])
+logger = get_logger(__name__)
 
+router = APIRouter(prefix="/experts", tags=["experts"],
+                   dependencies=[Depends(require_company_scope())])
 VENDOR_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                           "..", "..", "..", "..", "vendor", "agency-agents-zh")
 SOURCE_DIR_PREFIXES = list(DEPT_NAMES.keys()) + ["examples"]
@@ -72,7 +76,9 @@ async def import_experts(
         try:
             with open(os.path.join(vdir, fname), encoding="utf-8") as fh:
                 text = fh.read()
-        except Exception:
+        except Exception as e:
+            logger.warning("vendor 专家文件读取失败，跳过 %s：%s: %s", fname,
+                           type(e).__name__, e)
             skipped += 1
             continue
         rec = parse_expert_md(base, text, _detect_dept(base))
@@ -129,8 +135,12 @@ async def import_original_experts(
     for fname in files:
         base = fname[:-3]
         try:
-            text = open(os.path.join(odir, fname), encoding="utf-8").read()
-        except Exception:
+            with open(os.path.join(odir, fname), encoding="utf-8") as fh:
+                text = fh.read()
+        except Exception as e:
+            # 原实现 open().read() 句柄未关闭；改 with 后失败仍跳过该文件，但要留痕
+            logger.warning("专家文件读取失败，跳过 %s：%s: %s", fname,
+                           type(e).__name__, e)
             skipped += 1
             continue
         rec = parse_expert_md(base, text, _detect_dept(base))
@@ -287,8 +297,10 @@ async def search_experts(
                 if 0 <= idx < len(rows):
                     r = rows[idx]
                     picks.append({**r.public_dict(), "reason": p.get("reason", "")})
-        except Exception:
-            pass
+        except Exception as e:
+            # LLM 返回非 JSON/结构异常：降级走"请改关键词重试"提示，但必须留痕
+            logger.warning("专家检索 LLM 结果解析失败：%s: %s（原始输出前 200 字：%s）",
+                           type(e).__name__, e, raw[:200])
     return picks or [{"id": None, "message": "LLM 未返回有效结果，请改关键词重试"}]
 
 
@@ -342,8 +354,9 @@ async def build_team(
                 if 0 <= idx < len(rows):
                     team.append({"template": rows[idx].public_dict(),
                                 "task": p.get("task", "")})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("组队 LLM 结果解析失败：%s: %s（原始输出前 200 字：%s）",
+                           type(e).__name__, e, raw[:200])
     # 批量建蓝图 Job（每个模板走既有确认链：审查→验收→上岗）
     from app.factory_engine import AgentFactoryJob
     jobs = []

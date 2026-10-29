@@ -5,7 +5,7 @@
 不用手敲 IP。
 
 边界与降级：
-- zeroconf 没装 / 无可用网卡 / 广播失败 → 全部静默跳过，服务照常启动
+- zeroconf 没装 / 无可用网卡 / 广播失败 → 跳过并记 WARNING 日志，服务照常启动
   （mDNS 只是锦上添花，局域网共享的主体是 /clients/lan + 二维码）
 - 环境变量 AI_EOS_MDNS=0 可强制关闭（部分多播受限的网络会刷屏告警）
 - 广播线程 daemon，不拦退出
@@ -17,6 +17,7 @@ from typing import Optional
 
 from app.core.logging_config import get_logger
 from app.core.config import settings
+from app.version import __version__ as _ADVERTISE_VERSION
 
 logger = get_logger(__name__)
 
@@ -68,7 +69,7 @@ def start() -> None:
             _service_name(),
             addresses=_lan_addresses(),
             port=_local_port(),
-            properties={"version": "5.4", "name": "AI-EOS", "type": "tcp"},
+            properties={"version": _ADVERTISE_VERSION, "name": "AI-EOS", "type": "tcp"},
         )
         zc.register_service(info)
         _service = zc
@@ -86,8 +87,10 @@ def _lan_addresses() -> list:
         ip = s.getsockname()[0]
         s.close()
         addrs.append(socket.inet_aton(ip))
-    except OSError:
-        pass
+    except OSError as e:
+        # 降级不阻断（下面回退 127.0.0.1），但留痕：这会导致广播只带本机地址，
+        # 同网设备发现到的地址不可达
+        logger.warning("[mdns] 局域网地址探测失败，回退 127.0.0.1 广播：%s", e)
     if not addrs:
         addrs.append(socket.inet_aton("127.0.0.1"))
     return addrs
@@ -98,6 +101,7 @@ def stop() -> None:
     if _service is not None:
         try:
             _service.close()
-        except Exception:
-            pass
+        except Exception as e:
+            # 关闭失败不阻断退出流程（daemon 场景），但要留痕方便排查资源泄漏
+            logger.warning("[mdns] Zeroconf 关闭失败：%s: %s", type(e).__name__, e)
         _service = None

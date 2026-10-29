@@ -21,6 +21,9 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.api.routes.assets import storage_root
+from app.core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/clients", tags=["clients"])
 
@@ -141,8 +144,10 @@ def _detect_lan_ip() -> str:
         s.close()
         if ip and ip != "127.0.0.1" and (ip == "0.0.0.0" or _is_lan(ip)):
             return "127.0.0.1" if ip == "0.0.0.0" else ip
-    except OSError:
-        pass
+    except OSError as e:
+        # 降级不阻断（还有 getaddrinfo 兜底），但要留痕：
+        # 无外网/防火墙场景下这里失败会直接影响扫码地址
+        logger.warning("局域网 IP 探测（UDP connect 8.8.8.8）失败，尝试 getaddrinfo 兜底：%s", e)
     try:
         for family, _mode, _ttl, _socktype, sockaddr in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             if family != socket.AF_INET:
@@ -150,8 +155,8 @@ def _detect_lan_ip() -> str:
             ip = sockaddr[0]  # AF_INET 的 sockaddr = (ip, port)
             if isinstance(ip, str) and _is_lan(ip):
                 return ip
-    except OSError:
-        pass
+    except OSError as e:
+        logger.warning("局域网 IP 探测（getaddrinfo）失败，回退 127.0.0.1：%s", e)
     return "127.0.0.1"
 
 

@@ -5,21 +5,25 @@
 2. 协议检查（仅 https）
 3. 私有地址/内网 IP 黑名单（防 SSRF）
 4. 每次操作落库审计
+5. **逐跳重定向复检**：关闭 httpx 自动跟随，最多 5 跳，每跳都过
+   `core.net_guard.validate_outbound_url`（allow_private=False）；Playwright
+   渲染分支用 route 拦截对每个请求先校验，导航后再校验最终 URL。
 
-执行层用 httpx 抓取文本（无 JS 渲染，安全可控），后续可接 Playwright。
+执行层用 httpx 抓取文本（无 JS 渲染，安全可控），可选 Playwright。
 """
 import ipaddress
 import re
 import socket
 import uuid
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
 from sqlalchemy import JSON, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.net_guard import OutboundURLRejected, validate_outbound_url
 from app.db.base import Base
 
 
@@ -86,6 +90,45 @@ def check_url_security(url: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+_MAX_REDIRECTS = 5
+_REDIRECT_CODES = {301, 302, 303, 307, 308}
+
+
+class _UpstreamHTTPError(Exception):
+    """上游返回非 2xx；只携带状态码与原因，绝不携带响应体。"""
+
+    def __init__(self, status_code: int, reason: str):
+        self.status_code = status_code
+        self.reason = (reason or "")[:60]
+        super().__init__(f"HTTP {status_code} {self.reason}".strip())
+
+
+def _require_safe_hop(url: str) -> None:
+    """每一跳（含重定向目标）都必须重新校验，且仅允许 https。"""
+    scheme = urlparse(url).scheme
+    if scheme != "https":
+        raise OutboundURLRejected(f"仅允许 https（当前 {scheme or '无'}）")
+    validate_outbound_url(url, allow_private=False)
+
+
+async def _fetch_static(url: str, timeout_s: float) -> httpx.Response:
+    """手动逐跳跟随重定向（最多 5 跳），每跳先过 SSRF 闸门。"""
+    headers = {"User-Agent": "AI-EOS-BrowserAgent/1.0"}
+    async with httpx.AsyncClient(follow_redirects=False, timeout=timeout_s,
+                                 trust_env=False) as client:
+        current = url
+        for _ in range(_MAX_REDIRECTS + 1):
+            _require_safe_hop(current)
+            resp = await client.get(current, headers=headers)
+            if resp.status_code in _REDIRECT_CODES:
+                location = resp.headers.get("location")
+                if location:
+                    current = urljoin(str(resp.url), location)
+                    continue
+            return resp
+    raise OutboundURLRejected("重定向次数超过上限（最多 5 跳）")
+
+
 async def fetch_page_text(db, company_id: str, agent_id: str | None,
                           url: str, max_chars: int = 8000,
                           timeout_s: float = 15.0,
@@ -106,7 +149,6 @@ async def fetch_page_text(db, company_id: str, agent_id: str | None,
         return result
 
     status_code = content_len = duration_ms = None
-    error = None
     text = None
     page_title = None
 
@@ -115,11 +157,26 @@ async def fetch_page_text(db, company_id: str, agent_id: str | None,
         try:
             from playwright.async_api import async_playwright
 
+            async def _guard_route(route):
+                # 每个 http(s) 子请求（含重定向）发出前先校验，
+                # 防止浏览器把私网内容带回；data:/blob: 等本地资源放行。
+                req_url = route.request.url
+                if urlparse(req_url).scheme in ("http", "https"):
+                    try:
+                        _require_safe_hop(req_url)
+                    except OutboundURLRejected:
+                        await route.abort()
+                        return
+                await route.continue_()
+
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(headless=True)
                 page = await browser.new_page()
+                await page.route("**/*", _guard_route)
                 await page.goto(url, timeout=int(timeout_s * 1000),
                                 wait_until="domcontentloaded")
+                # 导航结束后再复核最终 URL（防止重定向到私网/元数据）
+                _require_safe_hop(page.url)
                 page_title = await page.title()
                 raw = await page.inner_text("body")
                 text = re.sub(r"\s+", " ", raw).strip()[:max_chars]
@@ -132,15 +189,15 @@ async def fetch_page_text(db, company_id: str, agent_id: str | None,
             result["note"] = ("playwright 未安装，回退静态抓取；"
                               "uv add playwright + playwright install chromium 后启用")
         except Exception as e:
-            result["note"] = f"JS 渲染失败，回退静态抓取: {e}"
+            result["note"] = f"JS 渲染失败，回退静态抓取: {type(e).__name__}"
 
     if text is None:
         try:
-            async with httpx.AsyncClient(follow_redirects=True,
-                                         timeout=timeout_s) as client:
-                resp = await client.get(url, headers={
-                    "User-Agent": "AI-EOS-BrowserAgent/1.0"})
+            resp = await _fetch_static(url, timeout_s)
             status_code = resp.status_code
+            if status_code >= 400:
+                # 不回显上游响应体，只给状态码 + 简短原因
+                raise _UpstreamHTTPError(status_code, resp.reason_phrase)
             html = resp.text
             # 剥离 script/style 后取纯文本
             stripped = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ",
@@ -153,9 +210,13 @@ async def fetch_page_text(db, company_id: str, agent_id: str | None,
                                 re.I | re.S)
             page_title = m_title.group(1).strip() if m_title else None
             result.update({"title_m": page_title, "text": text})
+        except _UpstreamHTTPError as e:
+            result["error"] = str(e)[:200]
+        except OutboundURLRejected as e:
+            result["error"] = f"目标地址被拒绝：{e}"[:200]
         except Exception as e:
-            error = f"{type(e).__name__}: {e}"
-            result["error"] = error
+            # 只保留异常类型与截断信息，避免把上游 body 带出去
+            result["error"] = f"{type(e).__name__}: {str(e)[:150]}"
 
     duration_ms = int((_now() - start).total_seconds() * 1000)
     db.add(BrowserActionLog(

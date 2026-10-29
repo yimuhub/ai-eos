@@ -3,7 +3,7 @@ import json
 import re as _re
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func, select, text
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -70,15 +70,23 @@ async def list_projects(company_id: str | None = None, status: str | None = None
     if status:
         q = q.where(Project.status == ProjectStatus(status))
     rows = (await db.execute(q.order_by(Project.created_at.desc()))).scalars().all()
+    # 一条聚合查询算出所有项目的任务总数/完成数，避免逐项目两次 COUNT 的 N+1
+    stats: dict[str, tuple[int, int]] = {}
+    if rows:
+        agg = await db.execute(
+            select(Task.project_id,
+                   func.count(Task.id),
+                   func.sum(case((Task.status == TaskStatus.COMPLETED, 1), else_=0)))
+            .where(Task.project_id.in_([pr.id for pr in rows]))
+            .group_by(Task.project_id))
+        for pid, total, done in agg.all():
+            stats[str(pid)] = (int(total or 0), int(done or 0))
     out = []
     for pr in rows:
         d = {c.key: getattr(pr, c.key) for c in pr.__table__.columns}
         d["status"] = pr.status.value
         # 进度：完成任务 / 总任务
-        total = (await db.execute(select(func.count()).select_from(Task).where(
-            Task.project_id == pr.id))).scalar() or 0
-        done = (await db.execute(select(func.count()).select_from(Task).where(
-            Task.project_id == pr.id, Task.status == TaskStatus.COMPLETED))).scalar() or 0
+        total, done = stats.get(str(pr.id), (0, 0))
         d["task_total"] = total
         d["task_completed"] = done
         d["progress"] = round(done / total * 100) if total else 0
@@ -335,16 +343,33 @@ async def project_lifecycle(pid: str, data: LifecycleIn,
 
     elif action == "delete":
         # 彻底清除：任务/执行记录/记忆(context_ref指向项目的)/会议/里程碑/成员/快照/资产引用 + 本体
-        tasks = (await db.execute(select(Task.id).where(
-            Task.project_id == pid))).scalars().all()
-        for tid in tasks:
-            await db.execute(text(
-                "DELETE FROM execution_checkpoints USING agent_executions "
-                "WHERE execution_checkpoints.execution_id = agent_executions.id "
-                "AND agent_executions.task_id = CAST(:tid AS varchar)"), {"tid": tid})
-            await db.execute(text(
-                "UPDATE agent_memories SET context_ref = NULL "
-                "WHERE context_ref = CAST(:tid AS varchar)"), {"tid": tid})
+        # 跨方言：用 IN 子查询替代 PostgreSQL/MySQL 专属的 DELETE ... USING
+        await db.execute(text(
+            "DELETE FROM execution_checkpoints WHERE execution_id IN ("
+            "SELECT id FROM agent_executions WHERE task_id IN ("
+            "SELECT id FROM tasks WHERE project_id = :pid))"), {"pid": pid})
+        await db.execute(text(
+            "UPDATE agent_memories SET context_ref = NULL WHERE context_ref IN ("
+            "SELECT id FROM tasks WHERE project_id = :pid)"), {"pid": pid})
+        # 任务侧引用先清干净，否则 SQLite 的外键会拦住后面的 DELETE FROM tasks
+        await db.execute(text(
+            "DELETE FROM task_events WHERE task_id IN ("
+            "SELECT id FROM tasks WHERE project_id = :pid)"), {"pid": pid})
+        await db.execute(text(
+            "DELETE FROM interventions WHERE task_id IN ("
+            "SELECT id FROM tasks WHERE project_id = :pid)"), {"pid": pid})
+        await db.execute(text(
+            "UPDATE assets SET task_id = NULL WHERE task_id IN ("
+            "SELECT id FROM tasks WHERE project_id = :pid)"), {"pid": pid})
+        await db.execute(text(
+            "UPDATE meeting_action_items SET task_id = NULL WHERE task_id IN ("
+            "SELECT id FROM tasks WHERE project_id = :pid)"), {"pid": pid})
+        await db.execute(text(
+            "UPDATE tasks SET parent_task_id = NULL WHERE project_id = :pid"),
+            {"pid": pid})
+        await db.execute(text(
+            "UPDATE tasks SET parent_task_id = NULL WHERE parent_task_id IN ("
+            "SELECT id FROM tasks WHERE project_id = :pid)"), {"pid": pid})
         await db.execute(AgentExecution.__table__.delete().where(
             AgentExecution.__table__.c.project_id == pid))
         await db.execute(Task.__table__.delete().where(
@@ -429,15 +454,36 @@ async def batch_delete_projects(data: BatchDeleteIn,
         if not p:
             failed.append({"id": pid, "reason": "不存在"})
             continue
+        pname = p.name  # 提前取值：回滚/删除后 ORM 对象过期
         try:
             async with db.begin_nested():
-                tasks = (await db.execute(select(Task.id).where(
-                    Task.project_id == pid))).scalars().all()
-                for tid in tasks:
-                    await db.execute(text(
-                        "DELETE FROM execution_checkpoints USING agent_executions "
-                        "WHERE execution_checkpoints.execution_id = agent_executions.id "
-                        "AND agent_executions.task_id = CAST(:tid AS varchar)"), {"tid": tid})
+                # 跨方言：IN 子查询替代 DELETE ... USING
+                await db.execute(text(
+                    "DELETE FROM execution_checkpoints WHERE execution_id IN ("
+                    "SELECT id FROM agent_executions WHERE task_id IN ("
+                    "SELECT id FROM tasks WHERE project_id = :pid))"), {"pid": pid})
+                await db.execute(text(
+                    "DELETE FROM agent_memories WHERE context_ref IN ("
+                    "SELECT id FROM tasks WHERE project_id = :pid)"), {"pid": pid})
+                # 清任务侧引用，避免外键拦住 DELETE FROM tasks（SQLite 默认开启 FK）
+                await db.execute(text(
+                    "DELETE FROM task_events WHERE task_id IN ("
+                    "SELECT id FROM tasks WHERE project_id = :pid)"), {"pid": pid})
+                await db.execute(text(
+                    "DELETE FROM interventions WHERE task_id IN ("
+                    "SELECT id FROM tasks WHERE project_id = :pid)"), {"pid": pid})
+                await db.execute(text(
+                    "UPDATE assets SET task_id = NULL WHERE task_id IN ("
+                    "SELECT id FROM tasks WHERE project_id = :pid)"), {"pid": pid})
+                await db.execute(text(
+                    "UPDATE meeting_action_items SET task_id = NULL WHERE task_id IN ("
+                    "SELECT id FROM tasks WHERE project_id = :pid)"), {"pid": pid})
+                await db.execute(text(
+                    "UPDATE tasks SET parent_task_id = NULL WHERE project_id = :pid"),
+                    {"pid": pid})
+                await db.execute(text(
+                    "UPDATE tasks SET parent_task_id = NULL WHERE parent_task_id IN ("
+                    "SELECT id FROM tasks WHERE project_id = :pid)"), {"pid": pid})
                 await db.execute(AgentExecution.__table__.delete().where(
                     AgentExecution.__table__.c.project_id == pid))
                 await db.execute(Task.__table__.delete().where(
@@ -445,19 +491,16 @@ async def batch_delete_projects(data: BatchDeleteIn,
                 for model in (ProjectContextSnapshot, ProjectMember, Milestone):
                     await db.execute(model.__table__.delete().where(
                         model.__table__.c.project_id == pid))
-                # 该项目产出的记忆清除（context_ref 指向其任务 id）
-                if tasks:
-                    tids = ",".join(f"CAST('{x}' AS varchar)" for x in tasks)
-                    await db.execute(text(
-                        "DELETE FROM agent_memories WHERE context_ref IN (" + tids + ")"))
                 await db.execute(Meeting.__table__.update().where(
                     Meeting.__table__.c.project_id == pid).values(project_id=None))
                 await db.delete(p)
-            deleted.append({"id": pid, "name": p.name})
+                # 显式 flush：本条失败在 savepoint 内回滚，不影响同批其他项目
+                await db.flush()
+            deleted.append({"id": pid, "name": pname})
         except (IntegrityError, DBAPIError) as e:
+            # savepoint 已回滚，不要 rollback 外层事务（会撤销此前成功项）
             failed.append({"id": pid,
                            "reason": f"约束冲突: {str(getattr(e, 'orig', e))[:100]}"})
-            await db.rollback()
             db.expire_all()
 
     if deleted:
@@ -466,8 +509,11 @@ async def batch_delete_projects(data: BatchDeleteIn,
                         {"count": len(deleted), "names": [x["name"] for x in deleted]})
     try:
         await db.commit()
-    except Exception:
+    except Exception as e:
         await db.rollback()
+        failed.extend({"id": x["id"], "reason": f"提交失败: {str(e)[:80]}"}
+                      for x in deleted)
+        deleted = []
 
     return {"deleted_count": len(deleted), "deleted": deleted, "failed": failed}
 

@@ -9,7 +9,6 @@
 ref 约定：DIRECT → task_id 列表；EXPERT → 团队蓝图 job 列表；PROJECT → 作战室 sid
 """
 import html
-import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -19,9 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.command_engine import command_execute, command_plan
+from app.core.logging_config import get_logger
+from app.core.permissions import require_company_scope
 from app.models.user import User
 
-router = APIRouter(prefix="/command", tags=["command"])
+logger = get_logger(__name__)
+
+router = APIRouter(prefix="/command", tags=["command"],
+                   dependencies=[Depends(require_company_scope())])
 
 
 class PlanIn(BaseModel):
@@ -31,6 +35,13 @@ class PlanIn(BaseModel):
 
 class ExecuteIn(BaseModel):
     plan: dict            # /command/plan 的原样返回（可被前端改过）
+
+
+class RunIn(BaseModel):
+    phrase: str
+    attachments: list[dict] | None = None
+    # 默认直达：老板一句话就是授权。设为 False 可退回"先看方案再放行"。
+    auto_run: bool = True
 
 
 class NotifyIn(BaseModel):
@@ -59,6 +70,31 @@ async def execute(
 ):
     r = await command_execute(db, company_id, data.plan, user.id)
     return r
+
+
+@router.post("/run", status_code=201)
+async def run_one_shot(
+    data: RunIn,
+    company_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """一句话直达：解析 → 执行一次完成，不需要中间确认。
+
+    这是"老板下一道旨意，三省六部自己干活"的入口：DIRECT 路径创建的
+    任务全部入队执行；PROJECT 路径跳过逐人宣告与负责人校对，直接开工。
+    返回里同时带 plan（让前端能展示"它是怎么理解的"）与执行结果。
+    """
+    p = await command_plan(db, company_id, data.phrase, data.attachments)
+    r = await command_execute(db, company_id, p, user.id, auto_run=data.auto_run)
+    return {"plan": p, **r}
+
+
+@router.get("/report-templates")
+async def report_templates(user: User = Depends(get_current_user)):
+    """可用的专业报告骨架（前端在任务/报告页展示，也用于说明生成规范）。"""
+    from app.report_templates import list_templates
+    return list_templates()
 
 
 # ---------- 执行摘要 + 单文件报告 ----------
@@ -147,8 +183,11 @@ async def report(
         row = q.first()
         if row:
             tokens, cost = row[0], row[1]
-    except Exception:
-        pass
+    except Exception as e:
+        # 费用聚合失败不阻断报告生成，但报告里的 token/费用会是 0，
+        # 必须留痕否则用户以为"这次执行没花 token"
+        logger.warning("执行报告 token 费用聚合失败 company=%s：%s: %s",
+                       company_id, type(e).__name__, e, exc_info=True)
 
     html_doc = _html_report(title, lines, tokens, cost)
     if as_json:
@@ -163,6 +202,10 @@ async def report(
 async def notify(data: NotifyIn, db: AsyncSession = Depends(get_db),
                  user: User = Depends(get_current_user)):
     import httpx
+
+    from app.core.net_guard import (OutboundURLRejected,
+                                    validate_outbound_url_async)
+
     text = data.report[:500] if "<" in data.report else data.report
     webhook = data.webhook
     platform = data.platform
@@ -177,8 +220,27 @@ async def notify(data: NotifyIn, db: AsyncSession = Depends(get_db),
         body = {"msgtype": "text", "text": {"content": text}}
     else:
         body = {"msgtype": "text", "text": {"content": text}}
-    async with httpx.AsyncClient(timeout=15) as cli:
-        r = await cli.post(webhook, json=body)
-        ok = r.status_code == 200
-        detail = r.json() if ok else r.text[:200]
-    return {"ok": ok, "platform": platform, "detail": detail}
+
+    # webhook 是用户提供的出站目标：拒绝回环/私网/元数据
+    try:
+        await validate_outbound_url_async(webhook, allow_private=False)
+    except OutboundURLRejected as e:
+        raise HTTPException(400, f"webhook 不安全：{e}")
+
+    try:
+        async with httpx.AsyncClient(timeout=15, trust_env=False,
+                                     follow_redirects=False) as cli:
+            r = await cli.post(webhook, json=body)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"webhook 请求失败：{type(e).__name__}")
+
+    if r.status_code != 200:
+        # 只回状态码，绝不回显对方响应体（可能含内网信息/回显内容）
+        return {"ok": False, "platform": platform,
+                "detail": {"http": r.status_code}}
+    try:
+        detail = r.json()
+    except Exception:
+        detail = {"http": r.status_code}
+    return {"ok": True, "platform": platform, "detail": detail}
+

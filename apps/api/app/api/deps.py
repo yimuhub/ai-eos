@@ -44,6 +44,34 @@ async def assert_company_owned(db: AsyncSession, user_id: str,
     return company
 
 
+async def is_company_owned(db: AsyncSession, user_id: str,
+                           company_id: str) -> bool:
+    """assert_company_owned 的无异常版本。
+
+    用于批量场景（如复制文档）：对不属于调用者的行按"不存在"跳过，
+    不抛 404，避免通过差异状态码泄露资源存在性。
+    """
+    if not company_id:
+        return False
+    company = await db.get(Company, company_id)
+    return bool(company) and company.owner_id == user_id
+
+
+async def assert_kb_doc_owned(db: AsyncSession, user_id: str, doc_id: str):
+    """校验知识库文档归属（经由其所属公司）；不属于该用户则 404。
+
+    kb2 的 documents 级端点（编辑/删除/复制）共用同一模式，
+    收敛到这里，避免每处手写 _owned 出现语义出入。
+    """
+    from app.models.knowledge import KBDocument
+
+    doc = await db.get(KBDocument, doc_id)
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    await assert_company_owned(db, user_id, doc.company_id)
+    return doc
+
+
 async def assert_agent_owned(db: AsyncSession, user_id: str,
                              agent_id: str):
     """校验 Agent 归属（经由其所属公司）。返回 Agent 行。"""

@@ -6,7 +6,7 @@
 - PUT  /token-budgets/{id}              调整/启停（enabled/paused/调额立即生效）
 - DELETE /token-budgets/{id}
 """
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -14,9 +14,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import assert_company_owned, get_current_user, get_db
+from app.core.logging_config import get_logger
 from app.models.budget import TokenBudget
 from app.models.token_usage import TokenUsage
 from app.models.user import User
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/token-budgets", tags=["token_budgets"])
 
@@ -50,7 +53,10 @@ async def _usage_for_async(db: AsyncSession, b: TokenBudget) -> tuple[int, float
     elif b.scope_type == "department" and b.scope_id:
         q = q.where(TokenUsage.department_id == b.scope_id)
     if b.period == "day":
-        start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        # 与 model_gateway._enforce_budget 同口径：UTC 日窗、naive-UTC
+        #（TokenUsage.created_at 实际存的是 naive UTC），本地时区会错位 8 小时。
+        start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
         q = q.where(TokenUsage.created_at >= start)
     row = (await db.execute(q)).one()
     return int(row[0]), float(row[1])
@@ -165,7 +171,10 @@ async def patch_budget(
                 agent_ids = [str(a.id) for a in (await db.execute(
                     select(_Agent).where(_Agent.department_id == b.scope_id)
                 )).scalars().all()]
-            q2 = select(AgentExecution).where(AgentExecution.status == "PAUSED")
+            # agent_runtime.pause_execution 写入的是小写 "paused"；
+            # 历史数据里可能同时存在 "PAUSED"/"paused"，查询按大小写无关匹配。
+            q2 = select(AgentExecution).where(
+                func.lower(AgentExecution.status) == "paused")
             if agent_ids:
                 q2 = q2.where(AgentExecution.agent_id.in_(agent_ids))
             execs = (await db.execute(q2)).scalars().all()
@@ -179,7 +188,12 @@ async def patch_budget(
                     from app.agent_runtime import resume_execution
                     await resume_execution(db, ex)
                     resumed_tasks.append(ex.task_id or ex.id)
-                except Exception:
+                except Exception as resume_err:
+                    # 单个执行续跑失败不应阻断其余恢复，但必须留痕，
+                    # 否则"预算恢复了但任务没跑"永远查不出来
+                    logger.warning("预算 %s 恢复后 execution %s 续跑失败：%s: %s",
+                                   b.id, ex.id, type(resume_err).__name__,
+                                   resume_err, exc_info=True)
                     continue
     b.updated_by = user.id
     await db.commit()

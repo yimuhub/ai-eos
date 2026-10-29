@@ -83,6 +83,10 @@ export default function DashboardPage() {
   const [onboarding, setOnboarding] = useState(false);
   const [bootError, setBootError] = useState("");
 
+  // 中文输入法守卫：本页没有独立搜索框，最快节奏的输入是「下达任务」弹窗的
+  // 标题框——组合（选词）期间不回写 state，避免受控 value 每键一更打断候选窗。
+  const titleComposing = useRef(false);
+
   // V5.5 P0：CEO 晨间简报（昨日完成 / 今日计划 / 需要你决策）
   const [briefing, setBriefing] = useState<Briefing | null>(null);
   // V5.5 A1：每日简报推送状态 + 系统通知
@@ -113,16 +117,23 @@ export default function DashboardPage() {
     } catch { /* 推送失败不影响主流程 */ }
   };
 
+  // 公司列表只需拉一次：轮询只打 /dashboard/{cid}/bootstrap 一个接口
+  const companiesRef = useRef<Company[]>([]);
+
   const load = useCallback(async () => {
     // 原实现在这里没有 try/catch，且"没有公司"时直接 return，
     // 结果是用户看到一片空白页且完全不知道发生了什么。
     // 现在：明确区分"加载失败（可重试）"与"还没有公司（走引导向导）"。
-    let companies: Company[] = [];
-    try {
-      companies = await api.get<Company[]>("/companies");
-    } catch (e) {
-      setBootError(e instanceof Error ? e.message : "加载失败");
-      return;
+    let companies = companiesRef.current;
+    if (!companies.length) {
+      try {
+        companies = await api.get<Company[]>("/companies");
+      } catch (e) {
+        setBootError(e instanceof Error ? e.message : "加载失败");
+        return;
+      }
+      companiesRef.current = companies;
+      setCompanies(companies);
     }
     setBootError("");
     if (!companies.length) {
@@ -130,35 +141,32 @@ export default function DashboardPage() {
       return;
     }
     setOnboarding(false);
-    setCompanies(companies);
     // 拦截层已把激活公司排第一；若 localStorage 为空则初始化为第一项
-    const cur = companies[0];
-    if (!localStorage.getItem("aieos_active_cid")) {
+    const storedCid = localStorage.getItem("aieos_active_cid");
+    const cur = companies.find((c) => c.id === storedCid) || companies[0];
+    if (!storedCid) {
       localStorage.setItem("aieos_active_cid", cur.id);
     }
     setCompany(cur);
     const cid = cur.id;
+    // 一次 bootstrap 拿齐：仪表盘 + 部门概览 + 运行中任务（limit 20）。
+    // 原来是串行的 /dashboard、/growth-center/departments-overview、/tasks
+    // 三个请求，其中 /tasks 为了前端筛"运行中"还拉了全量任务表。
     try {
-      setDash(await api.get(`/dashboard/${cid}`));
-    } catch (e) {
-      // 仪表盘失败不应让整页空白，也不该静默
-      notify("error", e instanceof Error ? e.message : "加载仪表盘失败");
-    }
-    try {
-      const ov = await api.get(`/growth-center/departments-overview?company_id=${cid}`);
-      setDeptGroups((ov.departments || []).map((dep: any) => ({
+      const boot = await api.get<{
+        dashboard: Dash;
+        departments_overview?: { departments?: any[] };
+        active_tasks?: RTask[];
+      }>(`/dashboard/${cid}/bootstrap`);
+      setDash(boot.dashboard);
+      setDeptGroups((boot.departments_overview?.departments || []).map((dep: any) => ({
         dept_id: dep.dept_id, dept_name: dep.dept_name,
         agents: (dep.agents || []).map((a: any) => ({ id: a.id, name: a.name })),
       })));
-    } catch {
-      // 部门列表缺失只影响"按部门选人"，不阻塞主流程，保持为空
-    }
-    try {
-      const tasks = await api.get(`/tasks?company_id=${cid}`);
-      setRunningTasks((Array.isArray(tasks) ? tasks : []).filter((t: any) =>
-        ["TODO", "PLANNING", "RUNNING", "WAITING"].includes(t.status)));
-    } catch {
-      setRunningTasks([]);
+      setRunningTasks(boot.active_tasks || []);
+    } catch (e) {
+      // 仪表盘失败不应让整页空白，也不该静默
+      notify("error", e instanceof Error ? e.message : "加载仪表盘失败");
     }
   }, []);
 
@@ -194,10 +202,10 @@ export default function DashboardPage() {
     return () => window.clearInterval(t);
   }, [loadBriefing]);
 
-  /* 指挥中心需要"实时"：任务正在跑，5 秒一次的新鲜度是合理的。
-     但**页面在后台时不该继续打后端**——用户看不见的刷新是纯粹的成本，
-     还可能与真正的前台请求抢连接。切回来自动补一次，避免第一眼是旧数据。 */
-  useVisibilityInterval(load, 5000);
+  /* 指挥中心需要"实时"：但一轮只打一个 bootstrap，15 秒足够；
+     页面在后台时依旧不打后端（用户看不见的刷新是纯粹成本）。
+     切回来自动补一次，避免第一眼是旧数据。 */
+  useVisibilityInterval(load, 15000);
 
   useEffect(() => {
     const onSwitch = () => { load(); loadBriefing(); };
@@ -771,7 +779,17 @@ export default function DashboardPage() {
 
             <div className="grid grid-cols-1 sm:grid-cols-[2fr_auto] gap-2.5">
               <input placeholder="任务标题 *" value={ntForm.title}
-                onChange={(e) => setNtForm({ ...ntForm, title: e.target.value })} className="input" />
+                onCompositionStart={() => { titleComposing.current = true; }}
+                onCompositionEnd={(e) => {
+                  titleComposing.current = false;
+                  const v = e.currentTarget.value;
+                  setNtForm((prev) => ({ ...prev, title: v }));
+                }}
+                onChange={(e) => {
+                  if (titleComposing.current) return;
+                  const v = e.target.value;
+                  setNtForm((prev) => ({ ...prev, title: v }));
+                }} className="input" />
               <select value={ntForm.priority}
                 onChange={(e) => setNtForm({ ...ntForm, priority: e.target.value })} className="input w-auto sm:w-36">
                 {Object.entries(PRIORITY_META).map(([k, m]) => (

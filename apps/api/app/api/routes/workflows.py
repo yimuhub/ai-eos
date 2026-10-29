@@ -1,7 +1,7 @@
 """Workflow CRUD + execution API (P2-02/P2-03 backend)."""
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -162,6 +162,15 @@ async def get_execution(eid: str, db: AsyncSession = Depends(get_db),
         raise HTTPException(404, "Execution not found")
     wf = await _wf_owned(db, user.id, ex.workflow_id)
 
+    # 重启/丢失调度的惰性恢复：状态还在跑但没有任何 worker 持有租约时，
+    # 看板轮询到这里就把实例重新踢起来（租约保证不会和在跑的 worker 双跑）。
+    from app.workflow_runtime import execution_is_orphaned
+    if await execution_is_orphaned(db, ex):
+        await log_event(db, "workflow.recovered", "workflow_execution", eid,
+                        "system", None, {"status": ex.status.value})
+        await db.commit()
+        _run_in_background(eid)
+
     steps_q = await db.execute(select(WorkflowStep).where(
         WorkflowStep.execution_id == eid).order_by(WorkflowStep.created_at))
     nodes_q = await db.execute(select(WorkflowNode).where(
@@ -186,11 +195,20 @@ async def get_execution(eid: str, db: AsyncSession = Depends(get_db),
 async def pause_execution(eid: str, db: AsyncSession = Depends(get_db),
                           user=Depends(get_current_user)):
     ex = await _owned_execution(db, user.id, eid)
-    if ex.status not in (RunStatus.RUNNING, RunStatus.WAITING_INPUT,
-                         RunStatus.WAITING_APPROVAL):
-        raise HTTPException(409, f"cannot pause from {ex.status.value}")
-    ex.status = RunStatus.PAUSED
+    # CAS：只有仍在"可暂停"状态的那一次生效。推进循环每步前重读状态，
+    # 所以暂停能立刻打断后续节点。
+    res = await db.execute(
+        update(WorkflowExecution)
+        .where(WorkflowExecution.id == eid,
+               WorkflowExecution.status.in_([
+                   RunStatus.RUNNING, RunStatus.PENDING,
+                   RunStatus.WAITING_INPUT, RunStatus.WAITING_APPROVAL]))
+        .values(status=RunStatus.PAUSED)
+        .execution_options(synchronize_session=False))
     await db.commit()
+    if res.rowcount != 1:
+        await db.refresh(ex)
+        raise HTTPException(409, f"cannot pause from {ex.status.value}")
     return {"detail": "paused"}
 
 
@@ -199,10 +217,18 @@ async def resume_execution(eid: str, background: BackgroundTasks,
                            db: AsyncSession = Depends(get_db),
                            user=Depends(get_current_user)):
     ex = await _owned_execution(db, user.id, eid)
-    if ex.status != RunStatus.PAUSED:
-        raise HTTPException(409, f"cannot resume from {ex.status.value}")
-    ex.status = RunStatus.RUNNING
+    # CAS PAUSED→PENDING：并发点两次「继续」只会有一次提交后台推进，
+    # 也避免第二次把正在 RUNNING 的实例再拉一份 worker。
+    res = await db.execute(
+        update(WorkflowExecution)
+        .where(WorkflowExecution.id == eid,
+               WorkflowExecution.status == RunStatus.PAUSED)
+        .values(status=RunStatus.PENDING)
+        .execution_options(synchronize_session=False))
     await db.commit()
+    if res.rowcount != 1:
+        await db.refresh(ex)
+        raise HTTPException(409, f"cannot resume from {ex.status.value}")
     _run_in_background(eid)
     return {"detail": "resumed"}
 
@@ -212,10 +238,22 @@ async def cancel_execution(eid: str, reason: str | None = None,
                            db: AsyncSession = Depends(get_db),
                            user=Depends(get_current_user)):
     ex = await _owned_execution(db, user.id, eid)
-    if ex.status in (RunStatus.COMPLETED, RunStatus.CANCELLED):
+    # CAS：取消对"还没结束"的实例都生效（含等人工/暂停/排队），
+    # 推进循环每步前重读状态，读到 CANCELLED 立刻停手。
+    res = await db.execute(
+        update(WorkflowExecution)
+        .where(WorkflowExecution.id == eid,
+               WorkflowExecution.status.notin_([RunStatus.COMPLETED,
+                                                RunStatus.CANCELLED]))
+        .values(status=RunStatus.CANCELLED,
+                error=f"cancelled by user: {reason or 'no reason'}")
+        .execution_options(synchronize_session=False))
+    await db.commit()
+    if res.rowcount != 1:
+        await db.refresh(ex)
         raise HTTPException(409, f"cannot cancel from {ex.status.value}")
-    ex.status = RunStatus.CANCELLED
-    ex.error = f"cancelled by user: {reason or 'no reason'}"
+    await log_event(db, "workflow.cancelled", "workflow_execution", eid,
+                    "user", user.id, {"reason": reason})
     await db.commit()
     return {"detail": "cancelled"}
 
@@ -227,8 +265,6 @@ async def approve_node(eid: str, node_key: str, approve: bool = True,
                        user=Depends(get_current_user)):
     """人工审批/输入后继续执行。"""
     ex = await _owned_execution(db, user.id, eid)
-    if ex.status not in (RunStatus.WAITING_APPROVAL, RunStatus.WAITING_INPUT):
-        raise HTTPException(409, f"execution is {ex.status.value}, not waiting")
 
     nodes_q = await db.execute(select(WorkflowNode).where(
         WorkflowNode.workflow_id == ex.workflow_id,
@@ -237,22 +273,37 @@ async def approve_node(eid: str, node_key: str, approve: bool = True,
     if not node:
         raise HTTPException(404, "node not found")
 
+    # 先抢占"继续权"（CAS 等人工 → PENDING），再写节点配置并提交后台推进：
+    # 并发审批/双击「通过」只会有一个请求真正续跑。
+    res = await db.execute(
+        update(WorkflowExecution)
+        .where(WorkflowExecution.id == eid,
+               WorkflowExecution.status.in_([RunStatus.WAITING_APPROVAL,
+                                             RunStatus.WAITING_INPUT]))
+        .values(status=RunStatus.CANCELLED
+                if not approve and node.node_type == NodeType.APPROVAL
+                else RunStatus.PENDING,
+                error=("rejected at approval node"
+                       if not approve and node.node_type == NodeType.APPROVAL
+                       else None))
+        .execution_options(synchronize_session=False))
+    if res.rowcount != 1:
+        await db.commit()
+        await db.refresh(ex)
+        raise HTTPException(409, f"execution is {ex.status.value}, not waiting")
+
     cfg = dict(node.config or {})
     if node.node_type == NodeType.APPROVAL:
         cfg["_approved"] = approve
     elif node.node_type == NodeType.HUMAN_INPUT:
         cfg["_human_input"] = human_input or ""
     node.config = cfg
-    ex.status = RunStatus.RUNNING
     await db.commit()
 
     if approve or node.node_type == NodeType.HUMAN_INPUT:
         _run_in_background(eid)
         return {"detail": "approved, continuing"}
-    # 拒绝审批 → 取消执行
-    ex.status = RunStatus.CANCELLED
-    ex.error = "rejected at approval node"
-    await db.commit()
+    # 拒绝审批 → 取消执行（状态已在上面 CAS 里落成 CANCELLED）
     return {"detail": "rejected, execution cancelled"}
 
 

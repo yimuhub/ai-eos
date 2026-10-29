@@ -5,13 +5,13 @@
 meetings / token_usages），零新表。GET /briefing 鉴权，返回用户首家公司视角。
 """
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, join, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_company_owned, get_current_user, get_db
 from app.models.company import Company
 from app.models.intervention import ApprovalRequest
 from app.models.meeting import Meeting, MeetingStatus
@@ -26,6 +26,13 @@ router = APIRouter(prefix="/briefing", tags=["briefing"])
 STUCK_HOURS = 2
 
 
+def today_start_utc() -> datetime:
+    """本机时区"今天 0 点"对应的 naive UTC 时间（数据库时间戳口径）。"""
+    local_midnight = datetime.now().replace(hour=0, minute=0, second=0,
+                                            microsecond=0)
+    return local_midnight.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 @router.get("")
 async def get_briefing(
     company_id: str | None = Query(None),
@@ -33,9 +40,9 @@ async def get_briefing(
     user: User = Depends(get_current_user),
 ):
     if company_id:
-        company = await db.get(Company, company_id)
-        if not company or (company.owner_id != user.id and user.id != company.created_by):
-            raise HTTPException(404, "公司不存在")
+        # 原实现还比较了 company.created_by —— Company 上没有这个字段，
+        # 只要不是本人公司就直接 AttributeError 500。统一走归属校验。
+        company = await assert_company_owned(db, user.id, company_id)
     else:
         rows = (await db.execute(
             select(Company).where(Company.owner_id == user.id).limit(1)
@@ -50,9 +57,13 @@ async def get_briefing(
 async def build_briefing(db: AsyncSession, company: Company) -> dict:
     """CEO 晨间简报数据（路由与调度器推送共用）。"""
     cid = company.id
-    now = datetime.now()
+    # 数据库时间戳统一是 naive UTC（见 models/scheduler._now）。这里原用
+    # 本地时间 `datetime.now()`，UTC+8 下"昨日"窗口整体偏 8 小时：
+    # 早上 9 点生成的简报会漏掉凌晨完成的活、混进前天晚上的活。
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     yesterday_from = now - timedelta(hours=24)
-    today_from = datetime(now.year, now.month, now.day)
+    # "今日"按老板所在时区的自然日算：本地 0 点换算成 UTC 存库时间
+    today_from = today_start_utc()
 
     # ---- 昨日：完成任务 + 自动化执行（经 schedule join 到公司）----
     done_tasks = (await db.execute(
@@ -103,7 +114,10 @@ async def build_briefing(db: AsyncSession, company: Company) -> dict:
     )).all()
     failed_tasks = (await db.execute(
         select(Task.title).where(
-            Task.company_id == cid, Task.status == TaskStatus.FAILED).limit(3)
+            Task.company_id == cid, Task.status == TaskStatus.FAILED,
+            # 只看最近 7 天：否则历史上的失败任务会永久占据"需要你决策"，
+            # 简报变成一张越用越长的旧账清单。
+            Task.updated_at >= now - timedelta(days=7)).limit(3)
     )).all()
     stuck_tasks = (await db.execute(
         select(Task.title).where(
@@ -132,7 +146,7 @@ async def build_briefing(db: AsyncSession, company: Company) -> dict:
             TokenUsage.company_id == cid, TokenUsage.created_at >= today_from))).one()
     cost_today = {"cost": round(float(cost_row[0]), 2), "tokens": int(cost_row[1])}
 
-    hour = now.hour
+    hour = datetime.now().hour
     greeting = "早上好" if hour < 12 else ("下午好" if hour < 18 else "晚上好")
 
     # V5.5 A2：预算软提醒（≥80% 黄色预警，到顶另见 paused）
@@ -156,7 +170,7 @@ async def build_briefing(db: AsyncSession, company: Company) -> dict:
             if b.period == "day":
                 uq = uq.where(TokenUsage.created_at >= today_from)
             trow = (await db.execute(uq)).one()
-            tokens, cost = int(trow[0]), float(trow[1])
+            tokens = int(trow[0])
             if b.limit_tokens and tokens >= b.limit_tokens * 0.8:
                 pct = round(tokens * 100 / b.limit_tokens)
                 budget_alert = {"pct": pct, "paused": b.paused,
@@ -199,9 +213,7 @@ async def ensure_push_schedule(
     到点由 scheduler 生成 BRIEFING_PUSH 事件进事件流，
     首页简报卡标注"最后一次推送时间"，浏览器可弹系统通知。
     """
-    company = await db.get(Company, company_id)
-    if not company or (company.owner_id != user.id and user.id != company.created_by):
-        raise HTTPException(404, "公司不存在")
+    await assert_company_owned(db, user.id, company_id)
     hh, mm = time_str.split(":")
     sched = (await db.execute(
         select(AutomationSchedule).where(

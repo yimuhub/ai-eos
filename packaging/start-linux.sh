@@ -79,6 +79,10 @@ start_api() {
   log "启动后端 (SQLite + FastAPI) 端口 $API_PORT ..."
   export PYTHONUNBUFFERED=1
   export DATABASE_URL="sqlite+aiosqlite:///$WORK_DIR/data/aieos.db"
+  # 密钥引导：JWT_SECRET 留空时后端会自动生成随机密钥并落盘到这里。
+  # 显式指定路径，避免 uvicorn 的工作目录（apps/api）把密钥写进包外。
+  # ⚠️ 备份 data/ 时请连同该文件一起备份：丢了 = 所有登录态失效。
+  export AIEOS_JWT_SECRET_FILE="$WORK_DIR/data/jwt_secret.key"
   ensure_deps
   # 首次启动建表：用内置脚本
   python3 "$WORK_DIR/apps/api/app/initializers/__init__.py" "$WORK_DIR/data/aieos.db" 2>&1 | tail -20

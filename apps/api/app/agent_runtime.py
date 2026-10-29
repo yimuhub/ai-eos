@@ -19,7 +19,6 @@ from app.models.asset import AssetType
 from app.models.skill import AgentSkill
 from app.models.skill import Skill as SkillRow
 from app.models.task import AgentExecution, ExecutionCheckpoint, Task, TaskStatus
-from app.skill_system import get_skill_class
 from app.task_engine import transition
 from app.services.event_system import log_event
 
@@ -74,12 +73,11 @@ async def build_context(db: AsyncSession, agent: Agent, task: Task) -> tuple[lis
     )
     skills = result.all()
     if skills:
-        skill_lines = "\n".join(f"- {n} ({slug}): {d or ''}" for slug, n, d in skills)
-        skill_scopes = {}
-        for slug, n, d in skills:
-            row = await db.execute(select(SkillRow.scope).where(SkillRow.slug == slug))
-            sc = row.scalar() or "public"
-            skill_scopes[slug] = sc
+        # 一次 IN 批量取 scope，替代"每个已装技能一条 SELECT"的 N+1
+        slugs = [slug for slug, _n, _d in skills]
+        scope_rows = (await db.execute(select(
+            SkillRow.slug, SkillRow.scope).where(SkillRow.slug.in_(slugs)))).all()
+        skill_scopes = {slug: (sc or "public") for slug, sc in scope_rows}
         scope_lines = "\n".join(
             f"- {n} ({slug}) [{skill_scopes.get(slug, 'public')}]: {d or ''}"
             for slug, n, d in skills)
@@ -99,6 +97,21 @@ async def build_context(db: AsyncSession, agent: Agent, task: Task) -> tuple[lis
         # 公文提示词注入失败不阻塞任务，但需要可见（否则排版能力静默降级）
         logger.warning("公文写作提示词注入失败 agent=%s role=%s: %s",
                        agent.id, agent.role, doc_err, exc_info=True)
+
+    # 工具使用纪律：与实际下发的 tools schema 配套（见 app/tools.py）
+    from app.tools import tool_system_prompt
+    messages.append({"role": "system", "content": tool_system_prompt()})
+
+    # 报告类任务注入专业骨架：章节、数据表、出处、真实文件交付
+    try:
+        from app.report_templates import build_report_instruction, detect_report_template
+        tpl = detect_report_template(task.title, task.description)
+        if tpl:
+            messages.append({"role": "system",
+                             "content": build_report_instruction(tpl)})
+    except Exception as tpl_err:
+        logger.warning("报告模板注入失败 task=%s: %s", task.id, tpl_err,
+                       exc_info=True)
 
     # P4: 成本优化的两级知识库检索（全局公用+Agent私人，分层召回+压缩+缓存+预算）
     try:
@@ -189,12 +202,102 @@ async def run_agent_on_task(
         await write_checkpoint(db, execution.id, "planning", 0,
                                {"messages": messages, "model_ids": model_ids})
 
+        # 短事务边界（P0-6）：execution/task/agent 三行到这里已经 flush，
+        # 拿着的行锁必须**在调 LLM 之前**释放。原实现一路持有写事务跨过一次
+        # 几秒到几分钟的网络调用，SQLite 下（整库锁）会把所有其它请求堵死，
+        # 而 PG 下则是长事务 + 长行锁。先 commit，拿到结果后开新事务写回复。
+        await db.commit()
+
         gateway = ModelGateway(db)
         from app.model_gateway import set_usage_context
         set_usage_context(agent=agent, scenario="TASK",
                           project_id=str(getattr(task, "project_id", None) or "") or None,
                           task_id=str(task.id), user_id=None)
-        llm_result = await gateway.chat_with_agent_models(model_ids, messages)
+
+        # ---- 工具循环：任务链过去只做一次 LLM 调用，模型手里没有任何工具，
+        # "自动抓数据"只能靠编。现在把 web_search / web_fetch 真正下发，
+        # 并在有 tool_calls 时执行、回填、再问，直到模型给出最终回答。
+        from app.tools import (MAX_TOOL_CALLS, MAX_TOOL_RESULT_CHARS,
+                               MAX_TOOL_ROUNDS, TOOLS as AGENT_TOOLS,
+                               execute_tool, parse_text_tool_calls,
+                               strip_text_tool_calls)
+
+        llm_result = await gateway.chat_with_agent_models(
+            model_ids, messages, tools=AGENT_TOOLS)
+        tool_trace: list[dict] = []
+        total_calls = 0
+        rounds = 0
+        while rounds < MAX_TOOL_ROUNDS:
+            calls = list(llm_result.get("tool_calls") or [])
+            content = llm_result.get("content") or ""
+            # 兼容把 tool_call 写成文本的模型（否则工具永远不会被执行）
+            text_calls = parse_text_tool_calls(content)
+            seen = {(c.get("function") or {}).get("name", "") +
+                    str((c.get("function") or {}).get("arguments", "")) for c in calls}
+            for tc in text_calls:
+                key = tc["function"]["name"] + str(tc["function"]["arguments"])
+                if key not in seen:
+                    calls.append(tc)
+                    seen.add(key)
+            if not calls:
+                break
+            if text_calls:
+                content = strip_text_tool_calls(content)
+
+            messages.append({"role": "assistant", "content": content,
+                             "tool_calls": calls})
+            for tc in calls:
+                if total_calls >= MAX_TOOL_CALLS:
+                    break
+                fname = (tc.get("function") or {}).get("name", "")
+                raw_args = (tc.get("function") or {}).get("arguments") or "{}"
+                try:
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    if not isinstance(args, dict):
+                        args = {}
+                except json.JSONDecodeError:
+                    args = {}
+                res = await execute_tool(fname, args,
+                                         company_id=str(task.company_id),
+                                         agent_id=str(agent.id))
+                total_calls += 1
+                ok = "error" not in res
+                tool_trace.append({
+                    "name": fname, "ok": ok,
+                    "arg": str(args.get("query") or args.get("url") or "")[:200],
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id"),
+                    "content": json.dumps(res, ensure_ascii=False,
+                                          default=str)[:MAX_TOOL_RESULT_CHARS],
+                })
+            llm_result = await gateway.chat_with_agent_models(
+                model_ids, messages, tools=AGENT_TOOLS)
+            rounds += 1
+
+        # 文本形式的残留标记不能进正文/正文落盘文件
+        if isinstance(llm_result.get("content"), str):
+            llm_result["content"] = strip_text_tool_calls(llm_result["content"])
+        if tool_trace:
+            await log_event(db, "agent.tools_used", "task", str(task.id),
+                            "agent", agent.id,
+                            {"count": total_calls,
+                             "tools": [t["name"] for t in tool_trace][:20],
+                             "ok": sum(1 for t in tool_trace if t["ok"])})
+
+        # LLM 期间任务可能已被取消/暂停：重读最新状态。
+        # 取消要"立即生效"，成果不再写回任务（执行记录仍保留，便于审计）。
+        await db.refresh(task)
+        if task.status == TaskStatus.CANCELLED:
+            execution.status = "cancelled"
+            execution.completed_at = utcnow_iso()
+            await log_event(db, "agent.cancelled_after_llm", "agent", agent.id,
+                            actor_type, agent.id,
+                            {"task_id": task.id,
+                             "note": "LLM 返回时任务已取消，成果未写回"})
+            await db.commit()
+            return execution
 
         execution.output = llm_result["content"]
         execution.status = "completed"
@@ -203,6 +306,7 @@ async def run_agent_on_task(
             "usage": llm_result.get("usage"),
             "used_model_id": llm_result.get("used_model_id"),
             "raw_model": llm_result.get("raw_model"),
+            "tools_used": tool_trace,
         }
 
         # Result checkpoint
@@ -319,7 +423,21 @@ async def run_agent_on_task(
 
 
 async def pause_execution(db: AsyncSession, execution: AgentExecution) -> AgentExecution:
-    execution.status = "paused"
+    """暂停一次执行（CAS：只有 running→paused 的那一次会写检查点）。"""
+    from sqlalchemy import update
+    from sqlalchemy.orm.attributes import set_committed_value
+
+    res = await db.execute(
+        update(AgentExecution)
+        .where(AgentExecution.id == execution.id,
+               AgentExecution.status == "running")
+        .values(status="paused")
+        .execution_options(synchronize_session=False))
+    if res.rowcount != 1:
+        # 已经被别的请求暂停/取消了：不重复写检查点。
+        # 不回滚事务：调用方可能在同一事务里还持有别的对象，回滚会连带失效。
+        return execution
+    set_committed_value(execution, "status", "paused")
     await write_checkpoint(db, execution.id, "execution", 2, {"paused_at": utcnow_iso()})
     await db.commit()
     return execution
@@ -332,7 +450,13 @@ async def resume_execution(db: AsyncSession, execution: AgentExecution) -> Agent
     旧调用结束后尝试 PAUSED→COMPLETED 非法转移被外层吞掉，任务永久卡死，
     且没有任何 worker 在跑（假恢复）。这里把旧执行标记为 superseded，
     另起一次真正的后台执行（checkpoint 类型记入事件，保证可追溯）。
+
+    并发保护：paused→superseded 是 CAS，双击「继续」只有一次会真正 submit，
+    否则同一个执行会被续跑两次（重复计费）。
     """
+    from sqlalchemy import update
+    from sqlalchemy.orm.attributes import set_committed_value
+
     q = await db.execute(
         select(ExecutionCheckpoint)
         .where(ExecutionCheckpoint.execution_id == execution.id)
@@ -354,8 +478,18 @@ async def resume_execution(db: AsyncSession, execution: AgentExecution) -> Agent
         cp2 = q2.scalars().first()
         if cp2:
             takeover_note = (cp2.context_snapshot or {}).get("note")
-    execution.status = "superseded"
-    execution.completed_at = utcnow_iso()
+
+    res = await db.execute(
+        update(AgentExecution)
+        .where(AgentExecution.id == execution.id,
+               AgentExecution.status == "paused")
+        .values(status="superseded", completed_at=utcnow_iso())
+        .execution_options(synchronize_session=False))
+    if res.rowcount != 1:
+        # 已经被别的请求恢复过：不再重复提交后台工作。
+        # 不回滚事务：调用方可能在同一事务里还持有别的对象，回滚会连带失效。
+        return execution
+    set_committed_value(execution, "status", "superseded")
     await log_event(db, "execution.resumed", "execution", execution.id, "system", None,
                     {"from_checkpoint": from_checkpoint,
                      "has_takeover_note": bool(takeover_note),

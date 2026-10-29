@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.core.permissions import Capability, require_company_scope
 from app.learning_engine import add_growth_event
 from app.models.agent import Agent
 from app.models.learning import GrowthEventType
@@ -14,9 +15,8 @@ from app.models.skill_growth import (LEVEL_ORDER, AgentSkillNode, SkillEvaluatio
                                      SkillLevel, SkillNode, new_id)
 from app.models.user import User
 
-router = APIRouter(prefix="/skill-growth", tags=["skill-growth"])
-
-
+router = APIRouter(prefix="/skill-growth", tags=["skill-growth"],
+                   dependencies=[Depends(require_company_scope())])
 # ---------- 技能树 ----------
 
 class NodeIn(BaseModel):

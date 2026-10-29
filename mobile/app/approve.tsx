@@ -2,20 +2,52 @@ import { useEffect, useState } from "react";
 import { View, Text, ScrollView, Pressable, ActivityIndicator, Alert } from "react-native";
 import { useAieos } from "../store";
 
-// 签字门：拉取所有"等待签字/审批"的关键步骤（作战室签字门、自动化审批、交付验收），
-// 老板在此一键通过/驳回。呼吸灯高亮新到待签项。
+// 签字门：拉取后端真实待审批队列（intervention ApprovalRequest status=PENDING），
+// 老板在此一键通过/驳回；通过/驳回直接落库，成功后刷新列表，失败必须显性报错。
 type Item = {
   id: string;
   title: string;
   ref: string;
   status: string;
   pending: boolean;
+  actionType?: string;
+  requestedBy?: string;
+  reason?: string;
 };
+
+const ACTION_LABELS: Record<string, string> = {
+  task_create: "创建任务",
+  task_complete: "完成任务",
+  meeting_start: "启动会议",
+  artifact_approve: "产出物验收",
+  escalate: "升级处理",
+  computer_command: "本机高危操作",
+  external_agent: "外部 Agent 外发",
+};
+
+function normalize(raw: any): Item {
+  const actionType = String(raw?.action_type || "");
+  return {
+    id: String(raw?.id ?? ""),
+    title:
+      raw?.reason ||
+      ACTION_LABELS[actionType] ||
+      actionType ||
+      "待审批项",
+    ref: String(raw?.id ?? ""),
+    status: String(raw?.status || "PENDING"),
+    pending: String(raw?.status || "").toUpperCase() === "PENDING",
+    actionType,
+    requestedBy: raw?.requested_by ? String(raw.requested_by) : undefined,
+    reason: raw?.reason ? String(raw.reason) : undefined,
+  };
+}
 
 export default function Approve() {
   const { api, svc, loggedIn } = useAieos();
   const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(false);
+  const [busyId, setBusyId] = useState("");
   const [err, setErr] = useState("");
 
   const load = async () => {
@@ -23,24 +55,14 @@ export default function Approve() {
     setLoading(true);
     setErr("");
     try {
-      // 老板视角聚合"待签字"：拉作战室 + 任务中的 pending 状态项
-      // 这里用 report 的 lines 结构 + command/report 拉取；若端点未实现聚合，给占位。
-      const dash = await api.dashboard(svc.companyId);
-      // dashboard 若带回 pending_approvals，优先用它；否则给引导
-      if (Array.isArray(dash?.pending_approvals)) {
-        setItems(
-          dash.pending_approvals.map((a: any) => ({
-            id: String(a.id ?? a.ref),
-            title: a.title || a.task || "待审批项",
-            ref: a.ref || a.id,
-            status: a.status || "pending",
-            pending: true,
-          })),
-        );
-      } else {
-        setItems([]);
+      // 真实待审批队列：GET /intervention/requests?company_id=...&status=PENDING
+      const list = await api.pendingApprovals(svc.companyId);
+      if (!Array.isArray(list)) {
+        throw new Error("审批列表返回格式异常，请升级客户端或检查后端版本");
       }
+      setItems(list.map(normalize));
     } catch (e: any) {
+      setItems([]);
       setErr(e?.message || "无法拉取审批列表，请先确认服务连接");
     } finally {
       setLoading(false);
@@ -49,10 +71,23 @@ export default function Approve() {
 
   useEffect(() => { load(); }, [loggedIn, svc]);
 
-  const decide = (ok: boolean) => {
-    // 签字门落地需 /governance 或 /war_room approve 端点；移动端先做"通过/驳回"意图，
-    // 后续 V4.2 接 governance 审批 API。当前用 Alert 回执 + 本地标记。
-    Alert.alert("签字门", ok ? "已记录通过（审批端点 V4.2 接入）" : "已记录驳回（审批端点 V4.2 接入）");
+  const decide = async (it: Item, ok: boolean) => {
+    if (busyId) return;
+    setBusyId(it.id);
+    setErr("");
+    try {
+      // 真接口：POST /intervention/requests/{id}/decide
+      // 失败会抛 ApiError，绝不本地标记成功。
+      await api.decideApproval(it.id, ok ? "approve" : "reject");
+      Alert.alert("签字门", ok ? "已通过，审批单已生效" : "已驳回，审批单已退回");
+      await load(); // 成功后才刷新列表
+    } catch (e: any) {
+      const msg = e?.message || "审批提交失败，请稍后重试";
+      setErr(msg);
+      Alert.alert("审批失败", msg);
+    } finally {
+      setBusyId("");
+    }
   };
 
   return (
@@ -81,40 +116,62 @@ export default function Approve() {
           </Text>
         </View>
       ) : (
-        items.map((it, i) => (
-          <View
-            key={i}
-            style={{
-              padding: 16,
-              borderRadius: 14,
-              backgroundColor: "rgba(255,255,255,0.06)",
-              gap: 8,
-              // 呼吸灯：新到待签项高亮（动画用 V4.2 接 react-native-reanimated 做真呼吸）
-              borderLeftColor: "#22d3ee",
-              borderLeftWidth: 3,
-            }}
-          >
-            <Text style={{ color: "#e8ecf4", fontWeight: 600 }}>{it.title}</Text>
-            <View style={{ flexDirection: "row", gap: 10 }}>
-              <Pressable
-                onPress={() => decide(true)}
-                style={{ flex: 1, padding: 10, borderRadius: 10, backgroundColor: "#22c55e", alignItems: "center" }}
-              >
-                <Text style={{ color: "#fff", fontWeight: 700 }}>✍️ 通过</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => decide(false)}
-                style={{ flex: 1, padding: 10, borderRadius: 10, backgroundColor: "rgba(239,68,68,0.85)", alignItems: "center" }}
-              >
-                <Text style={{ color: "#fff", fontWeight: 700 }}>✕ 驳回</Text>
-              </Pressable>
+        items.map((it) => {
+          const busy = busyId === it.id;
+          return (
+            <View
+              key={it.id}
+              style={{
+                padding: 16,
+                borderRadius: 14,
+                backgroundColor: "rgba(255,255,255,0.06)",
+                gap: 8,
+                // 呼吸灯：新到待签项高亮（动画用 V4.2 接 react-native-reanimated 做真呼吸）
+                borderLeftColor: "#22d3ee",
+                borderLeftWidth: 3,
+              }}
+            >
+              <Text style={{ color: "#e8ecf4", fontWeight: 600 }}>{it.title}</Text>
+              <Text style={{ color: "#5a6272", fontSize: 11 }}>
+                {it.actionType || "pending"}
+                {it.requestedBy ? ` · 发起人 ${it.requestedBy.slice(0, 8)}` : ""}
+              </Text>
+              <View style={{ flexDirection: "row", gap: 10 }}>
+                <Pressable
+                  disabled={busy}
+                  onPress={() => decide(it, true)}
+                  style={{
+                    flex: 1, padding: 10, borderRadius: 10,
+                    backgroundColor: busy ? "rgba(34,197,94,0.4)" : "#22c55e",
+                    alignItems: "center",
+                  }}
+                >
+                  {busy ? <ActivityIndicator color="#fff" /> : (
+                    <Text style={{ color: "#fff", fontWeight: 700 }}>✍️ 通过</Text>
+                  )}
+                </Pressable>
+                <Pressable
+                  disabled={busy}
+                  onPress={() => decide(it, false)}
+                  style={{
+                    flex: 1, padding: 10, borderRadius: 10,
+                    backgroundColor: busy ? "rgba(239,68,68,0.35)" : "rgba(239,68,68,0.85)",
+                    alignItems: "center",
+                  }}
+                >
+                  {busy ? <ActivityIndicator color="#fff" /> : (
+                    <Text style={{ color: "#fff", fontWeight: 700 }}>✕ 驳回</Text>
+                  )}
+                </Pressable>
+              </View>
             </View>
-          </View>
-        ))
+          );
+        })
       )}
 
       <Pressable
         onPress={load}
+        disabled={loading || !!busyId}
         style={{ padding: 12, borderRadius: 12, backgroundColor: "rgba(255,255,255,0.08)", alignItems: "center" }}
       >
         <Text style={{ color: "#22d3ee" }}>🔄 刷新待签</Text>

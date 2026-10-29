@@ -2,12 +2,17 @@
 
 插件约定（真动态加载，见底部的 load_plugin_skills）：
 `<仓库根>/plugins/skills/<skill_name>/manifest.json`，字段
-name / version / description / module；module 是该插件目录内的
-Python 模块名（该目录会被临时加入 sys.path），模块内需定义
+name / version / description / module；module 是插件目录内的点分模块名
+（如 `skill` 或 `pkg.skill`，不允许绝对路径与 `..`）。模块内需定义
 BaseSkill 子类（id 建议与 manifest.name 一致）。
+
+安全边界见 load_plugin_skills 上方的注释：插件目录不进 sys.path，
+模块按文件路径以唯一模块名加载；**签名/发布者校验尚未实现**。
 """
-import importlib
+import hashlib
+import importlib.util
 import json
+import os
 import re
 import sys
 from abc import ABC, abstractmethod
@@ -201,13 +206,73 @@ async def execute_skill(skill_slug: str, input_data: dict) -> dict[str, Any]:
 
 
 # ---- plugins/skills/ 真动态加载 -----------------------------------------
-# 之前这里只有一句注释 "future skills can be installed from
-# plugins/skills/"，但没有任何代码真的扫描该目录（审查 P1-④）。
-# 现在启动期（本模块随路由被 app.main 导入时）扫描一次：
-# 每个子目录的 manifest.json → import 对应模块 → 注册技能类。
+# 每个子目录的 manifest.json → 加载对应模块 → 注册技能类。
 # 单个插件失败只记 warning，不中断其它插件与内置技能。
+#
+# 【安全限制｜审查 S8】当前**没有**插件签名、发布者校验、SHA-256 固定清单，
+# 也没有"安装前用户显式确认"：任何能往 PLUGINS_DIR 写文件的人都能让 API
+# 进程执行其代码（插件在进程内运行，等价于任意代码执行）。完整签名体系
+# 需要密钥管理与发布链，尚未实现。
+#
+# 为此在读取侧做了这些收口（只能降低误加载面，不能替代签名）：
+#   1. 不再 `sys.path.insert(0, plugin_path)`：插件目录不进模块搜索路径，
+#      无法抢先注册同名模块覆盖内置实现；
+#   2. 插件目录 resolve() 后必须位于插件根目录内（挡软链越界）；
+#   3. manifest 必须有 name/version/module；入口必须是插件目录内的相对
+#      模块名，绝对路径、盘符、`/`、`\`、`..` 一律拒绝；
+#   4. 按文件路径加载，模块名唯一（aieos_plugin_<slug>_<hash>），且禁止
+#      插件用 id 覆盖内置技能。
+# 仍待实现：签名校验、安装确认、受限子进程运行。
 PLUGINS_DIR = Path(__file__).resolve().parents[3] / "plugins" / "skills"
-_MANIFEST_FIELDS = ("name", "version", "description", "module")
+_MANIFEST_FIELDS = ("name", "version", "module")
+_MANIFEST_MAX_BYTES = 64 * 1024
+_MODULE_PART_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _is_within(root: Path, target: Path) -> bool:
+    """target resolve() 后是否仍在 root 内（同时挡住软链越界）。"""
+    root_r = root.resolve()
+    target_r = target.resolve()
+    return target_r == root_r or root_r in target_r.parents
+
+
+def _plugin_entry(plugin_dir: Path, module: str) -> Path | None:
+    """把 manifest.module 解析成插件目录内的入口文件；非法/越界返回 None。
+
+    只接受点分模块名（`skill`、`pkg.skill`，可带 `.py` 后缀）；
+    绝对路径、盘符、`/`、`\\` 与任何 `..` 段都会被拒绝。
+    """
+    if not isinstance(module, str):
+        return None
+    name = module.strip()
+    if name.endswith(".py"):
+        name = name[:-3]
+    if not name or any(ch in name for ch in ("/", "\\", ":", "\x00")):
+        return None
+    parts = name.split(".")
+    if not parts or any(not _MODULE_PART_RE.match(p) for p in parts):
+        return None
+    base = plugin_dir.joinpath(*parts)
+    for cand in (base.with_suffix(".py"), base / "__init__.py"):
+        if cand.is_file() and _is_within(plugin_dir, cand):
+            return cand.resolve()
+    return None
+
+
+def _load_module_from_path(entry: Path, unique_name: str):
+    """按文件路径加载模块，模块名由调用方保证唯一（不进 sys.path）。"""
+    spec = importlib.util.spec_from_file_location(unique_name, entry)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法为 {entry.name} 构建模块 spec")
+    module = importlib.util.module_from_spec(spec)
+    # 先登记再执行：插件内部的自引用 import / dataclass 装饰器需要它
+    sys.modules[unique_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(unique_name, None)
+        raise
+    return module
 
 
 def _skill_class_from_module(module, manifest_name: str) -> type[BaseSkill] | None:
@@ -237,48 +302,85 @@ def load_plugin_skills() -> list[str]:
     loaded: list[str] = []
     if not PLUGINS_DIR.is_dir():
         return loaded
-    for plugin_dir in sorted(PLUGINS_DIR.iterdir()):
-        manifest_path = plugin_dir / "manifest.json"
-        if not plugin_dir.is_dir() or not manifest_path.is_file():
+    plugin_root = PLUGINS_DIR.resolve()
+    if not os.access(plugin_root, os.W_OK):
+        # 不可写意味着"用户无法安装/更新插件，但已有插件仍会执行"，
+        # 这是运维需要知道的状态，不能静默。
+        logger.warning(
+            "技能插件根目录 %s 不可写：无法安装/更新插件；"
+            "已有插件仍会加载执行（当前无签名校验，见本段注释）", plugin_root)
+
+    for plugin_dir in sorted(plugin_root.iterdir()):
+        if not plugin_dir.is_dir() or plugin_dir.name.startswith(("_", ".")):
+            continue
+        name_hint = plugin_dir.name
+        try:
+            real_dir = plugin_dir.resolve()
+        except OSError as exc:
+            logger.warning("技能插件 %s: 目录解析失败，已跳过：%s", name_hint, exc)
+            continue
+        if not _is_within(plugin_root, real_dir):
+            logger.warning("技能插件 %s: 目录解析后不在插件根目录内，已跳过", name_hint)
+            continue
+        manifest_path = real_dir / "manifest.json"
+        if not manifest_path.is_file():
             continue
         try:
+            if manifest_path.stat().st_size > _MANIFEST_MAX_BYTES:
+                logger.warning("技能插件 %s: manifest.json 超过 %d 字节，已跳过",
+                               name_hint, _MANIFEST_MAX_BYTES)
+                continue
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception as exc:
             logger.warning("技能插件 %s: manifest.json 解析失败，已跳过：%s",
-                           plugin_dir.name, exc)
+                           name_hint, exc)
             continue
-        missing = [f for f in _MANIFEST_FIELDS if not manifest.get(f)]
+        if not isinstance(manifest, dict):
+            logger.warning("技能插件 %s: manifest.json 不是对象，已跳过", name_hint)
+            continue
+        missing = [f for f in _MANIFEST_FIELDS
+                   if not isinstance(manifest.get(f), str) or not manifest[f].strip()]
         if missing:
-            logger.warning("技能插件 %s: manifest 缺字段 %s，已跳过",
-                           plugin_dir.name, missing)
+            logger.warning("技能插件 %s: manifest 缺字段或字段非字符串 %s，已跳过",
+                           name_hint, missing)
             continue
+        entry = _plugin_entry(real_dir, manifest["module"])
+        if entry is None:
+            logger.warning(
+                "技能插件 %s: manifest.module=%r 非法（绝对路径/含 .. 或"
+                "指向插件目录外/文件不存在），已跳过", name_hint, manifest["module"])
+            continue
+        slug = re.sub(r"[^a-z0-9]+", "_", manifest["name"].lower()).strip("_")[:40]
+        digest = hashlib.sha256(str(entry).encode("utf-8")).hexdigest()[:12]
+        unique_name = f"aieos_plugin_{slug or 'plugin'}_{digest}"
         try:
-            plugin_path = str(plugin_dir)
-            if plugin_path not in sys.path:
-                sys.path.insert(0, plugin_path)
-            module = importlib.import_module(manifest["module"])
+            module = _load_module_from_path(entry, unique_name)
             cls = _skill_class_from_module(module, manifest["name"])
             if cls is None:
                 logger.warning("技能插件 %s: 模块 %s 内未找到 BaseSkill 子类，已跳过",
-                               plugin_dir.name, manifest["module"])
+                               name_hint, manifest["module"])
                 continue
             if not cls.id:
                 logger.warning("技能插件 %s: 技能类 %s 未设置 id，已跳过",
-                               plugin_dir.name, cls.__name__)
+                               name_hint, cls.__name__)
+                continue
+            if cls.id in {s.id for s in BUILTIN_SKILLS}:
+                logger.warning("技能插件 %s: id=%r 与内置技能冲突，已跳过"
+                               "（插件不得覆盖内置实现）", name_hint, cls.id)
                 continue
             if cls.id != manifest["name"]:
                 logger.warning("技能插件 %s: manifest name=%r 与类 id=%r 不一致，按类 id 注册",
-                               plugin_dir.name, manifest["name"], cls.id)
+                               name_hint, manifest["name"], cls.id)
             if cls.id in _registry:
                 logger.warning("技能插件 %s: id=%r 已存在，将覆盖原注册",
-                               plugin_dir.name, cls.id)
+                               name_hint, cls.id)
             register_skill(cls)
             loaded.append(cls.id)
             logger.info("技能插件已加载：%s（%s v%s）",
-                        cls.id, plugin_dir.name, manifest["version"])
+                        cls.id, name_hint, manifest["version"])
         except Exception as exc:
             logger.warning("技能插件 %s 加载失败，已跳过：%s",
-                           plugin_dir.name, exc, exc_info=True)
+                           name_hint, exc, exc_info=True)
     return loaded
 
 
