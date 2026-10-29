@@ -6,35 +6,40 @@ import ConfirmHost from "@/components/ConfirmDialog";
 import CommandPalette from "@/components/CommandPalette";
 import GlobalShortcuts from "@/components/GlobalShortcuts";
 import UpdateBanner from "@/components/UpdateBanner";
+import ClassicLayout from "@/components/ClassicLayout";
+import ModeChooser from "@/components/ModeChooser";
 import { api, ApiError, getToken } from "@/lib/api";
 import { isEmbedded } from "@/lib/apps";
+import { useUIMode } from "@/lib/ui-mode";
 
 /**
- * 登录态守卫 + 全局外壳。
+ * 登录态守卫 + 双模式外壳。
  *
- * 单界面约定：`/workspace` 是唯一的界面外壳，其余页面只在它的右栏 iframe 里出现。
- * 直接访问 `/tasks` 之类的地址会被带回 `/workspace?app=/tasks`，
- * 这样书签、刷新、外部粘贴链接都落在同一个界面里。
+ *   classic：左侧固定菜单 + 整页导航，每个功能是一个完整页面（v5.12 之前的形态）；
+ *   geek：`/workspace` 单外壳，功能页开在右栏标签里，对话不中断。
  *
- * 内嵌页面（iframe，`window.self !== window.top`）反过来要剥掉外壳：
- * 页面的 Toast / 确认框 / ⌘K 都挂在自己的文档里，否则弹出层会消失。
+ * 首次进入必须二选一（ModeChooser），选择存在 localStorage，之后可随时切换。
+ * 内嵌页面（iframe）永远剥掉外壳，两种模式下都一样。
  */
 const DESKTOP_TITLEBAR = 34;
 
 export default function MainLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
+  const mode = useUIMode();
   const [state, setState] = useState<"checking" | "ready" | "failed">("checking");
   const [error, setError] = useState("");
   // 桌面壳改成 hiddenInset 后，顶部 34px 归红绿灯与窗口拖拽；普通页面也要让出这段
   const [desktop, setDesktop] = useState(false);
   const [embed, setEmbed] = useState(false);
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     const d = (window as any).aieosDesktop;
     // 只有 mac 改成了 hiddenInset；Windows 保留系统标题栏，不能再多让 34px
     setDesktop(!!d?.isDesktop && d?.platform === "darwin");
     setEmbed(isEmbedded());
+    setMounted(true);
   }, []);
 
   const verify = useCallback(async () => {
@@ -60,14 +65,16 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
   }, [verify]);
 
   const isWorkspace = pathname === "/workspace";
+  const isHome = pathname === "/";
 
-  // 单界面：除工作台外的页面一律带回工作台，作为右栏标签打开。
-  // iframe 里必须放行，否则标签内会无限自我重定向。
+  // 极客模式的单界面约定：除工作台外的页面一律带回工作台，作为右栏标签打开。
+  // 经典模式不做任何改写；iframe 里必须放行，否则标签内会无限自我重定向。
   useEffect(() => {
-    if (state !== "ready" || embed || isWorkspace) return;
+    if (state !== "ready" || !mounted || embed) return;
+    if (mode !== "geek" || isWorkspace || isHome) return;
     const target = `${pathname}${window.location.search}${window.location.hash}`;
     router.replace(`/workspace?app=${encodeURIComponent(target)}`);
-  }, [state, embed, isWorkspace, pathname, router]);
+  }, [state, mounted, embed, mode, isWorkspace, isHome, pathname, router]);
 
   if (state === "checking") {
     return (
@@ -98,12 +105,25 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
     );
   }
 
+  // 模式只能从 localStorage 读到，首帧先不渲染界面，避免闪一下再换形态
+  if (!mounted) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <span
+          className="w-5 h-5 rounded-full border-2 animate-spin"
+          style={{ borderColor: "var(--border)", borderTopColor: "var(--accent)" }}
+          aria-hidden
+        />
+      </div>
+    );
+  }
+
   const hosts = (
     <>
       <ToastHost />
       {/* 统一二次确认：全站危险操作都走它，替代原生 confirm */}
       <ConfirmHost />
-      {/* ⌘K 全局跳转：34 个页面规模下，"找得到"比"列得全"更重要 */}
+      {/* ⌘K 全局跳转：30+ 页面规模下，"找得到"比"列得全"更重要 */}
       <CommandPalette />
       {/* 全局快捷键（n / / j k / 空格 / ?）：与命令面板互不干扰 */}
       <GlobalShortcuts />
@@ -122,7 +142,47 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
     );
   }
 
-  if (!isWorkspace) {
+  // 还没有选择过模式：先让用户二选一，任何页面都先不渲染
+  if (mode === null) {
+    return (
+      <>
+        {hosts}
+        <div className="h-screen flex flex-col items-center justify-center gap-3"
+          style={{ paddingTop: desktop ? DESKTOP_TITLEBAR : 0 }}>
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center text-white font-bold"
+            style={{ background: "linear-gradient(135deg,#6366f1,#22d3ee)" }}>
+            ⚡
+          </div>
+          <p className="text-xs" style={{ color: "var(--muted)" }}>先选择一种界面模式</p>
+        </div>
+        <ModeChooser />
+      </>
+    );
+  }
+
+  const chrome = (
+    <>
+      {hosts}
+      {/* 自动升级横幅：只在桌面壳里工作，浏览器访问零渲染 */}
+      <UpdateBanner />
+      {desktop && <div className="app-drag fixed inset-x-0 top-0 z-40 h-[34px]" aria-hidden />}
+    </>
+  );
+
+  if (mode === "classic") {
+    return (
+      <>
+        {chrome}
+        <div className="h-screen overflow-hidden" style={{ paddingTop: desktop ? DESKTOP_TITLEBAR : 0 }}>
+          <ClassicLayout>{children}</ClassicLayout>
+        </div>
+        <ModeChooser />
+      </>
+    );
+  }
+
+  // "/" 自己按模式分流（经典 → /dashboard，极客 → /workspace），必须放它渲染
+  if (!isWorkspace && !isHome) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-2">
         <span
@@ -137,13 +197,11 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
 
   return (
     <>
-      {hosts}
-      {/* 自动升级横幅：只在桌面壳里工作，浏览器访问零渲染 */}
-      <UpdateBanner />
-      {desktop && <div className="app-drag fixed inset-x-0 top-0 z-40 h-[34px]" aria-hidden />}
+      {chrome}
       <div className="h-screen overflow-hidden" style={{ paddingTop: desktop ? DESKTOP_TITLEBAR : 0 }}>
         {children}
       </div>
+      <ModeChooser />
     </>
   );
 }

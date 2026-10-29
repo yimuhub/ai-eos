@@ -24,6 +24,7 @@ import { ALL_PAGES, type NavItem } from "@/lib/nav";
 import { clearToken } from "@/lib/api";
 import { notify } from "@/components/Toast";
 import { openApp } from "@/lib/apps";
+import { useSwitchMode, useUIMode } from "@/lib/ui-mode";
 
 const RECENT_KEY = "aieos_recent_pages";
 const RECENT_MAX = 6;
@@ -89,6 +90,8 @@ export function openCommandPalette() {
 
 export default function CommandPalette() {
   const router = useRouter();
+  const mode = useUIMode();
+  const switchMode = useSwitchMode();
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const [cursor, setCursor] = useState(0);
@@ -135,8 +138,19 @@ export default function CommandPalette() {
           notify("success", "已清空最近访问记录");
         },
       },
+      {
+        kind: "action",
+        id: "action:switch-mode",
+        label: mode === "classic" ? "切换到极客模式" : "切换到经典模式",
+        desc:
+          mode === "classic"
+            ? "极客：左中右三栏对话，功能页开在右栏标签，聊天不中断"
+            : "经典：左侧固定菜单 + 整页导航，一页一件事",
+        icon: "⇄",
+        run: () => switchMode(mode === "classic" ? "geek" : "classic"),
+      },
     ],
-    [router],
+    [router, mode, switchMode],
   );
 
   // ---------- 结果计算 ----------
@@ -378,7 +392,9 @@ export default function CommandPalette() {
           <span><kbd className="opacity-80">↑↓</kbd> 选择</span>
           <span><kbd className="opacity-80">↵</kbd> 打开</span>
           <span><kbd className="opacity-80">Esc</kbd> 关闭</span>
-          <span className="ml-auto opacity-70">{ALL_PAGES.length - 1} 个页面可直达 · 开在右栏</span>
+          <span className="ml-auto opacity-70">
+            {ALL_PAGES.length - 1} 个页面可直达 · {mode === "classic" ? "整页打开" : "开在右栏"}
+          </span>
         </div>
       </div>
     </div>

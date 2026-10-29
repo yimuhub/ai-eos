@@ -196,6 +196,8 @@ cd apps/web && npm run test          # vitest (frontend)
 
 *One interface, streaming answers: every feature opens as a tab inside the workbench — 2026-10-30. Full entry in [`CHANGELOG.md`](CHANGELOG.md).*
 
+- 🎛 **Dual UI modes (unreleased).** First entry asks for **classic** (fixed left menu + full-page navigation) or **geek** (`/workspace` three-pane chat with right-panel tabs). Switch any time from ⌘K or the ⇄ button at the bottom of either sidebar; the current page follows you, and the choice stays on this machine.
+
 - 🧩 **One interface for everything.** `/workspace` is now the only shell. The left rail, ⌘K and every in-page entry open features as **closable tabs in the right panel** — the chat and rail never navigate away. Tabs stay mounted (filters and scroll survive), closing one activates its left neighbour, and state is restored after a reload.
 - 🔗 **Old links still work.** Visiting `/tasks`, `/knowledge` and friends redirects into `/workspace?app=…`, so bookmarks, refreshes and pasted links always land in the same interface. On narrow screens the panel goes full-screen and the left drawer steps aside.
 - ⌨️ **Shortcuts never get swallowed.** ⌘K / ⌘B / ⌘J / ⌘N pressed while the focus is inside an embedded page are forwarded to the shell, so the command palette behaves the same everywhere.

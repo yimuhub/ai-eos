@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { NAV_GROUPS } from "@/lib/nav";
 import { openCommandPalette } from "@/components/CommandPalette";
+import { openModeChooser } from "@/components/ModeChooser";
 import { sessionMeta, type WsAgent, type WsSession } from "@/lib/workspace";
 
 /** 左栏：数字员工 + 作战会话 + 常用页面。宽度由外层控制，这里只管内容。 */
@@ -209,6 +210,9 @@ export default function WorkspaceSidebar({
             <p className="text-[11px] truncate">{userName}</p>
             <p className="text-[9px]" style={{ color: "#55555f" }}>老板 · 一人公司</p>
           </div>
+          <button type="button" onClick={openModeChooser} title="切换界面模式"
+            className="w-7 h-7 rounded-lg flex items-center justify-center text-xs hover:bg-white/[0.06]"
+            style={{ color: "var(--muted)" }} aria-label="切换界面模式">⇄</button>
           <button type="button" onClick={onCollapse} title="收起左栏 ⌘B"
             className="w-7 h-7 rounded-lg flex items-center justify-center text-xs hover:bg-white/[0.06]"
             style={{ color: "var(--muted)" }} aria-label="收起左栏">‹</button>

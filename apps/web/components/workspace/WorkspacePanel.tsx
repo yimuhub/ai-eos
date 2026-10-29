@@ -29,6 +29,7 @@ export default function WorkspacePanel({
   onToggleFocus,
   onFrame,
   compact,
+  showPicker = true,
 }: {
   outTab: OutTab;
   onOutTab: (t: OutTab) => void;
@@ -45,6 +46,8 @@ export default function WorkspacePanel({
   onFrame: (id: string, el: HTMLIFrameElement | null) => void;
   /** 窄屏上面板本身就是整屏，「展开」无从谈起 */
   compact: boolean;
+  /** 经典模式下没有标签容器，不显示「＋ 打开页面」 */
+  showPicker?: boolean;
 }) {
   return (
     <div className="flex h-full min-w-0 flex-col" style={{ background: "var(--surface)" }}>
@@ -61,11 +64,13 @@ export default function WorkspacePanel({
               <span className="max-w-[132px] truncate">{t.label}</span>
             </PaneTab>
           ))}
-          <button type="button" onClick={onOpenPicker} title="打开页面（⌘K）" aria-label="打开页面"
-            className="w-7 h-7 rounded-lg flex items-center justify-center text-xs shrink-0 hover:bg-white/[0.06]"
-            style={{ color: "var(--muted)" }}>
-            ＋
-          </button>
+          {showPicker && (
+            <button type="button" onClick={onOpenPicker} title="打开页面（⌘K）" aria-label="打开页面"
+              className="w-7 h-7 rounded-lg flex items-center justify-center text-xs shrink-0 hover:bg-white/[0.06]"
+              style={{ color: "var(--muted)" }}>
+              ＋
+            </button>
+          )}
         </div>
 
         <div className="ml-auto flex items-center gap-1 shrink-0 pl-2"

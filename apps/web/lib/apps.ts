@@ -8,6 +8,7 @@
 //   - 工作台没挂载（登录前、桌面壳首次渲染）→ 退化成普通跳转。
 
 import { ALL_PAGES, type NavItem } from "@/lib/nav";
+import { readUIMode } from "@/lib/ui-mode";
 
 export type AppTab = {
   /** 打开时的路径，作为标签的稳定身份（页面内部跳转不改它） */
@@ -50,6 +51,8 @@ export function stripEmbed(href: string): string {
 }
 
 let opener: ((href: string) => void) | null = null;
+/** 经典模式下的普通路由跳转（由 ClassicLayout 注册，保留 SPA 体验） */
+let navigator: ((href: string) => void) | null = null;
 
 /** 工作台注册自己作为标签容器；返回注销函数，卸载时调用。 */
 export function registerAppOpener(fn: (href: string) => void): () => void {
@@ -59,8 +62,20 @@ export function registerAppOpener(fn: (href: string) => void): () => void {
   };
 }
 
+export function registerAppNavigator(fn: (href: string) => void): () => void {
+  navigator = fn;
+  return () => {
+    if (navigator === fn) navigator = null;
+  };
+}
+
 export function openApp(href: string) {
   if (!href) return;
+  // 经典模式没有标签容器：一律整页跳转
+  if (readUIMode() === "classic") {
+    (navigator ?? ((h: string) => window.location.assign(h)))(href);
+    return;
+  }
   if (opener) {
     opener(href);
     return;

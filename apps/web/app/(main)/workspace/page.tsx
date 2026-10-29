@@ -5,6 +5,7 @@ import { api, clearToken, describeError, getActiveCompanyId } from "@/lib/api";
 import { notify } from "@/components/Toast";
 import { openCommandPalette, pushRecentPage } from "@/components/CommandPalette";
 import { navFor, openApp, registerAppOpener, stripEmbed, type AppTab } from "@/lib/apps";
+import { useUIMode, readUIMode } from "@/lib/ui-mode";
 import Splitter from "@/components/workspace/Splitter";
 import WorkspaceChat from "@/components/workspace/WorkspaceChat";
 import WorkspacePanel from "@/components/workspace/WorkspacePanel";
@@ -60,6 +61,8 @@ function appTab(href: string): AppTab {
 /** 开机恢复：先看 `?app=`（分享链接、刷新），再看上次的标签存档。 */
 function bootApps(): { apps: AppTab[]; pane: string } {
   if (typeof window === "undefined") return { apps: [], pane: "out" };
+  // 经典模式不恢复标签：这一页只是三栏对话，页面靠整页跳转
+  if (readUIMode() === "classic") return { apps: [], pane: "out" };
   let saved: AppTab[] = [];
   let savedActive = "";
   try {
@@ -95,6 +98,8 @@ function clamp(v: number, min: number, max: number) {
 
 export default function WorkspacePage() {
   const router = useRouter();
+  // 经典模式下这一页只是「三栏对话」本身，没有右栏标签容器
+  const classic = useUIMode() === "classic";
   const rowRef = useRef<HTMLDivElement>(null);
   const compactRef = useRef(false);
 
@@ -267,6 +272,11 @@ export default function WorkspacePage() {
 
   const openAppTab = useCallback((raw: string) => {
     const href = stripEmbed(String(raw || "").trim());
+    // 经典模式没有标签容器：所有入口都是整页跳转
+    if (classic) {
+      router.push(href === "/" ? "/dashboard" : href);
+      return;
+    }
     // 「工作台」不是可打开的页面，而是回到产出/对话本身
     if (href === "/" || href === "/workspace") {
       setPane("out");
@@ -295,7 +305,7 @@ export default function WorkspacePage() {
       rightHidden: false,
       leftHidden: compactRef.current ? true : prev.leftHidden,
     }), false);
-  }, [apps, setLayoutPersist]);
+  }, [apps, classic, router, setLayoutPersist]);
 
   const closeApp = useCallback((id: string) => {
     frames.current.delete(id);
@@ -307,7 +317,19 @@ export default function WorkspacePage() {
   }, [apps]);
 
   // 左栏、⌘K 以及任何页面的入口都走这里
-  useEffect(() => registerAppOpener(openAppTab), [openAppTab]);
+  useEffect(() => {
+    if (classic) return;
+    return registerAppOpener(openAppTab);
+  }, [classic, openAppTab]);
+
+  // 从极客切到经典时页面可能还挂着：把右栏标签收掉，别留下一条不属于这个模式的栏
+  useEffect(() => {
+    if (!classic) return;
+    frames.current.clear();
+    setApps([]);
+    setPane("out");
+    setFocus(false);
+  }, [classic]);
 
   // iframe 里跳转后，标签标题跟着走；对话区不动
   useEffect(() => {
@@ -348,13 +370,15 @@ export default function WorkspacePage() {
 
   // 地址栏只反映「当前看的是哪个页面」，刷新/分享都落在同一个界面
   useEffect(() => {
+    if (classic) return;
     const active = apps.find((t) => t.id === pane) || apps.find((t) => t.href === pane);
     const want = active ? `/workspace?app=${encodeURIComponent(active.href)}` : "/workspace";
     const cur = window.location.pathname + window.location.search;
     if (cur !== want) window.history.replaceState(window.history.state, "", want);
-  }, [apps, pane]);
+  }, [apps, pane, classic]);
 
   useEffect(() => {
+    if (classic) return;
     try {
       localStorage.setItem(APPS_KEY, JSON.stringify({
         hrefs: apps.map((t) => t.href),
@@ -363,7 +387,7 @@ export default function WorkspacePage() {
     } catch {
       /* 隐私模式下写不了：标签只在本次会话保留 */
     }
-  }, [apps, activeId]);
+  }, [apps, activeId, classic]);
 
   // 展开状态下 Esc 回到对话
   useEffect(() => {
@@ -430,7 +454,8 @@ export default function WorkspacePage() {
       focus={focusMode}
       onToggleFocus={() => setFocus((v) => !v)}
       onFrame={setFrame}
-      compact={compact}
+      compact={compact || classic}
+      showPicker={!classic}
     />
   );
 
