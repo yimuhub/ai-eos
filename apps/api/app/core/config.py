@@ -21,12 +21,12 @@ from pathlib import Path
 from pydantic import PrivateAttr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.core.env_loader import API_ROOT, load_env
+from app.core.env_loader import API_ROOT, env_file_path, load_env
 
 # 尽早注入：本模块被导入即完成，早于任何业务代码读取环境变量
 _ENV_FILES_LOADED = load_env()
 
-_ENV_FILE = API_ROOT / ".env"
+_ENV_FILE = env_file_path()
 
 # ⚠️ 仅供本地直开使用的占位密钥。
 #
@@ -357,20 +357,30 @@ class Settings(BaseSettings):
         敏感变量名在这里**直接忽略**（不取、不回退），作为 API 校验之外的
         兜底：历史遗留的 model 行（升级前写入、或直接改库）即使
         `api_key_env=JWT_SECRET`，运行时也拿不到服务端密钥。
+
+        **os.environ 必须优先于 self 上的同名字段**：`self.*` 是导入期的一次性
+        快照，而 `/models/env-key` 在运行期才改写 os.environ。若先读快照，
+        用户在「模型配置」里换过的 Key 会被启动时的旧 Key 顶掉，
+        表现为一直 401 Invalid token，直到重启后端——而界面却提示"已立即生效"。
         """
         if env_var_name and not is_sensitive_env_name(env_var_name):
             value = os.environ.get(env_var_name, "")
             if value:
                 return value
-        fallback = {
-            "openai_compat": self.openai_compat_api_key or os.environ.get(
-                "OPENAI_COMPAT_API_KEY", ""),
-            "anthropic": self.anthropic_api_key or os.environ.get(
-                "ANTHROPIC_API_KEY", ""),
-            "gemini": self.gemini_api_key or os.environ.get(
-                "GEMINI_API_KEY", ""),
-        }
-        return fallback.get(provider, "")
+        default_env = {
+            "openai_compat": "OPENAI_COMPAT_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "gemini": "GEMINI_API_KEY",
+        }.get(provider, "")
+        if default_env:
+            value = os.environ.get(default_env, "")
+            if value:
+                return value
+        return {
+            "openai_compat": self.openai_compat_api_key,
+            "anthropic": self.anthropic_api_key,
+            "gemini": self.gemini_api_key,
+        }.get(provider, "")
 
 
 settings = Settings()

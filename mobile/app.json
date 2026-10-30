@@ -2,8 +2,8 @@
   "expo": {
     "name": "AI-EOS",
     "slug": "ai-eos-mobile",
-    "version": "5.13.0",
-    "versionCode": 5,
+    "version": "5.14.0",
+    "versionCode": 6,
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",

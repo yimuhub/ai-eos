@@ -51,6 +51,7 @@ const PRESETS = [
     model_id: "agnes-2.5-flash",
     api_key_env: "OPENAI_COMPAT_API_KEY",
     key_hint: "去 agnes-ai.cn 注册账号 → 控制台「API 密钥」页面复制 Key，新用户有免费额度可先试。",
+    custom: false,
   },
   {
     label: "OpenAI 官方",
@@ -60,6 +61,7 @@ const PRESETS = [
     model_id: "gpt-4o-mini",
     api_key_env: "OPENAI_COMPAT_API_KEY",
     key_hint: "去 platform.openai.com 注册 → 右上角头像「API keys」新建并复制 Key（需境外网络）。",
+    custom: false,
   },
   {
     label: "DeepSeek",
@@ -69,6 +71,7 @@ const PRESETS = [
     model_id: "deepseek-chat",
     api_key_env: "OPENAI_COMPAT_API_KEY",
     key_hint: "去 platform.deepseek.com 注册 → 左侧「API keys」创建并复制 Key，价格相对便宜。",
+    custom: false,
   },
   {
     label: "Anthropic Claude",
@@ -78,6 +81,17 @@ const PRESETS = [
     model_id: "claude-3-5-sonnet-latest",
     api_key_env: "ANTHROPIC_API_KEY",
     key_hint: "去 console.anthropic.com 注册 → 「API Keys」页面创建并复制 Key（需境外网络）。",
+    custom: false,
+  },
+  {
+    label: "自定义 API",
+    name: "",
+    provider_type: "openai_compat",
+    base_url: "",
+    model_id: "",
+    api_key_env: "OPENAI_COMPAT_API_KEY",
+    key_hint: "任何 OpenAI 兼容接口都行（vLLM / Ollama / OneAPI / 自建网关）。地址填到 /v1 为止。",
+    custom: true,
   },
 ];
 
@@ -96,9 +110,19 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
   const [presetIdx, setPresetIdx] = useState(0);
   const [mForm, setMForm] = useState({ ...PRESETS[0] });
   const [modelCreated, setModelCreated] = useState(false);
+  // 模型 ID 优先从服务商读取后下拉选择；读不到再允许手填
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [listing, setListing] = useState(false);
+  const [manualModel, setManualModel] = useState(false);
+  const [listError, setListError] = useState("");
 
   // ---- 演示模式（免 Key）----
   const [demoOpen, setDemoOpen] = useState(false);
+
+  // ---- 密钥就地保存（写本机 .env，立即生效）----
+  const [keyInput, setKeyInput] = useState("");
+  const [keySaving, setKeySaving] = useState(false);
+  const [keyMasked, setKeyMasked] = useState("");
 
   // ---- 步骤 3：团队 ----
   const [templates, setTemplates] = useState<Template[]>([]);
@@ -153,7 +177,7 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
   // ---------- 步骤 2：登记模型 ----------
   async function createModel() {
     if (!mForm.base_url?.trim() || !mForm.model_id?.trim()) {
-      notify("warning", "请填写接口地址与模型 ID");
+      notify("warning", "请填写接口地址，并读取或选择模型");
       return;
     }
     setBusy(true);
@@ -173,6 +197,49 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
       notify("error", e instanceof Error ? e.message : "登记模型失败");
     } finally {
       setBusy(false);
+    }
+  }
+
+  // ---------- 步骤 2：从服务商读取可用模型 ----------
+  async function fetchModels() {
+    const base = mForm.base_url.trim();
+    if (!base) {
+      notify("warning", "请先填写接口地址");
+      return;
+    }
+    setListing(true);
+    setListError("");
+    try {
+      const r = await api.post<{ status: string; models?: string[]; error?: string }>(
+        "/models/providers/list-models",
+        {
+          base_url: base,
+          api_key: keyInput.trim() || undefined,
+          provider_type: mForm.provider_type,
+        },
+      );
+      const list = r?.status === "ok" ? (r.models ?? []) : [];
+      if (!list.length) {
+        setModelOptions([]);
+        setListError(r?.error || "没有读到模型，可手动填写模型 ID");
+        return;
+      }
+      setModelOptions(list);
+      setManualModel(false);
+      setMForm((f) => ({
+        ...f,
+        model_id: list.includes(f.model_id) ? f.model_id : list[0],
+        name:
+          f.name.trim() && f.name !== f.model_id
+            ? f.name
+            : list.includes(f.model_id)
+              ? f.name
+              : list[0],
+      }));
+    } catch (e) {
+      setListError(e instanceof Error ? e.message : "读取模型列表失败");
+    } finally {
+      setListing(false);
     }
   }
 
@@ -196,6 +263,34 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
   }
 
   const modelReady = diag?.ready === true;
+
+  /**
+   * 直接在界面上保存密钥：后端写入本机 .env（600 权限）并立即生效。
+   * 过去这里教用户"打开 apps/api/.env 手动粘贴再重启"——对普通用户是天堑，
+   * 结果就是模型登记了、任务却永远失败在「缺少密钥」。
+   */
+  async function saveKey() {
+    const key = keyInput.trim();
+    if (key.length < 8) {
+      notify("warning", "请粘贴完整的 API Key（至少 8 个字符）");
+      return;
+    }
+    setKeySaving(true);
+    try {
+      const r = await api.post<{ masked: string }>("/models/env-key", {
+        env_name: mForm.api_key_env || "OPENAI_COMPAT_API_KEY",
+        api_key: key,
+      });
+      setKeyMasked(r.masked);
+      setKeyInput("");
+      notify("success", "密钥已保存到本机 .env，立即生效");
+      await refreshDiag();
+    } catch (e) {
+      notify("error", e instanceof Error ? e.message : "保存密钥失败");
+    } finally {
+      setKeySaving(false);
+    }
+  }
 
   return (
     <div className="max-w-2xl mx-auto py-10 px-4 animate-fade-up">
@@ -309,14 +404,35 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
                     <div className="mt-2 rounded-lg p-2.5 space-y-1.5 text-[11px] leading-relaxed"
                       style={{ background: "rgba(0,0,0,0.3)", color: "var(--muted)" }}>
                       <p className="font-medium" style={{ color: "var(--foreground)" }}>
-                        按这 4 步把密钥交给后端（密钥只存在你自己机器上，不会上传）：
+                        把 Key 交给后端（只存在你自己的机器上，不会上传）
                       </p>
-                      <p>1️⃣ 打开 <code>apps/api</code> 文件夹，找 <code>.env</code> 文件——便携包里如果没有，就新建一个空白文本文档，把文件名改成 <code>.env</code>（前面有个点，不要带 .txt 后缀）。</p>
-                      <p>2️⃣ 用记事本 / 文本编辑打开它，另起一行粘贴：<br />
-                        <code>{mForm.api_key_env}=你的密钥</code>
-                        （等号两边不要加空格，「你的密钥」换成刚才复制的那一串）。</p>
-                      <p>3️⃣ 保存文件，然后重启后端：关掉运行后端的那个黑窗口，再重新双击启动脚本，等它重新出现启动成功的提示。</p>
-                      <p>4️⃣ 回到这个页面，点下方的「重新检测」，看到 ✅ 就说明通了。</p>
+                      <div className="flex gap-1.5">
+                        <input
+                          type="password"
+                          value={keyInput}
+                          onChange={(e) => setKeyInput(e.target.value)}
+                          onKeyDown={(e) => e.key === "Enter" && void saveKey()}
+                          placeholder={`粘贴 ${mForm.api_key_env} 的值`}
+                          autoComplete="off"
+                          spellCheck={false}
+                          className="input !py-1.5 text-[11px] flex-1"
+                          aria-label="API Key"
+                        />
+                        <button
+                          onClick={() => void saveKey()}
+                          disabled={keySaving || !keyInput.trim()}
+                          className="btn-primary !py-1.5 text-[11px] shrink-0 disabled:opacity-40"
+                        >
+                          {keySaving ? "保存中…" : "保存并生效"}
+                        </button>
+                      </div>
+                      <p>
+                        保存为 <code>{mForm.api_key_env}</code>，写入本机 <code>apps/api/.env</code>
+                        （权限 600），立即生效，无需重启。
+                      </p>
+                      {keyMasked && (
+                        <p style={{ color: "var(--success)" }}>已保存：{keyMasked}</p>
+                      )}
                     </div>
                   </div>
                 )}
@@ -329,13 +445,19 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
             <>
               <div>
                 <label className="text-xs mb-1.5 block" style={{ color: "var(--muted)" }}>
-                  选择服务商预设（已自动填好参数）
+                  选择服务商预设（填好地址和 Key 后点「读取模型」）
                 </label>
                 <div className="flex flex-wrap gap-1.5">
                   {PRESETS.map((p, i) => (
                     <button
                       key={p.label}
-                      onClick={() => { setPresetIdx(i); setMForm({ ...p }); }}
+                      onClick={() => {
+                        setPresetIdx(i);
+                        setMForm({ ...p });
+                        setModelOptions([]);
+                        setListError("");
+                        setManualModel(p.custom);
+                      }}
                       className="px-2.5 py-1 rounded-lg text-[11px] border transition-all"
                       style={{
                         borderColor: presetIdx === i ? "var(--accent)" : "var(--border)",
@@ -355,14 +477,59 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                <input value={mForm.name} onChange={(e) => setMForm({ ...mForm, name: e.target.value })}
-                  placeholder="显示名称" className="input" />
-                <input value={mForm.model_id} onChange={(e) => setMForm({ ...mForm, model_id: e.target.value })}
-                  placeholder="模型 ID，如 agnes-2.5-flash" className="input" />
-                <input value={mForm.base_url} onChange={(e) => setMForm({ ...mForm, base_url: e.target.value })}
+                <input value={mForm.base_url}
+                  onChange={(e) => {
+                    setMForm({ ...mForm, base_url: e.target.value });
+                    setModelOptions([]);
+                    setListError("");
+                  }}
                   placeholder="接口地址 https://.../v1" className="input sm:col-span-2" />
+                <div className="sm:col-span-2 flex gap-2">
+                  {modelOptions.length > 0 && !manualModel ? (
+                    <select className="input flex-1 min-w-0"
+                      value={mForm.model_id}
+                      onChange={(e) => {
+                        const id = e.target.value;
+                        setMForm((f) => ({
+                          ...f,
+                          model_id: id,
+                          name: f.name.trim() && f.name !== f.model_id ? f.name : id,
+                        }));
+                      }}>
+                      <option value="" disabled>选择一个模型</option>
+                      {modelOptions.map((id) => (
+                        <option key={id} value={id}>{id}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input value={mForm.model_id}
+                      onChange={(e) => setMForm({ ...mForm, model_id: e.target.value })}
+                      placeholder={manualModel ? "手动填写模型 ID" : "点右侧「读取模型」自动获取"}
+                      className="input flex-1 min-w-0"
+                      disabled={!manualModel} />
+                  )}
+                  <button onClick={fetchModels} disabled={listing || !mForm.base_url.trim()}
+                    className="btn-ghost text-xs shrink-0 disabled:opacity-40">
+                    {listing ? "读取中…" : modelOptions.length ? "重新读取" : "读取模型"}
+                  </button>
+                </div>
+                <div className="sm:col-span-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px]"
+                  style={{ color: "var(--muted)" }}>
+                  {modelOptions.length > 0 && !manualModel ? (
+                    <span style={{ color: "var(--success)" }}>✓ 已读取 {modelOptions.length} 个模型</span>
+                  ) : (
+                    <span>{manualModel ? "手动填写模式" : "先填接口地址，再点「读取模型」"}</span>
+                  )}
+                  <button onClick={() => setManualModel((s) => !s)} className="underline underline-offset-2"
+                    style={{ color: "var(--muted)" }}>
+                    {manualModel ? "改为从列表选择" : "服务商不支持读取？手动填写"}
+                  </button>
+                  {listError && <span style={{ color: "var(--warning)" }}>{listError}</span>}
+                </div>
+                <input value={mForm.name} onChange={(e) => setMForm({ ...mForm, name: e.target.value })}
+                  placeholder="显示名称（留空用模型 ID）" className="input" />
                 <input value={mForm.api_key_env} onChange={(e) => setMForm({ ...mForm, api_key_env: e.target.value })}
-                  placeholder="密钥所在的环境变量名" className="input sm:col-span-2" />
+                  placeholder="密钥所在的环境变量名" className="input" />
               </div>
 
               <button onClick={createModel} disabled={busy} className="btn-primary disabled:opacity-40">

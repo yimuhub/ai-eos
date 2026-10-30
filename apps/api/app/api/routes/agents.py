@@ -1,16 +1,49 @@
-"""Agent CRUD."""
+"""Agent CRUD + P5 行级可见性与创作权。
+
+## 三件事只在这里定义（其余入口复用同一套条件）
+
+1. **可见性（读）**：列表/详情走 `core.scope.agent_read_scope(ctx)`，
+   条件直接拼进 SQL——不允许"拉全量再在 Python 里过滤"，
+   那会让分页、计数与权限边界三处各说各话。
+2. **创作权（写）**：更新/删除/换模型/上下级统一走
+   `ensure_agent_access(...)`，按操作给 VIEW / OPERATE / MANAGE / DESTRUCTIVE。
+   失败一律 404（403 等于告诉调用方"这个 id 存在"）。
+3. **配额**：建 Agent 前按「本人 → 目标部门 → 公司默认」取第一个非 None 的上限，
+   超限不硬失败，而是落一条 `ApprovalRequest` 并返回 409，把决定权交回人。
+
+`visibility` 的默认值是 `department`：多成员时代，"新建即全公司可见"等于
+默认泄露；老数据为 NULL 的仍按 company 解释（见 scope.py）。
+"""
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, text, or_
+from sqlalchemy import func, or_, select, text, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.permissions import Capability, ensure_capability, role_has
+from app.core.scope import (
+    VISIBILITY_COMPANY,
+    VISIBILITY_DEPARTMENT,
+    VISIBILITY_PRIVATE,
+    agent_read_scope,
+    agent_write_scope,
+    build_ctx,
+    ensure_agent_access,
+    ensure_dept_access,
+)
 from app.db.session import get_db
 from app.models.agent import Agent, AgentModelConfig, AgentStatus
-from app.models.company import Company
+from app.models.company import Company, Department
+from app.models.membership import CompanyMember, DepartmentMember
+from app.models.user import User
 from app.services.event_system import log_event
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+
+VALID_VISIBILITIES = (VISIBILITY_COMPANY, VISIBILITY_DEPARTMENT,
+                      VISIBILITY_PRIVATE)
 
 
 class AgentIn(BaseModel):
@@ -26,6 +59,8 @@ class AgentIn(BaseModel):
     backend: str | None = None        # 执行底座: native_llm / hermes / codex
     expert_template_id: str | None = None  # V5.0：绑定专家库专家（取其 system_prompt）
     attachments: list[dict] | None = None  # 📎 附件口：[{id,name,size}]（上传后的资产）
+    # company | department | private；缺省 department（见模块说明）
+    visibility: str | None = None
 
 
 def _apply_capabilities(agent: Agent, capabilities: list[str], backend: str | None):
@@ -50,21 +85,157 @@ class ModelBindingIn(BaseModel):
     model_id: str
 
 
-async def _verify_agent_access(db: AsyncSession, user_id: str, agent: Agent) -> Company:
-    c = await db.get(Company, agent.company_id)
-    if not c or c.owner_id != user_id:
+async def _load_agent(db: AsyncSession, agent_id: str) -> Agent:
+    """按 id 取行；不存在统一 404（不泄露存在性）。"""
+    agent = await db.get(Agent, agent_id)
+    if not agent:
         raise HTTPException(404, "Agent not found")
-    return c
+    return agent
+
+
+async def _verify_agent_access(db: AsyncSession, user_id: str, agent: Agent,
+                               capability: Capability = Capability.VIEW) -> Company:
+    """**兼容层**：保留 user_id 形态给尚未迁移的调用方（如 offboarding）。
+
+    新代码请直接用 `ensure_agent_access(db, user, agent, capability)`——
+    它拿得到 `is_superadmin` 等身份信息。这里只按行级范围判定，
+    写/删的"有多重"仍由调用方显式声明的 capability 决定。
+    """
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(404, "Not found")
+    await ensure_agent_access(db, user, agent, capability)
+    company = await db.get(Company, agent.company_id)
+    if company is None:
+        raise HTTPException(404, "Not found")
+    return company
+
+
+async def _user_company_ids(db: AsyncSession, user) -> list[str]:
+    """当前用户"有身份"的公司集合（所有权 / 生效成员 / 部门成员）。
+
+    列表端点在没有显式 company_id 时要跨公司取数，先把候选公司收敛成
+    一条 SQL，再逐公司用 `build_ctx` 生成行级条件——**不**先把 Agent 拉出来
+    再在 Python 里判断。
+    """
+    # 候选公司枚举（不是权限判定）：真正的门禁是逐公司的 build_ctx / resolve_role，
+    # 这里只回答"他可能在哪几家公司里有身份"。
+    owned = select(Company.id).where(Company.owner_id == str(user.id))
+    member = select(CompanyMember.company_id).where(
+        CompanyMember.user_id == user.id,
+        func.lower(CompanyMember.status) == "active")
+    dept = (select(Department.company_id)
+            .join(DepartmentMember,
+                  DepartmentMember.department_id == Department.id)
+            .where(DepartmentMember.user_id == user.id))
+    rows = await db.execute(union(owned, member, dept))
+    return [r[0] for r in rows.all() if r[0]]
+
+
+def _normalize_visibility(raw: str | None) -> str:
+    """只接受 company|department|private；缺省 department，非法值 422。"""
+    value = (raw or VISIBILITY_DEPARTMENT).strip().lower()
+    if value not in VALID_VISIBILITIES:
+        raise HTTPException(
+            422, f"visibility 只能是 {'/'.join(VALID_VISIBILITIES)}")
+    return value
+
+
+async def _resolve_agent_quota(db: AsyncSession, company: Company,
+                               user_id: str,
+                               department_id: str | None) -> int | None:
+    """配额取值优先级：本人（company_members）→ 目标部门 → 公司默认。
+
+    第一个**非 None** 的值生效；全为 None 视为不限。
+    `companies` 表目前没有 agent_quota 列，故用 getattr 兜底——
+    将来加列即自动生效，不需要改这里。
+    """
+    personal = (await db.execute(
+        select(CompanyMember.agent_quota).where(
+            CompanyMember.company_id == company.id,
+            CompanyMember.user_id == user_id).limit(1))).scalars().first()
+    if personal is not None:
+        return personal
+    if department_id:
+        dept_quota = (await db.execute(
+            select(Department.agent_quota).where(
+                Department.id == department_id,
+                Department.company_id == company.id).limit(1))).scalars().first()
+        if dept_quota is not None:
+            return dept_quota
+    return getattr(company, "agent_quota", None)
+
+
+async def _department_agent_count(db: AsyncSession, company_id: str,
+                                  department_id: str | None) -> int:
+    """目标部门当前 Agent 数（未指定部门时按"公司直挂"计数）。"""
+    cond = (Agent.department_id == department_id if department_id
+            else Agent.department_id.is_(None))
+    total = (await db.execute(
+        select(func.count()).select_from(Agent).where(
+            Agent.company_id == company_id, cond))).scalar()
+    return int(total or 0)
+
+
+async def _enforce_agent_quota(db: AsyncSession, company: Company, user,
+                               department_id: str | None, *, adding: int = 1,
+                               label: str = "Agent") -> None:
+    """创建前配额闸门：超限 → 落审批单 + 409（不静默放行、不硬删除）。
+
+    并发口径刻意只做一次 COUNT：配额是"软上限 + 人工审批"，用分布式锁
+    去保证严格不超卖，代价远大于收益；多算一个的后果只是多一张审批单。
+    """
+    quota = await _resolve_agent_quota(db, company, user.id, department_id)
+    if quota is None:
+        return
+    current = await _department_agent_count(db, company.id, department_id)
+    if current + adding <= quota:
+        return
+
+    overage = current + adding - quota
+    from app.models.intervention import ApprovalRequest
+    req = ApprovalRequest(
+        id=str(uuid.uuid4()),
+        company_id=company.id,
+        action_type="agent_quota",
+        payload={"department_id": department_id, "adding": adding,
+                 "quota": quota, "current_count": current,
+                 "overage": overage, "requested_by_user_id": user.id,
+                 "label": label},
+        reason=(f"部门 Agent 配额已满（上限 {quota}、现有 {current}），"
+                f"{label}将超出 {overage} 个，等待管理员批准"),
+    )
+    db.add(req)
+    # 先落审批单：409 抛出后请求级 session 不再提交，审批记录必须已经存在
+    await db.commit()
+    raise HTTPException(
+        409,
+        detail=(f"部门 Agent 配额已满：上限 {quota}、现有 {current}，"
+                f"本次超出 {overage} 个。超额创建审批已提交"
+                f"（审批单 {req.id}），请等待管理员批准。"))
 
 
 @router.get("")
 async def list_agents(company_id: str | None = None, department_id: str | None = None,
                       status: str | None = None,
                       db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
-    q = select(Agent).join(Company, Company.id == Agent.company_id).where(
-        Company.owner_id == user.id)
+    """列表：行级可见条件直接拼进 SQL（见 core/scope.py 的说明）。"""
     if company_id:
-        q = q.where(Agent.company_id == company_id)
+        # 与该公司无关 → 404；同时这也是静态扫描认的归属守卫
+        await ensure_capability(db, user.id, company_id, Capability.VIEW)
+        ctx = await build_ctx(db, user, company_id)
+        scope = agent_read_scope(ctx)
+        q = select(Agent).where(scope)
+    elif getattr(user, "is_superadmin", False):
+        # 平台超管可以不属于任何公司：不加行级条件（仍可叠加 company_id 过滤）
+        q = select(Agent)
+    else:
+        scopes = []
+        for cid in await _user_company_ids(db, user):
+            scopes.append(agent_read_scope(await build_ctx(db, user, cid)))
+        if not scopes:
+            return []
+        q = select(Agent).where(or_(*scopes))
     if department_id:
         q = q.where(Agent.department_id == department_id)
     if status:
@@ -90,10 +261,32 @@ async def list_agents(company_id: str | None = None, department_id: str | None =
 @router.post("", status_code=201)
 async def create_agent(data: AgentIn, db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
+    """创建 Agent：写归属（created_by_user_id）+ 可见性 + 配额闸门。
+
+    门禁：
+    * 任何在本公司有 OPERATE 的角色都能建（member 建自己的私有 Agent、head 建本部门的）；
+    * `visibility=company` 只有 owner/company_admin（scope.sees_all_agents）能给，
+      否则 404——"把员工广播给全公司"是管理动作，不是成员的创作权；
+    * 指定部门时必须对该部门有归属（ensure_dept_access）。
+    """
     c = await db.get(Company, data.company_id)
-    if not c or c.owner_id != user.id:
+    if not c:
         raise HTTPException(404, "Company not found")
+    await ensure_capability(db, user.id, data.company_id, Capability.OPERATE)
+    ctx = await build_ctx(db, user, data.company_id)
+
+    visibility = _normalize_visibility(data.visibility)
+    if visibility == VISIBILITY_COMPANY and not ctx.sees_all_agents:
+        raise HTTPException(404, "Not found")
+    if data.department_id:
+        await ensure_dept_access(ctx, data.department_id, db=db)
+
+    await _enforce_agent_quota(db, c, user, data.department_id,
+                               label=f"Agent「{data.name}」")
+
     payload = data.model_dump()
+    payload["visibility"] = visibility
+    payload["created_by_user_id"] = user.id
     capabilities = payload.pop("capabilities", [])
     backend = payload.pop("backend", None)
     attachments = payload.pop("attachments", None)  # 📎 附件口（Agent 无此列，落 memory_config）
@@ -160,10 +353,8 @@ async def list_capability_packs(user=Depends(get_current_user)):
 @router.get("/{aid}")
 async def get_agent(aid: str, db: AsyncSession = Depends(get_db),
                     user=Depends(get_current_user)):
-    a = await db.get(Agent, aid)
-    if not a:
-        raise HTTPException(404, "Agent not found")
-    await _verify_agent_access(db, user.id, a)
+    a = await _load_agent(db, aid)
+    await ensure_agent_access(db, user, a, Capability.VIEW)
     return a
 
 
@@ -179,10 +370,8 @@ async def agent_card(aid: str, db: AsyncSession = Depends(get_db),
     - health：当前状态
     这是"别家公司 agent 按工牌调用你的员工"的协议层基础。
     """
-    a = await db.get(Agent, aid)
-    if not a:
-        raise HTTPException(404, "Agent not found")
-    await _verify_agent_access(db, user.id, a)
+    a = await _load_agent(db, aid)
+    await ensure_agent_access(db, user, a, Capability.VIEW)
     # 能力清单：技能（skills 表名）+ 电脑操作授权
     from app.models.skill import AgentSkill, Skill
     from sqlalchemy import select as _sel
@@ -238,10 +427,24 @@ async def agent_card(aid: str, db: AsyncSession = Depends(get_db),
 @router.patch("/{aid}")
 async def update_agent(aid: str, data: dict, db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
-    a = await db.get(Agent, aid)
-    if not a:
-        raise HTTPException(404, "Agent not found")
-    await _verify_agent_access(db, user.id, a)
+    a = await _load_agent(db, aid)
+    # 启停是不可逆的"让人下线"动作：MANAGE 起（member 一律 404），
+    # 其余配置改动按 OPERATE 走写范围（自己的 / 本部门的）。
+    if data.get("status"):
+        await ensure_agent_access(db, user, a, Capability.MANAGE)
+    else:
+        await ensure_agent_access(db, user, a, Capability.OPERATE)
+    # 可见性也是一项"广播权"：与创建同口径，只有 owner/admin 能给 company
+    if "visibility" in data:
+        visibility = _normalize_visibility(data.get("visibility"))
+        if visibility == VISIBILITY_COMPANY:
+            ctx = await build_ctx(db, user, a.company_id)
+            if not ctx.sees_all_agents:
+                raise HTTPException(404, "Not found")
+        a.visibility = visibility
+    if "department_id" in data and data.get("department_id"):
+        ctx = await build_ctx(db, user, a.company_id)
+        await ensure_dept_access(ctx, data["department_id"], db=db)
     # 能力包 / 底座更新
     if "capabilities" in data or "backend" in data:
         _apply_capabilities(a, data.get("capabilities") or [],
@@ -249,9 +452,17 @@ async def update_agent(aid: str, data: dict, db: AsyncSession = Depends(get_db),
     allowed = {"name", "avatar", "role", "description", "system_prompt",
                "department_id", "manager_agent_id", "status"}
     for k, v in data.items():
-        if k in allowed:
-            setattr(a, k if k != "status" else "status",
-                    AgentStatus(v) if k == "status" else v)
+        if k not in allowed:
+            continue
+        if k == "status":
+            if v is None:
+                continue
+            try:
+                a.status = AgentStatus(v)
+            except ValueError:
+                raise HTTPException(422, f"非法状态: {v}")
+        else:
+            setattr(a, k, v)
     await db.commit()
     await db.refresh(a)
     return a
@@ -260,14 +471,10 @@ async def update_agent(aid: str, data: dict, db: AsyncSession = Depends(get_db),
 @router.delete("/{aid}", status_code=204)
 async def delete_agent(aid: str, db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
-    a = await db.get(Agent, aid)
-    if not a:
-        raise HTTPException(404, "Agent not found")
-    await _verify_agent_access(db, user.id, a)
+    a = await _load_agent(db, aid)
     # 删除员工不可逆：其技能绑定、记忆、档案一并消失。
-    # 走统一权限层声明危险级别，而不是就地比较 owner_id。
-    from app.core.permissions import Capability, ensure_capability
-    await ensure_capability(db, user.id, a.company_id, Capability.DESTRUCTIVE)
+    # DESTRUCTIVE 不在 member 矩阵里，部门负责人也删不了——删除权不下放。
+    await ensure_agent_access(db, user, a, Capability.DESTRUCTIVE)
     await db.delete(a)
     await db.commit()
 
@@ -289,16 +496,19 @@ async def batch_delete_agents(data: BatchDeleteIn,
     from sqlalchemy.exc import IntegrityError, DBAPIError
 
     user_id = user.id  # 提前缓存，避免 rollback 过期后触发同步懒加载
-    # 预校验权限：一次性查出该用户公司下所有 agent id，循环内不再触发 ORM 懒加载
-    from app.models.company import Company as CompanyM
-    q = await db.execute(
-        select(Agent.id).join(CompanyM, CompanyM.id == Agent.company_id)
-        .where(CompanyM.owner_id == user.id))
-    owned_ids = set(q.scalars().all())
+    # 预校验权限：按"公司 × 写范围"一次性查出可删 id，循环内不再解析角色（防 N+1）。
+    # 仍用 SQL 条件而不是拉全量再过滤；DESTRUCTIVE 不在 member 矩阵里，删除权不下放。
+    deletable_ids: set[str] = set()
+    for cid in await _user_company_ids(db, user):
+        ctx = await build_ctx(db, user, cid)
+        if not role_has(ctx.role, Capability.DESTRUCTIVE):
+            continue
+        rows = await db.execute(select(Agent.id).where(agent_write_scope(ctx)))
+        deletable_ids.update(rows.scalars().all())
 
     deleted, failed = [], []
     for aid in data.agent_ids:
-        if aid not in owned_ids:
+        if aid not in deletable_ids:
             failed.append({"id": aid, "reason": "不存在或无权限"})
             continue
         a = (await db.execute(select(Agent).where(Agent.id == aid))).scalar_one_or_none()
@@ -386,10 +596,8 @@ async def reflect_agent(aid: str, db: AsyncSession = Depends(get_db),
     """手动触发一次自我反思：归纳近期经历 → 写入长期记忆。"""
     from app.reflection_engine import self_reflect
 
-    a = await db.get(Agent, aid)
-    if not a:
-        raise HTTPException(404, "Agent not found")
-    await _verify_agent_access(db, user.id, a)
+    a = await _load_agent(db, aid)
+    await ensure_agent_access(db, user, a, Capability.OPERATE)
     r = await self_reflect(db, a)
     return r
 
@@ -400,8 +608,24 @@ async def batch_create_agents(data: BatchCreateIn,
                               user=Depends(get_current_user)):
     """批量创建 Agent，可统一指定部门/上级/模型。"""
     c = await db.get(Company, data.company_id)
-    if not c or c.owner_id != user.id:
+    if not c:
         raise HTTPException(404, "Company not found")
+    await ensure_capability(db, user.id, data.company_id, Capability.OPERATE)
+    ctx = await build_ctx(db, user, data.company_id)
+
+    # 配额：按目标部门聚合（批量接口不能成为绕过配额的后门）。
+    # 先校验再落行，避免"建了一半才 409"留下半成品。
+    buckets: dict[str | None, int] = {}
+    for item in data.agents:
+        if not (item.get("name") or "").strip():
+            continue
+        dept_id = item.get("department_id") or data.department_id
+        buckets[dept_id] = buckets.get(dept_id, 0) + 1
+    for dept_id, adding in buckets.items():
+        if dept_id:
+            await ensure_dept_access(ctx, dept_id, db=db)
+        await _enforce_agent_quota(db, c, user, dept_id, adding=adding,
+                                   label=f"{adding} 个 Agent")
 
     created = []
     # V5.0：预取专家库（按 slug / id），供批量项按 expert_slug 或 expert_template_id 绑定专家
@@ -444,6 +668,9 @@ async def batch_create_agents(data: BatchCreateIn,
             system_prompt=item.get("system_prompt") or (tpl.system_prompt if tpl else None),
             expert_template_id=item.get("expert_template_id") or (tpl.id if tpl else None),
             status=AgentStatus.IDLE,
+            # 与单个创建同口径：写归属 + 默认部门可见，否则创建者自己都看不到
+            created_by_user_id=user.id,
+            visibility=VISIBILITY_DEPARTMENT,
         )
         # 专家↔技能包：项里没带 capabilities 且绑了专家 → 按专家推荐配备
         item_caps = item.get("capabilities") or []
@@ -481,18 +708,15 @@ async def set_manager(aid: str, data: SetManagerIn,
                       db: AsyncSession = Depends(get_db),
                       user=Depends(get_current_user)):
     """设置/更换 Agent 的上级（组织架构汇报关系）。"""
-    a = await db.get(Agent, aid)
-    if not a:
-        raise HTTPException(404, "Agent not found")
-    await _verify_agent_access(db, user.id, a)
+    a = await _load_agent(db, aid)
+    await ensure_agent_access(db, user, a, Capability.OPERATE)
 
     if data.manager_agent_id:
         if data.manager_agent_id == aid:
             raise HTTPException(400, "不能把自己设为上级")
-        mgr = await db.get(Agent, data.manager_agent_id)
-        if not mgr:
-            raise HTTPException(404, "上级 Agent 不存在")
-        await _verify_agent_access(db, user.id, mgr)
+        mgr = await _load_agent(db, data.manager_agent_id)
+        # 上级也必须在自己的写范围内，否则等于借机把别人的员工挂到自己名下
+        await ensure_agent_access(db, user, mgr, Capability.OPERATE)
         # 防环：沿上级链向上走，若遇到自己则拒绝
         seen, cur = {aid}, data.manager_agent_id
         while cur:
@@ -514,10 +738,8 @@ async def set_manager(aid: str, data: SetManagerIn,
 async def list_subordinates(aid: str, db: AsyncSession = Depends(get_db),
                             user=Depends(get_current_user)):
     """获取某 Agent 的全部直接下属。"""
-    a = await db.get(Agent, aid)
-    if not a:
-        raise HTTPException(404, "Agent not found")
-    await _verify_agent_access(db, user.id, a)
+    a = await _load_agent(db, aid)
+    await ensure_agent_access(db, user, a, Capability.VIEW)
     q = await db.execute(select(Agent).where(Agent.manager_agent_id == aid))
     return [{"id": s.id, "name": s.name, "role": s.role, "status": s.status.value
              if hasattr(s.status, "value") else str(s.status)} for s in q.scalars()]
@@ -541,14 +763,14 @@ async def batch_assign_manager(data: BatchAssignManagerIn,
             failed.append({"agent_id": aid, "reason": "not found"})
             continue
         try:
-            await _verify_agent_access(db, user.id, a)
+            await ensure_agent_access(db, user, a, Capability.OPERATE)
             if mid:
                 if mid == aid:
                     raise ValueError("不能把自己设为上级")
                 mgr = await db.get(Agent, mid)
                 if not mgr:
                     raise ValueError("上级不存在")
-                await _verify_agent_access(db, user.id, mgr)
+                await ensure_agent_access(db, user, mgr, Capability.OPERATE)
                 seen, cur = {aid}, mid
                 while cur:
                     if cur in seen:
@@ -567,10 +789,8 @@ async def batch_assign_manager(data: BatchAssignManagerIn,
 @router.post("/{aid}/models", status_code=201)
 async def bind_model(aid: str, data: ModelBindingIn,
                      db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
-    a = await db.get(Agent, aid)
-    if not a:
-        raise HTTPException(404, "Agent not found")
-    await _verify_agent_access(db, user.id, a)
+    a = await _load_agent(db, aid)
+    await ensure_agent_access(db, user, a, Capability.OPERATE)
     binding = AgentModelConfig(agent_id=aid, role=data.role, model_id=data.model_id)
     db.add(binding)
     await db.commit()
@@ -587,10 +807,8 @@ async def switch_model(aid: str, data: SwitchModelIn,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
     """切换 Agent 的主模型（替换 existing primary binding）。"""
-    a = await db.get(Agent, aid)
-    if not a:
-        raise HTTPException(404, "Agent not found")
-    await _verify_agent_access(db, user.id, a)
+    a = await _load_agent(db, aid)
+    await ensure_agent_access(db, user, a, Capability.OPERATE)
 
     # 删除旧的 primary binding
     old = await db.execute(
@@ -612,10 +830,8 @@ async def switch_model(aid: str, data: SwitchModelIn,
 @router.get("/{aid}/models")
 async def list_models_for_agent(aid: str, db: AsyncSession = Depends(get_db),
                                 user=Depends(get_current_user)):
-    a = await db.get(Agent, aid)
-    if not a:
-        raise HTTPException(404, "Agent not found")
-    await _verify_agent_access(db, user.id, a)
+    a = await _load_agent(db, aid)
+    await ensure_agent_access(db, user, a, Capability.VIEW)
     q = await db.execute(
         select(AgentModelConfig).where(AgentModelConfig.agent_id == aid))
     return [{"role": b.role, "model_id": b.model_id} for b in q.scalars()]

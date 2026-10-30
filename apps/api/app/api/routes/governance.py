@@ -6,12 +6,14 @@ from pydantic import BaseModel
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import (assert_company_capability, get_current_user, get_db)
 from app.core.permissions import Capability, require_company_scope
+from app.core.scope import ensure_agent_access
 from app.learning_engine import add_growth_event
 from app.models.agent import Agent
 from app.models.company import Company
 from app.models.learning import GrowthEventType
+from app.models.membership import CompanyMember
 from app.models.p3_governance import (AgentSandbox, AgentVersion,
                                       AutonomousExecutionLog,
                                       AutonomousSettings, CompanyCreationJob,
@@ -31,15 +33,25 @@ def _now_utc():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-async def _owned_case(db: AsyncSession, user_id: str, iid: str):
-    """取改进提案并校验公司归属：提案里带 agent_id，直接部署等于改别家员工。"""
-    from app.api.deps import assert_company_owned
-
+async def _owned_case(db: AsyncSession, user_id: str, iid: str,
+                      capability: Capability = Capability.VIEW):
+    """取改进提案并校验公司归属与能力：提案里带 agent_id，直接部署等于改别家员工。"""
     case = await db.get(SelfImprovementCase, iid)
     if not case:
         raise HTTPException(404, "not found")
-    await assert_company_owned(db, user_id, case.company_id)
+    await assert_company_capability(db, user_id, case.company_id, capability)
     return case
+
+
+def _accessible_company_ids(user_id: str):
+    """调用者可访问的公司：超管由调用方另行展开，其余 = owner ∪ active 成员。"""
+    owned = select(Company.id).join(
+        User, User.id == Company.owner_id).where(User.id == user_id)
+    member = select(CompanyMember.company_id).where(
+        CompanyMember.user_id == user_id,
+        CompanyMember.status == "active")
+    return select(Company.id).where(
+        or_(Company.id.in_(owned), Company.id.in_(member)))
 
 
 # ================= P3-13 Self-Improvement Governance =================
@@ -64,7 +76,8 @@ async def propose_improvement(
     """Agent/用户提交自我改进提案（进入治理流程，不直接生效）。"""
     import app.api.deps as deps
 
-    await deps.assert_company_owned(db, user.id, company_id)
+    await assert_company_capability(db, user.id, company_id,
+                                    Capability.OPERATE)
     agent = await deps.assert_agent_owned(db, user.id, data.agent_id)
     # 公司归属通过了还不够：提案里的员工必须真的属于这家公司，
     # 否则「自己的 company_id + 别家的 agent_id」就能把改进部署到别家员工身上。
@@ -90,7 +103,7 @@ async def sandbox_test(
     user: User = Depends(get_current_user),
 ):
     """创建沙盒克隆并记录测试对比结果。"""
-    case = await _owned_case(db, user.id, iid)
+    case = await _owned_case(db, user.id, iid, Capability.OPERATE)
     if case.status not in ("PROPOSED", "SANDBOX_TESTING"):
         raise HTTPException(409, f"status={case.status}")
     a = await db.get(Agent, case.agent_id)
@@ -127,7 +140,7 @@ async def deploy_improvement(
     user: User = Depends(get_current_user),
 ):
     """人工审批：批准 → 部署新版本（旧版本可回滚）；拒绝 → 关闭提案。"""
-    case = await _owned_case(db, user.id, iid)
+    case = await _owned_case(db, user.id, iid, Capability.OPERATE)
     if not data.approve:
         case.status = "REJECTED"
         case.decided_by = user.id
@@ -177,9 +190,10 @@ async def rollback_agent(
     user: User = Depends(get_current_user),
 ):
     """回滚 Agent 到指定历史版本。"""
-    from app.api.deps import assert_agent_owned
-
-    a = await assert_agent_owned(db, user.id, agent_id)
+    a = await db.get(Agent, agent_id)
+    if not a:
+        raise HTTPException(404, "Agent not found")
+    await ensure_agent_access(db, user, a, Capability.OPERATE)
     q = await db.execute(select(AgentVersion).where(
         AgentVersion.agent_id == agent_id, AgentVersion.version == version))
     ver = q.scalars().first()
@@ -259,6 +273,8 @@ async def install_package(
     user: User = Depends(get_current_user),
 ):
     """安装包：必须显式确认权限清单。"""
+    await assert_company_capability(db, user.id, company_id,
+                                    Capability.OPERATE)
     p = await db.get(MarketplacePackage, pid)
     if not p:
         raise HTTPException(404, "not found")
@@ -287,6 +303,9 @@ async def rollback_installation(inst_id: str,
     inst = await db.get(PackageInstallation, inst_id)
     if not inst:
         raise HTTPException(404, "not found")
+    # 安装记录自带 company_id：回滚同样要确认调用者在该公司的能力
+    await assert_company_capability(db, user.id, inst.company_id,
+                                    Capability.OPERATE)
     inst.rolled_back_at = _now_utc()
     await db.commit()
     return {"id": inst_id, "rolled_back": True}
@@ -373,10 +392,10 @@ async def create_from_template(
     tpl = BUILTIN_TEMPLATES.get(data.template_key)
     if not tpl:
         raise HTTPException(404, "template not found")
-    # owner_company_id 来自调用方：不查库就等于允许往他人公司塞员工
-    owned = await db.get(Company, owner_company_id)
-    if not owned or owned.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
+    # owner_company_id 来自调用方：必须确认当前用户在该公司具备组织变更能力，
+    # 否则等于允许往他人公司塞部门与员工。
+    await assert_company_capability(db, user.id, owner_company_id,
+                                    Capability.MANAGE)
 
     job = CompanyCreationJob(id=_id(),
                              company_id=owner_company_id,
@@ -454,6 +473,9 @@ async def save_as_template(
 ):
     """把当前公司结构保存为模板。"""
     from app.models.company import Company, Department
+    # 模板会读走整家公司的组织结构并进入全局目录：需要 MANAGE
+    await assert_company_capability(db, user.id, company_id,
+                                    Capability.MANAGE)
     comp = await db.get(Company, company_id)
     if not comp:
         raise HTTPException(404, "company not found")
@@ -501,6 +523,9 @@ async def set_autonomous_level(
     # L4 以上必须设置限制
     if data.level >= 4 and not (data.cost_limit or data.action_limit):
         raise HTTPException(400, "L4以上必须设置 cost_limit 或 action_limit")
+    # 自治等级是公司级运行策略：改它需要 MANAGE
+    await assert_company_capability(db, user.id, company_id,
+                                    Capability.MANAGE)
     q = await db.execute(select(AutonomousSettings).where(
         AutonomousSettings.company_id == company_id,
         AutonomousSettings.scope_type == data.scope_type,
@@ -595,8 +620,8 @@ async def delete_autonomous_settings(
     """
     # 先校验调用者真的拥有这家公司。原实现只比较
     # "记录的公司 == 调用者传入的公司"，两边都来自调用者，等于没有校验。
-    from app.api.deps import assert_company_owned
-    await assert_company_owned(db, user.id, company_id)
+    await assert_company_capability(db, user.id, company_id,
+                                    Capability.MANAGE)
 
     row = await db.get(AutonomousSettings, settings_id)
     # 记录级归属校验：防止用自己公司的 company_id 删除他人配置
@@ -645,6 +670,8 @@ async def upsert_autonomous_config(
     agent_id = data.get("agent_id")
     if not agent_id:
         raise HTTPException(400, "agent_id is required")
+    await assert_company_capability(db, user.id, company_id,
+                                    Capability.OPERATE)
     ext = data.get("external_agent_id") or None
     scope_id = ext or agent_id
     q = await db.execute(select(AutonomousSettings).where(
@@ -703,6 +730,8 @@ async def log_execution(
     user: User = Depends(get_current_user),
 ):
     """自治执行的审计日志：Why/Plan/Action/Result/Cost。"""
+    await assert_company_capability(db, user.id, company_id,
+                                    Capability.OPERATE)
     q = await db.execute(select(AutonomousSettings).where(
         AutonomousSettings.company_id == company_id,
         AutonomousSettings.scope_type == data.scope_type))
@@ -797,6 +826,14 @@ async def list_improvement_cases(
     q = select(SelfImprovementCase)
     if company_id:
         q = q.where(SelfImprovementCase.company_id == company_id)
+    else:
+        # 不传 company_id 时不能列全平台：收窄到调用者可访问的公司集合
+        user_row = await db.get(User, user.id)
+        if user_row is not None and user_row.is_superadmin:
+            pass
+        else:
+            q = q.where(SelfImprovementCase.company_id.in_(
+                _accessible_company_ids(user.id)))
     rows = (await db.execute(q.order_by(
         SelfImprovementCase.status, SelfImprovementCase.id))).scalars().all()
     return [{"id": r.id, "agent_id": r.agent_id,
@@ -814,9 +851,7 @@ async def decide_improvement_case(
     """批准/拒绝改进提案。"""
     if decision not in ("APPROVE", "REJECT"):
         raise HTTPException(400, "decision must be APPROVE or REJECT")
-    case = await db.get(SelfImprovementCase, iid)
-    if not case:
-        raise HTTPException(404, "Case not found")
+    case = await _owned_case(db, user.id, iid, Capability.OPERATE)
     case.status = "APPROVED" if decision == "APPROVE" else "REJECTED"
     await db.commit()
     return {"ok": True, "status": case.status}

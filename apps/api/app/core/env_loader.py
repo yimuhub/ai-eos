@@ -34,6 +34,30 @@ _CANDIDATE_ENV_FILES = (
 )
 
 
+# 允许把 .env 指到别处（便携包/测试隔离）。运行期每次都重新读取，
+# 便于测试把写入重定向到临时目录，绝不会碰到真实 .env。
+_ENV_FILE_OVERRIDE = "AIEOS_ENV_FILE"
+
+
+def env_file_path() -> Path:
+    """当前生效的 .env 路径：优先 AIEOS_ENV_FILE，否则 apps/api/.env。"""
+    override = os.environ.get(_ENV_FILE_OVERRIDE, "").strip()
+    return Path(override) if override else API_ROOT / ".env"
+
+
+def _env_paths() -> list[Path]:
+    """实际要加载的 .env 列表。
+
+    设置了 AIEOS_ENV_FILE 时**只加载它**：这是便携包/演示环境的隔离开关，
+    再回头去读 apps/api/.env 会把真实密钥混进隔离环境（曾经就这样发生过：
+    演示库的模型拿着真实 .env 的配置、取到空 Key，上游报 401 "Token not provided"）。
+    """
+    override = os.environ.get(_ENV_FILE_OVERRIDE, "").strip()
+    if override:
+        return [Path(override)]
+    return list(_CANDIDATE_ENV_FILES)
+
+
 def load_env(override: bool = False) -> list[str]:
     """把 .env 载入 os.environ。返回实际加载的文件路径列表。
 
@@ -52,12 +76,13 @@ def load_env(override: bool = False) -> list[str]:
               "请使用真实环境变量或安装 python-dotenv")
         return loaded
 
-    for path in _CANDIDATE_ENV_FILES:
+    paths = _env_paths()
+    for path in paths:
         if path.is_file():
             load_dotenv(dotenv_path=path, override=override)
             loaded.append(str(path))
     if not loaded:
-        print(f"[env] 未找到 .env 文件（已检查 {[str(p) for p in _CANDIDATE_ENV_FILES]}），"
+        print(f"[env] 未找到 .env 文件（已检查 {[str(p) for p in paths]}），"
               "将只使用进程环境变量")
     return loaded
 

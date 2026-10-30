@@ -73,6 +73,11 @@ export default function ModelsPage() {
   // 测试连接中
   const [testing, setTesting] = useState<string | null>(null);
 
+  // 写入密钥（保存到本机 .env，立即生效）
+  const [keyEnv, setKeyEnv] = useState("");
+  const [keyValue, setKeyValue] = useState("");
+  const [keySaving, setKeySaving] = useState(false);
+
   /* ---- 数据加载：列表 + 员工绑定关系 + 就绪自检 ----
    *
    * 改造前这里有三处问题：
@@ -245,10 +250,55 @@ export default function ModelsPage() {
     setTesting(null);
   }
 
+  /**
+   * 把密钥写进本机 .env 并立即生效。
+   *
+   * 过去这只能手工改文件再重启后端；对非技术用户等于"配不了模型"。
+   * 安全约束由后端把关（仅超管、变量名白名单、600 权限、不回显），
+   * 前端只负责把 Key 安全地提交一次并清空输入框。
+   */
+  const effectiveKeyEnv =
+    keyEnv || diag?.providers?.[0]?.default_env_var || "OPENAI_COMPAT_API_KEY";
+
+  async function saveKey() {
+    const key = keyValue.trim();
+    if (key.length < 8) {
+      notify("warning", "请粘贴完整的 API Key");
+      return;
+    }
+    setKeySaving(true);
+    try {
+      const r = await api.post<{ env_name: string; masked: string }>(
+        "/models/env-key", { env_name: effectiveKeyEnv, api_key: key });
+      notify("success", `密钥已写入本机 .env（${r.masked}），已立即生效`);
+      setKeyValue("");
+      await reload();
+    } catch (e) {
+      notify("error", describeError(e, "保存密钥失败"));
+    }
+    setKeySaving(false);
+  }
+
+  /** 把这条模型绑给公司里所有还没有首选模型的员工 */
+  async function bindAll(m: ModelRow) {
+    const myCid = getActiveCompanyId();
+    if (!myCid) { notify("warning", "请先选择公司"); return; }
+    try {
+      const r = await api.post<{ bound: number; skipped: number; agent_count: number }>(
+        `/models/${m.id}/bind-agents`, { company_id: myCid });
+      notify("success", r.bound
+        ? `已绑定 ${r.bound} 名员工${r.skipped ? `，${r.skipped} 名已有首选模型未改动` : ""}`
+        : `全部 ${r.agent_count} 名员工都已有首选模型，未改动`);
+      await reload();
+    } catch (e) {
+      notify("error", describeError(e, "绑定失败"));
+    }
+  }
+
   async function delModel(m: ModelRow) {
     if (!(await confirmAction({
       title: `删除配置「${m.name}」？`,
-      description: "已绑定它的 Agent 的历史记录不受影响，但新任务将无法再选用这个配置。",
+      description: "绑定过它的员工会自动回到「未绑定」状态（历史记录不受影响），新任务需要重新接入模型。",
       confirmText: "删除",
     }))) return;
     try {
@@ -291,6 +341,51 @@ export default function ModelsPage() {
             : { background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.3)", color: "#fcd34d" }}>
           <span>{readiness.tone === "ok" ? "✅" : "⚠️"}</span>
           <span className="flex-1">{readiness.text}</span>
+        </div>
+      )}
+
+      {/* 缺密钥时直接给输入框：本机应用里"让用户去改 .env 再重启"是不现实的 */}
+      {diag && !diag.ready && (
+        <div className="card p-4 space-y-2">
+          <h3 className="font-semibold text-sm">🔐 填写 API Key（保存到本机，立即生效）</h3>
+          <p className="text-[11px] leading-relaxed" style={{ color: "var(--muted)" }}>
+            密钥只写入本机 <code>apps/api/.env</code>（文件权限 600），
+            <b>不上传、不入库、不回显</b>。仅系统管理员可操作。
+          </p>
+          <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
+            <select
+              value={effectiveKeyEnv}
+              onChange={(e) => setKeyEnv(e.target.value)}
+              className="input sm:w-64 !py-2 text-xs"
+              aria-label="密钥变量名"
+            >
+              {(diag.providers.length ? diag.providers : [
+                { provider_type: "openai_compat", default_env_var: "OPENAI_COMPAT_API_KEY" },
+              ]).map((p) => (
+                <option key={p.default_env_var} value={p.default_env_var}>
+                  {PROVIDER_LABELS[p.provider_type] || p.provider_type} · {p.default_env_var}
+                </option>
+              ))}
+            </select>
+            <input
+              type="password"
+              value={keyValue}
+              onChange={(e) => setKeyValue(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && void saveKey()}
+              placeholder="粘贴 API Key"
+              autoComplete="off"
+              spellCheck={false}
+              className="input flex-1 !py-2 text-xs"
+              aria-label="API Key"
+            />
+            <button
+              onClick={() => void saveKey()}
+              disabled={keySaving || !keyValue.trim()}
+              className="btn-primary !py-2 !px-4 text-xs shrink-0 disabled:opacity-40"
+            >
+              {keySaving ? "保存中…" : "保存并生效"}
+            </button>
+          </div>
         </div>
       )}
 
@@ -431,6 +526,11 @@ export default function ModelsPage() {
                   </button>
                 ) : (
                   <>
+                    <button onClick={() => void bindAll(m)}
+                      title="设为公司全部员工的首选模型；已有首选模型的员工不受影响"
+                      className="btn-ghost text-xs py-1 shrink-0">
+                      绑定全员
+                    </button>
                     <button onClick={() => testModel(m.id)} disabled={testing === m.id}
                       className="btn-ghost text-xs py-1 shrink-0">
                       {testing === m.id ? "测试中…" : "测试"}

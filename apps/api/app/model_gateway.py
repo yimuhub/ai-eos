@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import json
 import random
+import re
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -78,9 +79,83 @@ def _is_retryable_status(code: int) -> bool:
     return code in RETRYABLE_STATUS or code >= 500
 
 
-def _retry_delay(attempt: int) -> float:
-    """指数退避 + jitter；attempt 从 0 开始。"""
-    base = min(RETRY_MAX_DELAY_S, RETRY_BASE_DELAY_S * (2 ** attempt))
+class UpstreamAPIError(httpx.HTTPStatusError):
+    """上游 4xx/5xx，错误消息里带响应体摘要。
+
+    ``raise_for_status()`` 只留一句 "Client error '400 Bad Request' for url ..."，
+    用户拿着这句话没有任何可操作信息（是模型名错了、参数不支持，还是上下文
+    超限？）。这里把上游原文脱敏、截断后附进消息，既能自查也不泄露密钥。
+    """
+
+    def __init__(self, message: str, *, request, response, excerpt: str = ""):
+        super().__init__(message, request=request, response=response)
+        self.excerpt = excerpt
+        self._message = message
+
+    def __str__(self) -> str:
+        return self._message
+
+
+# 上游回显的密钥（sk-xxx / Bearer xxx）一律打码
+_SECRET_IN_TEXT = re.compile(r"(sk-[A-Za-z0-9_\-]{8,}|Bearer\s+[A-Za-z0-9._\-]{8,})")
+
+
+def _sanitize_upstream_text(text: str, limit: int = 300) -> str:
+    text = _SECRET_IN_TEXT.sub("***", (text or "").strip())
+    text = re.sub(r"\s+", " ", text)
+    return text[:limit] + "…" if len(text) > limit else text
+
+
+def _upstream_error(resp: httpx.Response, raw: str | None = None) -> UpstreamAPIError:
+    excerpt = _sanitize_upstream_text(
+        resp.text if raw is None else raw)
+    message = f"HTTP {resp.status_code} {resp.reason_phrase}".strip()
+    if excerpt:
+        message += f"（模型服务返回：{excerpt}）"
+    return UpstreamAPIError(message, request=resp.request, response=resp,
+                            excerpt=excerpt)
+
+
+def _drop_unsupported_param(body: dict, status: int, raw: str) -> str | None:
+    """识别「这个参数我不支持」类 4xx，返回应从 body 里去掉的参数名。
+
+    本地/自建 OpenAI 兼容网关对可选参数的支持参差不齐：没开工具调用的
+    vLLM 会因为 ``tools`` 直接 400，模型上下文较小时会因为
+    ``max_tokens=8192`` 报 "maximum context length" 400，推理模型会拒绝
+    自定义 ``temperature``。遇到这类明确指向某个参数的报错，去掉该参数
+    重试一次，比整条链路失败对用户更有用；其余 400（模型名错误、鉴权
+    失败等）原样抛出，不做无意义重试。
+    """
+    if status not in (400, 404, 422):
+        return None
+    low = (raw or "").lower()
+    if "stream_options" in body and "stream_options" in low:
+        return "stream_options"
+    if "tools" in body and "tool" in low:
+        return "tools"
+    if "max_tokens" in body and ("max_tokens" in low or "context length" in low
+                                 or "maximum context" in low or "too long" in low):
+        return "max_tokens"
+    if "temperature" in body and "temperature" in low:
+        return "temperature"
+    return None
+
+
+def _retry_delay(attempt: int, status: int | None = None,
+                 retry_after: float | None = None) -> float:
+    """指数退避 + jitter；attempt 从 0 开始。
+
+    429 是限流而不是故障：上游通常几秒内就恢复，按 5xx 的 0.5s 起步重试
+    基本等于"重试了但必然还失败"（Agnes 的 3.0-flash 实测 2/3 概率 429）。
+    因此 429 单独用更长基数，并优先采用上游 `Retry-After`——但封顶
+    `RETRY_MAX_DELAY_S`，避免被响应要求睡几分钟卡住整个对话。
+    """
+    if retry_after is not None and 0 < retry_after <= RETRY_MAX_DELAY_S:
+        return retry_after
+    if status == 429:
+        base = min(RETRY_MAX_DELAY_S, 2.0 * (2 ** attempt))
+    else:
+        base = min(RETRY_MAX_DELAY_S, RETRY_BASE_DELAY_S * (2 ** attempt))
     return base + random.uniform(0, 0.25)
 
 
@@ -111,14 +186,21 @@ async def _post_with_retry(url: str, *, json: dict,
             await asyncio.sleep(delay)
             continue
         if _is_retryable_status(resp.status_code) and attempt < MAX_HTTP_RETRIES:
-            delay = _retry_delay(attempt)
+            try:
+                retry_after = float(resp.headers.get("retry-after", ""))
+            except ValueError:
+                retry_after = None
+            delay = _retry_delay(attempt, resp.status_code, retry_after)
             logger.warning("模型返回 HTTP %d，%.2fs 后重试 %d/%d",
                            resp.status_code, delay,
                            attempt + 1, MAX_HTTP_RETRIES)
             await resp.aclose()
             await asyncio.sleep(delay)
             continue
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            logger.warning("模型请求 %s 返回 HTTP %d：%s", url,
+                           resp.status_code, _sanitize_upstream_text(resp.text))
+            raise _upstream_error(resp)
         return resp
     raise last_exc or RuntimeError("model request failed without exception")
 
@@ -294,6 +376,37 @@ class OpenAICompatProvider(BaseModelProvider):
         self.api_key = api_key
         self.model_id = model_id
 
+    def _explain_error(self, exc: UpstreamAPIError) -> UpstreamAPIError:
+        """把"下一步该做什么"写进错误里。
+
+        上游只会说 "Token not provided" / "Invalid token" / "RateLimitError"，
+        不解释是本机没解析到密钥，还是 Key 被拒、账号欠费、还是单纯限流。
+        用户只能反复确认"我配置是对的"。
+        """
+        if exc.response is None:
+            return exc
+        status = exc.response.status_code
+        hint = ""
+        if status in (401, 403):
+            low = (exc.excerpt or "").lower()
+            if "quota" in low or "insufficient" in low or "balance" in low:
+                hint = ("（账号额度不足：上游账户余额/配额为 0，请到服务商控制台充值，"
+                        "或改用其它模型。这不是 Key 配错）")
+            elif not self.api_key:
+                hint = ("（本次请求未携带 API Key：请到「模型配置」为这个模型填写 Key，"
+                        "或确认对应环境变量已写入 .env 后重启后端）")
+            else:
+                hint = ("（Key 已发送但被服务商拒绝：可能已失效/被重置，或与站点不匹配"
+                        "——Agnes 国际站 .com 与国内站 .cn 的 Key 不通用。"
+                        "请到服务商控制台重新生成后，在「模型配置」里更新）")
+        elif status == 429:
+            hint = ("（被上游限流：该账号/该模型当前并发或频率超限，稍后重试；"
+                    "持续出现请换一个模型，或到服务商控制台查看套餐额度）")
+        if not hint:
+            return exc
+        return UpstreamAPIError(str(exc) + hint, request=exc.request,
+                                response=exc.response, excerpt=exc.excerpt)
+
     async def chat(self, messages: list[dict], tools=None, config: dict | None = None) -> dict:
         cfg = config or {}
         body = {
@@ -307,9 +420,20 @@ class OpenAICompatProvider(BaseModelProvider):
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         # 复用模块级共享 client：连接池有上限、超时分阶段，
         # 且对超时/5xx/429 做有限的指数退避重试。
-        resp = await _post_with_retry(
-            f"{self.base_url}/chat/completions", json=body, headers=headers,
-            timeout=cfg.get("timeout"))
+        url = f"{self.base_url}/chat/completions"
+        while True:
+            try:
+                resp = await _post_with_retry(
+                    url, json=body, headers=headers, timeout=cfg.get("timeout"))
+                break
+            except UpstreamAPIError as exc:
+                dropped = _drop_unsupported_param(body, exc.response.status_code,
+                                                  exc.excerpt)
+                if not dropped:
+                    raise self._explain_error(exc)
+                body.pop(dropped, None)
+                logger.warning("模型 %s 不支持参数 %s，去掉后重试：%s",
+                               self.model_id, dropped, exc.excerpt)
         data = resp.json()
         choice = data["choices"][0]
         return {
@@ -345,12 +469,12 @@ class OpenAICompatProvider(BaseModelProvider):
         timeout = cfg.get("timeout")
         kwargs = {"timeout": timeout} if timeout is not None else {}
 
-        include_usage = True
+        body = dict(base_body)
+        body["stream_options"] = {"include_usage": True}
         last_error: Exception | None = None
-        for attempt in range(MAX_HTTP_RETRIES + 1):
-            body = dict(base_body)
-            if include_usage:
-                body["stream_options"] = {"include_usage": True}
+        attempt = 0  # 只统计真正失败的重试；参数降级不占用重试次数
+        max_attempts = MAX_HTTP_RETRIES + 1
+        while attempt < max_attempts:
             emitted = False
             usage: dict = {}
             acc: dict[int, dict] = {}
@@ -360,13 +484,17 @@ class OpenAICompatProvider(BaseModelProvider):
                         json=body, headers=headers, **kwargs) as resp:
                     if resp.status_code >= 400:
                         raw = (await resp.aread()).decode("utf-8", "ignore")
-                        if (include_usage and resp.status_code in (400, 404, 422)
-                                and "stream_options" in raw):
-                            include_usage = False
-                            logger.info("模型 %s 不支持 stream_options，去掉后重试",
-                                        self.model_id)
+                        dropped = _drop_unsupported_param(body, resp.status_code, raw)
+                        if dropped:
+                            body.pop(dropped, None)
+                            max_attempts += 1
+                            logger.info("模型 %s 不支持参数 %s，去掉后重试",
+                                        self.model_id, dropped)
                             continue
-                        resp.raise_for_status()
+                        logger.warning("模型 %s 流式请求返回 HTTP %d：%s",
+                                       self.model_id, resp.status_code,
+                                       _sanitize_upstream_text(raw))
+                        raise self._explain_error(_upstream_error(resp, raw))
                     async for line in resp.aiter_lines():
                         line = line.strip()
                         if not line or line.startswith(":"):
@@ -407,16 +535,17 @@ class OpenAICompatProvider(BaseModelProvider):
                 last_error = exc
                 if emitted:
                     raise
+                attempt += 1
                 retryable = (
                     isinstance(exc, (httpx.TimeoutException, httpx.NetworkError,
                                      httpx.RemoteProtocolError))
                     or _is_retryable_status(_http_status(exc) or 0))
-                if not retryable or attempt >= MAX_HTTP_RETRIES:
+                if not retryable or attempt >= max_attempts:
                     raise
-                delay = _retry_delay(attempt)
+                delay = _retry_delay(attempt - 1, _http_status(exc))
                 logger.warning("模型流式请求失败（%s），%.2fs 后重试 %d/%d",
                                type(exc).__name__, delay,
-                               attempt + 1, MAX_HTTP_RETRIES)
+                               attempt, max_attempts - 1)
                 await asyncio.sleep(delay)
         raise last_error or RuntimeError("model stream failed without exception")
 

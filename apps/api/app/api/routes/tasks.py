@@ -4,17 +4,22 @@ import asyncio
 import json
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import assert_agent_owned, assert_company_owned, get_current_user
+from app.api.deps import (assert_agent_owned, assert_company_capability,
+                          get_current_user)
 from app.agent_runtime import pause_execution, run_agent_on_task, resume_execution, utcnow_iso
 from app.core.logging_config import get_logger
+from app.core.permissions import Capability
+from app.core.scope import build_ctx
 from app.db.session import AsyncSessionLocal, get_db
 from app.models.agent import Agent
 from app.models.company import Company
+from app.models.membership import CompanyMember
 from app.models.task import (AgentExecution, Intervention, Task, TaskEvent, TaskEventType,
                              TaskPriority, TaskStatus)
+from app.models.user import User
 from app.services.event_system import log_event
 from app.task_engine import IllegalTransition, add_task_event, transition
 
@@ -32,12 +37,38 @@ class TaskIn(BaseModel):
     parent_task_id: str | None = None
 
 
-async def _task_owned(db: AsyncSession, user_id: str, task_id: str) -> Task:
+def _accessible_company_ids(user_id: str):
+    """调用者可访问的公司：owner 事实源 ∪ active 成员行。"""
+    owned = select(Company.id).join(
+        User, User.id == Company.owner_id).where(User.id == user_id)
+    member = select(CompanyMember.company_id).where(
+        CompanyMember.user_id == user_id,
+        CompanyMember.status == "active")
+    return select(Company.id).where(
+        or_(Company.id.in_(owned), Company.id.in_(member)))
+
+
+def _task_scope(ctx):
+    """任务行的可见条件：owner/admin 看全公司，其余只看自己创建的。
+
+    Task 没有部门字段，无法做部门级收窄——按"创建者"这一最小可用口径
+    限制，宁可让成员少看到一些任务，也不把别人的执行结果/失败原因摊开。
+    """
+    base = Task.company_id == ctx.company_id
+    if ctx.sees_all_agents:
+        return base
+    return and_(base, Task.created_by == ctx.user_id)
+
+
+async def _task_owned(db: AsyncSession, user_id: str, task_id: str,
+                      capability: Capability = Capability.VIEW) -> Task:
     t = await db.get(Task, task_id)
     if not t:
         raise HTTPException(404, "Task not found")
-    c = await db.get(Company, t.company_id)
-    if not c or c.owner_id != user_id:
+    await assert_company_capability(db, user_id, t.company_id, capability)
+    user = await db.get(User, user_id)
+    ctx = await build_ctx(db, user, t.company_id)
+    if not ctx.sees_all_agents and t.created_by != user_id:
         raise HTTPException(404, "Task not found")
     return t
 
@@ -46,10 +77,14 @@ async def _task_owned(db: AsyncSession, user_id: str, task_id: str) -> Task:
 async def list_tasks(company_id: str | None = None, status: str | None = None,
                      agent_id: str | None = None,
                      db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
-    q = select(Task).join(Company, Company.id == Task.company_id).where(
-        Company.owner_id == user.id)
     if company_id:
-        q = q.where(Task.company_id == company_id)
+        q = select(Task).where(_task_scope(await build_ctx(db, user, company_id)))
+    else:
+        cids = (await db.execute(
+            _accessible_company_ids(user.id))).scalars().all()
+        scopes = [_task_scope(await build_ctx(db, user, cid)) for cid in cids]
+        q = select(Task).where(or_(*scopes) if scopes
+                               else Task.company_id.in_([]))
     if status:
         q = q.where(Task.status == TaskStatus(status))
     if agent_id:
@@ -61,7 +96,9 @@ async def list_tasks(company_id: str | None = None, status: str | None = None,
 @router.post("", status_code=201)
 async def create_task(data: TaskIn, db: AsyncSession = Depends(get_db),
                       user=Depends(get_current_user)):
-    await assert_company_owned(db, user.id, data.company_id)
+    # 建任务 = 日常写操作（OPERATE）：成员可以，只读不行
+    await assert_company_capability(db, user.id, data.company_id,
+                                    Capability.OPERATE)
     # 被指派的员工也必须属于该公司（且属于调用者）：此前只校验 company，
     # 带他人公司的 agent_id 即可把任务挂到别家员工身上
     if data.assigned_agent_id:
@@ -253,7 +290,7 @@ async def _dispatch_or_revert(db: AsyncSession, task_id: str, agent_id: str) -> 
 @router.post("/{tid}/start")
 async def start_task(tid: str,
                      db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
-    t = await _task_owned(db, user.id, tid)
+    t = await _task_owned(db, user.id, tid, Capability.OPERATE)
     if not t.assigned_agent_id:
         raise HTTPException(400, "Task has no assigned agent")
     # 先结束只读事务（此处无待写数据）：SQLite/WAL 下"读快照 → 升级写"会直接
@@ -272,7 +309,7 @@ async def start_task(tid: str,
 @router.post("/{tid}/pause")
 async def pause_task(tid: str, db: AsyncSession = Depends(get_db),
                      user=Depends(get_current_user)):
-    t = await _task_owned(db, user.id, tid)
+    t = await _task_owned(db, user.id, tid, Capability.OPERATE)
     await db.commit()
     try:
         await transition(db, t, TaskStatus.PAUSED, "user", user.id)
@@ -289,7 +326,7 @@ async def pause_task(tid: str, db: AsyncSession = Depends(get_db),
 @router.post("/{tid}/resume")
 async def resume_task(tid: str, db: AsyncSession = Depends(get_db),
                       user=Depends(get_current_user)):
-    t = await _task_owned(db, user.id, tid)
+    t = await _task_owned(db, user.id, tid, Capability.OPERATE)
     await db.commit()
     # 并发点击「继续」时只有一次能 PAUSED→RUNNING 成功；resume_execution
     # 会提交新的后台执行，所以必须由 CAS 保证只提交一次。
@@ -318,7 +355,7 @@ async def takeover_task(tid: str, data: InterventionIn,
                        user=Depends(get_current_user)):
     """V5.5 B1 老板接管：RUNNING 任务立即暂停，写下你的改方向指令，
     恢复执行时 Agent 按你的指令继续（检查点可追溯，见执行轨迹）。"""
-    t = await _task_owned(db, user.id, tid)
+    t = await _task_owned(db, user.id, tid, Capability.OPERATE)
     if t.status not in (TaskStatus.RUNNING, TaskStatus.PLANNING):
         raise HTTPException(409, f"只有执行中的任务可以接管，当前状态：{t.status.value}")
     note = (data.content or "老板接管：按最新要求继续").strip()
@@ -358,7 +395,7 @@ async def resolve_takeover(tid: str, data: InterventionIn,
                           user=Depends(get_current_user)):
     """V5.5 B1 接管解除：老板确认改完方向，任务从检查点恢复，
     最新接管指令作为最高优先级注入 Agent 上下文。"""
-    t = await _task_owned(db, user.id, tid)
+    t = await _task_owned(db, user.id, tid, Capability.OPERATE)
     if t.status != TaskStatus.PAUSED:
         raise HTTPException(409, f"只有已接管暂停的任务可以解除，当前状态：{t.status.value}")
     # 可选：解除前再补一条指令（恢复注入取 step_index 最大的检查点）
@@ -391,7 +428,7 @@ async def retry_task(tid: str,
 
     前端任务详情页 FAILED 状态的"重试"按钮调用此端点。
     """
-    t = await _task_owned(db, user.id, tid)
+    t = await _task_owned(db, user.id, tid, Capability.OPERATE)
     if t.status != TaskStatus.FAILED:
         raise HTTPException(409, f"只有 FAILED 状态的任务可以重试，当前状态：{t.status.value}")
     if not t.assigned_agent_id:
@@ -411,7 +448,7 @@ async def retry_task(tid: str,
 @router.post("/{tid}/cancel")
 async def cancel_task(tid: str, reason: str | None = None,
                       db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
-    t = await _task_owned(db, user.id, tid)
+    t = await _task_owned(db, user.id, tid, Capability.OPERATE)
     await db.commit()
     try:
         await transition(db, t, TaskStatus.CANCELLED, "user", user.id,
@@ -436,7 +473,7 @@ async def cancel_task(tid: str, reason: str | None = None,
 async def add_intervention(tid: str, data: InterventionIn,
                            db: AsyncSession = Depends(get_db),
                            user=Depends(get_current_user)):
-    t = await _task_owned(db, user.id, tid)
+    t = await _task_owned(db, user.id, tid, Capability.OPERATE)
     iv = Intervention(task_id=tid, user_id=user.id, type=data.type,
                       content=data.content, attachments=data.attachments,
                       status="delivered")
@@ -641,7 +678,7 @@ async def patch_task(tid: str, data: TaskPatchIn,
                      db: AsyncSession = Depends(get_db),
                      user=Depends(get_current_user)):
     """更新任务可编辑字段（负责人/优先级/描述）。记录审计事件。"""
-    t = await _task_owned(db, user.id, tid)
+    t = await _task_owned(db, user.id, tid, Capability.OPERATE)
     changes = {}
     if "assigned_agent_id" in data.model_fields_set:
         if data.assigned_agent_id:

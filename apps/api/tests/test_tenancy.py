@@ -229,11 +229,16 @@ async def test_task_list_scoped_to_own_companies(client, tenants):
     assert r.status_code == 200
     assert r.json() == [], "任务列表串号"
 
-    # 显式传他人 company_id 也不能绕过
+    # 显式传他人 company_id 也不能绕过：项目约定越权一律 404
+    # （比 200 + 空列表更严格，也不泄露该公司是否存在）
     r = await client.get("/tasks", params={"company_id": tenants.alice_co["id"]},
                          headers=tenants.bob["headers"])
+    assert r.status_code == 404
+
+    # 「不串号」语义不变：Bob 查自己的列表仍然是 200 且看不到 Alice 的任务
+    r = await client.get("/tasks", headers=tenants.bob["headers"])
     assert r.status_code == 200
-    assert r.json() == []
+    assert r.json() == [], "任务列表串号"
 
 
 async def test_cannot_create_task_in_other_company(client, tenants):

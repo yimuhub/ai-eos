@@ -6,8 +6,9 @@ from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
-from app.api.routes.agents import _verify_agent_access
+from app.api.deps import assert_company_capability, get_current_user
+from app.core.permissions import Capability
+from app.core.scope import ensure_agent_access
 from app.db.session import get_db
 from app.models.agent import Agent, AgentModelConfig
 from app.models.memory import AgentMemory
@@ -33,14 +34,14 @@ async def preview_offboarding(data: OffboardIn,
     succ = await db.get(Agent, data.successor_id)
     if not succ:
         raise HTTPException(404, "继承人不存在")
-    await _verify_agent_access(db, user.id, succ)
+    await ensure_agent_access(db, user, succ, Capability.VIEW)
 
     details = []
     for aid in data.agent_ids:
         a = await db.get(Agent, aid)
         if not a or a.id == data.successor_id:
             continue
-        await _verify_agent_access(db, user.id, a)
+        await ensure_agent_access(db, user, a, Capability.VIEW)
 
         skills = (await db.execute(text(
             "SELECT count(*) FROM agent_skills WHERE agent_id = CAST(:aid AS varchar)"),
@@ -74,34 +75,28 @@ async def execute_offboarding(data: OffboardIn,
     succ = await db.get(Agent, data.successor_id)
     if not succ:
         raise HTTPException(404, "继承人不存在")
-    await _verify_agent_access(db, user.id, succ)
     # 离职交接会真实改写归属（技能/成果/记忆转移到继承人）并删除原员工，
-    # 不可撤销：声明为最高危险级别。
-    from app.core.permissions import Capability, ensure_capability
-    await ensure_capability(db, user.id, succ.company_id, Capability.DESTRUCTIVE)
+    # 不可撤销：公司级声明为最高危险级别；行级同样按 DESTRUCTIVE
+    # （普通成员/只读不能交接任何 Agent，含自己创建的）。
+    await assert_company_capability(db, user.id, succ.company_id,
+                                    Capability.DESTRUCTIVE)
+    await ensure_agent_access(db, user, succ, Capability.DESTRUCTIVE)
     sid = str(succ.id)
     succ_name = succ.name  # 提前取值：避免 savepoint 回滚后惰性加载
-
-    user_id = user.id  # 提前缓存，防 rollback 过期后触发同步懒加载
-
-    # 预校验权限：一次查出本用户公司下全部 agent id
-    from app.models.company import Company as CompanyM
-    q = await db.execute(
-        select(Agent.id).join(CompanyM, CompanyM.id == Agent.company_id)
-        .where(CompanyM.owner_id == user_id))
-    owned_ids = set(q.scalars().all())
 
     offboarded, failed = [], []
 
     for aid in data.agent_ids:
         if aid == sid:
             continue
-        if aid not in owned_ids:
-            failed.append({"id": aid, "reason": "不存在或无权限"})
-            continue
         a = (await db.execute(select(Agent).where(Agent.id == aid))).scalar_one_or_none()
         if not a:
             failed.append({"id": aid, "reason": "不存在"})
+            continue
+        try:
+            await ensure_agent_access(db, user, a, Capability.DESTRUCTIVE)
+        except HTTPException:
+            failed.append({"id": aid, "reason": "不存在或无权限"})
             continue
         aname = a.name  # 提前取值：回滚/删除后 ORM 对象过期
         try:

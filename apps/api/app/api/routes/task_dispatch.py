@@ -9,10 +9,12 @@ from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import (assert_company_capability, assert_company_owned,
+                          get_current_user)
+from app.core.permissions import Capability
 from app.db.session import get_db
 from app.models.agent import Agent
-from app.models.company import Company, Department
+from app.models.company import Department
 from app.models.task import Task, TaskPriority, TaskStatus
 from app.services.event_system import log_event
 
@@ -70,9 +72,7 @@ async def dispatch_options(company_id: str = Query(...),
                            db: AsyncSession = Depends(get_db),
                            user=Depends(get_current_user)):
     """UI 数据源：可选目标 + 优先级枚举 + 各目标人数预览。"""
-    c = await db.get(Company, company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
+    await assert_company_owned(db, user.id, company_id)
 
     depts = (await db.execute(select(Department).where(
         Department.company_id == company_id))).scalars().all()
@@ -104,9 +104,9 @@ async def dispatch_tasks(data: DispatchIn,
                          db: AsyncSession = Depends(get_db),
                          user=Depends(get_current_user)):
     """按目标创建正式 Task 实例（每名执行 Agent 一条），绑定 priority。"""
-    c = await db.get(Company, data.company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
+    # 派活 = 日常写操作（OPERATE）
+    await assert_company_capability(db, user.id, data.company_id,
+                                    Capability.OPERATE)
     try:
         prio = TaskPriority(data.priority)
     except ValueError:
@@ -166,9 +166,8 @@ async def update_running_priority(data: PriorityUpdateIn,
                                   db: AsyncSession = Depends(get_db),
                                   user=Depends(get_current_user)):
     """动态调整 RUNNING（及排队中）任务的优先级——调度器即时响应权重变化。"""
-    c = await db.get(Company, company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
+    # 批量改全公司任务优先级会改变调度顺序，属于公司级配置（MANAGE）
+    await assert_company_capability(db, user.id, company_id, Capability.MANAGE)
     try:
         prio = TaskPriority(data.priority)
     except ValueError:
@@ -202,9 +201,9 @@ async def global_interrupt(company_id: str = Query(...),
     """
     from sqlalchemy import or_
 
-    c = await db.get(Company, company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
+    # 全局急停 = 影响面最大的一档（DESTRUCTIVE）
+    await assert_company_capability(db, user.id, company_id,
+                                    Capability.DESTRUCTIVE)
 
     q = await db.execute(select(Task).where(
         Task.company_id == company_id,
@@ -241,11 +240,18 @@ async def delete_tasks(data: DeleteTasksIn,
     from sqlalchemy.exc import DBAPIError, IntegrityError
 
     user_id = user.id
-    # 权限预校验
-    q = await db.execute(
-        select(Task.id).join(Company, Company.id == Task.company_id)
-        .where(Company.owner_id == user_id))
-    owned = set(q.scalars().all())
+    # 权限预校验：任务彻底删除（含执行记录/检查点）不可逆 → DESTRUCTIVE
+    owned: set[str] = set()
+    for tid in data.task_ids:
+        row = await db.get(Task, tid)
+        if row is None:
+            continue
+        try:
+            await assert_company_capability(db, user_id, row.company_id,
+                                            Capability.DESTRUCTIVE)
+        except HTTPException:
+            continue
+        owned.add(tid)
 
     deleted, failed = [], []
     for tid in data.task_ids:

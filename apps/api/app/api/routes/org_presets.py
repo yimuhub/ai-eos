@@ -14,15 +14,17 @@
 """
 import json
 import os
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_company_capability, get_current_user, get_db
+from app.core.permissions import Capability
 from app.models.agent import Agent, AgentStatus
-from app.models.company import Company, Department
+from app.models.company import Department
 from app.models.expert_template import ExpertTemplate
 from app.services.event_system import log_event
 
@@ -45,6 +47,10 @@ def _presets_dir() -> str:
 
 
 def _load_preset(pid: str) -> dict:
+    # 公开端点：pid 直接拼进文件路径，必须限制字符集，
+    # 否则 ../ 之类的输入会把读文件能力暴露到 content 目录之外。
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", pid):
+        raise HTTPException(404, f"组织形态预设 {pid} 不存在")
     p = os.path.join(_presets_dir(), f"{pid}.json")
     if not os.path.isfile(p):
         raise HTTPException(404, f"组织形态预设 {pid} 不存在")
@@ -52,8 +58,13 @@ def _load_preset(pid: str) -> dict:
 
 
 @router.get("")
-async def list_presets(user=Depends(get_current_user)):
-    """8 个行业预设：只给摘要，预览用 GET /org-presets/{pid}。"""
+async def list_presets():
+    """行业预设列表：只给摘要，预览用 GET /org-presets/{pid}。
+
+    **免登录**：预设是随包发布的静态 JSON（content/org_presets），
+    不含任何公司数据。安装向导要在还没有账号的第 3 步实时预览组织树，
+    所以这两个读接口不挂鉴权；写入路径 `/apply` 仍然要 MANAGE。
+    """
     d = _presets_dir()
     out = []
     for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
@@ -73,8 +84,11 @@ async def list_presets(user=Depends(get_current_user)):
 
 
 @router.get("/{pid}")
-async def preset_detail(pid: str, user=Depends(get_current_user)):
-    """预设详情：完整部门树 + 每岗位推荐专家 slug（前端预览 + 勾选）。"""
+async def preset_detail(pid: str):
+    """预设详情：完整部门树 + 每岗位推荐专家 slug（前端预览 + 勾选）。
+
+    与列表一样免登录，用途是安装向导的组织预览。
+    """
     return _load_preset(pid)
 
 
@@ -91,9 +105,9 @@ async def apply_preset(pid: str, data: ApplyIn,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
     """一键引入组织形态：部门树 + 配备专家的智能体（幂等，可 dry_run 预览）。"""
-    c = await db.get(Company, data.company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
+    # 一键建部门树 + 批量建员工属于组织结构变更：按 MANAGE 收口
+    await assert_company_capability(db, user.id, data.company_id,
+                                    Capability.MANAGE)
     preset = _load_preset(pid)
 
     only = set(data.departments) if data.departments else None

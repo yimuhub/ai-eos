@@ -36,6 +36,12 @@ describe("V.email", () => {
     expect(V.email()("a@b.co")).toBeNull();
     expect(V.email()("")).toBeNull();
   });
+  it("保留域名给出中文提示（后端 EmailStr 只会回英文 422）", () => {
+    expect(V.email()("boss@demo.local")).toBe(
+      "邮箱域名不可用（.local / .test 等是保留域名），请换成真实邮箱",
+    );
+    expect(V.email()("boss@demo.com")).toBeNull();
+  });
 });
 
 describe("V.url", () => {

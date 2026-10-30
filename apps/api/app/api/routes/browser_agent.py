@@ -1,16 +1,20 @@
 """Browser Agent API (P2-13).
 
-租户边界：可访问公司集合由服务端从 `Company.owner_id == user.id` 推导，
+租户边界：可访问公司集合由服务端从「owner 事实源 ∪ active 公司成员行」推导，
 客户端传入的 company_id 只用于“选定其中一个”，不再被直接当作过滤条件。
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_company_capability, get_current_user, get_db
 from app.browser_agent import BrowserActionLog, fetch_page_text
+from app.core.permissions import Capability
+from app.core.scope import agent_read_scope, build_ctx
+from app.models.agent import Agent
 from app.models.company import Company
+from app.models.membership import CompanyMember
 from app.models.user import User
 
 router = APIRouter(prefix="/browser-agent", tags=["browser-agent"])
@@ -23,17 +27,22 @@ class FetchIn(BaseModel):
 
 
 async def _my_company_ids(db: AsyncSession, user_id: str) -> list[str]:
-    rows = await db.execute(select(Company.id).where(
-        Company.owner_id == user_id))
+    """我可访问的公司：owner 事实源 ∪ active 成员行。"""
+    owned = select(Company.id).join(
+        User, User.id == Company.owner_id).where(User.id == user_id)
+    member = select(CompanyMember.company_id).where(
+        CompanyMember.user_id == user_id, CompanyMember.status == "active")
+    rows = await db.execute(
+        select(Company.id).where(or_(Company.id.in_(owned),
+                                     Company.id.in_(member))))
     return [cid for (cid,) in rows.all()]
 
 
 async def _assert_selectable_company(db: AsyncSession, user: User,
-                                     company_id: str) -> None:
+                                     company_id: str,
+                                     capability: Capability = Capability.VIEW) -> None:
     """只允许操作服务端推导出的、属于当前用户的公司。越权一律 404。"""
-    allowed = await _my_company_ids(db, user.id)
-    if company_id not in allowed:
-        raise HTTPException(404, "Company not found")
+    await assert_company_capability(db, user.id, company_id, capability)
 
 
 @router.post("/fetch")
@@ -45,7 +54,8 @@ async def fetch(
     user: User = Depends(get_current_user),
 ):
     """Agent 安全抓取网页（自动安全检查 + 审计日志）。"""
-    await _assert_selectable_company(db, user, company_id)
+    # 出站抓取并落审计日志 = 写操作（OPERATE）
+    await _assert_selectable_company(db, user, company_id, Capability.OPERATE)
     result = await fetch_page_text(db, company_id, agent_id, data.url,
                                    max_chars=data.max_chars,
                                    render=data.render)
@@ -67,10 +77,13 @@ async def list_logs(
     user: User = Depends(get_current_user),
 ):
     await _assert_selectable_company(db, user, company_id)
-    # 即使上面的校验被误删，这里也只查服务端推导出的公司集合
-    allowed = await _my_company_ids(db, user.id)
-    q = await db.execute(select(BrowserActionLog).where(
-        BrowserActionLog.company_id.in_(allowed)).order_by(
+    ctx = await build_ctx(db, user, company_id)
+    conds = [BrowserActionLog.company_id == company_id]
+    if not ctx.sees_all_agents:
+        # 非 owner/admin 只看到自己可见 Agent 的抓取记录（URL 可能含业务信息）
+        conds.append(BrowserActionLog.agent_id.in_(
+            select(Agent.id).where(agent_read_scope(ctx))))
+    q = await db.execute(select(BrowserActionLog).where(*conds).order_by(
         BrowserActionLog.created_at.desc()).limit(limit))
     rows = q.scalars().all()
     return [{"id": l.id, "agent_id": l.agent_id, "action": l.action_type,

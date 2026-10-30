@@ -12,9 +12,10 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_company_capability, get_current_user, get_db
+from app.core.permissions import Capability
+from app.core.scope import ensure_agent_access
 from app.models.agent import Agent
-from app.models.company import Company
 from app.models.memory import AgentMemory, MemoryType
 from app.models.user import User
 from app.models.worklog import AgentWorklog, WorklogStatus
@@ -36,13 +37,14 @@ class DecideIn(BaseModel):
     comment: str | None = None
 
 
-async def _owned_agent(db: AsyncSession, user: User, agent_id: str) -> Agent:
+async def _owned_agent(db: AsyncSession, user: User, agent_id: str,
+                       capability: Capability = Capability.VIEW) -> Agent:
+    """Agent 归属 + 行级可见/可写范围（与 agents 列表同一套条件）。"""
     a = await db.get(Agent, agent_id)
     if not a:
         raise HTTPException(404, "Agent not found")
-    c = await db.get(Company, a.company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Agent not found")
+    await assert_company_capability(db, user.id, a.company_id, capability)
+    await ensure_agent_access(db, user, a, capability)
     return a
 
 
@@ -54,7 +56,7 @@ async def create_worklog(
     user: User = Depends(get_current_user),
 ):
     """员工写工作日志（PENDING）——成长也要老板点头。"""
-    a = await _owned_agent(db, user, data.agent_id)
+    a = await _owned_agent(db, user, data.agent_id, Capability.OPERATE)
     wl = AgentWorklog(
         id=str(uuid.uuid4()), agent_id=data.agent_id, company_id=a.company_id,
         period=data.period, title=data.title, content=data.content,
@@ -95,7 +97,8 @@ async def decide_worklog(
     user: User = Depends(get_current_user),
 ):
     """老板决策。approve → ⑦ 高置信沉淀：写 AgentMemory(importance 0.95)。"""
-    await _owned_agent(db, user, agent_id)
+    # 审批并沉淀记忆 = 写操作（OPERATE），且只能操作自己写范围内的 Agent
+    await _owned_agent(db, user, agent_id, Capability.OPERATE)
     wl = await db.get(AgentWorklog, wl_id)
     if not wl or wl.agent_id != agent_id:
         raise HTTPException(404, "Worklog not found")

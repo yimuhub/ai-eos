@@ -21,7 +21,8 @@ from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import assert_company_capability, get_current_user
+from app.core.permissions import Capability
 from app.doc_generator import generate_document
 from app.db.session import get_db
 from app.models.agent import Agent, AgentModelConfig
@@ -134,10 +135,18 @@ async def _render_war_room_deliverable(session: AsyncSession, task: WarRoomTask,
     return meta
 
 
-async def _owned(db: AsyncSession, user_id: str, company_id: str) -> Company:
+async def _owned_company(db: AsyncSession, user_id: str, company_id: str,
+                 capability: Capability = Capability.VIEW) -> Company:
+    """公司级门禁：无角色/能力不足一律 404（不泄露公司是否存在）。
+
+    只读端点用默认 VIEW；作战室的一切变更（拉会、宣告、校对、审核、
+    整合）都是日常写（OPERATE）；删会话（单个生命周期 delete / 批量删除）
+    不可逆，按 DESTRUCTIVE 收口。
+    """
     c = await db.get(Company, company_id)
-    if not c or c.owner_id != user_id:
+    if not c:
         raise HTTPException(404, "company not found")
+    await assert_company_capability(db, user_id, company_id, capability)
     return c
 
 
@@ -186,7 +195,7 @@ async def list_sessions(company_id: str = Query(...),
                         db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
     """列出作战会话（按项目过滤可选）。"""
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id)
     q = select(WarRoomSession).where(WarRoomSession.company_id == company_id)
     if project_id:
         q = q.where(WarRoomSession.project_id == project_id)
@@ -217,7 +226,7 @@ class KickoffIn(BaseModel):
 @router.post("/kickoff", status_code=201)
 async def kickoff(data: KickoffIn, db: AsyncSession = Depends(get_db),
                   user: User = Depends(get_current_user)):
-    await _owned(db, user.id, data.company_id)
+    await _owned_company(db, user.id, data.company_id, Capability.OPERATE)
     leader = await db.get(Agent, data.leader_agent_id)
     if not leader:
         raise HTTPException(404, "leader agent not found")
@@ -409,7 +418,9 @@ async def session_lifecycle(sid: str, data: SessionActionIn,
                             db: AsyncSession = Depends(get_db),
                             user: User = Depends(get_current_user)):
     """作战会话生命周期：暂停(现场保留)/恢复(继续执行)/停止(终止保留成果)/删除(彻底清除)。"""
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id,
+                 Capability.DESTRUCTIVE if data.action == "delete"
+                 else Capability.OPERATE)
     sess, tasks = await _get_session(db, sid, company_id)
 
     if data.action == "pause":
@@ -453,7 +464,7 @@ async def batch_delete_sessions(data: BatchDeleteIn,
                                 db: AsyncSession = Depends(get_db),
                                 user: User = Depends(get_current_user)):
     """批量彻底删除作战会话（含全部任务）。"""
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id, Capability.DESTRUCTIVE)
     deleted, failed = 0, []
     for sid in data.session_ids:
         try:
@@ -479,7 +490,7 @@ async def session_team(sid: str, company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
     """明确：负责人是谁、参与 Agent 有哪些、各自进度。"""
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id)
     sess, tasks = await _get_session(db, sid, company_id)
     agents = (await db.execute(select(Agent).where(
         Agent.company_id == company_id))).scalars().all()
@@ -535,7 +546,7 @@ async def session_file(sid: str, name: str = Query(...),
     """下载/预览作战产出物（按文件名在会话目录内查找，防路径穿越）。"""
     from pathlib import Path
     from fastapi.responses import FileResponse
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id)
     sess = await db.get(WarRoomSession, sid)
     if not sess or sess.company_id != company_id:
         raise HTTPException(404, "session not found")
@@ -563,7 +574,7 @@ async def boss_say(sid: str, data: BossSayIn,
                    user: User = Depends(get_current_user)):
     """老板向作战群聊插入发言并触发全员真实回应。"""
     from app.api.routes.group_chat import GroupChatMessage
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id, Capability.OPERATE)
     sess = await db.get(WarRoomSession, sid)
     if not sess or sess.company_id != company_id:
         raise HTTPException(404, "session not found")
@@ -637,7 +648,7 @@ async def session_chat(sid: str, company_id: str = Query(...),
                        user: User = Depends(get_current_user)):
     """作战群聊消息流（Agent 互相交流 + 老板插话）。"""
     from app.api.routes.group_chat import GroupChatMessage
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id)
     sess = await db.get(WarRoomSession, sid)
     if not sess or sess.company_id != company_id:
         raise HTTPException(404, "session not found")
@@ -666,7 +677,7 @@ async def session_snapshot(sid: str, company_id: str = Query(...),
     """
     from app.api.routes.group_chat import GroupChatMessage
 
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id)
     sess, tasks = await _get_session(db, sid, company_id)
     agents = (await db.execute(select(Agent).where(
         Agent.company_id == company_id))).scalars().all()
@@ -715,7 +726,7 @@ async def announce(sid: str, company_id: str = Query(...),
                    db: AsyncSession = Depends(get_db),
                    user: User = Depends(get_current_user)):
     """每个成员在群聊复述自己的任务：「我的任务是什么」。"""
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id, Capability.OPERATE)
     sess, tasks = await _get_session(db, sid, company_id)
     if sess.status != "announcing":
         raise HTTPException(409, f"当前阶段 {sess.status} 不允许宣告")
@@ -759,7 +770,7 @@ async def announce(sid: str, company_id: str = Query(...),
 async def get_session(sid: str, company_id: str = Query(...),
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id)
     sess, tasks = await _get_session(db, sid, company_id)
     agents = (await db.execute(select(Agent).where(
         Agent.company_id == company_id))).scalars().all()
@@ -780,7 +791,7 @@ async def acknowledge(sid: str, data: AckIn,
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
     """负责人逐项校对宣告：正确→acknowledged；不正确→corrected 并写纠正意见。"""
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id, Capability.OPERATE)
     sess, tasks = await _get_session(db, sid, company_id)
     target = next((t for t in tasks if t.id == data.task_id), None)
     if not target:
@@ -929,7 +940,7 @@ async def start_exec(sid: str, company_id: str = Query(...),
     - executing / failed：不强制重新确认，只把仍是 todo 的成员任务重新拉起
       （审核驳回会把任务打回 todo；全部失败时会话会被标 failed）。
     """
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id, Capability.OPERATE)
     sess, tasks = await _get_session(db, sid, company_id)
 
     member_todo = [t.id for t in tasks
@@ -1022,7 +1033,7 @@ async def review_task(tid: str, data: ReviewIn,
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
     """可视化审核：负责人审或老板人工干预。驳回则打回重做。"""
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id, Capability.OPERATE)
     t = await db.get(WarRoomTask, tid)
     if not t:
         raise HTTPException(404, "task not found")
@@ -1042,7 +1053,7 @@ async def finalize(sid: str, company_id: str = Query(...),
                    db: AsyncSession = Depends(get_db),
                    user: User = Depends(get_current_user)):
     """全部审核通过后，由负责人把各部分整合为最终产出物。"""
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id, Capability.OPERATE)
     sess, tasks = await _get_session(db, sid, company_id)
     if not any(t.status == "approved" for t in tasks):
         raise HTTPException(409, "还没有任何已审核通过的产出物")

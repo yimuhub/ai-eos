@@ -4,7 +4,7 @@
 
 **The AI-Native Enterprise Operating System — Found an AI Company, Hire Digital Employees, Delegate Work**
 
-[![Phase](https://img.shields.io/badge/version-v5.13.0-blue.svg?style=flat-square)](#-latest-v5130)
+[![Phase](https://img.shields.io/badge/version-v5.14.0-blue.svg?style=flat-square)](#-latest-v5140)
 [![License: BSL 1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12+-green.svg?style=flat-square)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688.svg?style=flat-square)](https://fastapi.tiangolo.com)
@@ -19,7 +19,7 @@
 
 **English** • [简体中文说明](README_ZH.md)
 
-[✨ Features](#-core-features) • [🚀 Quick Start](#-quick-start) • [🏗️ Architecture](#-system-architecture) • [🧪 Testing](#-testing) • [📦 Latest](#-latest-v5130) • [📜 License](#-license--copyright-terms)
+[✨ Features](#-core-features) • [🚀 Quick Start](#-quick-start) • [🏗️ Architecture](#-system-architecture) • [🧪 Testing](#-testing) • [📦 Latest](#-latest-v5140) • [📜 License](#-license--copyright-terms)
 
 </div>
 
@@ -109,7 +109,7 @@ flowchart TD
     Engines --> Storage
 ```
 
-**Scale (measured from source, v5.13.0)**: backend 31,893 lines / 168 files / 420 operations over 365 paths / 104 tables / 32 Alembic migrations; frontend 24,938 lines / 47 page routes; backend suite **324 passed** (plus 38 e2e checks).
+**Scale (measured from source, v5.14.0)**: backend 31,893 lines / 168 files / 420 operations over 365 paths / 104 tables / 32 Alembic migrations; frontend 24,938 lines / 47 page routes; backend suite **324 passed** (plus 38 e2e checks).
 
 > Two honest caveats, because "it works" and "it's been verified" are different claims:
 > - **`alembic upgrade head` is PostgreSQL-only.** One historical migration (`23e9b97bb927`) hits SQLite's
@@ -192,11 +192,19 @@ cd apps/web && npm run test          # vitest (frontend)
 
 ---
 
-## 📦 Latest: v5.13.0
+## 📦 Latest: v5.14.0
+
+*Two interfaces, one system: classic full-page navigation and the geek three-pane workbench — chosen on first entry — 2026-10-30. Full entry in [`CHANGELOG.md`](CHANGELOG.md).*
+
+- 🎛 **Pick one on first entry.** Classic = fixed left menu + full-page navigation, one page at a time; geek = `/workspace` three-pane chat with right-panel tabs. Both expose the same features — only the workflow differs. Esc won't dismiss the chooser.
+- 🖥 **Classic restores the old shell.** Fixed left menu (collapsible groups, ⌘K search, recents, mode switch, sign-out); every feature is a real page with its own URL; `/` lands on the command deck.
+- 🧠 **Geek keeps the three panes.** Agents/sessions on the left, chat in the middle, outputs and feature tabs on the right. Tabs stay mounted, and the whole set is restored after a reload.
+- 🔀 **Switching follows your page.** From ⌘K or the ⇄ button at the bottom of either sidebar: classic → geek opens the current page as a right-panel tab; geek → classic opens the active tab as a full page. Mode and tabs stay on this machine.
+- 🧪 Backend suite **324 passed**; `./tools/check.sh --fast` fully green (contracts / tsc strict / eslint), `next build` renders all 47 routes; browser walkthroughs cover forced first choice, both navigation models, switch landings, reload persistence and direct-link rewriting.
+
+### Previous: v5.13.0
 
 *One interface, streaming answers: every feature opens as a tab inside the workbench — 2026-10-30. Full entry in [`CHANGELOG.md`](CHANGELOG.md).*
-
-- 🎛 **Dual UI modes (unreleased).** First entry asks for **classic** (fixed left menu + full-page navigation) or **geek** (`/workspace` three-pane chat with right-panel tabs). Switch any time from ⌘K or the ⇄ button at the bottom of either sidebar; the current page follows you, and the choice stays on this machine.
 
 - 🧩 **One interface for everything.** `/workspace` is now the only shell. The left rail, ⌘K and every in-page entry open features as **closable tabs in the right panel** — the chat and rail never navigate away. Tabs stay mounted (filters and scroll survive), closing one activates its left neighbour, and state is restored after a reload.
 - 🔗 **Old links still work.** Visiting `/tasks`, `/knowledge` and friends redirects into `/workspace?app=…`, so bookmarks, refreshes and pasted links always land in the same interface. On narrow screens the panel goes full-screen and the left drawer steps aside.

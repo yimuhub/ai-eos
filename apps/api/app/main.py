@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.routes import (access, agents, artifacts, assets, auth, browser_agent, group_chat, growth_center, doc_styles,
+from app.api.routes import (access, agents, artifacts, assets, auth, browser_agent, group_chat, chat_groups, growth_center, doc_styles,
                             agent_chat, delivery, departments_batch, kb2, offboarding, task_dispatch,
                             test_console,
                             career,
@@ -21,7 +21,8 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             automation, governance,
                             schedules, skill_growth,
                             app_alias, skills, tasks, team_builder, training, workflows, war_room, team_generator, company_manage,
-                            tokens, experts, command, org_presets, prometheus_metrics)
+                            tokens, experts, command, org_presets, prometheus_metrics, setup,
+                            members)
 from app.core.config import settings
 from app.core.logging_config import get_logger, setup_logging
 from app.version import __version__
@@ -64,6 +65,16 @@ async def lifespan(app: FastAPI):
     _added = await ensure_columns(engine)
     if _added:
         logger.info("[startup] 自动补齐 %d 个新增列", len(_added))
+
+    # 超管回填（P5）：老库没有 is_superadmin 概念，若不标记一个超管，
+    # 安装向导会把已有数据的安装误判成"全新安装"。必须放在 ensure_columns
+    # 之后（列可能是上一步补出来的）。失败只记日志，绝不阻断启动。
+    try:
+        from app.db.migrations import backfill_superadmin
+        await backfill_superadmin(engine)
+    except Exception as _bf_e:  # noqa: BLE001 — 回填失败不能拖住服务
+        logger.warning("[startup] 超管回填失败（不影响启动）：%s", _bf_e)
+
     from app.scheduler_engine import start_scheduler, stop_scheduler
     start_scheduler()
     # mDNS 局域网广播（V5.4）：零依赖降级，失败不影响启动
@@ -184,7 +195,7 @@ async def _unhandled_exception_handler(request, exc):
                  "error_type": type(exc).__name__},
     )
 
-for r in (health, auth, companies, agents, agent_chat, models_api, skills, tasks, messages, kb2, delivery, group_chat, doc_styles, growth_center,
+for r in (health, auth, companies, agents, agent_chat, models_api, skills, tasks, messages, kb2, delivery, group_chat, chat_groups, doc_styles, growth_center,
           assets, events, dashboard, metrics, orchestrate, projects, workflows, meetings,
           collaboration, knowledge, memory, context, artifacts, intervention,
           performance, team_builder, browser_agent, computer_agent, app_alias,
@@ -192,5 +203,5 @@ for r in (health, auth, companies, agents, agent_chat, models_api, skills, tasks
           review, factory, external_agents, sandbox, automation, governance,
           offboarding, departments_batch, task_dispatch, test_console, war_room, team_generator, company_manage, tokens, experts, command, org_presets,
           access, prometheus_metrics, clients, pairing, diagnostics, briefing,
-          budgets, mcp, mailboxes, worklogs):
+          budgets, mcp, mailboxes, worklogs, setup, members):
     app.include_router(r.router)

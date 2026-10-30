@@ -1,12 +1,13 @@
 """Workflow CRUD + execution API (P2-02/P2-03 backend)."""
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import assert_company_capability, get_current_user
+from app.core.permissions import Capability
+from app.core.scope import build_ctx
 from app.db.session import get_db
-from app.models.company import Company
 from app.models.workflow import (NodeType, RunStatus, WorkflowDefinition,
                                  WorkflowEdge, WorkflowExecution, WorkflowNode,
                                  WorkflowStep, WorkflowStatus)
@@ -38,12 +39,30 @@ class WorkflowSaveIn(BaseModel):
     edges: list[EdgeIn]
 
 
-async def _wf_owned(db: AsyncSession, user_id: str, wf_id: str) -> WorkflowDefinition:
+def _workflow_scope(ctx):
+    """工作流行的可见条件：owner/admin 看全公司，其余只看自己创建的。
+
+    WorkflowDefinition 没有部门字段，只能按创建者收窄——
+    宁可让成员少看到一些，也不把别人的编排与执行历史摊开。
+    """
+    base = WorkflowDefinition.company_id == ctx.company_id
+    if ctx.sees_all_agents:
+        return base
+    return and_(base, WorkflowDefinition.created_by == ctx.user_id)
+
+
+async def _wf_owned(db: AsyncSession, user, wf_id: str,
+                    capability: Capability = Capability.VIEW) -> WorkflowDefinition:
     wf = await db.get(WorkflowDefinition, wf_id)
     if not wf:
         raise HTTPException(404, "Workflow not found")
-    c = await db.get(Company, wf.company_id)
-    if not c or c.owner_id != user_id:
+    await assert_company_capability(db, user.id, wf.company_id, capability)
+    ctx = await build_ctx(db, user, wf.company_id)
+    found = (await db.execute(
+        select(WorkflowDefinition.id).where(WorkflowDefinition.id == wf.id,
+                                            _workflow_scope(ctx))
+        .limit(1))).first()
+    if found is None:
         raise HTTPException(404, "Workflow not found")
     return wf
 
@@ -51,8 +70,8 @@ async def _wf_owned(db: AsyncSession, user_id: str, wf_id: str) -> WorkflowDefin
 @router.get("/workflows")
 async def list_workflows(company_id: str, db: AsyncSession = Depends(get_db),
                          user=Depends(get_current_user)):
-    q = await db.execute(select(WorkflowDefinition).where(
-        WorkflowDefinition.company_id == company_id))
+    ctx = await build_ctx(db, user, company_id)
+    q = await db.execute(select(WorkflowDefinition).where(_workflow_scope(ctx)))
     return [{"id": w.id, "name": w.name, "description": w.description,
              "status": w.status.value} for w in q.scalars()]
 
@@ -60,7 +79,7 @@ async def list_workflows(company_id: str, db: AsyncSession = Depends(get_db),
 @router.get("/workflows/{wid}")
 async def get_workflow(wid: str, db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
-    wf = await _wf_owned(db, user.id, wid)
+    wf = await _wf_owned(db, user, wid)
     nodes_q = await db.execute(select(WorkflowNode).where(
         WorkflowNode.workflow_id == wid))
     edges_q = await db.execute(select(WorkflowEdge).where(
@@ -87,9 +106,9 @@ async def start_execution(db: AsyncSession, workflow_id: str,
 async def save_workflow(data: WorkflowSaveIn, company_id: str,
                         db: AsyncSession = Depends(get_db),
                         user=Depends(get_current_user)):
-    c = await db.get(Company, company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
+    # 保存/覆盖编排是日常写操作（OPERATE）
+    await assert_company_capability(db, user.id, company_id,
+                                    Capability.OPERATE)
 
     # 校验：必须有 START 和 END
     types = {n.node_type for n in data.nodes}
@@ -122,7 +141,8 @@ async def save_workflow(data: WorkflowSaveIn, company_id: str,
 @router.delete("/workflows/{wid}", status_code=204)
 async def delete_workflow(wid: str, db: AsyncSession = Depends(get_db),
                           user=Depends(get_current_user)):
-    wf = await _wf_owned(db, user.id, wid)
+    # 删工作流不可逆（节点/连线一并消失），按 DESTRUCTIVE 处理
+    wf = await _wf_owned(db, user, wid, Capability.DESTRUCTIVE)
     await db.delete(wf)
     await db.commit()
 
@@ -145,7 +165,7 @@ async def run_workflow(wid: str, background: BackgroundTasks,
                        project_id: str | None = None,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
-    wf = await _wf_owned(db, user.id, wid)
+    wf = await _wf_owned(db, user, wid, Capability.OPERATE)
     if wf.status == WorkflowStatus.ARCHIVED:
         raise HTTPException(400, "工作流已归档，不能执行")
     ex = await start_execution(db, wid, project_id, user.id)
@@ -160,7 +180,7 @@ async def get_execution(eid: str, db: AsyncSession = Depends(get_db),
     ex = await db.get(WorkflowExecution, eid)
     if not ex:
         raise HTTPException(404, "Execution not found")
-    wf = await _wf_owned(db, user.id, ex.workflow_id)
+    wf = await _wf_owned(db, user, ex.workflow_id)
 
     # 重启/丢失调度的惰性恢复：状态还在跑但没有任何 worker 持有租约时，
     # 看板轮询到这里就把实例重新踢起来（租约保证不会和在跑的 worker 双跑）。
@@ -194,7 +214,7 @@ async def get_execution(eid: str, db: AsyncSession = Depends(get_db),
 @router.post("/executions/{eid}/pause")
 async def pause_execution(eid: str, db: AsyncSession = Depends(get_db),
                           user=Depends(get_current_user)):
-    ex = await _owned_execution(db, user.id, eid)
+    ex = await _owned_execution(db, user, eid)
     # CAS：只有仍在"可暂停"状态的那一次生效。推进循环每步前重读状态，
     # 所以暂停能立刻打断后续节点。
     res = await db.execute(
@@ -216,7 +236,7 @@ async def pause_execution(eid: str, db: AsyncSession = Depends(get_db),
 async def resume_execution(eid: str, background: BackgroundTasks,
                            db: AsyncSession = Depends(get_db),
                            user=Depends(get_current_user)):
-    ex = await _owned_execution(db, user.id, eid)
+    ex = await _owned_execution(db, user, eid)
     # CAS PAUSED→PENDING：并发点两次「继续」只会有一次提交后台推进，
     # 也避免第二次把正在 RUNNING 的实例再拉一份 worker。
     res = await db.execute(
@@ -237,7 +257,7 @@ async def resume_execution(eid: str, background: BackgroundTasks,
 async def cancel_execution(eid: str, reason: str | None = None,
                            db: AsyncSession = Depends(get_db),
                            user=Depends(get_current_user)):
-    ex = await _owned_execution(db, user.id, eid)
+    ex = await _owned_execution(db, user, eid)
     # CAS：取消对"还没结束"的实例都生效（含等人工/暂停/排队），
     # 推进循环每步前重读状态，读到 CANCELLED 立刻停手。
     res = await db.execute(
@@ -264,7 +284,7 @@ async def approve_node(eid: str, node_key: str, approve: bool = True,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
     """人工审批/输入后继续执行。"""
-    ex = await _owned_execution(db, user.id, eid)
+    ex = await _owned_execution(db, user, eid)
 
     nodes_q = await db.execute(select(WorkflowNode).where(
         WorkflowNode.workflow_id == ex.workflow_id,
@@ -307,9 +327,10 @@ async def approve_node(eid: str, node_key: str, approve: bool = True,
     return {"detail": "rejected, execution cancelled"}
 
 
-async def _owned_execution(db: AsyncSession, user_id: str, eid: str) -> WorkflowExecution:
+async def _owned_execution(db: AsyncSession, user, eid: str) -> WorkflowExecution:
     ex = await db.get(WorkflowExecution, eid)
     if not ex:
         raise HTTPException(404, "Execution not found")
-    await _wf_owned(db, user_id, ex.workflow_id)
+    # 跑/停/继续/审批都是对编排的写操作
+    await _wf_owned(db, user, ex.workflow_id, Capability.OPERATE)
     return ex

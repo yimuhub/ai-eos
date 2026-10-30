@@ -4,9 +4,11 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import assert_company_capability, get_current_user
+from app.core.permissions import Capability
+from app.core.scope import agent_read_scope, build_ctx
 from app.db.session import get_db
-from app.models.company import Company
+from app.models.agent import Agent
 from app.models.message import Conversation, Message, MessageType
 from app.models.task import Task, TaskPriority, TaskStatus
 from app.services.event_system import log_event
@@ -29,13 +31,24 @@ class MessageIn(BaseModel):
     content: str
 
 
-async def _conv_owned(db: AsyncSession, user_id: str, conv_id: str) -> Conversation:
+async def _visible_agent_ids(db: AsyncSession, ctx) -> set[str]:
+    rows = (await db.execute(
+        select(Agent.id).where(agent_read_scope(ctx)))).scalars().all()
+    return {str(x) for x in rows}
+
+
+async def _conv_owned(db: AsyncSession, user, conv_id: str,
+                      capability: Capability = Capability.VIEW) -> Conversation:
     cv = await db.get(Conversation, conv_id)
     if not cv:
         raise HTTPException(404, "Conversation not found")
-    c = await db.get(Company, cv.company_id)
-    if not c or c.owner_id != user_id:
-        raise HTTPException(404, "Conversation not found")
+    await assert_company_capability(db, user.id, cv.company_id, capability)
+    ctx = await build_ctx(db, user, cv.company_id)
+    if not ctx.sees_all_agents:
+        # 会话没有 created_by 字段：用"参与者里有我可见的 Agent"作为行级口径
+        visible = await _visible_agent_ids(db, ctx)
+        if not visible.intersection({str(p) for p in (cv.participants or [])}):
+            raise HTTPException(404, "Conversation not found")
     return cv
 
 
@@ -43,17 +56,24 @@ async def _conv_owned(db: AsyncSession, user_id: str, conv_id: str) -> Conversat
 async def list_conversations(company_id: str,
                              db: AsyncSession = Depends(get_db),
                              user=Depends(get_current_user)):
-    q = await db.execute(select(Conversation).where(Conversation.company_id == company_id))
-    return [{c.key: getattr(cv, c.key) for c in cv.__table__.columns} for cv in q.scalars()]
+    ctx = await build_ctx(db, user, company_id)
+    q = await db.execute(select(Conversation).where(
+        Conversation.company_id == company_id))
+    rows = list(q.scalars())
+    if not ctx.sees_all_agents:
+        visible = await _visible_agent_ids(db, ctx)
+        rows = [cv for cv in rows
+                if visible.intersection({str(p) for p in (cv.participants or [])})]
+    return [{c.key: getattr(cv, c.key) for c in cv.__table__.columns} for cv in rows]
 
 
 @router.post("/conversations", status_code=201)
 async def create_conversation(data: ConversationIn,
                               db: AsyncSession = Depends(get_db),
                               user=Depends(get_current_user)):
-    c = await db.get(Company, data.company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
+    # 建会话 = 日常写操作（OPERATE）
+    await assert_company_capability(db, user.id, data.company_id,
+                                    Capability.OPERATE)
     cv = Conversation(**data.model_dump())
     db.add(cv)
     await db.commit()
@@ -64,7 +84,7 @@ async def create_conversation(data: ConversationIn,
 @router.get("/conversations/{cid}")
 async def get_conversation(cid: str, db: AsyncSession = Depends(get_db),
                            user=Depends(get_current_user)):
-    cv = await _conv_owned(db, user.id, cid)
+    cv = await _conv_owned(db, user, cid)
     d = {c.key: getattr(cv, c.key) for c in cv.__table__.columns}
     mq = await db.execute(select(Message).where(Message.conversation_id == cid)
                           .order_by(Message.created_at))

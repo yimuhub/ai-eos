@@ -1,6 +1,6 @@
 {
   "name": "ai-eos-desktop",
-  "version": "5.13.0",
+  "version": "5.14.0",
   "description": "AI-EOS 桌面客户端（Mac / Windows / Linux）— Electron 壳封装便携后端 + Web 前端",
   "main": "main.cjs",
   "author": "AI-EOS <dev@aieos.local>",

@@ -45,12 +45,21 @@ export const V = {
     (v) =>
       v.trim().length > n ? `${label}不能超过 ${n} 个字符（当前 ${v.trim().length}）` : null,
 
-  /** 邮箱：不做完美校验，只拦住明显的错（漏 @、带空格） */
+  /**
+   * 邮箱：不做完美校验，只拦住明显的错（漏 @、带空格、保留域名）。
+   * 保留域名必须在前端拦掉：后端 EmailStr 会以英文 422 拒绝 `.local`
+   * 这类地址，用户在中文界面里只会看到一串英文报错。
+   */
   email:
     (label = "邮箱"): Rule =>
     (v) => {
       if (isBlank(v)) return null; // 是否必填交给 required 规则
-      return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v.trim()) ? null : `${label}格式不正确`;
+      const t = v.trim();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(t)) return `${label}格式不正确`;
+      if (/\.(local|localhost|test|invalid|example)$/i.test(t)) {
+        return `${label}域名不可用（.local / .test 等是保留域名），请换成真实邮箱`;
+      }
+      return null;
     },
 
   /** http(s) 地址。留空视为"用默认值"，不算错 */

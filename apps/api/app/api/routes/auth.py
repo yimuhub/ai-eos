@@ -160,6 +160,23 @@ async def _clear_failures(key: str) -> None:
 _DUP_MSG = "该邮箱或用户名已被注册，请更换后重试"
 
 
+def validate_password_strength(password: str) -> str:
+    """注册与安装向导共用的密码强度规则。
+
+    抽成模块级函数是为了让 `/setup` 与 `/auth/register` 用**同一份**
+    规则：两处各写一遍迟早会漂移，而安装向导创建的是平台超管，
+    密码要求只应更严、不应更松。行为与旧的内联校验完全一致。
+    """
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"密码至少 {MIN_PASSWORD_LENGTH} 位")
+    if len(password) > MAX_PASSWORD_LENGTH:
+        raise ValueError(f"密码最多 {MAX_PASSWORD_LENGTH} 位")
+    # 只要求"字母 + 数字"，避免过度复杂的规则让用户写便利贴
+    if not any(c.isalpha() for c in password) or not any(c.isdigit() for c in password):
+        raise ValueError("密码需同时包含字母和数字")
+    return password
+
+
 class RegisterIn(BaseModel):
     email: EmailStr
     username: str
@@ -179,14 +196,7 @@ class RegisterIn(BaseModel):
     @field_validator("password")
     @classmethod
     def _check_password(cls, v: str) -> str:
-        if len(v) < MIN_PASSWORD_LENGTH:
-            raise ValueError(f"密码至少 {MIN_PASSWORD_LENGTH} 位")
-        if len(v) > MAX_PASSWORD_LENGTH:
-            raise ValueError(f"密码最多 {MAX_PASSWORD_LENGTH} 位")
-        # 只要求"字母 + 数字"，避免过度复杂的规则让用户写便利贴
-        if not any(c.isalpha() for c in v) or not any(c.isdigit() for c in v):
-            raise ValueError("密码需同时包含字母和数字")
-        return v
+        return validate_password_strength(v)
 
 
 class LoginIn(BaseModel):

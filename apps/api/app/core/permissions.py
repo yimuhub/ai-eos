@@ -22,25 +22,29 @@
 
 ## 诚实的边界
 
-**当前只有 OWNER 一种角色可达。** 系统还没有"成员"这一概念；
-引入多成员需要把全系统的归属判定统一改走角色解析（一次宽面改造），
-并配套邀请/移除成员的界面，属于产品决策而不是纯技术改动。
+P5 起 `resolve_role` 会真实读取三处事实源：`users.is_superadmin`、
+`companies.owner_id` / `company_members`、`department_members`。
+但**界面尚未提供成员管理入口**，因此除"所有者 + 超管"之外的三种角色
+（ADMIN / MEMBER / VIEWER）目前只能由直接写库或后续迭代产生；
+矩阵里它们是已声明的语义，端点在收到这些角色时会按矩阵正常放行。
 
-因此矩阵里 ADMIN / MEMBER / VIEWER 是**已声明的未来语义，不是当前功能**，
-请勿据此对外承诺。本模块的价值在于：结构与命名先立起来，
-将来加角色时只需让 `resolve_role` 多返回一种角色、`ROLE_MATRIX` 多一行，
-**不需要再动任何一个端点**。
+一次 `resolve_role` 最多 4 条查询（company / user / 成员 / 部门成员各一次），
+且 user 与 company 通常已被 `get_current_user`、`assert_company_owned` 取过，
+命中 Session identity map 后不再发 SQL——**不存在按成员数增长的 N+1**。
 """
 from __future__ import annotations
 
 from enum import Enum
 
 from fastapi import Depends, HTTPException, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
-from app.models.company import Company
+from app.models.company import Company, Department
+from app.models.membership import CompanyMember, DepartmentMember
+from app.models.user import User
 
 
 class Capability(str, Enum):
@@ -95,20 +99,103 @@ def role_has(role: Role | None, capability: Capability | str) -> bool:
     return cap in capabilities_of(role)
 
 
+# `company_members.role` → `Role`。刻意**不含** dept_head：部门负责人身份
+# 只存在于 department_members，混进公司角色会让"公司角色 × 部门角色"
+# 退化成单一维度（见 scope.build_ctx 的 head_dept_ids）。
+_MEMBER_ROLE_MAP: dict[str, Role] = {
+    "owner": Role.OWNER,
+    "company_admin": Role.ADMIN,
+    "member": Role.MEMBER,
+    "viewer": Role.VIEWER,
+}
+
+
+async def _company_member(db: AsyncSession, company_id: str,
+                          user_id: str) -> CompanyMember | None:
+    """该用户在该公司的成员行（最多一条，UNIQUE(company_id, user_id)）。"""
+    result = await db.execute(
+        select(CompanyMember)
+        .where(CompanyMember.company_id == company_id,
+               CompanyMember.user_id == user_id)
+        .limit(1))
+    return result.scalars().first()
+
+
+def _is_active_member(member: CompanyMember | None) -> bool:
+    return member is not None and (member.status or "").lower() == "active"
+
+
+async def _has_department_membership(db: AsyncSession, company_id: str,
+                                     user_id: str) -> bool:
+    """用户是否是该公司**任一部门**的成员。
+
+    子查询限定在该公司内：部门成员行本身不带 company_id，
+    不限定就会出现"在 A 公司有部门成员行 → 被 B 公司当成成员"的串号。
+    """
+    row = (await db.execute(
+        select(DepartmentMember.id)
+        .where(DepartmentMember.user_id == user_id,
+               DepartmentMember.department_id.in_(
+                   select(Department.id).where(Department.company_id == company_id)))
+        .limit(1))).first()
+    return row is not None
+
+
 async def resolve_role(db: AsyncSession, user_id: str,
                        company_id: str | None) -> Role | None:
     """解析用户在某公司的角色。返回 None 表示"这家公司与他无关"。
 
-    多成员协作尚未开放：将来在这里查成员表即可，端点与矩阵都不用改。
+    顺序（P5 契约，改顺序等于改权限，务必同步测试）：
+
+    1. 平台超管且在该公司**没有生效成员身份** → ADMIN（可进入任意公司，但不是所有者）
+    2. `companies.owner_id` 或 active 的 `company_members.role='owner'` → OWNER
+    3. active 成员：company_admin → ADMIN、member → MEMBER、viewer → VIEWER
+    4. 仅在部门成员表里出现过 → MEMBER（部门负责人身份不改变公司角色）
+    5. 其余 → None
+
+    每个请求都会调用这里，因此查询次数必须与"成员数量"无关：
+    company / user / 成员 / 部门成员各至多一次（前两者通常命中 identity map）。
+    "超管是否仍是成员"按 **active** 判定而不是"有没有行"：
+    否则一条 invited / suspended 的残留行会把超管锁在自己平台之外。
     """
-    if not company_id:
+    if not company_id or not user_id:
         return None
     company = await db.get(Company, company_id)
     if company is None:
         return None
+
+    member = await _company_member(db, company_id, user_id)
+    member_active = _is_active_member(member)
+
+    # 1) 超管：不是该公司生效成员时，按 ADMIN 处理（不能借此拿到所有权）
+    if not member_active and await _is_superadmin(db, user_id):
+        return Role.ADMIN
+
+    member_role = (member.role or "").lower() if member is not None else ""
+    # 2) 所有权：公司表是事实源，成员表里的 owner 是镜像
     if company.owner_id == user_id:
         return Role.OWNER
+    if member_active and member_role == "owner":
+        return Role.OWNER
+
+    # 3) 生效成员角色
+    if member_active:
+        mapped = _MEMBER_ROLE_MAP.get(member_role)
+        if mapped is not None:
+            return mapped
+
+    # 4) 只在部门成员表里：视为普通成员
+    if await _has_department_membership(db, company_id, user_id):
+        return Role.MEMBER
+
+    # 5) 与该公司无关
     return None
+
+
+async def _is_superadmin(db: AsyncSession, user_id: str) -> bool:
+    """取用户的超管标记（get_current_user 已加载时命中 identity map，不再发 SQL）。"""
+    user = await db.get(User, user_id)
+    return bool(user is not None and user.is_superadmin)
 
 
 async def ensure_capability(db: AsyncSession, user_id: str,

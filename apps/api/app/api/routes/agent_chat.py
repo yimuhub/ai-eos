@@ -21,6 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.core.logging_config import get_logger
+from app.core.permissions import Capability
+from app.core.scope import ensure_agent_access
 from app.db.base import Base
 from app.db.session import AsyncSessionLocal
 from app.models.agent import Agent
@@ -35,14 +37,32 @@ WEB_SEARCH_TOOL = {
     "type": "function",
     "function": {
         "name": "web_search",
-        "description": "Search the web for real-time information. Returns up to 10 results.",
+        "description": "联网搜索实时信息，返回标题、链接、摘要。"
+                       "涉及外部事实、天气、价格、新闻、政策等实时数据时必须先搜索。",
         "parameters": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query"},
+                "query": {"type": "string", "description": "搜索关键词"},
                 "max_results": {"type": "integer", "description": "Number of results (1-10)", "default": 5},
             },
             "required": ["query"],
+        },
+    },
+}
+
+WEB_FETCH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "web_fetch",
+        "description": "抓取网页正文纯文本。搜索结果只有摘要时，"
+                       "对权威来源（如 weather.com.cn / nmc.cn）取正文核对数字。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "http/https 地址"},
+                "max_chars": {"type": "integer", "default": 6000},
+            },
+            "required": ["url"],
         },
     },
 }
@@ -71,7 +91,18 @@ def _parse_text_tool_calls(content: str) -> list[dict]:
     return calls
 
 
-async def execute_skill_safe(db, fname, args):
+async def execute_skill_safe(db, fname, args, *, company_id: str | None = None,
+                             agent_id: str | None = None):
+    """执行一个工具调用。网络类工具统一走 app.tools.execute_tool。
+
+    execute_tool 里 web_fetch 会复用 browser_agent 的 SSRF 闸门并写审计日志；
+    这里把 company_id/agent_id 一并传下去，审计记录才带得上租户与 Agent。
+    """
+    from app.tools import TOOL_NAMES, execute_tool
+
+    if fname in TOOL_NAMES:
+        return await execute_tool(fname, args if isinstance(args, dict) else {},
+                                  company_id=company_id, agent_id=agent_id)
     from app.skill_system import execute_skill
     res = await execute_skill(fname, args)
     return res.get("result") or res
@@ -135,14 +166,17 @@ class ChatIn(BaseModel):
     message: str
 
 
-async def _owned(db: AsyncSession, user_id: str, agent_id: str) -> Agent:
-    from app.models.company import Company
+async def _visible_agent(db: AsyncSession, user, agent_id: str) -> Agent:
+    """对话入口的统一门禁：该 Agent 对当前用户可见（行级）才能聊。
+
+    与列表共用 `agent_read_scope` 的同一套条件（见 core/scope.py），因此
+    "列表里看不到"与"打不开详情/发不了消息"天然一致，不会出现
+    "隐藏但可直连"的经典漏洞。跨部门私有 Agent → 404（不泄露存在性）。
+    """
     a = await db.get(Agent, agent_id)
     if not a:
         raise HTTPException(404, "Agent not found")
-    c = await db.get(Company, a.company_id)
-    if not c or c.owner_id != user_id:
-        raise HTTPException(404, "Agent not found")
+    await ensure_agent_access(db, user, a, Capability.VIEW)
     return a
 
 
@@ -190,10 +224,13 @@ async def _build_qa_messages(db: AsyncSession, a: Agent, text: str) -> list[dict
     from app.memory_engine import recall
 
     messages = []
+    from datetime import datetime
+    now = datetime.now()
     base_prompt = (
         f"你是「{a.name}」，公司的一名数字员工。"
         f"职责：{a.role or '综合事务'}。"
-        "现在老板正在和你单独对话。回答要：\n"
+        f"现在老板正在和你单独对话（当前时间：{now:%Y-%m-%d %H:%M}，"
+        f"星期{'一二三四五六日'[now.weekday()]}）。回答要：\n"
         "1. 基于你的记忆和知识库里的真实信息；不知道就说不知道，不要编造\n"
         "2. 如果被问到经营数据而你记得相关事实就汇报，没有数据就说明需要核实\n"
         "3. 简洁、口语化，像向老板汇报一样")
@@ -239,13 +276,19 @@ async def _build_qa_messages(db: AsyncSession, a: Agent, text: str) -> list[dict
         '"content":"完整内容，ppt用##分页"}\n'
         "[/GENERATE_DOC]\n"
         "type 对应：word=Word, ppt=PPT, excel=Excel, md=Markdown。"})
+    # 工具使用纪律：联网能力要在"该查的时候真的去查"，而不是凭记忆编或直接说不知道
+    from app.tools import tool_system_prompt
+    messages.append({"role": "system", "content": tool_system_prompt()})
     # 实时信息强制搜索规则
     realtime_kw = any(k in text for k in ("今天","现在","最新","目前","当前","实时","汇率","天气","温度","新闻","趋势","价格","多少度","多少钱"))
     if realtime_kw:
         messages.append({"role": "system", "content":
             "【强制规则】用户的问题涉及实时/最新信息，你不知道答案。"
-            "必须调用 web_search 工具获取真实数据，然后基于搜索结果总结回答。"
-            "严禁凭记忆或猜测回答，严禁给出未经验证的数字。"})
+            "先调用 web_search 获取真实数据；摘要里没有具体数字/温度时，"
+            "必须用 web_fetch 抓取结果中最权威的链接正文"
+            "（天气用 weather.com.cn / nmc.cn），再基于正文作答。"
+            "最多搜索 2 次，不要反复换关键词搜索；"
+            "搜索/抓取失败要如实说明，严禁凭记忆或猜测给出数字。"})
     # 当前用户消息（必须显式加入）
     messages.append({"role": "user", "content": text})
     return messages
@@ -346,7 +389,7 @@ async def _materialize_docs(db: AsyncSession, a: Agent, raw_reply: str):
 async def chat_history(aid: str, limit: int = Query(50, ge=1, le=200),
                        db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
-    a = await _owned(db, user.id, aid)
+    a = await _visible_agent(db, user, aid)
     rows = (await db.execute(select(AgentChatMessage).where(
         AgentChatMessage.agent_id == str(a.id)).order_by(
         AgentChatMessage.created_at.desc()).limit(limit))).scalars().all()
@@ -363,7 +406,7 @@ async def boss_chat(aid: str, data: ChatIn,
     from app.model_gateway import ModelGateway
     from app.memory_engine import MemoryType, remember
 
-    a = await _owned(db, user.id, aid)
+    a = await _visible_agent(db, user, aid)
     text = data.message.strip()
     if not text:
         raise HTTPException(400, "empty message")
@@ -392,7 +435,7 @@ async def boss_chat(aid: str, data: ChatIn,
     _usage_scope = usage_context(agent=a, scenario="CHAT", user_id=str(user.id))
     _usage_scope.__enter__()
     model_ids = await _agent_model_ids(db, a)
-    llm = await gw.chat_with_agent_models(model_ids, messages, tools=[WEB_SEARCH_TOOL, *COMPUTER_TOOLS])
+    llm = await gw.chat_with_agent_models(model_ids, messages, tools=_CHAT_TOOLS)
     # 处理 tool_calls：调用 web_search 后回填消息再循环
     tool_calls = llm.get("tool_calls") or []
     final_reply = (llm.get("content") or "").strip()
@@ -409,6 +452,9 @@ async def boss_chat(aid: str, data: ChatIn,
     if tool_calls:
         from app.skill_system import execute_skill
 
+        # 与流式入口同理：web_fetch 用独立会话写审计日志，先把本会话的
+        # 待提交写入（含刚产生的用量记录）落盘，避免 SQLite 写锁互等。
+        await db.commit()
         tool_results = []
         search_summary = []
         for tc in tool_calls:
@@ -422,7 +468,9 @@ async def boss_chat(aid: str, data: ChatIn,
                     cap = fname.replace("computer_", "")
                     res = await _computer_action(db, cap, args, user.id, a.company_id)
                 else:
-                    res = await execute_skill(fname, args)
+                    res = await execute_skill_safe(
+                        db, fname, args, company_id=str(a.company_id),
+                        agent_id=str(a.id))
                 result_data = res.get("result") or res
                 # 收集 computer 操作，供前端展示"我做了什么"
                 if is_computer:
@@ -446,7 +494,7 @@ async def boss_chat(aid: str, data: ChatIn,
                          "tool_calls": tool_calls})
         for tr in tool_results:
             messages.append(tr)
-        second = await gw.chat_with_agent_models(model_ids, messages, tools=[WEB_SEARCH_TOOL, *COMPUTER_TOOLS])
+        second = await gw.chat_with_agent_models(model_ids, messages, tools=_CHAT_TOOLS)
         second_reply = (second.get("content") or "").strip()
         # second 可能又输出文本形式 tool_call 或空——循环处理（最多3轮）
         rounds = 0
@@ -458,7 +506,9 @@ async def boss_chat(aid: str, data: ChatIn,
                 for tc in s_struct:
                     try:
                         args2 = json.loads((tc.get("function") or {}).get("arguments", "{}"))
-                        res2 = await execute_skill_safe(db, tc["function"]["name"], args2)
+                        res2 = await execute_skill_safe(
+                            db, tc["function"]["name"], args2,
+                            company_id=str(a.company_id), agent_id=str(a.id))
                         messages.append({"role": "assistant", "content": "", "tool_calls": [tc]})
                         messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                          "content": str(res2)})
@@ -471,7 +521,7 @@ async def boss_chat(aid: str, data: ChatIn,
                         messages.append({"role": "assistant", "content": "", "tool_calls": [tc]})
                         messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                          "content": f"error: {tool_err}"})
-                second = await gw.chat_with_agent_models(model_ids, messages, tools=[WEB_SEARCH_TOOL, *COMPUTER_TOOLS])
+                second = await gw.chat_with_agent_models(model_ids, messages, tools=_CHAT_TOOLS)
                 second_reply = (second.get("content") or "").strip()
                 rounds += 1
                 continue
@@ -481,7 +531,9 @@ async def boss_chat(aid: str, data: ChatIn,
                 for tc in s_calls:
                     try:
                         args2 = json.loads(tc["function"]["arguments"])
-                        res2 = await execute_skill_safe(db, tc["function"]["name"], args2)
+                        res2 = await execute_skill_safe(
+                            db, tc["function"]["name"], args2,
+                            company_id=str(a.company_id), agent_id=str(a.id))
                         messages.append({"role": "user",
                                          "content": f"[搜索结果] {str(res2)[:1500]}"})
                     except Exception as tool_err:
@@ -542,7 +594,7 @@ async def boss_chat(aid: str, data: ChatIn,
 
 # ---------------- 流式聊天（SSE） ----------------
 
-_CHAT_TOOLS = [WEB_SEARCH_TOOL, *COMPUTER_TOOLS]
+_CHAT_TOOLS = [WEB_SEARCH_TOOL, WEB_FETCH_TOOL, *COMPUTER_TOOLS]
 
 
 class ChatStreamIn(BaseModel):
@@ -615,6 +667,8 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str):
 
     async with AsyncSessionLocal() as db:
         try:
+            # 鉴权已在 handler 里做完（_visible_agent → 未通过时直接 404）。
+            # 这里只处理"生成过程中被删"的竞态，属于数据竞态而不是权限判定。
             a = await db.get(Agent, agent_id)
             if a is None:
                 yield _sse({"type": "error", "message": "员工不存在或已离职"})
@@ -650,9 +704,14 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str):
                         elif ev.get("type") == "done":
                             tool_calls = ev.get("tool_calls")
 
-                    if not tool_calls or rounds >= 2:
+                    # 搜索 → 抓正文 → 作答是三步，留 3 轮工具预算
+                    if not tool_calls or rounds >= 3:
                         break
                     rounds += 1
+                    # web_fetch 走独立会话写 browser_action_logs；SQLite 只允许
+                    # 一个写事务，先把本会话待提交的用量/消息落盘，否则工具侧
+                    # 提交会一直等到 busy_timeout 后报 "database is locked"。
+                    await db.commit()
                     yield _sse({"type": "status", "text": "正在调用工具…"})
                     messages.append({"role": "assistant", "content": "",
                                      "tool_calls": tool_calls})
@@ -678,7 +737,9 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str):
                                                 "command": targs.get("command", ""),
                                                 "result": res})
                             else:
-                                res = await execute_skill_safe(db, fname, targs)
+                                res = await execute_skill_safe(
+                                    db, fname, targs, company_id=company_id,
+                                    agent_id=agent_id)
                             body = str((res.get("result")
                                         if isinstance(res, dict) else None) or res)
                         except Exception as tool_err:
@@ -690,6 +751,20 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str):
                                          "tool_call_id": tc.get("id"),
                                          "content": body})
                     tool_calls = None
+
+                # 工具轮次用尽仍未吐正文：去掉 tools 再问一次，逼模型基于
+                # 已拿到的搜索结果作答。否则前端只会收到一堆 status 和空回复。
+                if not flt.raw.strip():
+                    await db.commit()
+                    yield _sse({"type": "status", "text": "正在整理搜索结果…"})
+                    messages.append({"role": "system", "content":
+                        "现在必须直接回答老板的问题：基于上面的工具结果作答；"
+                        "数据缺失就如实说明缺哪一项，不要再调用工具。"})
+                    async for ev in gw.stream_with_agent_models(model_ids, messages):
+                        if ev.get("type") == "delta":
+                            piece = flt.feed(ev["text"])
+                            if piece:
+                                yield _sse({"type": "delta", "text": piece})
 
             tail = flt.flush()
             if tail:
@@ -723,7 +798,10 @@ async def boss_chat_stream(aid: str, data: ChatStreamIn,
     * ``done``   结束，带完整 reply / file / actions
     * ``error``  失败原因（本轮正文不会落库）
     """
-    a = await _owned(db, user.id, aid)
+    # 可见性校验必须在返回 StreamingResponse **之前**：一旦开流，
+    # 响应码已经发出，越权只能被降级成 SSE 里的 error 文本——那等于把
+    # 404 吞掉（前端会当成"模型报错"而不是"你没有这个员工"）。
+    a = await _visible_agent(db, user, aid)
     text = data.message.strip()
     if not text:
         raise HTTPException(400, "empty message")
@@ -768,7 +846,7 @@ async def chat_generate_doc(aid: str, data: GenDocIn,
     from app.doc_generator import generate_document
     from app.model_gateway import ModelGateway
 
-    a = await _owned(db, user.id, aid)
+    a = await _visible_agent(db, user, aid)
 
     type_names = {"word": "Word 文档", "excel": "Excel 表格",
                   "ppt": "PPT 演示文稿", "md": "Markdown 文档"}

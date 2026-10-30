@@ -19,10 +19,13 @@ import uuid
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import assert_company_owned, get_current_user, get_db
+from app.api.deps import (assert_company_capability, assert_company_owned,
+                          get_current_user, get_db)
+from app.core.permissions import Capability
+from app.core.scope import agent_read_scope, build_ctx
 from app.models.user import User
 from app.version import __version__
 
@@ -85,14 +88,21 @@ def _text_result(rpc_id, text: str, err: str | None = None):
     return {"jsonrpc": "2.0", "id": rpc_id, "result": payload}
 
 
-async def _user_company(db: AsyncSession, user: User, company_id: str | None):
+async def _user_company(db: AsyncSession, user: User, company_id: str | None,
+                        capability: Capability = Capability.VIEW):
     """MCP 请求默认用用户首家公司；也可通过 X-AI-EOS-Company 头指定。"""
     from app.models.company import Company
+    from app.models.membership import CompanyMember
+    from app.models.user import User as UserRow
     if company_id:
-        await assert_company_owned(db, user.id, company_id)
+        await assert_company_capability(db, user.id, company_id, capability)
         return company_id
-    rows = (await db.execute(
-        select(Company).where(Company.owner_id == user.id).limit(1)
+    owned = select(Company.id).join(
+        UserRow, UserRow.id == Company.owner_id).where(UserRow.id == user.id)
+    member = select(CompanyMember.company_id).where(
+        CompanyMember.user_id == user.id, CompanyMember.status == "active")
+    rows = (await db.execute(select(Company).where(
+        or_(Company.id.in_(owned), Company.id.in_(member))).limit(1)
     )).scalars().all()
     return rows[0].id if rows else None
 
@@ -101,6 +111,8 @@ async def _execute_tool(db: AsyncSession, user: User, company_id: str,
                        name: str, args: dict) -> tuple[str, str | None]:
     """执行 MCP tool。返回 (text, error)。"""
     try:
+        # 行级范围与 REST 端点同源：非 owner/admin 只见自己创建的任务/可见的 Agent
+        ctx = await build_ctx(db, user, company_id)
         if name == "aieos.create_task":
             from app.models.task import Task
             from app.models.agent import Agent
@@ -126,6 +138,8 @@ async def _execute_tool(db: AsyncSession, user: User, company_id: str,
         if name == "aieos.list_tasks":
             from app.models.task import Task, TaskStatus
             q = select(Task).where(Task.company_id == company_id)
+            if not ctx.sees_all_agents:
+                q = q.where(Task.created_by == ctx.user_id)
             if args.get("status"):
                 q = q.where(Task.status == TaskStatus(args["status"]))
             rows = (await db.execute(
@@ -178,7 +192,7 @@ async def _execute_tool(db: AsyncSession, user: User, company_id: str,
         if name == "aieos.list_agents":
             from app.models.agent import Agent
             rows = (await db.execute(
-                select(Agent).where(Agent.company_id == company_id)
+                select(Agent).where(agent_read_scope(ctx))
                 .order_by(Agent.created_at.asc()))).scalars().all()
             lines = [f"- {a.name}（{a.role or '员工'}，{a.status.value}）"
                      for a in rows]
@@ -221,7 +235,11 @@ async def mcp_rpc(data: McpCallIn, request: Request,
         name = params.get("name", "")
         args = params.get("arguments") or {}
         cid = request.headers.get("X-AI-EOS-Company")
-        cid = await _user_company(db, user, cid)
+        # 建任务/跑工作流 = 写（OPERATE）；查询类只需 VIEW
+        need = (Capability.OPERATE if name in ("aieos.create_task",
+                                              "aieos.run_workflow")
+                else Capability.VIEW)
+        cid = await _user_company(db, user, cid, need)
         if not cid:
             return _text_result(rpc_id, "还没有公司，无法执行",
                                 "no company")

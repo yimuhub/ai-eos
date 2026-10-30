@@ -9,13 +9,14 @@ import mimetypes
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_company_owned, get_current_user, get_db
 # Asset.path 存的是相对 storage 根的路径（如 artifacts/ab12_x.md），
 # 直接 Path() 会按进程 CWD 解析，换目录/换机器全部 404。
 from app.api.routes.assets import _resolve_asset_path
+from app.core.scope import agent_read_scope, build_ctx
 from app.models.agent import Agent
 from app.models.asset import Asset
 from app.models.company import Company
@@ -26,10 +27,20 @@ router = APIRouter(prefix="/delivery", tags=["delivery"])
 
 
 async def _company_of(db: AsyncSession, user_id: str, company_id: str) -> Company:
-    c = await db.get(Company, company_id)
-    if not c or c.owner_id != user_id:
-        raise HTTPException(404, "Company not found")
-    return c
+    """交付中心的所有列表都以"能进这家公司"为前置条件（VIEW）。"""
+    return await assert_company_owned(db, user_id, company_id)
+
+
+def _asset_scope(ctx):
+    """成果可见条件：owner/admin 全公司；其余只看自己上传的
+    ∪ 自己可见 Agent 的产出（与 /assets 列表同口径）。"""
+    base = Asset.company_id == ctx.company_id
+    if ctx.sees_all_agents:
+        return base
+    visible_agents = select(Agent.id).where(agent_read_scope(ctx))
+    return and_(base, or_(
+        and_(Asset.creator_type == "user", Asset.created_by == ctx.user_id),
+        Asset.agent_id.in_(visible_agents)))
 
 
 def _file_info(a: Asset) -> dict:
@@ -52,11 +63,11 @@ async def by_agent(company_id: str = Query(...),
                    db: AsyncSession = Depends(get_db),
                    user: User = Depends(get_current_user)):
     """按 Agent 文件夹分组：每个 Agent 一个"文件夹"，含其全部产出。"""
-    await _company_of(db, user.id, company_id)
+    ctx = await build_ctx(db, user, company_id)
     agents = (await db.execute(select(Agent).where(
-        Agent.company_id == company_id))).scalars().all()
+        agent_read_scope(ctx)))).scalars().all()
     assets = (await db.execute(select(Asset).where(
-        Asset.company_id == company_id,
+        _asset_scope(ctx),
         Asset.agent_id.is_not(None)).order_by(Asset.created_at.desc())
     )).scalars().all()
 
@@ -93,11 +104,11 @@ async def by_project(company_id: str = Query(...),
                      db: AsyncSession = Depends(get_db),
                      user: User = Depends(get_current_user)):
     """按项目分组：项目 → 任务 → 产出文件。含未关联项目的散件。"""
-    await _company_of(db, user.id, company_id)
+    ctx = await build_ctx(db, user, company_id)
     projects = (await db.execute(select(Project).where(
         Project.company_id == company_id))).scalars().all()
     assets = (await db.execute(select(Asset).where(
-        Asset.company_id == company_id).order_by(Asset.created_at.desc())
+        _asset_scope(ctx)).order_by(Asset.created_at.desc())
     )).scalars().all()
 
     groups: list[dict] = []
@@ -123,8 +134,10 @@ async def download(asset_id: str, db: AsyncSession = Depends(get_db),
     a = await db.get(Asset, asset_id)
     if not a:
         raise HTTPException(404)
-    c = await db.get(Company, a.company_id)
-    if not c or c.owner_id != user.id:
+    ctx = await build_ctx(db, user, a.company_id)
+    found = (await db.execute(select(Asset.id).where(
+        Asset.id == asset_id, _asset_scope(ctx)))).first()
+    if found is None:
         raise HTTPException(404)
     p = _resolve_asset_path(a.path or "")
     if not p.is_file():
@@ -153,11 +166,11 @@ async def by_task(company_id: str = Query(...),
                   user: User = Depends(get_current_user)):
     """按任务分组：任务 → 产出文件。"""
     from app.models.task import Task
-    await _company_of(db, user.id, company_id)
+    ctx = await build_ctx(db, user, company_id)
     tasks = (await db.execute(select(Task).where(
         Task.company_id == company_id))).scalars().all()
     assets = (await db.execute(select(Asset).where(
-        Asset.company_id == company_id,
+        _asset_scope(ctx),
         Asset.task_id.is_not(None)).order_by(Asset.created_at.desc())
     )).scalars().all()
 
@@ -180,11 +193,11 @@ async def by_scope(company_id: str = Query(...),
                    db: AsyncSession = Depends(get_db),
                    user: User = Depends(get_current_user)):
     """精确查某项目或某任务的交付文件（不含其他）。"""
-    await _company_of(db, user.id, company_id)
+    ctx = await build_ctx(db, user, company_id)
     if scope not in ("project", "task"):
         raise HTTPException(400, "scope must be project or task")
     col = Asset.project_id if scope == "project" else Asset.task_id
     assets = (await db.execute(select(Asset).where(
-        Asset.company_id == company_id,
+        _asset_scope(ctx),
         col == scope_id).order_by(Asset.created_at.desc()))).scalars().all()
     return {"files": [_file_info(a) for a in assets]}

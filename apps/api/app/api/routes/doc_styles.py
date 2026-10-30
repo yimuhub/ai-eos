@@ -4,10 +4,10 @@ from pydantic import BaseModel
 from sqlalchemy import Column, String, Text, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_company_capability, get_current_user, get_db
+from app.core.permissions import Capability
 from app.db.base import Base
 from app.models.agent import Agent
-from app.models.company import Company
 from app.models.user import User
 
 router = APIRouter(prefix="/doc-styles", tags=["doc-styles"])
@@ -37,18 +37,17 @@ class StyleIn(BaseModel):
     sample: str | None = None
 
 
-async def _owned(db, user_id, company_id):
-    c = await db.get(Company, company_id)
-    if not c or c.owner_id != user_id:
-        raise HTTPException(404, "company not found")
-    return c
+async def _owned_company(db, user_id, company_id,
+                 capability: Capability = Capability.VIEW):
+    """公司门禁：走 resolve_role，成员/管理员不再是"陌生人"。越权 404。"""
+    return await assert_company_capability(db, user_id, company_id, capability)
 
 
 @router.get("")
 async def list_styles(company_id: str = Query(...),
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id)
     rows = (await db.execute(select(DocStyle).where(
         DocStyle.company_id == company_id).order_by(DocStyle.created_at))).scalars().all()
     return [{"id": r.id, "name": r.name, "hint": r.hint,
@@ -61,7 +60,7 @@ async def create_style(data: StyleIn,
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
     import uuid
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id, Capability.OPERATE)
     row = DocStyle(id=uuid.uuid4().hex[:32], company_id=company_id,
                    name=data.name, hint=data.hint, sample=data.sample)
     db.add(row)
@@ -74,7 +73,7 @@ async def update_style(data: StyleIn, style_id: str,
                        company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id, Capability.OPERATE)
     row = await db.get(DocStyle, style_id)
     if not row or row.company_id != company_id:
         raise HTTPException(404)
@@ -87,7 +86,9 @@ async def update_style(data: StyleIn, style_id: str,
 async def delete_style(style_id: str, company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
-    await _owned(db, user.id, company_id)
+    # 删除风格只做 MANAGE：这是可逆的内容级删除（绑定会被一并解除），
+    # 不按 DESTRUCTIVE 处理，避免把公司管理员排除在日常维护之外。
+    await _owned_company(db, user.id, company_id, Capability.MANAGE)
     row = await db.get(DocStyle, style_id)
     if not row or row.company_id != company_id:
         raise HTTPException(404)
@@ -112,7 +113,7 @@ async def assign(data: BindIn, company_id: str = Query(...),
                  db: AsyncSession = Depends(get_db),
                  user: User = Depends(get_current_user)):
     """把风格批量分配给 Agent；style_id=None 解除绑定。"""
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id, Capability.OPERATE)
     if data.style_id:
         row = await db.get(DocStyle, data.style_id)
         if not row or row.company_id != company_id:
@@ -136,7 +137,7 @@ async def upload_sample(company_id: str = Query(...),
     """上传示例附件 → 自动转 Markdown 作为风格示例。"""
     from app.doc_convert import extract_to_md
 
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id)
     raw = await file.read()
     md, ok = extract_to_md(file.filename or "sample", raw)
     if not ok:

@@ -34,10 +34,11 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.scope import build_ctx
 from app.db.session import get_db
 from app.models.agent import Agent
 from app.models.company import Company
@@ -89,15 +90,19 @@ async def overview(
     user=Depends(get_current_user),
 ):
     """公司维度的质量度量总览（默认最近 30 天）。"""
+    # 读端点：有角色即可；行级上非 owner/admin 只看自己创建的任务与自己的调用
+    ctx = await build_ctx(db, user, company_id)
     company = await db.get(Company, company_id)
-    if not company or company.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
 
     cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
 
+    task_where = [Task.company_id == company_id]
+    if not ctx.sees_all_agents:
+        task_where.append(Task.created_by == ctx.user_id)
+
     # ---------------- 任务 ----------------
     task_rows = list((await db.execute(
-        select(Task).where(Task.company_id == company_id)
+        select(Task).where(*task_where)
         .order_by(Task.created_at.desc()).limit(MAX_SAMPLE))).scalars())
     tasks_in_window = [
         t for t in task_rows
@@ -110,7 +115,7 @@ async def overview(
     # ---------------- 执行记录 ----------------
     exec_rows = list((await db.execute(
         select(AgentExecution).join(Task, Task.id == AgentExecution.task_id)
-        .where(Task.company_id == company_id)
+        .where(*task_where)
         .order_by(AgentExecution.created_at.desc()).limit(MAX_SAMPLE))).scalars())
     execs_in_window = [
         e for e in exec_rows
@@ -163,8 +168,14 @@ async def overview(
         bucket["completed" if e.status == "completed" else "failed"] += 1
 
     # ---------------- 模型调用 ----------------
+    usage_where = [TokenUsage.company_id == company_id]
+    if not ctx.sees_all_agents:
+        branches = [TokenUsage.user_id == ctx.user_id]
+        if ctx.head_dept_ids:
+            branches.append(TokenUsage.department_id.in_(ctx.head_dept_ids))
+        usage_where.append(or_(*branches))
     usage_rows = list((await db.execute(
-        select(TokenUsage).where(TokenUsage.company_id == company_id)
+        select(TokenUsage).where(*usage_where)
         .order_by(TokenUsage.created_at.desc()).limit(MAX_SAMPLE))).scalars())
     usage_in_window = [
         u for u in usage_rows

@@ -1,0 +1,38 @@
+{
+  "id": "marketing",
+  "name": "业务群聊",
+  "emoji": "📣",
+  "hint": "营销、内容、投放、增长相关的事，丢进来让他们一起出主意",
+  "agents": [
+    {
+      "name": "营销总监",
+      "role": "营销策略 / 预算分配 / 跨渠道统筹",
+      "expert_slug": "chief-marketing-officer",
+      "duties": "判断营销主线与优先级，分配预算和人力，对最终增长结果负责"
+    },
+    {
+      "name": "增长黑客",
+      "role": "增长实验 / 漏斗优化 / 低成本获客",
+      "expert_slug": "marketing-growth-hacker",
+      "duties": "设计可验证的增长实验，盯漏斗各环节转化，用最小成本拿到最大增量"
+    },
+    {
+      "name": "内容策划",
+      "role": "选题 / 文案 / 内容矩阵",
+      "expert_slug": "marketing-content-creator",
+      "duties": "把业务目标翻译成选题与内容，产出可直接发布的多平台文案"
+    },
+    {
+      "name": "SEO 专家",
+      "role": "搜索增长 / 关键词 / 内容结构",
+      "expert_slug": "marketing-seo-specialist",
+      "duties": "关键词与搜索意图分析，优化页面结构与内容，争取自然流量"
+    },
+    {
+      "name": "小红书运营",
+      "role": "社媒运营 / 种草 / 私域承接",
+      "expert_slug": "marketing-xiaohongshu-operator",
+      "duties": "小红书账号定位、笔记选题与投放节奏，把流量承接到私域"
+    }
+  ]
+}

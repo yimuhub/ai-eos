@@ -30,16 +30,26 @@ async def get_current_user(
 
 async def assert_company_owned(db: AsyncSession, user_id: str,
                                company_id: str) -> Company:
-    """校验公司归属；不属于该用户则 404（不泄露资源是否存在）。
+    """校验调用者与该公司的关系；无关则 404（不泄露资源是否存在）。
 
     改造新增：此前多个路由各自手写 `_owned`，语义略有出入，
     且部分写操作（如训练撤销）完全没有归属校验——知道 id 就能操作他人数据。
     统一到一个实现，新增端点直接复用，避免再次遗漏。
+
+    P5：内部改走 `resolve_role`，不再直接比 `owner_id`——多成员与平台超管
+    因此自动生效。**非成员仍然 404**（租户隔离不因改造而放宽）；
+    空 company_id 仍是 400（保持历史契约：调用方 bug 与越权要区分）。
     """
     if not company_id:
         raise HTTPException(400, "company_id is required")
     company = await db.get(Company, company_id)
-    if not company or company.owner_id != user_id:
+    if not company:
+        raise HTTPException(404, "Company not found")
+    # 延迟导入：permissions 在模块级导入本模块的 get_current_user，
+    # 顶层互相 import 会形成环。
+    from app.core.permissions import resolve_role
+
+    if await resolve_role(db, user_id, company_id) is None:
         raise HTTPException(404, "Company not found")
     return company
 
@@ -54,7 +64,31 @@ async def is_company_owned(db: AsyncSession, user_id: str,
     if not company_id:
         return False
     company = await db.get(Company, company_id)
-    return bool(company) and company.owner_id == user_id
+    if not company:
+        return False
+    from app.core.permissions import resolve_role
+
+    return await resolve_role(db, user_id, company_id) is not None
+
+
+async def assert_company_capability(db: AsyncSession, user_id: str,
+                                    company_id: str,
+                                    capability) -> Company:
+    """校验调用者在该公司具备某项能力；不通过统一 404。返回公司行。
+
+    与 `assert_company_owned` 的区别只在"多重"：归属只要求有角色，
+    本函数还要求该角色在 `ROLE_MATRIX` 里具备 VIEW/OPERATE/MANAGE/... 。
+    写操作应走这里，读操作 `assert_company_owned` 已覆盖（所有角色都有 VIEW）。
+    """
+    if not company_id:
+        raise HTTPException(400, "company_id is required")
+    company = await db.get(Company, company_id)
+    if not company:
+        raise HTTPException(404, "Company not found")
+    from app.core.permissions import ensure_capability
+
+    await ensure_capability(db, user_id, company_id, capability)
+    return company
 
 
 async def assert_kb_doc_owned(db: AsyncSession, user_id: str, doc_id: str):

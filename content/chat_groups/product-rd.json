@@ -1,0 +1,38 @@
+{
+  "id": "product-rd",
+  "name": "产品研发群聊",
+  "emoji": "🛠",
+  "hint": "需求评审、方案取舍、排期与代码质量，产品和研发在这里对齐",
+  "agents": [
+    {
+      "name": "产品负责人",
+      "role": "产品方向 / 需求优先级 / 验收口径",
+      "expert_slug": "chief-product-officer",
+      "duties": "决定做什么不做什么，拆解需求优先级，定义验收标准"
+    },
+    {
+      "name": "UI 设计师",
+      "role": "交互 / 视觉 / 设计规范",
+      "expert_slug": "design-ui-designer",
+      "duties": "把需求变成可实现的界面方案，维护设计规范与组件一致性"
+    },
+    {
+      "name": "前端工程师",
+      "role": "Web 前端 / 交互实现 / 性能",
+      "expert_slug": "engineering-frontend-developer",
+      "duties": "实现界面与交互，保证加载性能、兼容性和可维护性"
+    },
+    {
+      "name": "后端架构师",
+      "role": "服务端架构 / 数据模型 / 接口",
+      "expert_slug": "engineering-backend-architect",
+      "duties": "设计服务端架构与数据模型，定义接口契约，评估扩展与风险"
+    },
+    {
+      "name": "代码评审",
+      "role": "代码质量 / 风险把关 / 重构建议",
+      "expert_slug": "engineering-code-reviewer",
+      "duties": "评审实现方案与代码，指出正确性、安全和可维护性问题"
+    }
+  ]
+}

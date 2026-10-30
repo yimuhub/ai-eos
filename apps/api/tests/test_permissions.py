@@ -148,7 +148,8 @@ def test_guard_scanner_actually_detects_violations(tmp_path):
 #
 # 判定标准：端点从 Query 或 Pydantic body 里取 company_id（调用者可自由指定），
 # 且函数体内没有任何归属校验痕迹。痕迹词表复用删除守卫那一套，另外补上本次
-# 读端点收口实际用到的 assert_company_owned / resolve_role。
+# 读端点收口实际用到的 assert_company_owned / resolve_role，以及 P5 收口后
+# 路由改用的 build_ctx / assert_company_capability / ensure_agent_access。
 #
 # 这是"基线登记表"：第一天必然是红的（本次并行修复只覆盖了最严重的几处），
 # 所以已知违规先固化进 _READ_DEBT_ALLOWLIST，测试只拦"新增的、没登记的"越权读——
@@ -168,6 +169,13 @@ READ_GUARD_MARKERS = (
     "assert_agent_owned",     # 按 agent_id 反查公司
     "ensure_capability",      # 统一权限层
     "require_capability",
+    # P5 收口后的新写法：build_ctx 在 resolve_role 拿到 None（与该公司的
+    # 任何角色都无关）时直接 404，是完整的租户门禁，不是"只查了个公司名"。
+    "build_ctx(",
+    # assert_company_owned 的能力版：公司存在 + 角色具备 VIEW/OPERATE/...
+    "assert_company_capability(",
+    # 按 Agent 反查其公司，再叠加角色与行级范围，不通过统一 404
+    "ensure_agent_access(",
     "selectable_company",     # browser-agent 的 _assert_selectable_company
     "_owned_",                # _owned_company / _owned_department ...
     "owner_id",               # 就地比较归属
@@ -371,7 +379,8 @@ def test_every_company_id_endpoint_has_an_ownership_guard():
     assert not new, (
         f"以下端点从 Query/body 取了 company_id 却没有任何归属校验，且不在债务登记表里"
         f"——这是新增的越权读，禁止直接合并。请就地补 assert_company_owned / "
-        f"ensure_capability 或 _owned_* 校验，而不是把它加进 allowlist：\n  "
+        f"assert_company_capability / build_ctx 或 _owned_* 校验，"
+        f"而不是把它加进 allowlist：\n  "
         + "\n  ".join(sorted(new))
     )
 

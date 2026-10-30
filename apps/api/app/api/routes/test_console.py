@@ -127,11 +127,16 @@ async def test_console_meta(user: User = Depends(get_current_user),
     """返回功能清单。生产环境关闭或非授权角色时返回 404（对普通用户隐藏存在性）。"""
     if not _is_enabled():
         raise HTTPException(404, "Not Found")
-    # 仅公司 owner（开发/test 角色）可见
+    # 仅"公司成员"（开发/test 角色）可见：owner ∪ active 成员行
     from sqlalchemy import select
     from app.models.company import Company
+    from app.models.membership import CompanyMember
     owned = (await db.execute(
-        select(Company.id).where(Company.owner_id == user.id))).scalars().all()
+        select(Company.id).join(
+            User, User.id == Company.owner_id).where(User.id == user.id)
+        .union(select(CompanyMember.company_id).where(
+            CompanyMember.user_id == user.id,
+            CompanyMember.status == "active")))).scalars().all()
     if not owned:
         raise HTTPException(404, "Not Found")
 

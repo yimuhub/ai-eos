@@ -5,15 +5,50 @@ import json
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import assert_company_owned, get_current_user
+from app.api.deps import get_current_user
+from app.core.scope import build_ctx
 from app.db.session import get_db
+from app.models.agent import Agent
 from app.models.company import Company
 from app.models.event import EventLog
+from app.models.membership import CompanyMember, DepartmentMember
+from app.models.user import User
 
 router = APIRouter(prefix="/events", tags=["events"])
+
+
+def _accessible_company_ids(user_id: str):
+    """调用者可访问的公司：owner 事实源 ∪ active 成员行。"""
+    owned = select(Company.id).join(
+        User, User.id == Company.owner_id).where(User.id == user_id)
+    member = select(CompanyMember.company_id).where(
+        CompanyMember.user_id == user_id,
+        CompanyMember.status == "active")
+    return select(Company.id).where(
+        or_(Company.id.in_(owned), Company.id.in_(member)))
+
+
+def _event_scope(ctx):
+    """事件行的可见条件（与用量统计同构）。
+
+    owner/admin/超管 → 全公司；部门负责人 → 本部门成员与员工产生的事件
+    ∪ 自己；普通成员 → 只看到自己的事件。事件里常带产出与指令全文，
+    "能进公司"不等于"能看全员行为"。
+    """
+    base = EventLog.company_id == ctx.company_id
+    if ctx.sees_all_agents:
+        return base
+    branches = [EventLog.actor_id == ctx.user_id]
+    if ctx.head_dept_ids:
+        branches.append(EventLog.actor_id.in_(
+            select(DepartmentMember.user_id).where(
+                DepartmentMember.department_id.in_(ctx.head_dept_ids))))
+        branches.append(EventLog.actor_id.in_(
+            select(Agent.id).where(Agent.department_id.in_(ctx.head_dept_ids))))
+    return and_(base, or_(*branches))
 
 
 async def _event_query(
@@ -28,16 +63,18 @@ async def _event_query(
 ):
     """列表与导出共用的查询：租户过滤是**前置条件**，不是可选筛选。
 
-    不传 company_id 时只返回该用户名下公司的事件；传了则先校验归属。
+    不传 company_id 时只返回可访问公司范围内的事件；传了则先解析角色。
     历史遗留的 company_id IS NULL 行一律不返回（安全优先：无法证明归属就不展示）。
     """
     q = select(EventLog).order_by(EventLog.created_at.desc()).limit(limit)
     if company_id:
-        await assert_company_owned(db, user.id, company_id)
-        q = q.where(EventLog.company_id == company_id)
+        ctx = await build_ctx(db, user, company_id)
+        q = q.where(_event_scope(ctx))
     else:
-        q = q.where(EventLog.company_id.in_(
-            select(Company.id).where(Company.owner_id == user.id)))
+        cids = (await db.execute(
+            _accessible_company_ids(user.id))).scalars().all()
+        scopes = [_event_scope(await build_ctx(db, user, cid)) for cid in cids]
+        q = q.where(or_(*scopes) if scopes else EventLog.company_id.in_([]))
 
     if event_type:
         q = q.where(EventLog.event_type == event_type)

@@ -30,6 +30,94 @@ export type WsSession = {
   final_output_path?: string | null;
 };
 
+export type WsProject = {
+  id: string;
+  name: string;
+  status: string;
+  progress?: number;
+  task_total?: number;
+  task_completed?: number;
+};
+
+export type WsMeeting = {
+  id: string;
+  title: string;
+  status: string;
+  meeting_type?: string | null;
+  topic?: string | null;
+};
+
+/** 工作台中间栏的四种会话形态：单人、项目群、会议、作战 */
+export type WsGroupMember = { id: string; name: string; role?: string | null };
+
+/** 自由群聊：内置分组（营销 / 产品研发）与老板自建群。 */
+export type WsChatGroup = {
+  id: string;
+  name: string;
+  kind: "preset" | "custom";
+  preset_id?: string | null;
+  emoji?: string | null;
+  hint?: string | null;
+  agent_ids: string[];
+  members: WsGroupMember[];
+  /** 内置分组还没集齐的员工（点一下自动生成） */
+  missing?: { name: string; role?: string | null }[];
+  message_count?: number;
+  last_at?: string | null;
+  created_at?: string | null;
+};
+
+export type WsMode = "single" | "group" | "meeting" | "war";
+
+export type WsView = { mode: WsMode; id: string };
+
+export type GroupMsg = {
+  id?: string;
+  role: string;
+  agent_name?: string | null;
+  text: string;
+  created_at?: string | null;
+};
+
+export type MeetingMsg = {
+  speaker: string;
+  speaker_type: string;
+  content: string;
+  phase?: string;
+};
+
+export type MeetingDetail = {
+  id: string;
+  title: string;
+  status: string;
+  meeting_type?: string;
+  topic?: string | null;
+  minutes?: string | null;
+  summary?: string | null;
+  participants: { agent_id: string; name: string; spoke_count: number }[];
+  messages: MeetingMsg[];
+  decisions: { id: string; content: string; status: string }[];
+  action_items: { id: string; content: string; assignee?: string | null; status: string }[];
+};
+
+export type WarTaskLite = {
+  id: string;
+  seq?: number;
+  title: string;
+  agent_name?: string;
+  status: string;
+};
+
+export type WarDetail = {
+  id: string;
+  goal: string;
+  status: string;
+  leader_name?: string;
+  project_id?: string | null;
+  final_output_path?: string | null;
+  tasks: WarTaskLite[];
+};
+
 export type WsArtifact = {
   id: string;
   name: string;
@@ -88,6 +176,18 @@ export function sessionMeta(status: string): { label: string; tone: "run" | "war
     case "done": return { label: "已完成", tone: "ok" };
     case "failed": return { label: "失败", tone: "bad" };
     case "paused": return { label: "已暂停", tone: "idle" };
+    default: return { label: status || "未知", tone: "idle" };
+  }
+}
+
+/** 会议状态 → 中文与色调 */
+export function meetingMeta(status: string): { label: string; tone: "run" | "warn" | "ok" | "bad" | "idle" } {
+  switch (status) {
+    case "SCHEDULED": return { label: "待开始", tone: "warn" };
+    case "RUNNING": return { label: "进行中", tone: "run" };
+    case "PAUSED": return { label: "已暂停", tone: "idle" };
+    case "COMPLETED": return { label: "已完成", tone: "ok" };
+    case "CANCELLED": return { label: "已取消", tone: "bad" };
     default: return { label: status || "未知", tone: "idle" };
   }
 }

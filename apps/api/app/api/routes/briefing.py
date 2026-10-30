@@ -11,10 +11,13 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, join, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import assert_company_owned, get_current_user, get_db
+from app.api.deps import (assert_company_capability, assert_company_owned,
+                          get_current_user, get_db)
+from app.core.permissions import Capability
 from app.models.company import Company
 from app.models.intervention import ApprovalRequest
 from app.models.meeting import Meeting, MeetingStatus
+from app.models.membership import CompanyMember
 from app.models.scheduler import AutomationRun, AutomationSchedule
 from app.models.task import Task, TaskStatus
 from app.models.token_usage import TokenUsage
@@ -44,8 +47,16 @@ async def get_briefing(
         # 只要不是本人公司就直接 AttributeError 500。统一走归属校验。
         company = await assert_company_owned(db, user.id, company_id)
     else:
+        # 没传公司：取"我可访问"的第一家公司（owner ∪ active 成员行），
+        # 成员登录后也能看到自己加入公司的简报
+        owned = select(Company.id).join(
+            User, User.id == Company.owner_id).where(User.id == user.id)
+        member = select(CompanyMember.company_id).where(
+            CompanyMember.user_id == user.id,
+            CompanyMember.status == "active")
         rows = (await db.execute(
-            select(Company).where(Company.owner_id == user.id).limit(1)
+            select(Company).where(
+                or_(Company.id.in_(owned), Company.id.in_(member))).limit(1)
         )).scalars().all()
         company = rows[0] if rows else None
     if company is None:
@@ -213,7 +224,8 @@ async def ensure_push_schedule(
     到点由 scheduler 生成 BRIEFING_PUSH 事件进事件流，
     首页简报卡标注"最后一次推送时间"，浏览器可弹系统通知。
     """
-    await assert_company_owned(db, user.id, company_id)
+    # 改推送调度 = 写操作（OPERATE）
+    await assert_company_capability(db, user.id, company_id, Capability.OPERATE)
     hh, mm = time_str.split(":")
     sched = (await db.execute(
         select(AutomationSchedule).where(

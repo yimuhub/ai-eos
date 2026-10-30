@@ -60,6 +60,70 @@ async def test_list_models_rejects_cloud_metadata_url(client, make_user):
     assert r.status_code == 400, f"元数据地址未被拦截：{r.status_code} {r.text}"
 
 
+async def test_list_models_rejects_unknown_provider_type(client, make_user):
+    user = await make_user()
+    r = await client.post("/models/providers/list-models", json={
+        "base_url": "http://127.0.0.1:11434/v1",
+        "api_key": "sk-test-123456",
+        "provider_type": "not-a-provider",
+    }, headers=user["headers"])
+    assert r.status_code == 400, r.text
+
+
+async def test_list_models_uses_provider_specific_auth_header(client, make_user,
+                                                              monkeypatch):
+    """Anthropic 用 x-api-key，OpenAI 兼容用 Bearer——发错头就是 401。
+
+    这里替换掉 httpx.AsyncClient，只验证出站请求的 URL 与鉴权头，
+    不发起真实网络请求。
+    """
+    import httpx
+
+    captured: dict = {}
+
+    class _FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "claude-3-5-sonnet-latest"}]}
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None):
+            captured["url"] = url
+            captured["headers"] = headers or {}
+            return _FakeResp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+    user = await make_user()
+
+    r = await client.post("/models/providers/list-models", json={
+        "base_url": "http://127.0.0.1:11434/v1",
+        "api_key": "sk-ant-1234567890",
+        "provider_type": "anthropic",
+    }, headers=user["headers"])
+    assert r.status_code == 200, r.text
+    assert r.json()["models"] == ["claude-3-5-sonnet-latest"]
+    assert captured["url"] == "http://127.0.0.1:11434/v1/models"
+    assert captured["headers"]["x-api-key"] == "sk-ant-1234567890"
+    assert "Authorization" not in captured["headers"]
+
+    r = await client.post("/models/providers/list-models", json={
+        "base_url": "http://127.0.0.1:11434/v1",
+        "api_key": "sk-ant-1234567890",
+    }, headers=user["headers"])
+    assert r.status_code == 200
+    assert captured["headers"]["Authorization"] == "Bearer sk-ant-1234567890"
+
+
 # ------------------------------------------------------------------- notify
 
 async def test_command_notify_rejects_loopback_webhook(client, make_user):

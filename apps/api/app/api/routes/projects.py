@@ -3,18 +3,23 @@ import json
 import re as _re
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import case, func, select, text
+from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import assert_agent_owned, get_current_user
+from app.api.deps import (assert_agent_owned, assert_company_capability,
+                          get_current_user)
 from app.core.logging_config import get_logger
+from app.core.permissions import Capability
+from app.core.scope import build_ctx
 from app.db.session import get_db
 from app.models.agent import Agent
 from app.models.asset import Asset
 from app.models.company import Company, Department
+from app.models.membership import CompanyMember
 from app.models.project import (Milestone, MilestoneStatus, Project,
                                 ProjectMember, ProjectStatus)
 from app.models.task import Task, TaskStatus
+from app.models.user import User
 from app.services.event_system import log_event
 
 logger = get_logger(__name__)
@@ -48,12 +53,38 @@ class MemberIn(BaseModel):
     role_in_project: str | None = None
 
 
-async def _project_owned(db: AsyncSession, user_id: str, pid: str) -> Project:
+def _accessible_company_ids(user_id: str):
+    """调用者可访问的公司：owner 事实源 ∪ active 成员行。"""
+    owned = select(Company.id).join(
+        User, User.id == Company.owner_id).where(User.id == user_id)
+    member = select(CompanyMember.company_id).where(
+        CompanyMember.user_id == user_id,
+        CompanyMember.status == "active")
+    return select(Company.id).where(
+        or_(Company.id.in_(owned), Company.id.in_(member)))
+
+
+def _project_scope(ctx):
+    """项目行可见条件：owner/admin 看全公司，其余只看自己创建的项目。"""
+    base = Project.company_id == ctx.company_id
+    if ctx.sees_all_agents:
+        return base
+    return and_(base, Project.owner_id == ctx.user_id)
+
+
+async def _project_owned(db: AsyncSession, user_id: str, pid: str,
+                         capability: Capability = Capability.VIEW) -> Project:
     p = await db.get(Project, pid)
     if not p:
         raise HTTPException(404, "Project not found")
-    c = await db.get(Company, p.company_id)
-    if not c or c.owner_id != user_id:
+    await assert_company_capability(db, user_id, p.company_id, capability)
+    user = await db.get(User, user_id)
+    ctx = await build_ctx(db, user, p.company_id)
+    # 与列表共用同一条件：列表里看不到的项目，详情/写操作也打不开
+    found = (await db.execute(
+        select(Project.id).where(Project.id == p.id, _project_scope(ctx))
+        .limit(1))).first()
+    if found is None:
         raise HTTPException(404, "Project not found")
     return p
 
@@ -63,10 +94,15 @@ async def _project_owned(db: AsyncSession, user_id: str, pid: str) -> Project:
 async def list_projects(company_id: str | None = None, status: str | None = None,
                         db: AsyncSession = Depends(get_db),
                         user=Depends(get_current_user)):
-    q = select(Project).join(Company, Company.id == Project.company_id).where(
-        Company.owner_id == user.id)
     if company_id:
-        q = q.where(Project.company_id == company_id)
+        q = select(Project).where(
+            _project_scope(await build_ctx(db, user, company_id)))
+    else:
+        cids = (await db.execute(
+            _accessible_company_ids(user.id))).scalars().all()
+        scopes = [_project_scope(await build_ctx(db, user, cid)) for cid in cids]
+        q = select(Project).where(or_(*scopes) if scopes
+                                  else Project.company_id.in_([]))
     if status:
         q = q.where(Project.status == ProjectStatus(status))
     rows = (await db.execute(q.order_by(Project.created_at.desc()))).scalars().all()
@@ -102,9 +138,7 @@ async def create_project(data: ProjectIn, company_id: str | None = None,
     cid = company_id or data.company_id
     if not cid:
         raise HTTPException(422, "缺少 company_id：请在请求体或查询参数中提供")
-    c = await db.get(Company, cid)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
+    await assert_company_capability(db, user.id, cid, Capability.OPERATE)
     payload = data.model_dump(exclude={"company_id"})
     p = Project(**payload, company_id=cid,
                 status=ProjectStatus.PLANNING, owner_id=user.id)
@@ -153,7 +187,7 @@ async def get_project(pid: str, db: AsyncSession = Depends(get_db),
 async def update_project(pid: str, data: dict,
                          db: AsyncSession = Depends(get_db),
                          user=Depends(get_current_user)):
-    p = await _project_owned(db, user.id, pid)
+    p = await _project_owned(db, user.id, pid, Capability.OPERATE)
     allowed = {"name", "description", "priority", "manager_agent_id",
                "start_date", "target_date"}
     for k, v in data.items():
@@ -220,7 +254,7 @@ async def delete_project(pid: str, db: AsyncSession = Depends(get_db),
 async def add_milestone(pid: str, data: MilestoneIn,
                         db: AsyncSession = Depends(get_db),
                         user=Depends(get_current_user)):
-    await _project_owned(db, user.id, pid)
+    await _project_owned(db, user.id, pid, Capability.OPERATE)
     m = Milestone(project_id=pid, **data.model_dump())
     db.add(m)
     await db.commit()
@@ -235,7 +269,7 @@ async def update_milestone(mid: str, data: dict,
     m = await db.get(Milestone, mid)
     if not m:
         raise HTTPException(404, "Milestone not found")
-    await _project_owned(db, user.id, m.project_id)
+    await _project_owned(db, user.id, m.project_id, Capability.OPERATE)
     if "status" in data:
         from datetime import datetime, timezone
         m.status = MilestoneStatus(data["status"])
@@ -254,7 +288,7 @@ async def update_milestone(mid: str, data: dict,
 async def add_member(pid: str, data: MemberIn,
                      db: AsyncSession = Depends(get_db),
                      user=Depends(get_current_user)):
-    await _project_owned(db, user.id, pid)
+    await _project_owned(db, user.id, pid, Capability.OPERATE)
     if data.member_type == "agent":
         a = await db.get(Agent, data.member_id)
         if not a:
@@ -277,7 +311,7 @@ async def add_member(pid: str, data: MemberIn,
 async def remove_member(pid: str, member_id: str,
                         db: AsyncSession = Depends(get_db),
                         user=Depends(get_current_user)):
-    await _project_owned(db, user.id, pid)
+    await _project_owned(db, user.id, pid, Capability.OPERATE)
     q = await db.execute(select(ProjectMember).where(
         ProjectMember.project_id == pid, ProjectMember.member_id == member_id))
     m = q.scalar_one_or_none()
@@ -304,8 +338,11 @@ async def project_lifecycle(pid: str, data: LifecycleIn,
                                     ProjectMember)
     from app.models.task import AgentExecution, Task
 
-    p = await _project_owned(db, user.id, pid)
     action = data.action
+    # delete 是彻底清除（不可逆）→ DESTRUCTIVE；暂停/恢复/停止 → OPERATE
+    p = await _project_owned(
+        db, user.id, pid,
+        Capability.DESTRUCTIVE if action == "delete" else Capability.OPERATE)
     now_iso = __import__("datetime").datetime.utcnow().isoformat()
 
     if action == "pause":
@@ -439,11 +476,18 @@ async def batch_delete_projects(data: BatchDeleteIn,
 
     user_id = user.id
 
-    # 权限预校验：一次查出本用户的项目 id 集
-    q = await db.execute(
-        select(Project.id).join(Company, Company.id == Project.company_id)
-        .where(Company.owner_id == user_id))
-    owned = set(q.scalars().all())
+    # 权限预校验：逐个项目校正到其所属公司的 DESTRUCTIVE（批量删除不可逆）
+    owned: set[str] = set()
+    for pid in data.project_ids:
+        row = await db.get(Project, pid)
+        if row is None:
+            continue
+        try:
+            await assert_company_capability(db, user.id, row.company_id,
+                                            Capability.DESTRUCTIVE)
+        except HTTPException:
+            continue
+        owned.add(pid)
 
     deleted, failed = [], []
     for pid in data.project_ids:
@@ -536,7 +580,7 @@ async def project_chat_operation(pid: str, data: ChatOpIn,
     """
     import re as _re
 
-    p = await _project_owned(db, user.id, pid)
+    p = await _project_owned(db, user.id, pid, Capability.OPERATE)
     text_msg = data.message.strip()
     actions: list[dict] = []
 

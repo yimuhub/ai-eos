@@ -13,10 +13,13 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import (assert_company_owned, assert_kb_doc_owned,
-                          get_current_user, get_db, is_company_owned)
+from app.api.deps import (assert_company_capability, assert_company_owned,
+                          assert_kb_doc_owned, get_current_user, get_db,
+                          is_company_owned)
 from app.core.config import settings
 from app.core.logging_config import get_logger
+from app.core.permissions import Capability
+from app.core.scope import ensure_agent_access
 from app.core.uploads import (KB_ALLOWED_EXTENSIONS, ensure_within,
                               generate_stored_name, safe_original_name,
                               stream_upload, validate_extension)
@@ -87,14 +90,17 @@ def _now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-async def _owned_agent(db: AsyncSession, user_id: str, agent_id: str) -> Agent:
-    from app.models.company import Company
+async def _owned_agent(db: AsyncSession, user: User, agent_id: str,
+                       capability: Capability = Capability.VIEW) -> Agent:
+    """私人知识库的 Agent 门禁：公司角色 + 行级范围（越权 404）。
+
+    不再手写 `companies.owner_id` 与用户 id 的等值比较：P5 之后成员身份由
+    resolve_role/agent_read_scope 解析，读写分别走读/写范围。
+    """
     a = await db.get(Agent, agent_id)
     if not a:
         raise HTTPException(404, "Agent not found")
-    c = await db.get(Company, a.company_id)
-    if not c or c.owner_id != user_id:
-        raise HTTPException(404, "Agent not found")
+    await ensure_agent_access(db, user, a, capability)
     return a
 
 
@@ -120,7 +126,7 @@ async def create_private_doc(agent_id: str, data: DocIn,
                              db: AsyncSession = Depends(get_db),
                              user: User = Depends(get_current_user)):
     """向 Agent 私人知识库添加文档（自动切片+摘要+关键词）。"""
-    a = await _owned_agent(db, user.id, agent_id)
+    a = await _owned_agent(db, user, agent_id, Capability.OPERATE)
     doc_id = str(uuid.uuid4())
     doc = KBDocument(
         id=doc_id, company_id=a.company_id, title=data.title,
@@ -147,8 +153,9 @@ async def list_private_docs(agent_id: str,
                             db: AsyncSession = Depends(get_db),
                             user: User = Depends(get_current_user)):
     """列出私人库文档。"""
-    await _owned_agent(db, user.id, agent_id)
+    a = await _owned_agent(db, user, agent_id)
     q = select(KBDocument).where(
+        KBDocument.company_id == a.company_id,
         KBDocument.agent_id == agent_id, KBDocument.scope == "private")
     if category:
         q = q.where(KBDocument.category == category)
@@ -218,7 +225,7 @@ async def upload_private_file(agent_id: str, file: UploadFile = File(...),
     副本1：原始文件原样保留（original_path）
     副本2：机器可读转换——文本提取→切片→关键词→摘要
     """
-    a = await _owned_agent(db, user.id, agent_id)
+    a = await _owned_agent(db, user, agent_id, Capability.OPERATE)
 
     # 审查 S9：原实现 `raw = await file.read()` 整文件进内存且无上限，
     # 且把用户文件名（仅替换斜杠）拼进落盘路径。现在：
@@ -287,8 +294,8 @@ async def create_global_doc(data: DocIn, company_id: str = Query(...),
                             user: User = Depends(get_current_user)):
     """添加全局公用文档。"""
     # 归属校验：此前只认 query 里的 company_id，任何登录用户都能
-    # 往他人公司的 RAG 语料里植入文档（提示词注入面）
-    await assert_company_owned(db, user.id, company_id)
+    # 往他人公司的 RAG 语料里植入文档（提示词注入面）。写入需要 OPERATE。
+    await assert_company_capability(db, user.id, company_id, Capability.OPERATE)
     doc_id = str(uuid.uuid4())
     doc = KBDocument(id=doc_id, company_id=company_id, title=data.title,
                      source_type="text", content=data.content,
@@ -330,7 +337,7 @@ async def copy_docs(data: CopyIn, db: AsyncSession = Depends(get_db),
     """把文档复制到目标 Agent 私人库（doc_ids 可来自公用库或另一 Agent）。"""
     # 目标私人库必须属于调用者（sync-from-global 也经此校验）
     if data.target_agent_id != "global":
-        await _owned_agent(db, user.id, data.target_agent_id)
+        await _owned_agent(db, user, data.target_agent_id, Capability.OPERATE)
     copied = []
     for did in data.doc_ids:
         src = await db.get(KBDocument, did)
@@ -392,7 +399,7 @@ async def import_template(agent_id: str, skill_key: str,
     tpl = SKILL_KB_TEMPLATES.get(skill_key)
     if not tpl:
         raise HTTPException(404, f"template {skill_key} not found")
-    a = await _owned_agent(db, user.id, agent_id)
+    a = await _owned_agent(db, user, agent_id, Capability.OPERATE)
 
     created = []
     for d in tpl["docs"]:
@@ -433,7 +440,7 @@ async def set_kb_config(agent_id: str, data: KbConfigIn,
                         db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
     """Agent 级检索策略 + 成本模式配置。"""
-    a = await _owned_agent(db, user.id, agent_id)
+    a = await _owned_agent(db, user, agent_id, Capability.OPERATE)
     cfg = dict(a.memory_config or {})
     if data.kb_scope_mode:
         if data.kb_scope_mode not in ("private_first", "global_only", "private_only"):
@@ -465,7 +472,7 @@ async def private_rag(agent_id: str, q: str = Query(..., min_length=1),
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
     """成本优化的两级 RAG 检索预览。"""
-    a = await _owned_agent(db, user.id, agent_id)
+    a = await _owned_agent(db, user, agent_id)
     r = await cost_optimized_rag(db, a.company_id, agent_id, q, agent=a)
     return r
 

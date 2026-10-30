@@ -5,10 +5,11 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import assert_company_capability, get_current_user
+from app.core.permissions import Capability
 from app.db.session import get_db
 from app.models.agent import Agent
-from app.models.company import Company, Department
+from app.models.company import Department
 from app.services.event_system import log_event
 
 router = APIRouter(prefix="/departments", tags=["departments-batch"])
@@ -24,9 +25,9 @@ class BatchCreateIn(BaseModel):
 async def batch_create_departments(data: BatchCreateIn,
                                    db: AsyncSession = Depends(get_db),
                                    user=Depends(get_current_user)):
-    c = await db.get(Company, data.company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
+    # 批量建部门 = 改组织架构，属于 MANAGE：普通成员/只读不可为
+    await assert_company_capability(db, user.id, data.company_id,
+                                    Capability.MANAGE)
     created = []
     for item in data.departments:
         name = (item.get("name") or "").strip()
@@ -57,11 +58,19 @@ async def batch_delete_departments(data: BatchDeleteIn,
                                    user=Depends(get_current_user)):
     user_id = user.id
 
-    # 预校验权限
-    q = await db.execute(
-        select(Department.id).join(Company, Company.id == Department.company_id)
-        .where(Company.owner_id == user_id))
-    owned = set(q.scalars().all())
+    # 预校验权限：逐个部门校正到其所属公司的 DESTRUCTIVE（批量删除不可逆）。
+    # 无权限与不存在都按"不存在或无权限"跳过，不泄露资源是否存在。
+    owned: set[str] = set()
+    for did in data.department_ids:
+        row = await db.get(Department, did)
+        if row is None:
+            continue
+        try:
+            await assert_company_capability(db, user_id, row.company_id,
+                                            Capability.DESTRUCTIVE)
+        except HTTPException:
+            continue
+        owned.add(did)
 
     deleted, failed = [], []
 

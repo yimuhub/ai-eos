@@ -14,9 +14,11 @@
 // 3. 样式用了另一套灰阶类，与全站设计令牌不一致；现统一到 design tokens，
 //    并补上加载态、密码可见性切换与"这套系统能干什么"的简短说明。
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, setToken, setRefreshToken } from "@/lib/api";
+import type { SetupStatus } from "@/lib/setup";
+import { runRules, V } from "@/lib/validate";
 
 const MIN_PW = 8;
 
@@ -30,6 +32,27 @@ export default function LoginPage() {
   const [showPw, setShowPw] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  // 安装状态探测失败时给一个人工入口：否则首次使用者只能停在登录页干瞪眼
+  const [setupDown, setSetupDown] = useState(false);
+
+  // 首次安装：系统里还没有 superadmin 时任何账号都登不进来，直接送去 /setup。
+  // 状态接口失败时**不**跳转（当作已初始化）——否则后端临时不可用 / 版本较旧
+  // 会把所有人锁死在安装页，连登录都进不去。
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<SetupStatus>("/setup/status", { silent: true, timeoutMs: 8_000 })
+      .then((s) => {
+        if (!cancelled && s?.needs_setup === true) router.replace("/setup");
+      })
+      .catch(() => {
+        /* 探测失败：按"已初始化"处理，留在登录页；但给出安装入口兜底 */
+        if (!cancelled) setSetupDown(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   /** 与后端 RegisterIn 的规则保持一致，先本地拦一道，避免无谓往返 */
   function validate(): string {
@@ -38,7 +61,8 @@ export default function LoginPage() {
       if (!password) return "请填写密码";
       return "";
     }
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) return "请填写有效的邮箱地址";
+    const emailErr = runRules(email, [V.required("邮箱"), V.email("邮箱")]);
+    if (emailErr) return emailErr;
     if (username.trim().length < 2) return "用户名至少 2 个字符";
     if (password.length < MIN_PW) return `密码至少 ${MIN_PW} 位`;
     if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) return "密码需同时包含字母和数字";
@@ -228,6 +252,17 @@ export default function LoginPage() {
           >
             {mode === "login" ? "还没有账号？立即注册" : "已有账号？返回登录"}
           </button>
+
+          {setupDown && (
+            <p className="text-[11px] leading-relaxed text-center"
+              style={{ color: "var(--muted)" }}>
+              没连上安装状态接口。若是首次使用，
+              <a href="/setup" className="underline mx-0.5" style={{ color: "var(--accent)" }}>
+                直接进入安装向导
+              </a>
+              。
+            </p>
+          )}
         </form>
       </div>
     </div>

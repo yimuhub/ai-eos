@@ -1,13 +1,14 @@
 """公司管理：列表统计、单个/批量删除（级联清理全部下属数据）。"""
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import assert_company_capability, get_current_user
+from app.core.permissions import Capability
 from app.db.session import get_db
-from app.models.agent import Agent
-from app.models.company import Company, Department
+from app.models.company import Company
+from app.models.membership import CompanyMember
 from app.models.user import User
 
 router = APIRouter(prefix="/company-manage", tags=["company-manage"])
@@ -43,12 +44,33 @@ CASCADE_SQLS = [
 ]
 
 
+def _manageable_company_ids(user_id: str):
+    """可进入"公司管理"的公司：owner 事实源 ∪ 具备管理角色的 active 成员行。
+
+    此前写死「所有者本人」：多成员落地后，公司管理员在公司管理页
+    会看不到自己管理的公司。只读/普通成员不列进来——这一页的每个动作
+    都是删公司（DESTRUCTIVE）级别的，列出来只会诱导失败点击。
+    """
+    owned = select(Company.id).join(
+        User, User.id == Company.owner_id).where(User.id == user_id)
+    admin_member = select(CompanyMember.company_id).where(
+        CompanyMember.user_id == user_id,
+        CompanyMember.status == "active",
+        CompanyMember.role.in_(["owner", "company_admin"]))
+    return select(Company.id).where(
+        or_(Company.id.in_(owned), Company.id.in_(admin_member)))
+
+
 @router.get("/list")
 async def list_companies(db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
     """公司管理列表：基本信息 + Agent/部门/项目/任务统计 + 负责人。"""
-    rows = (await db.execute(select(Company).where(
-        Company.owner_id == user.id).order_by(Company.created_at))).scalars().all()
+    if getattr(user, "is_superadmin", False):
+        q = select(Company)
+    else:
+        q = select(Company).where(
+            Company.id.in_(_manageable_company_ids(user.id)))
+    rows = (await db.execute(q.order_by(Company.created_at))).scalars().all()
     out = []
     for c in rows:
         cid = str(c.id)
@@ -97,16 +119,13 @@ async def batch_delete(data: DeleteIn, db: AsyncSession = Depends(get_db),
         # 先校验归属
         valid_ids = []
         for cid in data.company_ids:
-            c = await db.get(Company, cid)
-            if not c or c.owner_id != user.id:
-                failed.append({"id": cid, "reason": "not found"})
-                continue
             # 批量删除公司会级联清除项目/员工/成果/日志，是最重的一档。
-            # 走统一权限层而不是就地比较 owner_id：将来引入"管理员"角色时，
-            # 这里不需要任何改动。
-            from app.core.permissions import Capability, ensure_capability
+            # 统一走 DESTRUCTIVE：跨租户/角色不足一律按"不存在"返回，
+            # 不泄露公司是否存在。另：删公司不是 ADMIN——ADMIN 是所有权变更，
+            # 删除不可逆，按 DESTRUCTIVE 收口。
             try:
-                await ensure_capability(db, user.id, cid, Capability.DESTRUCTIVE)
+                await assert_company_capability(db, user.id, cid,
+                                                Capability.DESTRUCTIVE)
             except HTTPException:
                 failed.append({"id": cid, "reason": "not found"})
                 continue

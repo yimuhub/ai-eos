@@ -3,6 +3,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, clearToken, describeError, getActiveCompanyId } from "@/lib/api";
 import { notify } from "@/components/Toast";
+import { confirmAction } from "@/components/ConfirmDialog";
 import { openCommandPalette, pushRecentPage } from "@/components/CommandPalette";
 import { navFor, openApp, registerAppOpener, stripEmbed, type AppTab } from "@/lib/apps";
 import { useUIMode, readUIMode } from "@/lib/ui-mode";
@@ -10,8 +11,9 @@ import Splitter from "@/components/workspace/Splitter";
 import WorkspaceChat from "@/components/workspace/WorkspaceChat";
 import WorkspacePanel from "@/components/workspace/WorkspacePanel";
 import WorkspaceSidebar from "@/components/workspace/WorkspaceSidebar";
+import GroupEditor from "@/components/workspace/GroupEditor";
 import type { OutTab } from "@/components/workspace/WorkspaceOutput";
-import type { WsAgent, WsSession } from "@/lib/workspace";
+import type { WsAgent, WsChatGroup, WsMeeting, WsMode, WsProject, WsSession, WsView } from "@/lib/workspace";
 
 /**
  * 工作台（方案 B）：左「人与会话」 / 中「一句话指挥」 / 右「产出」。
@@ -106,10 +108,20 @@ export default function WorkspacePage() {
   const [boot, setBoot] = useState<"loading" | "ready" | "failed" | "empty">("loading");
   const [err, setErr] = useState("");
   const [cid, setCid] = useState("");
+  // 模型是否就绪：false 时显示顶部提示条。null = 还没查出来，不打扰。
+  const [modelReady, setModelReady] = useState<boolean | null>(null);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
   const [userName, setUserName] = useState("我");
   const [agents, setAgents] = useState<WsAgent[]>([]);
   const [sessions, setSessions] = useState<WsSession[]>([]);
+  const [projects, setProjects] = useState<WsProject[]>([]);
+  const [meetings, setMeetings] = useState<WsMeeting[]>([]);
+  const [chatGroups, setChatGroups] = useState<WsChatGroup[]>([]);
+  // null = 新建；group 非空 = 编辑
+  const [groupEditor, setGroupEditor] = useState<{ open: boolean; group: WsChatGroup | null }>({ open: false, group: null });
+  const [groupSaving, setGroupSaving] = useState(false);
   const [agentId, setAgentId] = useState("");
+  const [view, setView] = useState<WsView>({ mode: "single", id: "" });
   const [outTab, setOutTab] = useState<OutTab>("trace");
   const [picking, setPicking] = useState(false);
   const [compact, setCompact] = useState(false);
@@ -126,6 +138,10 @@ export default function WorkspacePage() {
   // 媒体查询回调里要用到当前激活页，但那个 effect 只在挂载时建一次监听
   const paneRef = useRef(pane);
   paneRef.current = pane;
+  const agentIdRef = useRef(agentId);
+  agentIdRef.current = agentId;
+  // 「打开页面时顺手折叠左栏」是临时动作：关掉页面自动复原，不写进布局存档
+  const autoLeft = useRef(false);
 
   const setLayoutPersist = useCallback((updater: LayoutState | ((prev: LayoutState) => LayoutState), persist = true) => {
     setLayout((prev) => {
@@ -152,20 +168,38 @@ export default function WorkspacePage() {
       const company = companies.find((c) => c.id === active) || companies[0];
       setCid(company.id);
 
-      const [agentRows, wr] = await Promise.all([
+      const [agentRows, wr, projectRows, meetingRows, groupRows] = await Promise.all([
         api.get<WsAgent[]>(`/agents?company_id=${company.id}`),
         api.get<{ sessions: WsSession[] }>(`/war-room/sessions?company_id=${company.id}`)
           .catch(() => ({ sessions: [] as WsSession[] })),
+        api.get<WsProject[]>(`/projects?company_id=${company.id}`)
+          .catch(() => [] as WsProject[]),
+        api.get<WsMeeting[]>(`/meetings?company_id=${company.id}`)
+          .catch(() => [] as WsMeeting[]),
+        api.get<{ groups: WsChatGroup[] }>(`/chat-groups?company_id=${company.id}`)
+          .catch(() => ({ groups: [] as WsChatGroup[] })),
       ]);
       setAgents(Array.isArray(agentRows) ? agentRows : []);
       setSessions(wr.sessions || []);
+      setProjects(Array.isArray(projectRows) ? projectRows : []);
+      setMeetings(Array.isArray(meetingRows) ? meetingRows : []);
+      const groups = Array.isArray(groupRows.groups) ? groupRows.groups : [];
+      setChatGroups(groups);
 
-      setAgentId((prev) => {
-        if (prev && agentRows.some((a) => a.id === prev)) return prev;
-        let saved = "";
-        try { saved = localStorage.getItem(AGENT_KEY) || ""; } catch { /* 忽略 */ }
-        if (saved && agentRows.some((a) => a.id === saved)) return saved;
-        return agentRows[0]?.id || "";
+      let saved = "";
+      try { saved = localStorage.getItem(AGENT_KEY) || ""; } catch { /* 忽略 */ }
+      const prevAgent = agentIdRef.current;
+      const chosen = (prevAgent && agentRows.some((a) => a.id === prevAgent)) ? prevAgent
+        : (saved && agentRows.some((a) => a.id === saved)) ? saved
+        : agentRows[0]?.id || "";
+      setAgentId(chosen);
+      agentIdRef.current = chosen;
+      setView((prev) => {
+        const list: { id: string }[] = prev.mode === "group" ? [...projectRows, ...groups]
+          : prev.mode === "meeting" ? meetingRows
+          : prev.mode === "war" ? (wr.sessions || []) : agentRows;
+        if (prev.id && list.some((r) => r.id === prev.id)) return prev;
+        return { mode: "single", id: chosen };
       });
       setBoot("ready");
     } catch (e) {
@@ -175,6 +209,38 @@ export default function WorkspacePage() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  /* ---------- 模型就绪提示条 ---------- */
+  // 刚装好的系统里一个模型都没有，员工接任务只会回「尚未绑定任何模型」。
+  // 这里在进入工作台的第一屏就把缺口说出来，并直达「模型配置」。
+  const checkModel = useCallback(async () => {
+    if (!cid) return;
+    try {
+      const d = await api.get<{ ready?: boolean }>("/models/diagnostics", { silent: true });
+      setModelReady(!!d?.ready);
+    } catch {
+      setModelReady(null); // 查不到就不打扰，别把提示条变成新的噪音
+    }
+  }, [cid]);
+
+  useEffect(() => {
+    if (boot !== "ready" || !cid) return;
+    try {
+      setBannerDismissed(localStorage.getItem(`aieos_model_banner:${cid}`) === "1");
+    } catch {
+      setBannerDismissed(false);
+    }
+    void checkModel();
+    // 用户可能正在右栏标签里配模型：切回来时重新确认，配好了提示条自动消失
+    const onFocus = () => void checkModel();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [boot, cid, checkModel]);
+
+  const dismissModelBanner = useCallback(() => {
+    setBannerDismissed(true);
+    try { localStorage.setItem(`aieos_model_banner:${cid}`, "1"); } catch { /* 隐私模式：仅本次生效 */ }
+  }, [cid]);
 
   // 存档与量宽都只能在浏览器里做；首屏用默认值，挂载后再对齐
   useEffect(() => {
@@ -228,30 +294,178 @@ export default function WorkspacePage() {
 
   /* ---------- 宽度 ---------- */
 
-  const visibleSplitters = (layout.leftHidden ? 0 : 1) + (layout.rightHidden ? 0 : 1);
+  const activeApp = apps.find((t) => t.id === pane) || apps.find((t) => t.href === pane) || null;
+  const activeId = activeApp ? activeApp.id : "out";
+  const pageWide = !classic && !compact && !!activeApp;
+
+  // 经典模式已经有固定左栏，这里再出一列导航就是重复的人两颗脑袋
+  const railHidden = classic || layout.leftHidden;
+  const visibleSplitters = (railHidden ? 0 : 1) + (layout.rightHidden ? 0 : 1);
   const sideBudget = rowW > 0
     ? Math.max(0, rowW - CENTER_MIN - visibleSplitters * SPLITTER_W)
     : Number.POSITIVE_INFINITY;
   const maxRight = Number.isFinite(sideBudget)
-    ? Math.min(RIGHT_MAX, Math.max(RIGHT_MIN, sideBudget - (layout.leftHidden ? 0 : LEFT_MIN)))
+    ? Math.min(RIGHT_MAX, Math.max(RIGHT_MIN, sideBudget - (railHidden ? 0 : LEFT_MIN)))
     : RIGHT_MAX;
   const rightW = layout.rightHidden ? 0 : clamp(layout.right, RIGHT_MIN, maxRight);
+  // 打开功能页：右栏直接占窗口一半，左栏让位，中栏仍保留可读宽度
+  const pageRightW = rowW > 0
+    ? clamp(Math.round(rowW / 2), RIGHT_MIN, Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, rowW - CENTER_MIN - SPLITTER_W)))
+    : Math.round(RIGHT_MAX / 2);
+  const effectiveRightW = pageWide ? pageRightW : rightW;
   const maxLeft = Number.isFinite(sideBudget)
     ? Math.min(LEFT_MAX, Math.max(LEFT_MIN, sideBudget - rightW))
     : LEFT_MAX;
-  const leftW = layout.leftHidden ? 0 : clamp(layout.left, LEFT_MIN, maxLeft);
+  const leftW = railHidden ? 0 : clamp(layout.left, LEFT_MIN, maxLeft);
 
   const agent = agents.find((a) => a.id === agentId) || null;
 
   const pickAgent = useCallback((a: WsAgent) => {
     setAgentId(a.id);
+    agentIdRef.current = a.id;
+    setView({ mode: "single", id: a.id });
     setPicking(false);
     try { localStorage.setItem(AGENT_KEY, a.id); } catch { /* 忽略 */ }
   }, []);
 
+  const pickProject = useCallback((p: WsProject) => {
+    setView({ mode: "group", id: p.id });
+    setPicking(false);
+  }, []);
+
+  /** 内置分组缺人：按预设生成员工（幂等），并把视图切到生成后的真实群 id。 */
+  const ensurePresetGroup = useCallback(async (g: WsChatGroup): Promise<WsChatGroup | null> => {
+    const pid = g.preset_id;
+    if (!pid || !cid) return null;
+    try {
+      const d = await api.post<{ group: WsChatGroup; created: { name: string }[] }>(
+        `/chat-groups/preset/${pid}/ensure`, { company_id: cid });
+      const next = d.group;
+      setChatGroups((prev) => [next, ...prev.filter((x) => x.id !== g.id && x.id !== next.id)]);
+      setView((v) => (v.mode === "group" && v.id === g.id ? { mode: "group", id: next.id } : v));
+      if (d.created?.length) {
+        notify("success", `已生成 ${d.created.length} 位员工：${d.created.map((x) => x.name).join("、")}`);
+        api.get<WsAgent[]>(`/agents?company_id=${cid}`)
+          .then((rows) => setAgents(Array.isArray(rows) ? rows : []))
+          .catch(() => { /* 员工列表下次加载会补齐 */ });
+      }
+      return next;
+    } catch (e) {
+      notify("error", describeError(e, "生成员工失败"));
+      return null;
+    }
+  }, [cid]);
+
+  /** 点内置分组：缺人就当场按预设生成，再进群——用户点的是「进群」，不是「看缺几个人」。 */
+  const pickGroup = useCallback(async (g: WsChatGroup) => {
+    setPicking(false);
+    if (g.id.startsWith("preset:") && g.missing?.length) {
+      const next = await ensurePresetGroup(g);
+      if (next) setView({ mode: "group", id: next.id });
+      return;
+    }
+    setView({ mode: "group", id: g.id });
+  }, [ensurePresetGroup]);
+
+  const openGroupEditor = useCallback(async (g: WsChatGroup) => {
+    // 还没落库的内置分组：先补齐员工拿到真实 id，再打开编辑器
+    if (g.id.startsWith("preset:")) {
+      const next = await ensurePresetGroup(g);
+      if (next) setGroupEditor({ open: true, group: next });
+      return;
+    }
+    setGroupEditor({ open: true, group: g });
+  }, [ensurePresetGroup]);
+
+  const saveGroup = useCallback(async (name: string, ids: string[]) => {
+    if (!cid || groupSaving) return;
+    const editing = groupEditor.group;
+    setGroupSaving(true);
+    try {
+      if (editing) {
+        const d = await api.patch<WsChatGroup>(`/chat-groups/${editing.id}`, { name, agent_ids: ids });
+        setChatGroups((prev) => prev.map((g) => (g.id === d.id ? d : g)));
+        notify("success", "群聊已更新");
+      } else {
+        const d = await api.post<WsChatGroup>("/chat-groups", { company_id: cid, name, agent_ids: ids });
+        setChatGroups((prev) => [d, ...prev]);
+        setView({ mode: "group", id: d.id });
+        notify("success", "群聊已创建");
+      }
+      setGroupEditor({ open: false, group: null });
+    } catch (e) {
+      notify("error", describeError(e, editing ? "更新群聊失败" : "创建群聊失败"));
+    } finally {
+      setGroupSaving(false);
+    }
+  }, [cid, groupSaving, groupEditor.group]);
+
+  const deleteGroup = useCallback(async () => {
+    const g = groupEditor.group;
+    if (!g || groupSaving) return;
+    const ok = await confirmAction({
+      title: `删除「${g.name}」？`,
+      description: "群聊记录会一起删除，员工本身不受影响。",
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!ok) return;
+    setGroupSaving(true);
+    try {
+      await api.del(`/chat-groups/${g.id}`);
+      setChatGroups((prev) => prev.filter((x) => x.id !== g.id));
+      setView((v) => (v.mode === "group" && v.id === g.id
+        ? { mode: "single", id: agentIdRef.current || agents[0]?.id || "" }
+        : v));
+      setGroupEditor({ open: false, group: null });
+      notify("success", "群聊已删除");
+    } catch (e) {
+      notify("error", describeError(e, "删除群聊失败"));
+    } finally {
+      setGroupSaving(false);
+    }
+  }, [groupEditor.group, groupSaving, agents]);
+
+  const pickMeeting = useCallback((m: WsMeeting) => {
+    setView({ mode: "meeting", id: m.id });
+    setPicking(false);
+  }, []);
+
+  // 作战会话不再单独跳页：中栏就是它的对话现场
+  const pickSession = useCallback((s: WsSession) => {
+    setView({ mode: "war", id: s.id });
+    setPicking(false);
+  }, []);
+
+  const openView = useCallback((v: WsView) => {
+    setView(v);
+    setPicking(false);
+  }, []);
+
+  const addMeeting = useCallback((m: WsMeeting) => {
+    setMeetings((prev) => (prev.some((x) => x.id === m.id) ? prev : [m, ...prev]));
+    setView({ mode: "meeting", id: m.id });
+  }, []);
+
+  // 分段切换：同一个模式里没指定对象时，落到最近一个可用的
+  const switchMode = useCallback((mode: WsMode) => {
+    setView((prev) => {
+      if (prev.mode === mode && prev.id) return prev;
+      const id = mode === "single" ? (agentIdRef.current || agents[0]?.id || "")
+        : mode === "group" ? (projects[0]?.id || chatGroups[0]?.id || "")
+        : mode === "meeting" ? (meetings[0]?.id || "")
+        : (sessions[0]?.id || "");
+      return { mode, id };
+    });
+    setPicking(false);
+  }, [agents, projects, meetings, sessions, chatGroups]);
+
   const toggleLeft = useCallback(() => {
+    // 经典模式的左栏由 ClassicLayout 负责，这里没有可开关的列
+    if (classic) return;
+    autoLeft.current = false;
     setLayoutPersist((prev) => ({ ...prev, leftHidden: !prev.leftHidden }));
-  }, [setLayoutPersist]);
+  }, [classic, setLayoutPersist]);
 
   const toggleRight = useCallback(() => {
     setLayoutPersist((prev) => ({ ...prev, rightHidden: !prev.rightHidden }));
@@ -265,8 +479,23 @@ export default function WorkspacePage() {
 
   /* ---------- 右栏标签 ---------- */
 
-  const activeApp = apps.find((t) => t.id === pane) || apps.find((t) => t.href === pane) || null;
-  const activeId = activeApp ? activeApp.id : "out";
+  // 页面一打开就把左栏折起来，页面关掉再放回去；用户自己按过 ⌘B 就不再自动还原
+  const leftHiddenRef = useRef(layout.leftHidden);
+  leftHiddenRef.current = layout.leftHidden;
+  useEffect(() => {
+    if (pageWide) {
+      if (!layout.leftHidden) {
+        autoLeft.current = true;
+        setLayoutPersist((prev) => ({ ...prev, leftHidden: true }), false);
+      }
+    } else if (autoLeft.current) {
+      autoLeft.current = false;
+      setLayoutPersist((prev) => ({ ...prev, leftHidden: false }), false);
+    }
+    // 只在「是否有页面」变化时触发；用户手动收起/展开不该被这个 effect 覆盖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageWide]);
+
   // 只有真的打开了页面，展开才有意义；否则「展开」会把对话收起来却只看到产出
   const focusMode = focus && !!activeApp;
 
@@ -329,6 +558,8 @@ export default function WorkspacePage() {
     setApps([]);
     setPane("out");
     setFocus(false);
+    // 经典页只有一个对话：会议/群聊/作战各自有整页入口，这边回到单聊
+    setView((v) => (v.mode === "single" ? v : { mode: "single", id: agentIdRef.current || v.id }));
   }, [classic]);
 
   // iframe 里跳转后，标签标题跟着走；对话区不动
@@ -389,13 +620,17 @@ export default function WorkspacePage() {
     }
   }, [apps, activeId, classic]);
 
-  // 展开状态下 Esc 回到对话
+  // Esc：展开态先回到对话；有页面时关掉页面，右栏与左栏一起复原
   useEffect(() => {
-    if (!focus) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setFocus(false); };
+    if (!focus && !activeApp) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (focus) { setFocus(false); return; }
+      setPane("out");
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [focus]);
+  }, [focus, activeApp]);
 
   // ⌘B / ⌘J / ⌘N：和原型一致的三把钥匙
   useEffect(() => {
@@ -428,9 +663,17 @@ export default function WorkspacePage() {
     <WorkspaceSidebar
       agents={agents}
       sessions={sessions}
-      activeAgentId={agentId}
+      projects={projects}
+      meetings={meetings}
+      chatGroups={chatGroups}
+      view={view}
       onAgent={pickAgent}
-      onSession={(s) => openAppTab(`/warroom/${s.id}`)}
+      onProject={pickProject}
+      onMeeting={pickMeeting}
+      onSession={pickSession}
+      onGroup={pickGroup}
+      onNewGroup={() => setGroupEditor({ open: true, group: null })}
+      onEditGroup={openGroupEditor}
       onNewChat={() => setPicking(true)}
       onCollapse={toggleLeft}
       onLogout={logout}
@@ -459,7 +702,7 @@ export default function WorkspacePage() {
     />
   );
 
-  const center = picking || !agent ? (
+  const center = picking || (view.mode === "single" && !agent) ? (
     <NewChat
       agents={agents}
       picking={picking}
@@ -468,20 +711,38 @@ export default function WorkspacePage() {
     />
   ) : (
     <WorkspaceChat
+      view={view}
       agent={agent}
       agents={agents}
+      projects={projects}
+      meetings={meetings}
+      chatGroups={chatGroups}
+      sessions={sessions}
       cid={cid}
+      onMode={switchMode}
+      onOpenView={openView}
+      onMeetingCreated={addMeeting}
       onPickAgent={pickAgent}
+      onOpenApp={openAppTab}
+      onEnsureGroup={ensurePresetGroup}
+      onEditGroup={openGroupEditor}
       onOpenTrace={() => { setOutTab("trace"); setLayoutPersist((p) => ({ ...p, rightHidden: false })); }}
       onCollapseOut={toggleRight}
       onExpandLeft={toggleLeft}
       outHidden={layout.rightHidden}
-      leftHidden={layout.leftHidden}
+      leftHidden={classic ? false : layout.leftHidden}
+      classic={classic}
     />
   );
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      {boot === "ready" && modelReady === false && !bannerDismissed && (
+        <ModelBanner
+          onOpen={() => openApp("/models")}
+          onDismiss={dismissModelBanner}
+        />
+      )}
       {boot !== "ready" ? (
         <BootState state={boot} err={err} onRetry={load} />
       ) : (
@@ -489,7 +750,7 @@ export default function WorkspacePage() {
           {compact ? (
             <>
               <div className="flex-1 min-w-0">{center}</div>
-              {!layout.leftHidden && (
+              {!railHidden && (
                 <>
                   <div className="fixed inset-0 z-20 bg-black/55" onClick={toggleLeft} aria-hidden />
                   <aside className="fixed inset-y-0 left-0 z-30 w-[280px] max-w-[86vw] border-r shadow-2xl"
@@ -512,7 +773,7 @@ export default function WorkspacePage() {
             </>
           ) : (
             <>
-              {!layout.leftHidden && (
+              {!railHidden && (
                 <>
                   {/* 分隔线自己画线，这一侧不再加边框，免得两条线挨着 */}
                   <aside className="shrink-0 min-w-0 overflow-hidden" style={{ width: leftW }}>
@@ -539,16 +800,19 @@ export default function WorkspacePage() {
 
                   {!layout.rightHidden && (
                     <>
-                      <Splitter
-                        side="right"
-                        label="调整右栏宽度"
-                        value={rightW}
-                        min={RIGHT_MIN}
-                        max={maxRight}
-                        onChange={(v) => setLayoutPersist((p) => ({ ...p, right: v }))}
-                        onReset={resetLayout}
-                      />
-                      <aside className="shrink-0 min-w-0 overflow-hidden" style={{ width: rightW }}>
+                      {!pageWide && (
+                        <Splitter
+                          side="right"
+                          label="调整右栏宽度"
+                          value={rightW}
+                          min={RIGHT_MIN}
+                          max={maxRight}
+                          onChange={(v) => setLayoutPersist((p) => ({ ...p, right: v }))}
+                          onReset={resetLayout}
+                        />
+                      )}
+                      <aside className="shrink-0 min-w-0 overflow-hidden transition-[width] duration-200"
+                        style={{ width: effectiveRightW }}>
                         {panel}
                       </aside>
                     </>
@@ -559,11 +823,66 @@ export default function WorkspacePage() {
           )}
         </div>
       )}
+      <GroupEditor
+        open={groupEditor.open}
+        group={groupEditor.group}
+        agents={agents}
+        busy={groupSaving}
+        onClose={() => { if (!groupSaving) setGroupEditor({ open: false, group: null }); }}
+        onSave={saveGroup}
+        onDelete={deleteGroup}
+      />
     </div>
   );
 }
 
 /* ---------------- 状态页 ---------------- */
+
+/**
+ * 「还没接大模型」提示条。
+ *
+ * 不放进状态页：公司、员工、会话都是好的，只是员工没有大脑。
+ * 做成可关闭的窄条，给一个直达入口，别挡住正在看的东西。
+ */
+function ModelBanner({ onOpen, onDismiss }: { onOpen: () => void; onDismiss: () => void }) {
+  return (
+    <div
+      className="flex items-center gap-3 px-4 py-2 text-[12px] shrink-0"
+      style={{
+        background: "rgba(251,191,36,0.09)",
+        borderBottom: "1px solid rgba(251,191,36,0.32)",
+        color: "#fde68a",
+      }}
+      role="status"
+    >
+      <span className="shrink-0" aria-hidden>⚠️</span>
+      <span className="min-w-0 leading-snug">
+        还没有接入大模型，AI 员工接任务会提示「尚未绑定任何模型」。
+      </span>
+      <button
+        type="button"
+        onClick={onOpen}
+        className="ml-auto shrink-0 rounded-lg px-2.5 py-1 text-[11.5px] font-medium"
+        style={{
+          background: "rgba(251,191,36,0.18)",
+          border: "1px solid rgba(251,191,36,0.45)",
+          color: "#fde68a",
+        }}
+      >
+        去接入 →
+      </button>
+      <button
+        type="button"
+        onClick={onDismiss}
+        className="shrink-0 px-1.5 py-0.5 rounded text-[13px] leading-none"
+        style={{ color: "rgba(253,230,138,0.75)" }}
+        aria-label="关闭提示"
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
 
 function BootState({ state, err, onRetry }: {
   state: "loading" | "failed" | "empty";

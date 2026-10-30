@@ -105,78 +105,295 @@ class FileReaderSkill(BaseSkill):
                            "size": path.stat().st_size}}
 
 
+# ---------------- Web 搜索：多个免费后端按序降级 ----------------
+#
+# 2026-10 逐家实测（这条结论是排查"网络通但 Agent 搜不到"的关键）：
+# * html.duckduckgo.com/html/ **用 GET 会被反爬挡成 202**，换成 POST 表单
+#   就能稳定拿到 10 条结果，中英文与时效性都好——所以它是主后端；
+#   偶发 202 是瞬时限流，退避 2s 重试即可恢复，不要立刻换家。
+# * Brave SSR 页面解析可用，但连续请求几次就 429，且冷却期很长（分钟级）。
+# * 360 搜索连发几次后整页变"访问异常"；m.baidu / quark.sm.cn 会跳安全验证；
+#   www.bing.com 对中文查询会丢词（"北京今天天气"只按"北京"返回）；
+#   cn.bing.com 无 cookie 时 301 回首页。这些只适合做兜底，不能当主力。
+#
+# 因此策略：DDG POST（带退避重试）→ Brave → Bing RSS → ddgs，
+# 任一家拿到结果即返回，`backend` 字段写明实际来源，便于事后排障。
+
+_SEARCH_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+_SEARCH_HEADERS = {
+    "User-Agent": _SEARCH_UA,
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+
+def _http_fetch(url: str, *, data: dict | None = None,
+                timeout: float = 8.0) -> tuple[str, int]:
+    """同步请求并返回 (文本, HTTP 状态)；在 asyncio.to_thread 里调用。
+
+    DDG 的 202 反爬页也是 200 段的状态码，不能靠异常区分，所以把状态一起返回。
+    """
+    import urllib.parse as _up
+    import urllib.request as _uq
+
+    headers = dict(_SEARCH_HEADERS)
+    body = None
+    if data is not None:
+        body = _up.urlencode(data).encode()
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    req = _uq.Request(url, data=body, headers=headers)
+    with _uq.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace"), resp.status
+
+
+def _plain(text: str) -> str:
+    """去标签 + HTML 反转义 + 压缩空白。"""
+    from html import unescape
+    out = unescape(re.sub(r"<[^>]+>", " ", text or ""))
+    return re.sub(r"\s+", " ", out.replace("\u00a0", " ")).strip()
+
+
+def _dedupe_results(results: list[dict], limit: int) -> list[dict]:
+    """去空、去重（按 URL 忽略锚点与尾斜杠）、截断字段。"""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for r in results:
+        href = str((r or {}).get("href") or "").strip()
+        title = str((r or {}).get("title") or "").strip()
+        if not href or not title:
+            continue
+        key = href.split("#", 1)[0].rstrip("/")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"title": title[:200], "href": href,
+                    "body": str(r.get("body") or "").strip()[:400]})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def parse_brave_html(html: str, limit: int = 5) -> list[dict]:
+    """解析 Brave 搜索结果页（SSR 直出，中英文实测稳定）。"""
+    out: list[dict] = []
+    chunks = re.split(r'(?=<div class="snippet[^"]*"[^>]*data-type="web")', html or "")
+    for chunk in chunks[1:]:
+        href = re.search(r'href="(https?://[^"]+)"', chunk)
+        title = re.search(r'title="([^"]{4,300})"', chunk)
+        if not href or not title:
+            continue
+        snip = re.search(r'<div class="generic-snippet[^"]*">(.*?)</div>', chunk, re.S)
+        out.append({"title": _plain(title.group(1)),
+                    "href": href.group(1).replace("&amp;", "&"),
+                    "body": _plain(snip.group(1)) if snip else ""})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def parse_ddg_html(html: str, limit: int = 5) -> list[dict]:
+    """解析 DuckDuckGo HTML 版搜索结果（`result__a` / `result__snippet`）。"""
+    out: list[dict] = []
+    for chunk in re.split(r'(?=<div class="result results_links)', html or "")[1:]:
+        if "result--ad" in chunk.split(">", 1)[0]:
+            continue
+        link = re.search(r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                         chunk, re.S)
+        if not link:
+            continue
+        href = link.group(1).replace("&amp;", "&")
+        # 部分结果仍是 /l/?uddg=<encoded> 跳转链，还原成真实地址
+        m = re.search(r"[?&]uddg=([^&]+)", href)
+        if m:
+            from urllib.parse import unquote
+            href = unquote(m.group(1))
+        snip = re.search(r'class="result__snippet"[^>]*>(.*?)</a>', chunk, re.S)
+        out.append({"title": _plain(link.group(2)),
+                    "href": href,
+                    "body": _plain(snip.group(1)) if snip else ""})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def parse_bing_rss(xml: str, limit: int = 5) -> list[dict]:
+    """解析 Bing `format=rss` 输出（XML 比 HTML 稳，但中文结果质量一般）。"""
+    out: list[dict] = []
+    for item in re.findall(r"<item>(.*?)</item>", xml or "", re.S):
+        tm = re.search(r"<title>(.*?)</title>", item, re.S)
+        hm = re.search(r"<link>(.*?)</link>", item, re.S)
+        bm = re.search(r"<description>(.*?)</description>", item, re.S)
+        if not tm or not hm:
+            continue
+        out.append({"title": _plain(tm.group(1)), "href": hm.group(1).strip(),
+                    "body": _plain(bm.group(1)) if bm else ""})
+        if len(out) >= limit:
+            break
+    return out
+
+
 class WebSearchSkill(BaseSkill):
-    """真实 Web 搜索：Bing 中国（国内可达），无需 API key。"""
+    """免费联网搜索：DDG POST 为主，Brave / Bing RSS / ddgs 兜底。"""
 
     id = "web_search"
     name = "Web Search"
     description = "Search the web to get real-time information."
     permissions = ["network"]
 
-    async def execute(self, input_data: dict) -> dict:
-        """Bing中国搜索（国内可达），HTML解析。"""
+    PER_BACKEND_TIMEOUT = 10.0
+    TOTAL_BUDGET = 30.0
+    # 同一查询 10 分钟内直接复用结果：Agent 常在同一次对话里重复问同一个问题，
+    # 反复打搜索后端只会招来 202/429。
+    CACHE_TTL_S = 600.0
+    CACHE_MAX_ENTRIES = 64
+    # 进程内最小请求间隔，避免多 Agent 并发时把免费后端打限流
+    MIN_INTERVAL_S = 0.8
+
+    _cache: dict[str, tuple[float, dict]] = {}
+    _last_request_at = 0.0
+
+    @classmethod
+    def _cached(cls, key: str) -> dict | None:
+        import time
+        hit = cls._cache.get(key)
+        if not hit:
+            return None
+        expires, payload = hit
+        if time.monotonic() > expires:
+            cls._cache.pop(key, None)
+            return None
+        return payload
+
+    @classmethod
+    def _remember(cls, key: str, payload: dict) -> None:
+        import time
+        if len(cls._cache) >= cls.CACHE_MAX_ENTRIES:
+            # 简单淘汰：先清过期项，仍满则丢最早写入的一个
+            now = time.monotonic()
+            expired = [k for k, (exp, _) in cls._cache.items() if exp <= now]
+            for k in expired:
+                cls._cache.pop(k, None)
+            if len(cls._cache) >= cls.CACHE_MAX_ENTRIES:
+                cls._cache.pop(next(iter(cls._cache)), None)
+        cls._cache[key] = (time.monotonic() + cls.CACHE_TTL_S, payload)
+
+    async def _throttle(self) -> None:
         import asyncio
-        import re as _re
-        import urllib.request as _uq
-        from html import unescape as _unesc
+        import time
+        now = time.monotonic()
+        wait = self.__class__._last_request_at + self.MIN_INTERVAL_S - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+        self.__class__._last_request_at = time.monotonic()
 
-        query = input_data.get("query", "")
-        max_results = min(int(input_data.get("max_results", 5)), 10)
+    async def execute(self, input_data: dict) -> dict:
+        import asyncio
+        from urllib.parse import quote
 
-        def _fetch():
-            url = ("https://cn.bing.com/search?q="
-                   + _uq.quote(query) + "&count=" + str(max_results))
-            req = _uq.Request(url, headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                              "AppleWebKit/537.36"})
-            with _uq.urlopen(req, timeout=12) as resp:
-                return resp.read().decode("utf-8", errors="replace")
-
+        data = input_data or {}
+        query = str(data.get("query") or "").strip()
+        if not query:
+            return {"result": {"query": "", "error": "缺少 query", "results": []}}
         try:
-            html = await asyncio.wait_for(asyncio.to_thread(_fetch), timeout=15)
-            results = []
-            # 解析 b_algo 结果块
-            for m in _re.finditer(r'<li class="b_algo".*?</li>', html, _re.S):
-                block = m.group()
-                tm = _re.search(r'<h2[^>]*>.*?<a[^>]*>(.*?)</a>', block, _re.S)
-                hm = _re.search(r'<h2[^>]*>.*?<a[^>]*href="([^"]+)"', block, _re.S)
-                pm = _re.search(r'<p[^>]*>(.*?)</p>', block, _re.S)
-                if tm:
-                    title = _unesc(_re.sub(r"<[^>]+>", "", tm.group(1))).strip()
-                    snippet = _unesc(_re.sub(r"<[^>]+>", "", pm.group(1))).strip() if pm else ""
-                    results.append({"title": title,
-                                    "href": hm.group(1) if hm else "",
-                                    "body": snippet[:300]})
-                if len(results) >= max_results:
-                    break
-            if not results:
-                # 兜底：直接抓所有 h2 链接
-                for m in _re.finditer(r'<h2><a[^>]*href="([^"]+)"[^>]*>(.*?)</a></h2>',
-                                      html, _re.S):
-                    results.append({
-                        "title": _unesc(_re.sub(r"<[^>]+>", "", m.group(2))).strip(),
-                        "href": m.group(1), "body": ""})
-                    if len(results) >= max_results:
-                        break
-            if results:
-                return {"result": {"query": query, "backend": "bing_cn",
-                                   "results": results, "count": len(results)}}
-            return {"result": {"query": query, "error": "no results parsed",
-                               "results": []}}
-        except Exception as e:
-            # 兜底再试 ddgs
+            max_results = int(data.get("max_results") or 5)
+        except (TypeError, ValueError):
+            max_results = 5
+        max_results = max(1, min(max_results, 10))
+
+        normalized = re.sub(r"\s+", " ", query).strip().lower()
+        cache_key = f"{normalized}|{max_results}"
+        cached = self._cached(cache_key)
+        if cached:
+            return {"result": {**cached, "cached": True}}
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        attempts: list[str] = []
+
+        # 1) DuckDuckGo HTML POST：偶发 202 是瞬时限流，退避重试即可
+        for attempt in range(3):
+            if loop.time() - started > self.TOTAL_BUDGET:
+                break
+            await self._throttle()
             try:
-                from ddgs import DDGS
-                results = DDGS().text(query, max_results=max_results)
+                text, status = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _http_fetch, "https://html.duckduckgo.com/html/",
+                        data={"q": query}, timeout=self.PER_BACKEND_TIMEOUT),
+                    timeout=self.PER_BACKEND_TIMEOUT + 2)
+                results = _dedupe_results(parse_ddg_html(text, max_results),
+                                          max_results)
                 if results:
-                    return {"result": {"query": query, "backend": "ddgs",
-                                       "results": results, "count": len(results)}}
-            except Exception as e2:
-                # 两个搜索后端都失败：这是"搜索无结果"与"搜索坏了"的分界，
-                # 必须区分开，否则排查时看不到到底是哪个后端挂了
-                logger.warning("搜索降级后端 ddgs 亦失败 query=%r: %s（原始错误: %s）",
-                               query[:80], e2, e)
-            return {"result": {"query": query, "error": str(e), "results": []}}
+                    payload = {"query": query, "backend": "duckduckgo",
+                               "results": results, "count": len(results)}
+                    self._remember(cache_key, payload)
+                    logger.info("搜索命中 backend=duckduckgo query=%r count=%d",
+                                query[:60], len(results))
+                    return {"result": payload}
+                attempts.append(f"duckduckgo#{attempt + 1}: HTTP {status} 无结果")
+            except Exception as exc:  # 单后端失败不终止整条链
+                logger.warning("搜索后端 duckduckgo 失败 query=%r: %s",
+                               query[:60], exc)
+                attempts.append(f"duckduckgo#{attempt + 1}: "
+                                f"{type(exc).__name__}: {exc}")
+            await asyncio.sleep(2.0 * (attempt + 1))
+
+        backends = (
+            ("brave", "https://search.brave.com/search?q=", parse_brave_html),
+            ("bing_rss", "https://www.bing.com/search?format=rss&mkt=zh-CN&q=",
+             parse_bing_rss),
+        )
+        for name, prefix, parser in backends:
+            if loop.time() - started > self.TOTAL_BUDGET:
+                attempts.append(f"{name}: 跳过后端预算")
+                break
+            await self._throttle()
+            try:
+                text, _status = await asyncio.wait_for(
+                    asyncio.to_thread(_http_fetch, prefix + quote(query),
+                                      timeout=self.PER_BACKEND_TIMEOUT),
+                    timeout=self.PER_BACKEND_TIMEOUT + 2)
+                results = _dedupe_results(parser(text, max_results), max_results)
+            except Exception as exc:  # 单后端失败不终止整条链
+                logger.warning("搜索后端 %s 失败 query=%r: %s", name, query[:60], exc)
+                attempts.append(f"{name}: {type(exc).__name__}: {exc}")
+                continue
+            if results:
+                payload = {"query": query, "backend": name,
+                           "results": results, "count": len(results)}
+                self._remember(cache_key, payload)
+                logger.info("搜索命中 backend=%s query=%r count=%d",
+                            name, query[:60], len(results))
+                return {"result": payload}
+            attempts.append(f"{name}: 解析不到结果")
+
+        # 最后兜底：ddgs 库（走 DuckDuckGo，仅部分网络环境可用）
+        try:
+            from ddgs import DDGS
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(lambda: DDGS().text(query, max_results=max_results)),
+                timeout=self.PER_BACKEND_TIMEOUT)
+            results = _dedupe_results(
+                [{"title": r.get("title", ""),
+                  "href": r.get("href") or r.get("url") or "",
+                  "body": r.get("body") or r.get("snippet") or ""}
+                 for r in (raw or [])], max_results)
+            if results:
+                payload = {"query": query, "backend": "ddgs",
+                           "results": results, "count": len(results)}
+                self._remember(cache_key, payload)
+                return {"result": payload}
+            attempts.append("ddgs: 无结果")
+        except Exception as exc:
+            logger.warning("搜索后端 ddgs 失败 query=%r: %s", query[:60], exc)
+            attempts.append(f"ddgs: {type(exc).__name__}: {exc}")
+
+        return {"result": {"query": query,
+                           "error": "所有搜索后端均未返回结果（"
+                                    + "；".join(attempts) + "）",
+                           "results": [], "attempts": attempts}}
 
 
 # ---- Skill registry: future skills can be installed from plugins/skills/ directory ----

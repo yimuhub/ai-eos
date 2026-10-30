@@ -14,11 +14,11 @@ from sqlalchemy import JSON, String, ForeignKey, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_company_capability, get_current_user, get_db
 from app.core.logging_config import get_logger
+from app.core.permissions import Capability
 from app.db.base import Base
 from app.models.agent import Agent, Model
-from app.models.company import Company
 from app.models.user import User
 import re as _re2
 
@@ -71,11 +71,13 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-async def _owned_company(db: AsyncSession, user_id: str, company_id: str):
-    c = await db.get(Company, company_id)
-    if not c or c.owner_id != user_id:
-        raise HTTPException(404, "company not found")
-    return c
+async def _owned_company(db: AsyncSession, user_id: str, company_id: str,
+                         capability: Capability = Capability.VIEW):
+    """公司门禁：角色具备 capability 才放行（越权 404）。
+
+    company_id 来自调用方，必须先由 resolve_role 确认关系，不能只信参数。
+    """
+    return await assert_company_capability(db, user_id, company_id, capability)
 
 
 def _now():
@@ -88,12 +90,17 @@ import uuid  # noqa: E402
 async def _get_member_agents(db, company_id, scope, scope_id):
     """获取参与该 scope 的所有 Agent。"""
     from app.models.project import ProjectMember
+    from app.models.chat_group import ChatGroup
     agents = []
     if scope == "project":
         rows = (await db.execute(select(ProjectMember).where(
             ProjectMember.project_id == scope_id,
             ProjectMember.member_type == "agent"))).scalars().all()
         ids = [m.member_id for m in rows]
+    elif scope == "group":
+        # 自由群聊：成员直接存在 chat_groups.agent_ids
+        g = await db.get(ChatGroup, scope_id)
+        ids = [str(i) for i in (g.agent_ids or [])] if g and g.company_id == company_id else []
     else:  # task：执行过该任务的 Agent + 指派 Agent
         from app.models.task import Task
         from app.models.task import AgentExecution
@@ -365,9 +372,9 @@ async def group_chat(scope: str, scope_id: str, data: GroupChatIn,
                      db: AsyncSession = Depends(get_db),
                      user: User = Depends(get_current_user)):
     """老板发言 → 所有参与 Agent 依次反馈（互相可见）。"""
-    if scope not in ("project", "task"):
-        raise HTTPException(400, "scope must be project or task")
-    await _owned_company(db, user.id, company_id)
+    if scope not in ("project", "task", "group"):
+        raise HTTPException(400, "scope must be project, task or group")
+    await _owned_company(db, user.id, company_id, Capability.OPERATE)
     from app.model_gateway import ModelGateway
     gw = ModelGateway(db)
 
@@ -381,6 +388,7 @@ async def group_chat(scope: str, scope_id: str, data: GroupChatIn,
     # 2. 取参与 Agent + 已有发言记录
     agents = await _get_member_agents(db, company_id, scope, scope_id)
     prev = (await db.execute(select(GroupChatMessage).where(
+        GroupChatMessage.company_id == company_id,
         GroupChatMessage.scope == scope,
         GroupChatMessage.scope_id == scope_id).order_by(
         GroupChatMessage.created_at))).scalars().all()
@@ -434,6 +442,7 @@ async def history(scope: str, scope_id: str,
                   user: User = Depends(get_current_user)):
     await _owned_company(db, user.id, company_id)
     rows = (await db.execute(select(GroupChatMessage).where(
+        GroupChatMessage.company_id == company_id,
         GroupChatMessage.scope == scope,
         GroupChatMessage.scope_id == scope_id).order_by(
         GroupChatMessage.created_at))).scalars().all()

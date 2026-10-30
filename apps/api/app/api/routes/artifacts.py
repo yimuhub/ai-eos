@@ -11,11 +11,12 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import assert_company_owned, get_current_user, get_db
+from app.api.deps import (assert_company_capability, assert_company_owned,
+                          get_current_user, get_db)
 from app.core.logging_config import get_logger
+from app.core.permissions import Capability
 from app.models.artifact import (ALLOWED_TRANSITIONS, Artifact, ArtifactStatus,
                                  ArtifactVersion, can_transition)
-from app.models.company import Company
 from app.models.user import User
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
@@ -49,7 +50,7 @@ async def create_artifact(
     user: User = Depends(get_current_user),
 ):
     """创建成果并写入 v1 草稿。"""
-    await assert_company_owned(db, user.id, company_id)
+    await assert_company_capability(db, user.id, company_id, Capability.OPERATE)
     art = Artifact(id=str(uuid.uuid4()), company_id=company_id,
                    project_id=data.project_id, name=data.name,
                    artifact_type=data.artifact_type, current_version=1,
@@ -136,7 +137,7 @@ async def submit_new_version(
     user: User = Depends(get_current_user),
 ):
     """提交新版本（草稿或被驳回后重新提交）。"""
-    art = await _owned_artifact(artifact_id, db, user)
+    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)
     if art.status not in (ArtifactStatus.DRAFT, ArtifactStatus.REJECTED):
         raise HTTPException(409, f"Cannot submit new version in status {art.status.value}")
 
@@ -168,7 +169,7 @@ async def submit_for_review(
     user: User = Depends(get_current_user),
 ):
     """提交审核：DRAFT/REJECTED → IN_REVIEW。"""
-    art = await _owned_artifact(artifact_id, db, user)
+    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)
     if not can_transition(art.status, ArtifactStatus.IN_REVIEW):
         raise HTTPException(409, f"Cannot submit from {art.status.value}")
 
@@ -199,7 +200,7 @@ async def review_artifact(
     user: User = Depends(get_current_user),
 ):
     """审核：approve / reject / withdraw。"""
-    art = await _owned_artifact(artifact_id, db, user)
+    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)
 
     decision_map = {
         "approve": ArtifactStatus.APPROVED,
@@ -229,14 +230,13 @@ async def review_artifact(
             "reviewer": data.reviewer_agent_id or user.id}
 
 
-async def _owned_artifact(artifact_id: str, db: AsyncSession, user: User) -> Artifact:
-    """取成果并做归属校验：只能操作自己公司的成果（防 IDOR，404 而非 403）。"""
+async def _owned_artifact(artifact_id: str, db: AsyncSession, user: User,
+                          capability: Capability = Capability.VIEW) -> Artifact:
+    """取成果并做门禁：公司角色需具备 capability，否则 404（不泄露存在性）。"""
     art = await db.get(Artifact, artifact_id)
     if not art:
         raise HTTPException(404, "Artifact not found")
-    c = await db.get(Company, art.company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Artifact not found")
+    await assert_company_capability(db, user.id, art.company_id, capability)
     return art
 
 
@@ -275,7 +275,7 @@ async def publish_artifact(
     - 否则直接发布（小公司单人模式，不增加流程负担）
     """
     import uuid as _uuid
-    art = await _owned_artifact(artifact_id, db, user)
+    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)
     if art.status.value != "APPROVED":
         raise HTTPException(409, f"只有审核通过（APPROVED）的成果可以发布，当前：{art.status.value}")
 
@@ -336,7 +336,7 @@ async def decide_publish(
     import uuid as _uuid
     from sqlalchemy import text
     from app.models.intervention import ApprovalRequest
-    art = await _owned_artifact(artifact_id, db, user)
+    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)
     req = (await db.execute(
         select(ApprovalRequest).where(
             ApprovalRequest.company_id == art.company_id,
@@ -368,7 +368,8 @@ async def delete_artifact(
     user: User = Depends(get_current_user),
 ):
     """删除成果（含全部版本）。"""
-    art = await _owned_artifact(artifact_id, db, user)
+    # 成果删除只做 MANAGE（与 doc_styles 同口径），不按 DESTRUCTIVE 处理。
+    art = await _owned_artifact(artifact_id, db, user, Capability.MANAGE)
     await db.execute(delete(ArtifactVersion).where(
         ArtifactVersion.artifact_id == artifact_id))
     await db.delete(art)

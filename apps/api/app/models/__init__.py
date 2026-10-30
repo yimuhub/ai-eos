@@ -4,6 +4,7 @@ from .base import TimestampMixin  # noqa: F401
 from .user import User  # noqa: F401
 from .refresh_token import RefreshToken  # noqa: F401
 from .company import Company, Department  # noqa: F401
+from .membership import CompanyMember, DepartmentMember  # noqa: F401
 from .agent import Agent, AgentModelConfig, Model  # noqa: F401
 from .skill import AgentSkill, Skill  # noqa: F401
 from .task import (AgentExecution, ExecutionCheckpoint, Intervention, Task,  # noqa: F401
@@ -57,5 +58,6 @@ from app.models.p3_governance import (AgentSandbox, AgentVersion,  # noqa: F401
                                       SelfImprovementCase)
 from .budget import TokenBudget  # noqa: F401
 from .mailbox import AgentMailbox, MailMessage  # noqa: F401
+from .chat_group import ChatGroup  # noqa: F401
 from .whitelist import ApprovalWhitelist  # noqa: F401
 from .worklog import AgentWorklog, WorklogStatus  # noqa: F401

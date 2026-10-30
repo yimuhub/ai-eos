@@ -15,9 +15,11 @@ base_url 与"密钥放在哪个环境变量"这类信息。这是跨租户越权
 * 未归属的配置只允许被**认领**（PATCH 带上自己的 company_id），不能直接删：
   无主配置可能正被别家公司的员工使用，直接删会造成看不见的破坏。
 """
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -26,15 +28,55 @@ from app.core.net_guard import OutboundURLRejected, validate_outbound_url_async
 from app.core.permissions import Capability, ensure_capability
 from app.db.session import get_db
 from app.model_gateway import PROVIDERS
-from app.models.agent import Model, ModelProviderType
+from app.models.agent import Agent, AgentModelConfig, Model, ModelProviderType
 from app.models.company import Company
+from app.models.membership import CompanyMember
 from app.models.user import User
 
 router = APIRouter(prefix="/models", tags=["models"])
+logger = logging.getLogger(__name__)
+
+
+# 模型配置里可能夹带的明文密钥字段名（历史上有人把 key 直接写进 config）。
+# 返回值一律剔除；`*_env` 是"密钥变量名"这类引用，按契约保留。
+_SECRET_CONFIG_KEYS = {"api_key", "apikey", "secret", "password", "authorization"}
+_SECRET_SUFFIXES = ("_api_key", "_secret", "_password", "_token", "_key")
+
+
+def _is_secret_config_key(name: str) -> bool:
+    n = name.lower().replace("-", "_")
+    if n.endswith("_env") or n.endswith("_env_var"):
+        return False  # 只引用环境变量名，不是密钥本身
+    return n in _SECRET_CONFIG_KEYS or n.endswith(_SECRET_SUFFIXES)
+
+
+def _safe_config(config):
+    """剔除 config 中的密钥类字段，避免列表接口把明文密钥回给前端。"""
+    if isinstance(config, list):
+        return [_safe_config(v) for v in config]
+    if not isinstance(config, dict):
+        return config
+    return {k: _safe_config(v) for k, v in config.items()
+            if not _is_secret_config_key(str(k))}
 
 
 async def _my_company_ids(db: AsyncSession, user_id: str) -> list[str]:
-    rows = await db.execute(select(Company.id).where(Company.owner_id == user_id))
+    """调用者可见的公司 id：超管看全部；其余 = owner 事实源 ∪ active 成员行。
+
+    与 tasks/tokens 的 `_accessible_company_ids` 同口径——P5 之后"是不是
+    公司成员"由成员表表达，只看 `companies.owner_id` 会把 admin/member
+    挡在自己的模型配置之外。
+    """
+    user = await db.get(User, user_id)
+    if user is not None and user.is_superadmin:
+        return [cid for (cid,) in (await db.execute(select(Company.id))).all()]
+    owned = select(Company.id).join(
+        User, User.id == Company.owner_id).where(User.id == user_id)
+    member = select(CompanyMember.company_id).where(
+        CompanyMember.user_id == user_id,
+        CompanyMember.status == "active")
+    rows = await db.execute(select(Company.id).where(
+        or_(Company.id.in_(owned), Company.id.in_(member))))
     return [cid for (cid,) in rows.all()]
 
 
@@ -100,6 +142,113 @@ def key_available(model_row: Model) -> bool:
     return bool(env_name and os.environ.get(f"{env_name}_FILE", ""))
 
 
+class EnvKeyIn(BaseModel):
+    env_name: str
+    api_key: str
+
+
+def _mask_key(key: str) -> str:
+    """只回显足够让人确认"是不是填对了那一串"的片段。"""
+    if len(key) <= 8:
+        return "…" + key[-2:]
+    return key[:4] + "…" + key[-4:]
+
+
+def _persist_env_key(env_name: str, api_key: str) -> None:
+    """把密钥写进 .env 并立即生效（原子替换 + 600 权限）。
+
+    * 只替换同名行，其余内容原样保留——.env 里还有 JWT_SECRET 等
+      别的配置，整文件重写必须无损。
+    * 先写临时文件再 os.replace，写到一半断电不会留下截断的 .env。
+    * 同时写入 os.environ：`resolved_api_key` 是按调用时读取的，
+      因此不需要重启后端，下一次任务就能用上新密钥。
+    """
+    import os
+    import tempfile
+
+    from app.core.env_loader import env_file_path
+
+    path = env_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = f"{env_name}={api_key}"
+
+    kept: list[str] = []
+    replaced = False
+    if path.is_file():
+        for old in path.read_text(encoding="utf-8").splitlines():
+            probe = old.strip()
+            if probe.startswith("export "):
+                probe = probe[len("export "):].lstrip()
+            if probe.split("=", 1)[0].strip() == env_name:
+                if not replaced:
+                    kept.append(line)
+                    replaced = True
+                continue  # 同名行只保留一条
+            kept.append(old)
+    if not replaced:
+        kept.append(line)
+
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".env.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(kept) + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError as exc:
+            logger.warning("清理 .env 临时文件失败（不影响写入结果）: %s", exc)
+        raise
+
+    os.environ[env_name] = api_key
+
+
+@router.post("/env-key")
+async def save_env_key(data: EnvKeyIn, user: User = Depends(get_current_user)):
+    """把模型密钥写进本机 .env 并立即生效。
+
+    为什么需要：密钥过去只能手工编辑 apps/api/.env 再重启后端，
+    对普通用户是天堑——于是新装的系统里每个员工都以"尚未绑定模型"
+    收场。这里把这一步变成一次表单提交。
+
+    安全边界：
+    * 仅超管（安装者）可写——写 .env 是服务器级动作；
+    * 变量名白名单（三个 provider 的默认变量），不能借它改写其它配置；
+    * 密钥只存在本机 .env，不入库、不外发、不回显（响应里只有掩码）；
+    * 文件权限 600，原子替换，写后同步 os.environ。
+    """
+    import re
+
+    if not user.is_superadmin:
+        raise HTTPException(403, "只有系统管理员可以写入服务端密钥。")
+
+    env_name = (data.env_name or "").strip()
+    if env_name not in set(PROVIDER_ENV_VARS.values()):
+        raise HTTPException(
+            400,
+            f"env_name 只允许 {sorted(set(PROVIDER_ENV_VARS.values()))}，"
+            "不能写入其它变量。")
+    if is_sensitive_env_name(env_name):  # 白名单已挡住，保留作为纵深防御
+        raise HTTPException(400, "不能写入服务端敏感变量。")
+
+    key = data.api_key or ""
+    if not 8 <= len(key) <= 512:
+        raise HTTPException(400, "密钥长度应在 8–512 个字符之间。")
+    if re.search(r"[\s\"'`\\]", key):
+        raise HTTPException(400, "密钥里不能包含空白字符或引号，请检查是否多复制了内容。")
+
+    try:
+        _persist_env_key(env_name, key)
+    except OSError as e:
+        raise HTTPException(
+            500, f"写入 .env 失败：{e.strerror or e}。请确认后端目录有写权限。")
+
+    # 立刻用新密钥做一次可用性确认：写进去了 ≠ 能用
+    return {"saved": True, "env_name": env_name, "masked": _mask_key(key),
+            "applied": True}
+
+
 class ModelIn(BaseModel):
     name: str
     provider_type: str  # openai_compat|anthropic|gemini
@@ -154,8 +303,8 @@ async def diagnostics(db: AsyncSession = Depends(get_db),
         names = "、".join(
             sorted({m.api_key_env or PROVIDER_ENV_VARS.get(m.provider_type.value, "")
                     for m in rows} - {""}))
-        missing_hint = (f"模型已登记但缺少密钥。请在 apps/api/.env 中设置 "
-                        f"{names} 后重启后端服务。")
+        missing_hint = (f"模型已登记但缺少密钥。请在「模型配置」页填写 API Key"
+                        f"（保存为 {names}，立即生效，无需重启后端）。")
 
     return {
         "model_count": len(rows),
@@ -184,7 +333,8 @@ async def list_models(company_id: str | None = Query(None),
         or_(Model.company_id.is_(None), Model.company_id.in_(mine))))
     return [
         {"id": m.id, "name": m.name, "provider_type": m.provider_type.value,
-         "base_url": m.base_url, "model_id": m.model_id, "config": m.config,
+         "base_url": m.base_url, "model_id": m.model_id,
+         "config": _safe_config(m.config),
          "company_id": m.company_id,
          # 未归属的配置要显式标出来，前端才能提示去认领，
          # 否则用户只会疑惑"为什么这条我删不掉"。
@@ -207,6 +357,10 @@ async def create_model(data: ModelIn, db: AsyncSession = Depends(get_db),
     await _validate_model_base_url(data.base_url)
     payload = data.model_dump()
     payload.pop("provider_type", None)
+    if not (payload.get("api_key_env") or "").strip():
+        # 没指定变量名时落 provider 默认变量：模型行自解释，
+        # 也避免"密钥明明写在 .env 里、却没有任何行指向它"的静默 401。
+        payload["api_key_env"] = PROVIDER_ENV_VARS.get(pt.value)
     m = Model(**payload, provider_type=pt)
     db.add(m)
     await db.commit()
@@ -248,6 +402,11 @@ async def update_model(mid: str, data: dict, db: AsyncSession = Depends(get_db),
         m.provider_type = ModelProviderType(data["provider_type"])
     if "api_key_env" in data:
         _reject_sensitive_env(data["api_key_env"])
+        if not (data["api_key_env"] or "").strip():
+            # 和学习 POST 一致：清空变量名时落 provider 默认变量，
+            # 而不是留下一行"取不到任何密钥"的空指向。
+            data["api_key_env"] = PROVIDER_ENV_VARS.get(
+                ModelProviderType(data.get("provider_type", m.provider_type.value)).value)
     if "base_url" in data:
         await _validate_model_base_url(data["base_url"])
     for k, v in data.items():
@@ -263,7 +422,16 @@ async def delete_model(mid: str, db: AsyncSession = Depends(get_db),
     m = await db.get(Model, mid)
     if not m:
         raise HTTPException(404, "Model not found")
-    await _ensure_model_access(db, user, m, Capability.DESTRUCTIVE)
+    # 模型密钥属于公司级配置：删除只需 MANAGE（与 tokens/artifacts 的
+    # 配置类删除同口径），不升级到 DESTRUCTIVE 把公司管理员排除在外。
+    await _ensure_model_access(db, user, m, Capability.MANAGE)
+    # 先解绑再删：agent_model_configs.model_id 有外键约束，直接删模型会
+    # 500。绑定这里只是一行记录，删掉后员工回到"未绑定"，不丢任何历史。
+    unbound = await db.execute(delete(AgentModelConfig).where(
+        AgentModelConfig.model_id == m.id))
+    if unbound.rowcount:
+        logger.info("删除模型 %s：同时解除 %s 条员工绑定",
+                    m.id, unbound.rowcount)
     await db.delete(m)
     await db.commit()
 
@@ -289,16 +457,79 @@ async def test_model(mid: str, db: AsyncSession = Depends(get_db),
     provider = PROVIDERS[m.provider_type](
         base_url=m.base_url or "", api_key=_resolve_api_key(m), model_id=m.model_id)
     try:
+        # 64 而不是 10：推理型模型（如 agnes-2.5-flash）会先用 token 写
+        # reasoning_content，上限太小会导致 content 为空——测试显示"连通正常"
+        # 却看不到回复，用户会误以为模型坏了。
         result = await provider.chat([{"role": "user", "content": "回复 OK 两个字母即可"}],
-                                     config={"max_tokens": 10})
+                                     config={"max_tokens": 64})
         return {"status": "ok", "reply": result["content"][:100], "raw_model": result.get("raw_model")}
     except Exception as e:
         return {"status": "error", "error": str(e)[:500]}
 
 
+class BindAgentsIn(BaseModel):
+    company_id: str
+    role: str = "primary"          # primary|secondary|fallback
+    only_unbound: bool = True      # True：只补“还没有该角色绑定”的员工，不动手工配过的
+
+
+@router.post("/{mid}/bind-agents")
+async def bind_model_to_agents(mid: str, data: BindAgentsIn,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(get_current_user)):
+    """把一条模型配置批量绑定给公司内全部 AI 员工。
+
+    为什么需要：新装完成时公司里有几十名员工、0 条绑定，逐个员工点
+    "设为首选模型"不现实；而运行时只认 `agent_model_configs`。没有这个
+    接口，安装向导再顺，最后一步仍会以"尚未绑定任何模型"收场。
+    """
+    if data.role not in {"primary", "secondary", "fallback"}:
+        raise HTTPException(400, "role 只能是 primary / secondary / fallback。")
+
+    m = await db.get(Model, mid)
+    if not m:
+        raise HTTPException(404, "Model not found")
+    # 先校验对目标公司的管理权：无权限时统一 404，不泄露"该模型属于谁"
+    await ensure_capability(db, user.id, data.company_id, Capability.MANAGE)
+    if m.company_id is None:
+        raise HTTPException(
+            409, "该模型配置未归属公司，请先认领（PATCH 带上 company_id）再绑定。")
+    if m.company_id != data.company_id:
+        raise HTTPException(409, "该模型不属于指定的公司，不能跨公司绑定。")
+
+    agent_ids = [aid for (aid,) in (await db.execute(
+        select(Agent.id).where(Agent.company_id == data.company_id))).all()]
+    if not agent_ids:
+        return {"model_id": m.id, "role": data.role, "agent_count": 0,
+                "bound": 0, "skipped": 0}
+
+    rows = (await db.execute(select(AgentModelConfig).where(
+        AgentModelConfig.agent_id.in_(agent_ids),
+        AgentModelConfig.role == data.role))).scalars().all()
+    by_agent = {b.agent_id: b for b in rows}
+
+    bound = 0
+    for aid in agent_ids:
+        existing = by_agent.get(aid)
+        if existing is not None:
+            if data.only_unbound:
+                continue
+            existing.model_id = m.id
+        else:
+            db.add(AgentModelConfig(agent_id=aid, role=data.role, model_id=m.id))
+        bound += 1
+
+    await db.commit()
+    return {"model_id": m.id, "role": data.role,
+            "agent_count": len(agent_ids), "bound": bound,
+            "skipped": len(agent_ids) - bound}
+
+
 class FetchModelsIn(BaseModel):
     base_url: str
     api_key: str | None = None      # 直接传 key（不落库）
+    # 决定鉴权头：Anthropic 用 x-api-key，其余按 OpenAI 兼容用 Bearer。
+    provider_type: str = "openai_compat"
     # 仅为识别旧客户端而保留：服务端**不再**读取任何环境变量，
     # 传了就 400（见 list_provider_models）。绝不能删掉字段只靠 Pydantic
     # 忽略未知字段，否则旧客户端会以为生效了。
@@ -308,7 +539,7 @@ class FetchModelsIn(BaseModel):
 @router.post("/providers/list-models")
 async def list_provider_models(data: FetchModelsIn,
                                user=Depends(get_current_user)):
-    """从 OpenAI 兼容供应商拉取可用模型列表（GET /v1/models）。
+    """从供应商拉取可用模型列表（OpenAI 兼容 GET /v1/models）。
 
     ## 安全边界（修复「密钥外发」）
 
@@ -331,6 +562,11 @@ async def list_provider_models(data: FetchModelsIn,
             "出于安全考虑，不再支持通过 api_key_env 从环境变量读取密钥；"
             "请在服务端配置模型密钥后重试。")
 
+    try:
+        provider_type = ModelProviderType(data.provider_type)
+    except ValueError:
+        raise HTTPException(400, f"provider_type must be one of {[p.value for p in ModelProviderType]}")
+
     key = data.api_key or ""
     try:
         await validate_outbound_url_async(data.base_url, allow_private=True)
@@ -340,11 +576,16 @@ async def list_provider_models(data: FetchModelsIn,
     url = data.base_url.rstrip("/")
     if not url.endswith("/models"):
         url = f"{url}/models" if url.endswith("/v1") else f"{url}/v1/models"
+    headers: dict[str, str] = {}
+    if key:
+        if provider_type is ModelProviderType.ANTHROPIC:
+            headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+        else:
+            headers = {"Authorization": f"Bearer {key}"}
     try:
         async with httpx.AsyncClient(timeout=15, trust_env=False,
                                      follow_redirects=False) as client:
-            resp = await client.get(url, headers={"Authorization": f"Bearer {key}"}
-                                    if key else {})
+            resp = await client.get(url, headers=headers)
             if resp.status_code == 401:
                 return {"status": "error", "error": "认证失败（401）：请检查 API Key"}
             if resp.status_code != 200:

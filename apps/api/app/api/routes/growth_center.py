@@ -7,10 +7,11 @@ from pydantic import BaseModel
 from sqlalchemy import JSON, String, Text, Float, select, Column
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import assert_company_capability, get_current_user, get_db
+from app.core.permissions import Capability
+from app.core.scope import agent_read_scope, build_ctx
 from app.db.base import Base
 from app.models.agent import Agent
-from app.models.company import Company
 from app.models.user import User
 from app.models.memory import AgentMemory
 
@@ -52,11 +53,13 @@ class PlanIn(BaseModel):
     notes: str | None = None
 
 
-async def _owned(db, user_id, company_id):
-    c = await db.get(Company, company_id)
-    if not c or c.owner_id != user_id:
-        raise HTTPException(404, "company not found")
-    return c
+async def _owned_company(db, user_id, company_id,
+                 capability: Capability = Capability.VIEW):
+    """公司门禁：角色具备 capability 才放行，其余一律 404。
+
+    P5 之后成员/管理员身份由 resolve_role 解析，不再只认 companies.owner_id。
+    """
+    return await assert_company_capability(db, user_id, company_id, capability)
 
 
 @router.get("/departments-overview")
@@ -64,9 +67,10 @@ async def departments_overview(company_id: str = Query(...),
                                db: AsyncSession = Depends(get_db),
                                user: User = Depends(get_current_user)):
     """按一级部门聚合全部员工的成长档案摘要。"""
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id)
+    ctx = await build_ctx(db, user, company_id)
     agents = (await db.execute(select(Agent).where(
-        Agent.company_id == company_id))).scalars().all()
+        agent_read_scope(ctx)))).scalars().all()
     from app.models.company import Department
     depts = (await db.execute(select(Department).where(
         Department.company_id == company_id))).scalars().all()
@@ -119,14 +123,18 @@ async def list_plans(company_id: str = Query(...),
                      agent_id: str | None = Query(None),
                      db: AsyncSession = Depends(get_db),
                      user: User = Depends(get_current_user)):
-    await _owned(db, user.id, company_id)
-    q = select(LearningPlan).where(LearningPlan.company_id == company_id)
+    await _owned_company(db, user.id, company_id)
+    ctx = await build_ctx(db, user, company_id)
+    visible_agents = select(Agent.id).where(agent_read_scope(ctx))
+    q = select(LearningPlan).where(
+        LearningPlan.company_id == company_id,
+        LearningPlan.agent_id.in_(visible_agents))
     if agent_id:
         q = q.where(LearningPlan.agent_id == agent_id)
     rows = (await db.execute(q.order_by(LearningPlan.created_at.desc()))).scalars().all()
     name_map = {}
     agents = (await db.execute(select(Agent).where(
-        Agent.company_id == company_id))).scalars().all()
+        agent_read_scope(ctx)))).scalars().all()
     name_map = {str(a.id): a.name for a in agents}
     return [{"id": p.id, "title": p.title, "agent_id": p.agent_id,
              "agent_name": name_map.get(p.agent_id, "?"),
@@ -142,7 +150,7 @@ async def create_plan(data: PlanIn, company_id: str = Query(...),
                       user: User = Depends(get_current_user)):
     """创建学习计划（可批量分配给多名员工）。"""
     import uuid as _uuid
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id, Capability.OPERATE)
     now = datetime.now(timezone.utc)
     created = []
     for aid in data.agent_ids:
@@ -168,7 +176,7 @@ async def update_plan(plan_id: str, company_id: str = Query(...),
                       progress: float | None = Query(None),
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id, Capability.OPERATE)
     p = await db.get(LearningPlan, plan_id)
     if not p or p.company_id != company_id:
         raise HTTPException(404)
@@ -187,7 +195,13 @@ async def agent_detail(agent_id: str, company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
     """成长中心弹窗详情：技能清单 / 记忆清单 / 进行中计划（可管理）。"""
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id)
+    target = await db.get(Agent, agent_id)
+    if not target or target.company_id != company_id:
+        raise HTTPException(404, "Agent not found")
+    # 行级可见性：成员只能看自己范围内的员工档案
+    from app.core.scope import ensure_agent_access
+    await ensure_agent_access(db, user, target, Capability.VIEW)
     from app.models.skill import AgentSkill, Skill as SkillRow
     from app.models.memory import AgentMemory
     skills = (await db.execute(
@@ -230,7 +244,7 @@ async def delete_agent_skill(asn_id: str, company_id: str = Query(...),
     2. 原代码只校验了 company_id 归属，未校验被删记录本身属于该公司，
        知道 id 即可跨租户删除。现按 agent→company 显式校验。
     """
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id, Capability.MANAGE)
     from app.models.skill import AgentSkill
 
     row = await db.get(AgentSkill, asn_id)
@@ -253,7 +267,7 @@ async def delete_agent_memory(memory_id: str, company_id: str = Query(...),
 
     同 delete_agent_skill：补上记录级的租户归属校验，避免跨公司删除。
     """
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id, Capability.MANAGE)
     m = await db.get(AgentMemory, memory_id)
     if not m:
         raise HTTPException(404, "记忆不存在")
@@ -277,10 +291,12 @@ async def add_agent_memory(data: AddMemoryIn,
                             db: AsyncSession = Depends(get_db),
                             user: User = Depends(get_current_user)):
     """为员工添加一条长期记忆。"""
-    await _owned(db, user.id, data.company_id)
+    await _owned_company(db, user.id, data.company_id, Capability.OPERATE)
     a = await db.get(Agent, data.agent_id)
-    if not a:
+    if not a or a.company_id != data.company_id:
         raise HTTPException(404)
+    from app.core.scope import ensure_agent_access
+    await ensure_agent_access(db, user, a, Capability.OPERATE)
     from app.models.memory import MemoryType
     m = AgentMemory(
         id=str(uuid.uuid4()), agent_id=data.agent_id, company_id=data.company_id,
@@ -296,7 +312,7 @@ async def delete_plan(plan_id: str, company_id: str = Query(...),
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
     """删除学习计划。"""
-    await _owned(db, user.id, company_id)
+    await _owned_company(db, user.id, company_id, Capability.MANAGE)
     p = await db.get(LearningPlan, plan_id)
     if not p or p.company_id != company_id:
         raise HTTPException(404)

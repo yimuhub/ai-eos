@@ -5,17 +5,19 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import assert_company_capability, get_current_user
 from app.core.config import settings
+from app.core.permissions import Capability
+from app.core.scope import agent_read_scope, build_ctx
 from app.core.uploads import (ASSET_ALLOWED_EXTENSIONS, ensure_within,
                               generate_stored_name, safe_original_name,
                               stream_upload, validate_extension)
 from app.db.session import get_db
+from app.models.agent import Agent
 from app.models.asset import Asset, AssetType
-from app.models.company import Company
 from app.services.event_system import log_event
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -82,13 +84,37 @@ async def save_artifact(db: AsyncSession, company_id: str, name: str, content: s
     return asset
 
 
+def _asset_scope(ctx):
+    """成果行的可见条件：owner/admin 看全公司；其余看自己上传的
+    ∪ 自己可见 Agent 产出的成果。成果里可能有报告全文，不能全员可见。
+    """
+    base = Asset.company_id == ctx.company_id
+    if ctx.sees_all_agents:
+        return base
+    visible_agents = select(Agent.id).where(agent_read_scope(ctx))
+    return and_(base, or_(
+        and_(Asset.creator_type == "user", Asset.created_by == ctx.user_id),
+        Asset.agent_id.in_(visible_agents)))
+
+
+async def _visible_asset(db: AsyncSession, user, aid: str) -> Asset:
+    """单行校验与列表用同一条件：看不到即 404（不泄露存在性）。"""
+    a = await db.get(Asset, aid)
+    if not a:
+        raise HTTPException(404, "Asset not found")
+    ctx = await build_ctx(db, user, a.company_id)
+    found = (await db.execute(
+        select(Asset.id).where(Asset.id == aid, _asset_scope(ctx)))).first()
+    if found is None:
+        raise HTTPException(404, "Asset not found")
+    return a
+
+
 @router.get("")
 async def list_assets(company_id: str, type: str | None = None,
                       db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
-    c = await db.get(Company, company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
-    q = select(Asset).where(Asset.company_id == company_id)
+    ctx = await build_ctx(db, user, company_id)
+    q = select(Asset).where(_asset_scope(ctx))
     if type:
         q = q.where(Asset.type == AssetType(type))
     rows = (await db.execute(q.order_by(Asset.created_at.desc()))).scalars().all()
@@ -103,9 +129,8 @@ async def list_assets(company_id: str, type: str | None = None,
 @router.post("/upload", status_code=201)
 async def upload(company_id: str, file: UploadFile,
                  db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
-    c = await db.get(Company, company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
+    # 上传成果 = 日常写操作：成员（OPERATE）可以，只读不行
+    await assert_company_capability(db, user.id, company_id, Capability.OPERATE)
     root = storage_root().resolve()
     # 用户文件名只作元数据：落盘名由服务端生成（uuid + 白名单扩展名），
     # 扩展名不在白名单直接 400，超限由 stream_upload 流式拦截。
@@ -131,12 +156,7 @@ async def upload(company_id: str, file: UploadFile,
 @router.get("/{aid}/download")
 async def download(aid: str, db: AsyncSession = Depends(get_db),
                    user=Depends(get_current_user)):
-    a = await db.get(Asset, aid)
-    if not a:
-        raise HTTPException(404, "Asset not found")
-    c = await db.get(Company, a.company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Asset not found")
+    a = await _visible_asset(db, user, aid)
     fpath = _resolve_asset_path(a.path)
     if not fpath.is_file():
         raise HTTPException(404, "Asset file missing")
@@ -146,12 +166,7 @@ async def download(aid: str, db: AsyncSession = Depends(get_db),
 @router.get("/{aid}")
 async def read_asset(aid: str, db: AsyncSession = Depends(get_db),
                      user=Depends(get_current_user)):
-    a = await db.get(Asset, aid)
-    if not a:
-        raise HTTPException(404, "Asset not found")
-    c = await db.get(Company, a.company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Asset not found")
+    a = await _visible_asset(db, user, aid)
     p = _resolve_asset_path(a.path)
     if not p.is_file():
         raise HTTPException(404, "Asset file missing")

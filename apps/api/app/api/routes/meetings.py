@@ -1,13 +1,14 @@
 """Meeting API (P2-04)."""
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import assert_company_capability, get_current_user
+from app.core.permissions import Capability
+from app.core.scope import build_ctx
 from app.db.session import get_db
 from app.models.agent import Agent
-from app.models.company import Company
 from app.models.meeting import (ActionItemStatus, Meeting, MeetingActionItem,
                                 MeetingDecision, MeetingMessage,
                                 MeetingParticipant, MeetingStatus, MeetingType)
@@ -16,12 +17,28 @@ from app.services.event_system import log_event
 router = APIRouter(tags=["meetings"])
 
 
-async def _meeting_owned(db: AsyncSession, user_id: str, mid: str) -> Meeting:
+def _meeting_scope(ctx):
+    """会议行的可见条件：owner/admin 看全公司，其余只看自己创建的。
+
+    Meeting 没有部门字段，只能按创建者收窄。
+    """
+    base = Meeting.company_id == ctx.company_id
+    if ctx.sees_all_agents:
+        return base
+    return and_(base, Meeting.created_by == ctx.user_id)
+
+
+async def _meeting_owned(db: AsyncSession, user, mid: str,
+                         capability: Capability = Capability.VIEW) -> Meeting:
     m = await db.get(Meeting, mid)
     if not m:
         raise HTTPException(404, "Meeting not found")
-    c = await db.get(Company, m.company_id)
-    if not c or c.owner_id != user_id:
+    await assert_company_capability(db, user.id, m.company_id, capability)
+    ctx = await build_ctx(db, user, m.company_id)
+    found = (await db.execute(
+        select(Meeting.id).where(Meeting.id == m.id, _meeting_scope(ctx))
+        .limit(1))).first()
+    if found is None:
         raise HTTPException(404, "Meeting not found")
     return m
 
@@ -41,9 +58,9 @@ class MeetingCreateIn(BaseModel):
 @router.post("/meetings", status_code=201)
 async def create_meeting(data: MeetingCreateIn, db: AsyncSession = Depends(get_db),
                          user=Depends(get_current_user)):
-    c = await db.get(Company, data.company_id)
-    if not c or c.owner_id != user.id:
-        raise HTTPException(404, "Company not found")
+    # 开会是日常写操作（OPERATE）：成员可以，只读不行
+    await assert_company_capability(db, user.id, data.company_id,
+                                    Capability.OPERATE)
     mtype = data.meeting_type  # 支持内置枚举值 + 自定义类型字符串
     if not data.participant_ids:
         raise HTTPException(400, "至少选择一名参会 Agent")
@@ -70,8 +87,9 @@ async def create_meeting(data: MeetingCreateIn, db: AsyncSession = Depends(get_d
 @router.get("/meetings")
 async def list_meetings(company_id: str, db: AsyncSession = Depends(get_db),
                         user=Depends(get_current_user)):
-    q = await db.execute(select(Meeting).where(
-        Meeting.company_id == company_id).order_by(Meeting.created_at.desc()))
+    ctx = await build_ctx(db, user, company_id)
+    q = await db.execute(select(Meeting).where(_meeting_scope(ctx))
+                         .order_by(Meeting.created_at.desc()))
     return [{"id": m.id, "title": m.title, "status": m.status.value,
              "meeting_type": m.meeting_type, "topic": m.topic}
             for m in q.scalars()]
@@ -80,7 +98,7 @@ async def list_meetings(company_id: str, db: AsyncSession = Depends(get_db),
 @router.get("/meetings/{mid}")
 async def get_meeting(mid: str, db: AsyncSession = Depends(get_db),
                       user=Depends(get_current_user)):
-    m = await _meeting_owned(db, user.id, mid)
+    m = await _meeting_owned(db, user, mid)
     msgs_q = await db.execute(select(MeetingMessage).where(
         MeetingMessage.meeting_id == mid).order_by(MeetingMessage.created_at))
     parts_q = await db.execute(select(MeetingParticipant).where(
@@ -131,7 +149,7 @@ def _kick(mmid: str):
 @router.post("/meetings/{mid}/start")
 async def start_meeting(mid: str, db: AsyncSession = Depends(get_db),
                         user=Depends(get_current_user)):
-    m = await _meeting_owned(db, user.id, mid)
+    m = await _meeting_owned(db, user, mid, Capability.OPERATE)
     if m.status != MeetingStatus.SCHEDULED:
         raise HTTPException(409, f"会议状态为 {m.status.value}，不能开始")
     m.status = MeetingStatus.RUNNING
@@ -144,7 +162,7 @@ async def start_meeting(mid: str, db: AsyncSession = Depends(get_db),
 @router.post("/meetings/{mid}/pause")
 async def pause_meeting(mid: str, db: AsyncSession = Depends(get_db),
                         user=Depends(get_current_user)):
-    m = await _meeting_owned(db, user.id, mid)
+    m = await _meeting_owned(db, user, mid, Capability.OPERATE)
     if m.status != MeetingStatus.RUNNING:
         raise HTTPException(409, f"会议状态为 {m.status.value}，不能暂停")
     m.status = MeetingStatus.PAUSED
@@ -155,7 +173,7 @@ async def pause_meeting(mid: str, db: AsyncSession = Depends(get_db),
 @router.post("/meetings/{mid}/resume")
 async def resume_meeting(mid: str, db: AsyncSession = Depends(get_db),
                          user=Depends(get_current_user)):
-    m = await _meeting_owned(db, user.id, mid)
+    m = await _meeting_owned(db, user, mid, Capability.OPERATE)
     if m.status != MeetingStatus.PAUSED:
         raise HTTPException(409, f"会议状态为 {m.status.value}，不能继续")
     m.status = MeetingStatus.RUNNING
@@ -172,7 +190,7 @@ class SayIn(BaseModel):
 async def user_say(mid: str, data: SayIn, db: AsyncSession = Depends(get_db),
                    user=Depends(get_current_user)):
     """用户实时插话。若会议进行中，Agent 下一轮会看到这条发言。"""
-    m = await _meeting_owned(db, user.id, mid)
+    m = await _meeting_owned(db, user, mid, Capability.OPERATE)
     db.add(MeetingMessage(meeting_id=mid, speaker_type="user",
                           speaker_user_id=user.id, content=data.content))
     await log_event(db, "meeting.user_message", "meeting", str(m.id),
@@ -185,7 +203,7 @@ async def user_say(mid: str, data: SayIn, db: AsyncSession = Depends(get_db),
 async def end_meeting(mid: str, db: AsyncSession = Depends(get_db),
                       user=Depends(get_current_user)):
     """提前结束：直接进入总结（由后台完成纪要/决策/行动项提取）。"""
-    m = await _meeting_owned(db, user.id, mid)
+    m = await _meeting_owned(db, user, mid, Capability.OPERATE)
     if m.status == MeetingStatus.COMPLETED:
         raise HTTPException(409, "会议已结束")
     m.status = MeetingStatus.COMPLETED
@@ -216,7 +234,7 @@ async def end_meeting(mid: str, db: AsyncSession = Depends(get_db),
 async def convert_items(mid: str, project_id: str | None = None,
                         db: AsyncSession = Depends(get_db),
                         user=Depends(get_current_user)):
-    m = await _meeting_owned(db, user.id, mid)
+    m = await _meeting_owned(db, user, mid, Capability.OPERATE)
     if m.status != MeetingStatus.COMPLETED:
         raise HTTPException(409, "会议尚未结束")
     from app.meeting_engine import convert_action_items
@@ -231,7 +249,7 @@ async def dismiss_item(aid: str, db: AsyncSession = Depends(get_db),
     item = await db.get(MeetingActionItem, aid)
     if not item:
         raise HTTPException(404, "not found")
-    m = await _meeting_owned(db, user.id, str(item.meeting_id))
+    m = await _meeting_owned(db, user, str(item.meeting_id), Capability.OPERATE)
     item.status = ActionItemStatus.DISMISSED
     await db.commit()
 
@@ -244,7 +262,7 @@ async def upload_meeting_material(
     user=Depends(get_current_user),
 ):
     """会议进行中上传材料：追加到会议 context_material 并存储到公司资产库。"""
-    m = await _meeting_owned(db, user.id, mid)
+    m = await _meeting_owned(db, user, mid, Capability.OPERATE)
     if m.status not in ("RUNNING", "SCHEDULED", "PAUSED"):
         raise HTTPException(409, f"会议状态为 {m.status}，无法上传")
     # 读取内容（限制 10MB）

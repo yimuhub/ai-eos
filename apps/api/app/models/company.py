@@ -41,5 +41,11 @@ class Department(TimestampMixin, Base):
     kb_document_ids: Mapped[list] = mapped_column(JSON, default=list)  # 部门专属知识库文档
     attachments: Mapped[list] = mapped_column(JSON, default=list)  # 📎 附件引用
 
+    # --- P5：部门级配额与数据域（全部可空，老库靠 ensure_columns 幂等补列） ---
+    agent_quota: Mapped[int | None] = mapped_column(Integer, nullable=True)   # 本部门 Agent 数量上限
+    allowed_models: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 允许使用的 model_id 白名单
+    data_domain_code: Mapped[str | None] = mapped_column(
+        String(30), nullable=True, index=True)  # 数据域编码（如 finance / hr），供行级过滤预留
+
     company: Mapped["Company"] = relationship(back_populates="departments")
     agents: Mapped[list["Agent"]] = relationship(back_populates="department")

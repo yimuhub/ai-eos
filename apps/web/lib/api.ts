@@ -156,7 +156,7 @@ export function setActiveCompanyId(cid: string) {
 }
 
 /** 不需要自动追加 company_id 的路径前缀 */
-const COMPANY_SCOPE_SKIP = ["/companies", "/auth", "/upload", "/health"];
+const COMPANY_SCOPE_SKIP = ["/companies", "/auth", "/upload", "/health", "/setup"];
 
 /** 把路径中的 company_id=... 替换为当前激活公司（有激活值才替换） */
 function applyCompanyScope(path: string): string {
@@ -183,6 +183,16 @@ export type RequestOptions = {
   silent?: boolean;
   /** 透传给 fetch 的缓存策略（如更新检查通道需要 no-store） */
   cache?: RequestCache;
+  /**
+   * 401 时不按"登录已过期"处理：不清 token、不整页跳 /login、不广播。
+   *
+   * 首次安装引导（/setup）专用：安装前系统里还没有任何账号，也就没有登录态，
+   * 此时读 `/org-presets` 之类需要鉴权的接口必然 401——那是**预期状态**，
+   * 若走默认的"过期 → window.location = /login"，会把用户正在填写的安装表单冲掉，
+   * 再被登录页的 needs_setup 判定送回 /setup，形成来回跳转。
+   * 调用方拿到 401 后自行降级即可。
+   */
+  noAuthRedirect?: boolean;
 };
 
 /**
@@ -335,6 +345,15 @@ async function raw(
     if (!_isRetry) {
       const replayed = await tryRefreshAndReplay(path, options, config);
       if (replayed) return replayed;
+    }
+    if (config.noAuthRedirect) {
+      // 首次安装引导：安装前没有账号，401 是预期结果。就地抛错，由调用方降级展示。
+      const body = await res.json().catch(() => ({} as any));
+      throw new ApiError(
+        normalizeErrorDetail(body?.detail) || "需要登录后才能读取该数据",
+        401,
+        scoped,
+      );
     }
     if (isAuthEntryPath(path)) {
       // 登录/注册入口的 401 = 凭据不对：不清 token、不整页跳转、不全局广播，
