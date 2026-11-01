@@ -17,8 +17,13 @@ type Dept = {
   sort_order?: number; pinned?: boolean;
   skill_ids?: string[]; kb_document_ids?: string[];
   attachments?: Attachment[];
+  /** 部门下的组（CEO 按需招人时会自动新建） */
+  groups?: { id: string; name: string; description: string | null }[];
 };
-type Agent = { id: string; name: string; role: string | null; department_id: string | null };
+type Agent = {
+  id: string; name: string; role: string | null;
+  department_id: string | null; group_id?: string | null;
+};
 type SkillRow = { id: string; name: string; slug: string };
 type KbDoc = { id: string; title: string; chunk_count: number };
 
@@ -532,6 +537,34 @@ export default function OrganizationPage() {
                   <p className="text-[10px]" style={{ color: "var(--muted)" }}>暂无员工</p>
                 )}
               </div>
+
+              {/* 部门下的组（CEO 缺岗自动招人时的落位层级） */}
+              {(d.groups?.length ?? 0) > 0 && (
+                <div className="mt-3">
+                  <p className="text-[10px] font-semibold tracking-widest uppercase mb-1.5" style={{ color: "var(--muted)" }}>
+                    🧩 组（{d.groups!.length}）
+                  </p>
+                  <div className="space-y-1.5">
+                    {d.groups!.map((g) => {
+                      const members = staff.filter((a) => a.group_id === g.id);
+                      return (
+                        <div key={g.id} className="rounded-lg px-2 py-1.5"
+                          style={{ background: "rgba(34,211,238,0.07)", border: "1px solid rgba(34,211,238,0.2)" }}>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[11px] font-medium" style={{ color: "#67e8f9" }}>{g.name}</span>
+                            <span className="text-[10px]" style={{ color: "var(--muted)" }}>{members.length} 人</span>
+                          </div>
+                          {members.length > 0 && (
+                            <div className="mt-0.5 text-[10px] truncate" style={{ color: "var(--muted)" }}>
+                              {members.map((a) => a.name).join("、")}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               {/* 悬停操作 */}
               {!sortMode && (

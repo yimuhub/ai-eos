@@ -23,8 +23,10 @@ from app import ceo_engine
 from app.api.routes import ceo as ceo_routes
 from app.db.session import AsyncSessionLocal
 from app.models.agent import Agent, AgentModelConfig, Model, ModelProviderType
+from app.models.agent_group import AgentGroup
 from app.models.asset import Asset
 from app.models.ceo import CeoMission
+from app.models.company import Department
 from app.models.notification import Notification
 from app.models.task import Task, TaskStatus
 from app.schemas import responses_ceo
@@ -314,6 +316,202 @@ async def test_launch_requires_planning_state(client, make_user, make_company,
     again = await client.post(f"/ceo/missions/{mid}/launch", json={},
                               headers=user["headers"])
     assert again.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# 3.5 缺岗自动建人：部门 + 组，模型绑定继承
+# ---------------------------------------------------------------------------
+
+def _plan_with_open_roles() -> dict:
+    """两名子任务指向公司里没有的岗位，各自指定部门/组。"""
+    return {
+        "title": "内容增长专项",
+        "objective": "三个月把内容线索做到 500 条/月",
+        "deliverable": "内容排期 + 数据复盘表",
+        "redlines": ["不得刷量"],
+        "acceptance": ["排期到人到周"],
+        "terminology": {},
+        "subtasks": [
+            {"title": "增长策略", "description": "定主渠道与预算",
+             "agent_name": "王总"},
+            {"title": "内容排期", "description": "写选题与发布节奏",
+             "agent_name": "内容主编", "agent_role": "内容主编",
+             "department": "内容部", "group": "增长内容组",
+             "reason": "现有员工都不做内容"},
+            {"title": "数据复盘", "description": "按周出转化复盘",
+             "agent_name": "数据复盘师", "agent_role": "数据分析",
+             "department": "内容部", "group": "增长内容组",
+             "reason": "缺数据分析岗"},
+        ],
+    }
+
+
+async def test_missing_role_is_hired_into_department_and_group(
+        client, make_user, make_company, monkeypatch, queued_jobs):
+    _install_fake_chat(monkeypatch, _plan_with_open_roles())
+    user, co, ids = await _company_with_agents(client, make_user, make_company)
+
+    # 负责人先绑一个模型：新员工必须继承，否则一开工就没模型可用
+    async with AsyncSessionLocal() as s:
+        model = Model(company_id=co["id"], name="m-ceo",
+                      provider_type=ModelProviderType.OPENAI_COMPAT,
+                      model_id="test-model")
+        s.add(model)
+        await s.flush()
+        s.add(AgentModelConfig(agent_id=ids["王总"], role="primary",
+                               model_id=model.id))
+        await s.commit()
+        model_id = model.id
+
+    created = await client.post("/ceo/missions", json={
+        "company_id": co["id"], "instruction": "做内容增长"},
+        headers=user["headers"])
+    assert created.status_code == 201, created.text
+    body = created.json()
+    mid = body["mission_id"]
+
+    assert len(body["new_agents"]) == 2, "缺岗没有在预览里提前说明"
+    for proposal in body["new_agents"]:
+        _assert_keys(proposal, responses_ceo.CeoNewAgentOut, "new_agents")
+        assert proposal["agent_id"] == "", "预览阶段不该已经建人"
+        assert proposal["department"] == "内容部"
+        assert proposal["group"] == "增长内容组"
+    assert [p["name"] for p in body["new_agents"]] == ["内容主编", "数据复盘师"]
+    assert body["subtasks"][1]["agent_matched"] is False
+    assert body["subtasks"][0]["agent_matched"] is True
+
+    launch = await client.post(f"/ceo/missions/{mid}/launch", json={},
+                               headers=user["headers"])
+    assert launch.status_code == 202, launch.text
+    launched = launch.json()
+    _assert_keys(launched, responses_ceo.CeoLaunchOut)
+    assert len(launched["new_agents"]) == 2
+    assert all(a["agent_id"] for a in launched["new_agents"]), "开工没有真正建人"
+
+    detail = await client.get(f"/ceo/missions/{mid}", headers=user["headers"])
+    assert detail.status_code == 200, detail.text
+    _assert_keys(detail.json(), responses_ceo.CeoMissionDetailOut, "detail")
+    assert len(detail.json()["new_agents"]) == 2
+    assert all(a["agent_id"] for a in detail.json()["new_agents"])
+
+    async with AsyncSessionLocal() as s:
+        hired = (await s.execute(select(Agent).where(
+            Agent.company_id == co["id"],
+            Agent.name.in_(["内容主编", "数据复盘师"])))).scalars().all()
+        group = (await s.execute(select(AgentGroup).where(
+            AgentGroup.company_id == co["id"],
+            AgentGroup.name == "增长内容组"))).scalars().first()
+        dept = (await s.execute(select(Department).where(
+            Department.company_id == co["id"],
+            Department.name == "内容部"))).scalars().all()
+        tasks = (await s.execute(select(Task).where(Task.mission_id == mid)
+                                 .order_by(Task.created_at))).scalars().all()
+        mission = await s.get(CeoMission, mid)
+        bindings = (await s.execute(select(AgentModelConfig).where(
+            AgentModelConfig.agent_id.in_([a.id for a in hired])))
+        ).scalars().all()
+
+    assert len(hired) == 2, "按名字查不到新员工，落位不完整"
+    assert len(dept) == 1, "同一个部门被建了两次"
+    assert group is not None and group.department_id == dept[0].id
+    assert all(a.department_id == dept[0].id for a in hired)
+    assert all(a.group_id == group.id for a in hired)
+    assert all(a.company_id == co["id"] and a.created_by_user_id == user["id"]
+               for a in hired)
+    assert len(bindings) == 2 and all(b.model_id == model_id for b in bindings), \
+        "新员工没有继承负责人的模型绑定"
+
+    hired_ids = {a.id for a in hired}
+    assert {str(t.assigned_agent_id) for t in tasks[1:]} == hired_ids
+    assert str(tasks[0].assigned_agent_id) == ids["王总"]
+    assert len(mission.new_agents) == 2
+    assert all(st["agent_matched"] for st in mission.plan[1:])
+
+    # 组织架构页要能看到 CEO 建出来的组
+    depts_resp = await client.get(f"/companies/{co['id']}/departments",
+                                  headers=user["headers"])
+    assert depts_resp.status_code == 200, depts_resp.text
+    content_dept = next(d for d in depts_resp.json() if d["name"] == "内容部")
+    assert [g["name"] for g in content_dept["groups"]] == ["增长内容组"]
+
+    # 队列满把统筹打回 PLANNING 后重新开工：不能重复招同一批人
+    async with AsyncSessionLocal() as s:
+        mission = await s.get(CeoMission, mid)
+        coord = await s.get(Agent, mission.coordinator_agent_id)
+        again = await ceo_engine._provision_new_agents(s, mission, coord)
+        await s.commit()
+        total = (await s.execute(select(Agent).where(
+            Agent.company_id == co["id"]))).scalars().all()
+    assert len(again) == 2, "重复开工时把同一批新员工又招了一遍"
+    assert len(total) == 5, f"总员工数应保持 3 老 + 2 新，实际 {len(total)}"
+
+
+def _plan_with_cap_and_dedup() -> dict:
+    return {
+        "title": "扩张专项",
+        "objective": "把内容、设计、运营、法务、财务都跑起来",
+        "deliverable": "五份执行方案",
+        "redlines": [],
+        "acceptance": [],
+        "terminology": {},
+        "subtasks": [
+            {"title": "选题", "description": "选题",
+             "agent_name": "分析师", "agent_role": "数据分析",
+             "department": "产品部", "group": "内容组"},
+            {"title": "复盘", "description": "复盘",
+             "agent_name": "分析师", "agent_role": "数据分析",
+             "department": "产品部", "group": "内容组"},
+            {"title": "出图", "description": "出图",
+             "agent_name": "分析师", "agent_role": "视觉分析",
+             "department": "设计部", "group": "视觉组"},
+            {"title": "投放", "description": "投放",
+             "agent_name": "运营", "agent_role": "投放运营",
+             "department": "产品部", "group": "内容组"},
+            {"title": "合规", "description": "合规",
+             "agent_name": "法务", "agent_role": "法务",
+             "department": "法务部"},
+            {"title": "算账", "description": "算账",
+             "agent_name": "财务", "agent_role": "财务",
+             "department": "财务部"},
+        ],
+    }
+
+
+async def test_new_hire_cap_dedup_and_name_collision(
+        client, make_user, make_company, monkeypatch, queued_jobs):
+    _install_fake_chat(monkeypatch, _plan_with_cap_and_dedup())
+    user, co, ids = await _company_with_agents(client, make_user, make_company)
+    created = await client.post("/ceo/missions", json={
+        "company_id": co["id"], "instruction": "扩张"}, headers=user["headers"])
+    assert created.status_code == 201, created.text
+    body = created.json()
+    mid = body["mission_id"]
+
+    assert len(body["new_agents"]) == ceo_engine.MAX_NEW_AGENTS == 3, \
+        "新招人数没有按上限截断"
+    assert [p["name"] for p in body["new_agents"]] == ["分析师", "分析师", "运营"]
+    assert body["subtasks"][0]["new_agent_index"] == body["subtasks"][1]["new_agent_index"], \
+        "同一岗位被拆成两条子任务时重复招人"
+    assert body["subtasks"][4]["agent_id"] == ids["王总"], "超出上限的子任务没有回落给现有员工"
+    assert body["subtasks"][5]["agent_id"] == ids["王总"]
+    assert body["subtasks"][4]["agent_matched"] is False
+
+    launch = await client.post(f"/ceo/missions/{mid}/launch", json={},
+                               headers=user["headers"])
+    assert launch.status_code == 202, launch.text
+
+    async with AsyncSessionLocal() as s:
+        names = sorted(a.name for a in (await s.execute(select(Agent).where(
+            Agent.company_id == co["id"]))).scalars().all())
+        depts = (await s.execute(select(Department.name).where(
+            Department.company_id == co["id"]))).scalars().all()
+        groups = (await s.execute(select(AgentGroup.name).where(
+            AgentGroup.company_id == co["id"]))).scalars().all()
+
+    assert names == sorted(["王总", "小李", "小张", "分析师", "分析师（2）", "运营"]), \
+        f"重名没有加后缀或招多了人：{names}"
+    assert sorted(depts) == ["产品部", "设计部"], "只应建实际落位用到的部门"
+    assert sorted(groups) == ["内容组", "视觉组"], "组的复用/新建不对"
 
 
 async def test_assigning_ceo_enables_daily_digest_by_default(client, make_user,

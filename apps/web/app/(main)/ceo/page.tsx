@@ -58,6 +58,22 @@ type PlannedSubtask = {
   agent_id: string;
   agent_name: string;
   agent_matched: boolean;
+  /** 指向 new_agents 的下标；null/undefined = 这条分工不涉及新招 */
+  new_agent_index?: number | null;
+};
+
+/**
+ * CEO 提议或已招的新员工。
+ * 开工前 `agent_id` 为空（只是提议），开工后回填真实 id。
+ */
+type NewAgent = {
+  name: string;
+  role: string;
+  department: string;
+  group: string;
+  reason: string;
+  agent_id: string;
+  proposed_name?: string;
 };
 
 type CeoPreview = {
@@ -73,6 +89,7 @@ type CeoPreview = {
   anchor_version: number;
   subtasks: PlannedSubtask[];
   subtask_count: number;
+  new_agents: NewAgent[];
   coordinator_agent_id: string;
   coordinator_agent_name: string;
   max_parallel: number;
@@ -125,6 +142,7 @@ type CeoDetail = {
   coordinator_agent_id: string;
   coordinator_agent_name: string;
   subtask_count: number;
+  new_agents: NewAgent[];
   completed_count: number;
   failed_count: number;
   off_track_count: number;
@@ -264,6 +282,47 @@ function BulletList({ items, tone = "normal" }: { items: string[]; tone?: "norma
         </li>
       ))}
     </ul>
+  );
+}
+
+/**
+ * CEO 提议/已招的新员工卡片。
+ * 预览阶段是「将新招」（黄框），开工后是「已入职」（绿框），共用一套布局。
+ */
+function NewAgentCards({ agents, hired }: { agents: NewAgent[]; hired: boolean }) {
+  if (!agents.length) return null;
+  const tone = hired
+    ? { border: "rgba(52,211,153,0.4)", background: "rgba(52,211,153,0.08)", title: "#6ee7b7" }
+    : { border: "rgba(251,191,36,0.4)", background: "rgba(251,191,36,0.08)", title: "#fcd34d" };
+  return (
+    <div>
+      <div className="text-[11px] font-medium mb-1" style={{ color: tone.title }}>
+        {hired ? `本次新招 ${agents.length} 人（已入职）` : `将新招 ${agents.length} 人（开工时自动入职）`}
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        {agents.map((a, i) => (
+          <div key={`${a.agent_id || a.name}-${i}`} className="rounded-lg px-2.5 py-2 text-xs"
+            style={{ border: `1px solid ${tone.border}`, background: tone.background }}>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="font-medium text-[var(--foreground)]">{a.name}</span>
+              {a.role && <span className="text-[10px] text-[var(--muted)]">{a.role}</span>}
+              {hired && a.agent_id && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded"
+                  style={{ background: "rgba(52,211,153,0.14)", color: "#6ee7b7" }}>
+                  已入职
+                </span>
+              )}
+            </div>
+            <div className="mt-0.5 text-[10px] text-[var(--muted)]">
+              部门：{a.department || "—"} · 组：{a.group || "未分组"}
+            </div>
+            {a.reason && (
+              <div className="mt-1 text-[10px] leading-4 text-[var(--muted)] line-clamp-2">理由：{a.reason}</div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -473,15 +532,18 @@ export default function CeoPage() {
         subtask_count: number;
         effective_parallel: number;
         provider_cap: number;
+        new_agents: NewAgent[];
       }>(`/ceo/missions/${preview.mission_id}/launch`, { max_parallel: parallel });
       setPreview(null);
       setInstruction("");
       setSelectedId(res.mission_id);
       setDetailTick((n) => n + 1); // 立刻开始盯这一场
       missions.refresh();
+      const hired = res.new_agents?.length ?? 0;
       notify(
         "success",
-        `已开工：${res.subtask_count} 个子任务，实际并发 ${res.effective_parallel}（供应商上限 ${res.provider_cap}）`,
+        `已开工：${res.subtask_count} 个子任务，实际并发 ${res.effective_parallel}（供应商上限 ${res.provider_cap}）` +
+          (hired > 0 ? `；新招 ${hired} 人已入职` : ""),
       );
     } catch (e) {
       setLaunchError(describeError(e, "开工失败"));
@@ -860,14 +922,20 @@ export default function CeoPage() {
                     <span className="shrink-0 text-[11px] text-[var(--muted)]">{s.agent_name || "未分配"}</span>
                     {!s.agent_matched && (
                       <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded"
-                        style={{ background: "rgba(251,191,36,0.14)", color: "#fcd34d", border: "1px solid rgba(251,191,36,0.4)" }}>
-                        未精确匹配
+                        style={
+                          s.new_agent_index != null
+                            ? { background: "rgba(99,102,241,0.14)", color: "#c7d2fe", border: "1px solid rgba(99,102,241,0.4)" }
+                            : { background: "rgba(251,191,36,0.14)", color: "#fcd34d", border: "1px solid rgba(251,191,36,0.4)" }
+                        }>
+                        {s.new_agent_index != null ? "待招新人" : "未精确匹配"}
                       </span>
                     )}
                   </div>
                 ))}
               </div>
             </div>
+
+            <NewAgentCards agents={preview.new_agents} hired={false} />
 
             <div className="flex items-center gap-2 flex-wrap pt-1">
               <button
@@ -1031,6 +1099,8 @@ export default function CeoPage() {
                   </div>
                 </div>
               )}
+
+              <NewAgentCards agents={activeDetail.new_agents} hired />
 
               {/* 追加指令（准绳升级） */}
               {!isTerminal(activeDetail.status) && (

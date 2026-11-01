@@ -50,6 +50,26 @@ class CeoPlannedSubtaskOut(BaseModel):
     agent_id: str
     agent_name: str
     agent_matched: bool
+    # 指向 new_agents 的下标（预览阶段把子任务和「待招的人」对上）
+    new_agent_index: int | None = None
+
+
+class CeoNewAgentOut(BaseModel):
+    """CEO 提议/已招的新员工。
+
+    开工前是提议（`agent_id` 为空），开工后回填真实 id；
+    两者共用一套字段，前端只按 `agent_id` 是否为空区分阶段。
+    """
+
+    model_config = _free()
+
+    name: str
+    role: str = ""
+    department: str = ""
+    group: str = ""
+    reason: str = ""
+    agent_id: str = ""
+    proposed_name: str = ""
 
 
 class CeoMissionPreviewOut(BaseModel):
@@ -67,6 +87,7 @@ class CeoMissionPreviewOut(BaseModel):
     anchor_version: int
     subtasks: list[CeoPlannedSubtaskOut]
     subtask_count: int
+    new_agents: list[CeoNewAgentOut]
     coordinator_agent_id: str
     coordinator_agent_name: str
     max_parallel: int
@@ -87,6 +108,7 @@ class CeoLaunchOut(BaseModel):
     effective_parallel: int
     provider_cap: int
     provider_type: str
+    new_agents: list[CeoNewAgentOut]
 
 
 class CeoSlotOut(BaseModel):
@@ -122,6 +144,7 @@ class CeoMissionDetailOut(BaseModel):
     coordinator_agent_id: str
     coordinator_agent_name: str
     subtask_count: int
+    new_agents: list[CeoNewAgentOut]
     completed_count: int
     failed_count: int
     off_track_count: int

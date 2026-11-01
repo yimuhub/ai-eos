@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     # 仅在类型检查期导入：Department 与本模型互相引用，
     # 运行时靠 SQLAlchemy registry 按类名解析字符串关系目标。
     # 显式声明可让 pyflakes / mypy 正确识别 Mapped["Department"]。
+    from app.models.agent_group import AgentGroup
     from app.models.company import Department
 
 
@@ -57,6 +58,9 @@ class Agent(TimestampMixin, Base):
 
     company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     department_id: Mapped[str | None] = mapped_column(ForeignKey("departments.id"), index=True)
+    # 部门下的组（CEO 按需招人时的落位层级）；NULL = 只归部门、不分组
+    group_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_groups.id", ondelete="SET NULL"), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(200))
     avatar: Mapped[str | None] = mapped_column(String(500))
     role: Mapped[str | None] = mapped_column(String(200))
@@ -81,6 +85,7 @@ class Agent(TimestampMixin, Base):
     is_ceo: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
 
     department: Mapped["Department | None"] = relationship(back_populates="agents")
+    group: Mapped["AgentGroup | None"] = relationship(back_populates="agents")
     model_configs: Mapped[list["AgentModelConfig"]] = relationship(
         backref="agent", cascade="all, delete-orphan"
     )

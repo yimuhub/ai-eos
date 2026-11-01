@@ -8,6 +8,7 @@ from app.api.deps import assert_company_capability, get_current_user
 from app.core.permissions import (Capability, ensure_capability,
                                  require_capability)
 from app.db.session import get_db
+from app.models.agent_group import AgentGroup
 from app.models.company import Company, Department
 from app.models.membership import CompanyMember
 from app.models.user import User
@@ -111,6 +112,14 @@ async def list_departments(cid: str, db: AsyncSession = Depends(get_db),
     await _owned_company(db, user.id, cid)
     q = await db.execute(select(Department).where(Department.company_id == cid))
     rows = q.scalars().all()
+    # 部门下的组（CEO 按需招人时新建）：一次查全公司，Python 侧按部门分组
+    groups_by_dept: dict[str, list[dict]] = {}
+    group_rows = (await db.execute(
+        select(AgentGroup).where(AgentGroup.company_id == cid)
+        .order_by(AgentGroup.created_at))).scalars().all()
+    for g in group_rows:
+        groups_by_dept.setdefault(str(g.department_id), []).append({
+            "id": g.id, "name": g.name, "description": g.description})
     # 置顶优先 → sort_order 升序 → 创建时间
     rows = sorted(rows, key=lambda d: (not d.pinned, d.sort_order,
                                        d.created_at or __import__("datetime").datetime.max))
@@ -120,6 +129,7 @@ async def list_departments(cid: str, db: AsyncSession = Depends(get_db),
         "sort_order": d.sort_order, "pinned": d.pinned,
         "skill_ids": d.skill_ids or [], "kb_document_ids": d.kb_document_ids or [],
         "attachments": d.attachments or [],
+        "groups": groups_by_dept.get(str(d.id), []),
     } for d in rows]
 
 

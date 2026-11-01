@@ -63,6 +63,9 @@ class CeoMission(TimestampMixin, Base):
 
     # --- 执行台账 ---
     plan: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 本次统筹自动新招的员工：开工前是提议（无 agent_id），开工后回填真实 id。
+    # 单独一列而不是塞进 stats：这是老板要审计的「组织变化」，不是统计数字。
+    new_agents: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
     subtask_count: Mapped[int] = mapped_column(Integer, default=0)
     completed_count: Mapped[int] = mapped_column(Integer, default=0)
     failed_count: Mapped[int] = mapped_column(Integer, default=0)

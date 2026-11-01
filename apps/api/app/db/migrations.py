@@ -48,6 +48,10 @@ _NEW_INDEXES: tuple[tuple[str, str, str], ...] = (
     ("department_members", "user_id", "ix_department_members_user_id"),
     # CEO 统筹：老库给 tasks 补 mission_id 时索引不会自动建
     ("tasks", "mission_id", "ix_tasks_mission_id"),
+    # CEO 自动招人：老库补 agents.group_id；agent_groups 是新表，create_all 会建索引
+    ("agents", "group_id", "ix_agents_group_id"),
+    ("agent_groups", "company_id", "ix_agent_groups_company_id"),
+    ("agent_groups", "department_id", "ix_agent_groups_department_id"),
 )
 
 

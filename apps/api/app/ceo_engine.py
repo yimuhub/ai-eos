@@ -35,9 +35,11 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.logging_config import get_logger
-from app.models.agent import Agent, AgentStatus
+from app.models.agent import Agent, AgentModelConfig, AgentStatus
+from app.models.agent_group import AgentGroup
 from app.models.ceo import CeoMission
 from app.models.company import Department
 from app.models.task import Task, TaskPriority, TaskStatus
@@ -52,6 +54,10 @@ logger = get_logger(__name__)
 
 MAX_SUBTASKS = 12
 MAX_RETRY = 1
+# 一场统筹最多自动新招几个人：防止一次拆解把公司规模翻倍、也防止模型幻觉
+# 造出一堆用不上的岗位。超出上限的子任务回落到现有员工（预览里仍然标出来）。
+MAX_NEW_AGENTS = 3
+DEFAULT_NEW_DEPARTMENT = "综合部"
 MISSION_TIMEOUT_S = 3600
 MIN_RESULT_CHARS = 10
 DIGEST_WINDOW_HOURS = 24
@@ -97,12 +103,16 @@ PLAN_PROMPT = """你是这家公司的 CEO（超级 Agent）。老板用一句�
 
 老板原话：{instruction}
 
-可用员工（姓名 / 岗位 / 部门）：
+现有员工（姓名 / 岗位 / 部门 / 组）：
 {roster}
 
 要求：
 - 子任务数量按实际需要，通常 3~6 个，最多 {max_subtasks} 个；每个子任务必须能独立完成。
 - 子任务要分给最合适的员工；优先跨部门协作，但不要为了凑人数硬拆。
+- **缺岗位就新建，不要硬塞**：如果现有员工里没有合适的人，agent_name 直接写
+  你打算新招的岗位名（如「投放优化师」），并补上 agent_role（岗位职责）、
+  department（放进哪个部门）、group（部门下的哪个组）、reason（为什么要招）。
+  同一场最多新招 {max_new_agents} 人，超出就分给最接近的现有员工。
 - 红线写"绝对不能出现的东西"（如不得编造数据、不得对外发送、不得修改财务原始凭证）。
 - 验收标准写"怎样算合格"，要可判断，不要写"质量高"这种空话。
 - 只输出 JSON，不要任何其它文字：
@@ -112,7 +122,8 @@ PLAN_PROMPT = """你是这家公司的 CEO（超级 Agent）。老板用一句�
   "redlines":["..."],
   "acceptance":["..."],
   "terminology":{{"关键术语":"本公司的口径"}},
-  "subtasks":[{{"title":"子任务名","description":"具体要做什么、边界在哪","agent_name":"员工姓名"}}]}}
+  "subtasks":[{{"title":"子任务名","description":"具体要做什么、边界在哪","agent_name":"员工姓名或新岗位名",
+              "agent_role":"仅新招时填","department":"仅新招时填","group":"仅新招时填","reason":"仅新招时填"}}]}}
 """
 
 REVIEW_PROMPT = """你是这家公司的 CEO。下面是本次任务的准绳和各位员工的产出。
@@ -241,8 +252,16 @@ async def _roster_lines(db: AsyncSession, company_id: str) -> tuple[str, list[Ag
             select(Department.id, Department.name)
             .where(Department.id.in_(dept_ids)))).all()
         dept_map = {r[0]: r[1] for r in rows}
+    group_ids = {a.group_id for a in agents if a.group_id}
+    group_map: dict[str, str] = {}
+    if group_ids:
+        rows = (await db.execute(
+            select(AgentGroup.id, AgentGroup.name)
+            .where(AgentGroup.id.in_(group_ids)))).all()
+        group_map = {r[0]: r[1] for r in rows}
     lines = [f"- {a.name}（岗位：{a.role or '未定岗'}；部门："
-             f"{dept_map.get(a.department_id, '未分配')}）"
+             f"{dept_map.get(a.department_id, '未分配')}；组："
+             f"{group_map.get(a.group_id, '未分组')}）"
              for a in agents[:60]]
     return "\n".join(lines), agents
 
@@ -290,21 +309,51 @@ def _normalize_plan(raw: dict, instruction: str,
                 terminology[key] = str(v).strip()[:300]
 
     subtasks: list[dict] = []
+    new_agents: list[dict] = []
+    # 同一场里同一个岗位只招一次：按 (岗位名, 部门, 组) 归并，
+    # 模型把「内容组」拆成三条时不会建出三个同名员工。
+    proposal_index: dict[tuple[str, str, str], int] = {}
+
     for item in (raw.get("subtasks") or [])[:MAX_SUBTASKS]:
         if not isinstance(item, dict):
             continue
         st_title = str(item.get("title") or "").strip()[:200]
         if not st_title:
             continue
-        matched = _match_agent(str(item.get("agent_name") or ""), agents)
-        agent = matched or agents[0]
+        wanted = str(item.get("agent_name") or "").strip()[:200]
+        matched = _match_agent(wanted, agents)
+        new_idx: int | None = None
+        if matched is None:
+            role = str(item.get("agent_role") or "").strip()[:200]
+            department = (str(item.get("department") or "").strip()[:200]
+                          or DEFAULT_NEW_DEPARTMENT)
+            group = str(item.get("group") or "").strip()[:200]
+            reason = str(item.get("reason") or "").strip()[:500]
+            name = (wanted or role or f"执行专员{len(subtasks) + 1}")[:120]
+            key = (name.lower(), department.lower(), group.lower())
+            new_idx = proposal_index.get(key)
+            if new_idx is None and len(new_agents) < MAX_NEW_AGENTS:
+                new_idx = len(new_agents)
+                proposal_index[key] = new_idx
+                new_agents.append({
+                    "name": name,
+                    "role": role or name,
+                    "department": department,
+                    "group": group,
+                    "reason": reason,
+                    "agent_id": "",
+                })
+        agent = matched
+        if agent is None and new_idx is None:
+            agent = agents[0]  # 超过新招上限：分给现有第一人，预览里标未匹配
         subtasks.append({
             "index": len(subtasks) + 1,
             "title": st_title,
             "description": str(item.get("description") or "").strip()[:4000],
-            "agent_id": str(agent.id),
-            "agent_name": agent.name,
+            "agent_id": str(agent.id) if agent is not None else "",
+            "agent_name": agent.name if agent is not None else new_agents[new_idx]["name"],
             "agent_matched": matched is not None,
+            "new_agent_index": new_idx,
         })
     if not subtasks:
         raise CeoError("CEO 没有拆出任何可执行的子任务，请补充目标细节后重试", 502)
@@ -317,6 +366,7 @@ def _normalize_plan(raw: dict, instruction: str,
         "acceptance": _as_str_list(raw.get("acceptance")),
         "terminology": terminology,
         "subtasks": subtasks,
+        "new_agents": new_agents,
     }
 
 
@@ -326,7 +376,8 @@ def _plan_messages(roster: str, instruction: str) -> list[dict]:
          "content": "你是企业 CEO，负责把老板的一句话变成可执行的准绳与分工方案。"},
         {"role": "user",
          "content": PLAN_PROMPT.format(instruction=instruction, roster=roster,
-                                       max_subtasks=MAX_SUBTASKS)},
+                                       max_subtasks=MAX_SUBTASKS,
+                                       max_new_agents=MAX_NEW_AGENTS)},
     ]
 
 
@@ -387,6 +438,7 @@ async def create_mission(db: AsyncSession, *, company_id: str, user_id: str,
         effective_parallel=capacity["effective"],
         provider_cap=capacity["provider_cap"],
         plan=plan["subtasks"], subtask_count=len(plan["subtasks"]),
+        new_agents=plan["new_agents"],
         degraded=False,
     )
     db.add(mission)
@@ -394,6 +446,7 @@ async def create_mission(db: AsyncSession, *, company_id: str, user_id: str,
     await log_event(db, "ceo.mission_planned", "ceo_mission", mission.id,
                     "user", user_id,
                     {"title": plan["title"], "subtasks": len(plan["subtasks"]),
+                     "new_agents": len(plan["new_agents"]),
                      "effective_parallel": capacity["effective"]},
                     company_id=company_id)
     await db.commit()
@@ -417,6 +470,7 @@ def mission_preview(mission: CeoMission, capacity: dict | None,
         "anchor_version": mission.anchor_version,
         "subtasks": mission.plan or [],
         "subtask_count": mission.subtask_count,
+        "new_agents": mission.new_agents or [],
         "coordinator_agent_id": mission.coordinator_agent_id or "",
         "coordinator_agent_name": coord.name if coord else "",
         "max_parallel": mission.max_parallel,
@@ -431,6 +485,145 @@ def mission_preview(mission: CeoMission, capacity: dict | None,
 # ---------------------------------------------------------------------------
 # 开工
 # ---------------------------------------------------------------------------
+
+async def _ensure_department(db: AsyncSession, company_id: str,
+                             name: str) -> Department:
+    """按名字找部门；没有就建一个（CEO 全自动招人的落位保证）。"""
+    dept = (await db.execute(
+        select(Department).where(
+            Department.company_id == company_id,
+            func.lower(Department.name) == name.strip().lower())
+        .limit(1))).scalars().first()
+    if dept is not None:
+        return dept
+    dept = Department(company_id=company_id, name=name.strip()[:200],
+                      description="CEO 按需新建", sort_order=0)
+    db.add(dept)
+    await db.flush()
+    return dept
+
+
+async def _ensure_group(db: AsyncSession, company_id: str, department_id: str,
+                        name: str, user_id: str) -> AgentGroup:
+    group = (await db.execute(
+        select(AgentGroup).where(
+            AgentGroup.department_id == department_id,
+            func.lower(AgentGroup.name) == name.strip().lower())
+        .limit(1))).scalars().first()
+    if group is not None:
+        return group
+    group = AgentGroup(company_id=company_id, department_id=department_id,
+                       name=name.strip()[:200], description="CEO 按需新建",
+                       created_by_user_id=user_id)
+    db.add(group)
+    await db.flush()
+    return group
+
+
+def _unique_agent_name(base: str, taken: set[str]) -> str:
+    name = (base or "").strip()[:120] or "执行专员"
+    if name.lower() not in taken:
+        taken.add(name.lower())
+        return name
+    for i in range(2, 1000):
+        candidate = f"{name}（{i}）"
+        if candidate.lower() not in taken:
+            taken.add(candidate.lower())
+            return candidate
+    raise CeoError("员工重名过多，无法自动命名", 409)
+
+
+async def _model_bindings(db: AsyncSession, agent_id: str) -> list[tuple[str, str]]:
+    rows = (await db.execute(
+        select(AgentModelConfig.role, AgentModelConfig.model_id)
+        .where(AgentModelConfig.agent_id == agent_id)
+        .order_by(AgentModelConfig.created_at))).all()
+    return [(r[0], r[1]) for r in rows]
+
+
+async def _provision_new_agents(db: AsyncSession, mission: CeoMission,
+                                coord: Agent) -> list[dict]:
+    """开工前把拆解里「缺岗」的人真正招进来。
+
+    全自动（老板拍板）：不需要另行确认，但受三个硬约束——
+    * 每场最多 ``MAX_NEW_AGENTS`` 人，超出部分在拆解阶段已回落给现有员工；
+    * 只在本公司内找/建部门与组，不跨租户；
+    * 新员工继承负责人的模型绑定（负责人没有就退到公司任一有绑定的员工），
+      否则新员工一开工就会因「没有可用模型」失败。
+    """
+    proposals = list(mission.new_agents or [])
+    if not proposals:
+        return []
+
+    taken = {
+        (a.name or "").strip().lower()
+        for a in (await db.execute(
+            select(Agent).where(Agent.company_id == mission.company_id))).scalars().all()
+    }
+    fallback_models = await _model_bindings(db, str(coord.id))
+    if not fallback_models:
+        rows = (await db.execute(
+            select(AgentModelConfig.role, AgentModelConfig.model_id)
+            .join(Agent, Agent.id == AgentModelConfig.agent_id)
+            .where(Agent.company_id == mission.company_id)
+            .order_by(AgentModelConfig.created_at).limit(6))).all()
+        fallback_models = list(dict.fromkeys((r[0], r[1]) for r in rows))
+
+    created: list[dict] = []
+    for idx, proposal in enumerate(proposals[:MAX_NEW_AGENTS]):
+        if proposal.get("agent_id"):
+            # 上一次开工已经建过人、但被队列回退打回 PLANNING：不重复招
+            created.append(proposal)
+            continue
+        dept = await _ensure_department(
+            db, mission.company_id,
+            str(proposal.get("department") or DEFAULT_NEW_DEPARTMENT))
+        group_name = str(proposal.get("group") or "").strip()
+        group = (await _ensure_group(db, mission.company_id, dept.id,
+                                     group_name, mission.created_by)
+                 if group_name else None)
+        name = _unique_agent_name(str(proposal.get("name") or ""), taken)
+        agent = Agent(
+            company_id=mission.company_id, department_id=dept.id,
+            group_id=group.id if group else None,
+            name=name, role=str(proposal.get("role") or name)[:200],
+            description=str(proposal.get("reason") or "")[:1000] or None,
+            status=AgentStatus.IDLE, visibility="company",
+            created_by_user_id=mission.created_by, is_ceo=False,
+            memory_config={},
+        )
+        db.add(agent)
+        await db.flush()
+        for role, model_id in fallback_models:
+            db.add(AgentModelConfig(agent_id=agent.id, role=role,
+                                    model_id=model_id))
+        for st in (mission.plan or []):
+            if st.get("new_agent_index") == idx:
+                st["agent_id"] = agent.id
+                st["agent_name"] = agent.name
+                st["agent_matched"] = True
+                st.pop("new_agent_index", None)
+        created.append({
+            "agent_id": agent.id,
+            "name": agent.name,
+            "role": agent.role or "",
+            "department": dept.name,
+            "group": group.name if group else "",
+            "reason": str(proposal.get("reason") or ""),
+            "proposed_name": str(proposal.get("name") or ""),
+        })
+        await log_event(db, "ceo.agent_hired", "agent", agent.id, "agent",
+                        str(coord.id),
+                        {"mission_id": mission.id, "department": dept.name,
+                         "group": group.name if group else "",
+                         "role": agent.role or ""},
+                        company_id=mission.company_id)
+
+    mission.new_agents = created
+    # plan 是原地改了子任务字典，SQLAlchemy 不会自动感知 JSON 内部变化
+    flag_modified(mission, "plan")
+    return created
+
 
 async def launch_mission(db: AsyncSession, mission_id: str,
                          requested_parallel: int | None = None,
@@ -453,6 +646,9 @@ async def launch_mission(db: AsyncSession, mission_id: str,
     if not plan:
         raise CeoError("没有可执行的子任务，请重新拆解", 409)
 
+    coord = await db.get(Agent, mission.coordinator_agent_id) if mission.coordinator_agent_id else None
+    hired = await _provision_new_agents(db, mission, coord) if coord else []
+
     for item in plan[:MAX_SUBTASKS]:
         db.add(Task(
             company_id=mission.company_id,
@@ -461,7 +657,7 @@ async def launch_mission(db: AsyncSession, mission_id: str,
             title=item["title"][:500],
             description=item.get("description") or item["title"],
             status=TaskStatus.TODO, priority=TaskPriority.NORMAL,
-            assigned_agent_id=item.get("agent_id"),
+            assigned_agent_id=item.get("agent_id") or (coord.id if coord else None),
             created_by=mission.created_by,
         ))
     parent = await db.get(Task, mission.parent_task_id) if mission.parent_task_id else None
@@ -473,6 +669,7 @@ async def launch_mission(db: AsyncSession, mission_id: str,
     await log_event(db, "ceo.mission_launched", "ceo_mission", mission.id,
                     "user", mission.created_by,
                     {"subtasks": mission.subtask_count,
+                     "new_agents": len(hired),
                      "effective_parallel": mission.effective_parallel},
                     company_id=mission.company_id)
     await db.commit()
@@ -494,6 +691,7 @@ async def launch_mission(db: AsyncSession, mission_id: str,
         "effective_parallel": mission.effective_parallel,
         "provider_cap": mission.provider_cap,
         "provider_type": capacity["provider_type"],
+        "new_agents": hired,
     }
 
 
@@ -969,6 +1167,7 @@ def mission_detail(mission: CeoMission, tasks: list[Task],
             if mission.coordinator_agent_id
             and str(mission.coordinator_agent_id) in agents else ""),
         "subtask_count": mission.subtask_count,
+        "new_agents": mission.new_agents or [],
         "completed_count": mission.completed_count,
         "failed_count": mission.failed_count,
         "off_track_count": mission.off_track_count,
