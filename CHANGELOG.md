@@ -79,6 +79,21 @@
 - 已接入 `tools/check.sh`（六道门禁变七道）。当前 **226 处**带泛型的调用零错配；
   反向验证：把修复前的治理中心页面还原回去，工具准确报出那 2 处。
 
+### 扩展：接口契约门禁覆盖移动端 `mobile/**`
+
+- `tools/check_api_contract.py` 原来只扫网页端的 `api.*` 调用。移动端把全部后端路径
+  集中写在 `mobile/lib/api.ts` 的 `call(base, token, "/path", {method})` 里，形态不同
+  但同样可比——历史上它的 404（把 `company_id` 当 query 传给只接受路径参数的
+  `/dashboard/{company_id}`）只能靠人肉发现，而门禁一片绿。
+- 新增 `mobile_calls()`：按引号与括号配平取出第 3 个实参，只有**字面量**才参与比对
+  （`call(base, token, path)` 这种透传看不到路径，跳过），HTTP 方法取第 4 个实参里的
+  `method:`，缺省按 GET；路径里的 query 与 `${…}` 沿用原归一化规则。
+- 当前网页端 204 处 + 移动端 **10** 处全部命中后端路由；反向验证：把 `/dashboard/{id}`
+  改成 `/dashboards/{id}`，门禁准确报出 `404 路径不存在 mobile/lib/api.ts:150`。
+- 有意保留的盲区（已写进工具文档）：`mobile/app/server.tsx` 里 2 处 raw `fetch`
+  （探活 `/health`、升级检查 `/clients/update/check`）——路径拼在用户自填的服务地址上，
+  走不到统一客户端层；两个路径本轮已人工核对存在。
+
 ## [5.15.0] 从审查到九分：契约、交付、多端与安全收口 — 2026-11-01
 
 > 来源：五视角审查（[审查报告](docs/审查报告_AI-EOS_2026-10-31.md)）与

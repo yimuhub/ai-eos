@@ -9,7 +9,8 @@
 本脚本用 FastAPI 的 OpenAPI schema 作为**后端唯一权威来源**
 （不要手工维护路由清单，否则又会和代码脱节），
 再扫描前端所有 `api.get/post/put/patch/del(...)` 调用，
-逐个比对"路径模板 + HTTP 方法"。
+以及移动端 `mobile/**` 里 `call(base, token, "/path", {method})` 的
+第 3 个实参（字面量），逐个比对"路径模板 + HTTP 方法"。
 
 ## 用法
 
@@ -24,6 +25,8 @@
   宽松匹配通过的会列入"需人工确认"，不计为失败。
 - raw `fetch()` 调用**不在**本工具扫描范围内（它们绕过了统一 API 层）。
   如果要用 raw fetch，请先确认它是否也该走 api 层。
+  移动端 `app/server.tsx` 的 2 处例外（探活 `/health`、升级 `/clients/update/check`）
+  是"任意用户填的地址 + 固定路径"，走不到 Api 层，属于已知盲区。
 - 模板串里嵌三元表达式（如 `/x/${a ? "b" : "c"}`）会因引号提前终止捕获，
   此类调用会被判为「无法静态解析」并计入失败——请改写成 if/else 两条字面调用。
 """
@@ -36,6 +39,11 @@ import sys
 
 API_DIR = pathlib.Path(__file__).resolve().parent.parent / "apps" / "api"
 WEB_DIR = pathlib.Path(__file__).resolve().parent.parent / "apps" / "web"
+REPO_DIR = pathlib.Path(__file__).resolve().parent.parent
+# 移动端把全部后端路径集中在一个客户端文件里（mobile/lib/api.ts 的 call(...)），
+# 因此可以同样静态比对——历史上它的 404（把 company_id 当 query 传给
+# 只接受路径参数的 /dashboard）只能靠人肉发现。
+MOBILE_DIR = REPO_DIR / "mobile"
 
 # 动态动作名候选：末段为变量时，先按候选动作名定位资源族，再用「文件内实际用到的
 # 动作字面量」逐个校验（见 _harvest_actions）。这里的候选只用于兜底，
@@ -115,9 +123,85 @@ def frontend_calls() -> list[tuple[str, int, str, str]]:
     return calls
 
 
+_MOBILE_CALL_RE = re.compile(r"\bcall\(")
+_MOBILE_METHOD_RE = re.compile(r'method:\s*"([A-Za-z]+)"')
+_MOBILE_LITERAL_RE = re.compile(r"""^\s*[`"']([^`"']*)[`"']\s*$""")
+
+
+def _call_args(text: str, open_at: int) -> list[str]:
+    """取 `(` 处那次调用的顶层实参（引号原样保留，用于区分字面量与变量）。"""
+    args: list[str] = []
+    buf: list[str] = []
+    depth = 1
+    quote = ""
+    i = open_at + 1
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            buf.append(ch)
+            if ch == "\\" and quote in "\"'" and i + 1 < len(text):
+                buf.append(text[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'`":
+            quote = ch
+            buf.append(ch)
+        elif ch in "([{":
+            depth += 1
+            buf.append(ch)
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                args.append("".join(buf))
+                return args
+            buf.append(ch)
+        elif ch == "," and depth == 1:
+            args.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    return args
+
+
+def mobile_calls() -> list[tuple[str, int, str, str]]:
+    """移动端 lib/api.ts 里的 `call(base, token, "/path", {method})` 清单。
+
+    第 3 个实参不是字符串字面量的（`call(base, token, path)` 这种透传）跳过——
+    它的路径由调用点决定，静态看不到。
+    """
+    out: list[tuple[str, int, str, str]] = []
+    for f in sorted(list(MOBILE_DIR.rglob("*.ts")) + list(MOBILE_DIR.rglob("*.tsx"))):
+        s = str(f)
+        if any(x in s for x in ("node_modules", "/android/", "/dist/", "/build/")):
+            continue
+        src = f.read_text(encoding="utf-8", errors="replace")
+        for m in _MOBILE_CALL_RE.finditer(src):
+            args = _call_args(src, m.end() - 1)
+            if len(args) < 3:
+                continue
+            literal = _MOBILE_LITERAL_RE.match(args[2])
+            if not literal:
+                continue
+            method = "GET"
+            mm = _MOBILE_METHOD_RE.search(args[3] if len(args) > 3 else "")
+            if mm:
+                method = mm.group(1).upper()
+            out.append((str(f.relative_to(REPO_DIR)),
+                        src[: m.start()].count("\n") + 1,
+                        method, literal.group(1)))
+    return out
+
+
 def _read_web(rel_file: str) -> str:
     """按相对路径读回前端源文件（供动态动作字面量还原用）。"""
-    return (WEB_DIR / rel_file).read_text(encoding="utf-8", errors="replace")
+    for base in (WEB_DIR, REPO_DIR):
+        p = base / rel_file
+        if p.is_file():
+            return p.read_text(encoding="utf-8", errors="replace")
+    return ""
 
 
 def _ends_with_var(raw: str) -> bool:
@@ -184,13 +268,15 @@ def _harvest_actions(rel_file: str, lineno: int, raw: str) -> list[str]:
     return out
 
 
-def check() -> tuple[list[tuple], list[tuple]]:
-    """返回 (确凿的不匹配, 已校验/需人工确认的动态调用)。"""
+def check() -> tuple[list[tuple], list[tuple], int, int]:
+    """返回 (确凿的不匹配, 已校验/需人工确认的动态调用, 前端调用数, 移动端调用数)。"""
     routes = backend_routes()
     broken: list[tuple] = []
     dynamic: list[tuple] = []
+    web_calls = frontend_calls()
+    mob_calls = mobile_calls()
 
-    for file, line, method, raw in frontend_calls():
+    for file, line, method, raw in web_calls + mob_calls:
         # 路径模板被截断 = 静态扫描看不懂（例如模板串里嵌了三元表达式，
         # 其中的引号会提前终止正则捕获）。这属于**校验盲区**，
         # 必须显式报错而不是当成"没发现问题"放过去。
@@ -225,7 +311,7 @@ def check() -> tuple[list[tuple], list[tuple]]:
                 continue
 
         broken.append((file, line, method, raw, sorted(routes.get(norm, []))))
-    return broken, dynamic
+    return broken, dynamic, len(web_calls), len(mob_calls)
 
 
 def main() -> int:
@@ -236,7 +322,7 @@ def main() -> int:
                     help="同时列出通过宽松匹配的动态调用（供人工复核）")
     args = ap.parse_args()
 
-    broken, dynamic = check()
+    broken, dynamic, n_web, n_mobile = check()
 
     if dynamic and args.show_dynamic:
         print(f"\n【需人工确认】动态拼接调用 {len(dynamic)} 处：")
@@ -244,7 +330,8 @@ def main() -> int:
             print(f"  {file}:{line}  {method} {raw}")
 
     if not broken:
-        print("✅ 接口契约校验通过：前端所有 api.* 调用都能在后端找到对应路由。")
+        print(f"✅ 接口契约校验通过：网页端 {n_web} 处 api.* 调用 + "
+              f"移动端 {n_mobile} 处 call() 调用都能在后端找到对应路由。")
         return 0
 
     print(f"\n❌ 发现 {len(broken)} 处接口契约不匹配：\n")

@@ -310,6 +310,7 @@ cd apps/api && .venv/bin/python -m pytest tests/ -q -m "not requires_llm"
 cd apps/web && npx tsc --noEmit && npx eslint app components lib
 
 # 前后端接口契约（独立运行，便于定位具体错配）
+# 覆盖网页端 api.* 调用与移动端 mobile/lib/api.ts 的 call(...)
 cd apps/api && .venv/bin/python ../../tools/check_api_contract.py --strict
 
 # 响应形状契约：前端 `api.get<T>` 的 T 与后端顶层 schema 对不对得上
