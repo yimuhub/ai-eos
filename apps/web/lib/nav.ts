@@ -48,6 +48,7 @@ export const NAV_GROUPS: NavGroup[] = [
     hint: "每天先看这里：现在在打什么仗、仗打到哪了",
     items: [
       { href: "/workspace", label: "工作台", icon: "◧", desc: "左看人、中间下指令、右边看产出，一张屏干完活", keywords: ["workspace", "gongzuotai", "工作台", "对话", "聊天", "首页", "home"] },
+      { href: "/ceo", label: "CEO 指挥台", icon: "👑", desc: "一句话交给 CEO：拆准绳、分到人、按并发跑、盯偏离、收报告", keywords: ["ceo", "超级agent", "ceo zhihuitai", "统筹", "总指挥", "一句话"] },
       { href: "/dashboard", label: "指挥中心", icon: "◈", desc: "全局总览：公司、员工、任务与今日动向", keywords: ["dashboard", "zhihuizhongxin", "总览", "概览", "看板"], hidden: true },
       { href: "/command", label: "一句话指挥台", icon: "📣", desc: "说一句话，AI 判断派活/专家组队/作战室立项，每步都有你的确认点", keywords: ["command", "zhichutai", "指挥台", "一句话", "下达", "派活", "组队", "立项", "orchestrator"], hidden: true },
       { href: "/projects", label: "项目中心", icon: "▤", desc: "按项目组织目标：建项目、拉团队、下目标", keywords: ["project", "xiangmu", "项目", "目标"], hidden: true },
@@ -108,7 +109,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: "/skill-growth", label: "技能成长档案", icon: "📈", desc: "技能随任务增长的完整档案", keywords: ["skill growth", "jineng", "成长档案", "技能曲线"], hidden: true },
       { href: "/token-stats", label: "Token统计", icon: "🪙", desc: "花了多少钱、花在哪个模型上", keywords: ["token", "cost", "billing", "统计", "费用", "成本", "计费"] },
       { href: "/lan-share", label: "局域网共享", icon: "📡", desc: "手机扫二维码接入同一份数据：Web 版直进、App 接管、开机自启", keywords: ["lan", "share", "lajuan", "局域网", "共享", "扫码", "二维码", "手机", "mobile", "二维码", "qrcode", "开机自启", "autostart", "配对", "pairing"], hidden: true },
-      { href: "/diagnostics", label: "系统诊断", icon: "🩺", desc: "一键体检数据库/磁盘/局域网/升级通道，异常项给修复建议", keywords: ["diagnostics", "doctor", "诊断", "体检", "健康"] },
+      { href: "/diagnostics", label: "系统诊断", icon: "🩺", desc: "一键体检数据库/磁盘/局域网/升级通道，异常项给修复建议", keywords: ["diagnostics", "doctor", "诊断", "体检", "健康"], hidden: true },
       { href: "/logs", label: "审计日志", icon: "📜", desc: "系统里发生过的每一件事", keywords: ["log", "audit", "日志", "审计", "记录"], hidden: true },
     ],
   },
