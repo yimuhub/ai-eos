@@ -31,6 +31,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging_config import get_logger
+from app.models.agent import Agent
 from app.models.experience import SharedExperience
 from app.models.task import AgentExecution, Task, TaskStatus
 from app.models.token_usage import TokenUsage
@@ -292,6 +293,13 @@ async def harvest_task_experience(db: AsyncSession, task: Task, agent, *,
     """任务结束后沉淀一条经验；不满足门槛或重复上报时安静返回 None/旧记录。"""
     if task is None or agent is None or not getattr(task, "id", None):
         return None
+    # 调用方在失败路径上必须先把证据 commit 掉，此时 ORM 属性已过期。
+    # 按主键重新读取，避免在异步上下文里访问过期属性触发隐式 IO。
+    fresh_task = await db.get(Task, str(task.id), populate_existing=True)
+    fresh_agent = await db.get(Agent, str(agent.id), populate_existing=True)
+    if fresh_task is None or fresh_agent is None:
+        return None
+    task, agent = fresh_task, fresh_agent
     executions = (await db.execute(
         select(AgentExecution)
         .where(AgentExecution.task_id == str(task.id))
@@ -487,8 +495,6 @@ async def build_experience_context(db: AsyncSession, company_id: str,
 
 async def adopt_experience(db: AsyncSession, row: SharedExperience,
                            agent_id: str, user_id: str | None = None) -> dict:
-    from app.models.agent import Agent
-
     agent = await db.get(Agent, agent_id)
     if agent is None or agent.company_id != row.company_id:
         raise ValueError("目标员工不存在或不属于这家公司")

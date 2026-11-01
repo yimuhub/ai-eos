@@ -298,3 +298,26 @@ async def test_experience_http_contract_and_tenant_isolation(
                           json={"agent_id": other_agent},
                           headers=alice["headers"])
     assert r.status_code == 400
+
+
+async def test_harvest_after_commit_uses_fresh_objects(tenants, monkeypatch):
+    """运行时失败路径会先 commit 证据，再沉淀经验。
+
+    此时 ORM 对象已过期，harvest 必须自己按主键重读——否则在异步上下文里
+    访问过期属性会冒 MissingGreenlet，经验静默不落库。
+    """
+    _no_llm(monkeypatch)
+    co, user = tenants.alice_co["id"], tenants.alice["id"]
+    agent_id = await _agent(co, user, "小李")
+    task_id = await _task(co, user, agent_id, status=TaskStatus.FAILED)
+    await _execution(task_id, agent_id, "failed", error="接口 502")
+    await _execution(task_id, agent_id, "failed", error="接口 502")
+
+    async with AsyncSessionLocal() as s:
+        task = await s.get(Task, task_id)
+        agent = await s.get(Agent, agent_id)
+        await s.commit()  # 模拟运行时：证据先落库，属性全部过期
+        rec = await exp.harvest_task_experience(
+            s, task, agent, success=False, error="接口 502")
+
+    assert rec is not None and rec["kind"] == "failure"
