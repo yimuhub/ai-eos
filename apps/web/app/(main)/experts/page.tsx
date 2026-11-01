@@ -2,7 +2,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, describeError } from "@/lib/api";
-import { invalidate, useResource } from "@/lib/useResource";
+import { invalidate, useActiveCompanyId, useResource } from "@/lib/useResource";
 import AttachmentPicker from "@/components/AttachmentPicker";
 import type { Attachment } from "@/components/AttachmentPicker";
 
@@ -77,13 +77,20 @@ const SECTION_ACCENT: Record<string, string> = {
 };
 
 export default function ExpertsPage() {
-  // 专家库是账号级目录（与当前公司无关），接口本身不带 company_id，
-  // 因此 key 不带 cid——带上只会在切公司时重拉同一份数据。
+  // 专家库**按公司隔离**：`lib/api.ts` 会给 /experts 自动补上当前公司的
+  // company_id，后端也只回该公司的模板。所以缓存 key 必须带 cid——
+  // 不带的话切了公司这一页仍显示上一家公司的专家（同 key 的缓存在 30 秒内直接复用），
+  // 而卡片上的「雇佣」会把别家公司的人设招进当前公司。
   // 两个接口互不依赖：并发发出、各自缓存、各自重取。
-  const { data: expertData, error: loadError, loading, refresh: refreshExperts } =
-    useResource<Expert[]>("experts:list", () => api.get<Expert[]>("/experts"));
+  const cid = useActiveCompanyId();
+  const { data: expertData, error: loadError, loading: listLoading, refresh: refreshExperts } =
+    useResource<Expert[]>(cid ? `experts:list:${cid}` : null,
+      () => api.get<Expert[]>("/experts"));
   const { data: deptData, refresh: refreshDepts } =
-    useResource<DeptRow[]>("experts:departments", () => api.get<DeptRow[]>("/experts/departments"));
+    useResource<DeptRow[]>(cid ? `experts:departments:${cid}` : null,
+      () => api.get<DeptRow[]>("/experts/departments"));
+  // cid 还在确认（首帧）时也算加载中，否则会先闪一下"暂无专家"
+  const loading = cid === undefined || listLoading;
 
   const list = useMemo<Expert[]>(() => expertData ?? [], [expertData]);
   const depts = useMemo<DeptRow[]>(() => deptData ?? [], [deptData]);
@@ -317,6 +324,11 @@ export default function ExpertsPage() {
       </div>
 
       {msg && <div className="mb-4 text-sm text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-2">{msg}</div>}
+      {cid === null && (
+        <div className="mb-4 text-sm text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg p-2">
+          你还没有创建 AI 公司——专家库按公司隔离，请先建公司再来雇佣。
+        </div>
+      )}
       {loadError && (
         <div className="mb-4 text-sm text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg p-2">
           ❌ 加载专家库失败：{loadError}

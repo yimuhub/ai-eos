@@ -117,6 +117,38 @@
 - 棘轮上调：`test_response_models.py` 全库基线 **112 → 200** 条、占比 **23% → 42%**
   （当前实测 202/461 = 43.8%）。
 
+### 新增：「老板批准」这条线响应模型收口（A3 长尾，21/21）
+
+- `/intervention`（10 条）与 `/experts`（11 条）全部声明 `response_model`，模型集中在
+  `app/schemas/responses_gate.py`。这两个模块是主线的两端：老板在干预中心点「批准」，
+  专家库把人设变成上岗的员工——它们 returned 的形状一旦变了，中间没有任何一层会报错。
+- 这两个模块的**分支返回特别多**，每条分支的键集都单独钉住：
+  * `GET /intervention/policy`：库里有策略回 `{id, company_id, project_id, level,
+    approval_actions}`，没策略回 `{company_id, project_id, level, approval_actions,
+    is_default}`。靠 `response_model_exclude_unset=True` 让两条分支各回各的键；
+    反向验证：临时摘掉 `exclude_unset`，默认分支立刻多出 `id: null` 并把测试打红。
+  * `POST /intervention/requests`：自动放行只有 `detail`，落单待批只有
+    `request_id` + `status`。
+  * `POST /intervention/requests/{id}/decide`：普通单回 `{id, status}`，批准了挂了
+    高危副作用的单才多一个 `execution`（失败分支是 `{ok, error}`，成功分支才是
+    `{ok, result}`）。
+  * `POST /experts/search`：命中是「完整人设 + `reason`」，LLM 没谈成是
+    `{id: null, message}`——用 `ExpertPickOut | ExpertSearchMissOut` 联合建模，
+    所以前端不会收到一张 `id` 为空的空白卡片当结果。
+- `/experts` 的列表/详情/编辑/复制/新建共用 `ExpertTemplate.public_dict()`（17 键），
+  模型也只有一个 `ExpertPublicOut`，其余继承或嵌套它：`public_dict()` 改一处，
+  七条端点一起红，而不是各处悄悄漏。
+- 新护栏 `tests/test_expert_intervention_contract.py`（15 项）：临时库真跑两个模块的
+  端点，键集合**相等**断言；含「始终允许」→ 白名单 → 撤销的整条链、越权 404、
+  vendor 导入 → 原创替换的计数（`created/updated/disabled_legacy` 是前端提示语的原料），
+  以及两条完整性检查（这两个模块的端点必须全带模型、模型必须 `extra='allow'`）。
+  LLM 相关的 search/team 用 monkeypatch 顶掉网关，零真实调用、零额度。
+- 顺带修前端一处：专家库页的缓存 key 写成 `"experts:list"`（注释断言"专家库与当前公司
+  无关"），但 `lib/api.ts` 会给 `/experts` 自动补 `company_id`、后端也只按公司过滤——
+  于是**切公司后这一页还显示上一家公司的专家**，点「雇佣」会把别家公司的人设招进当前
+  公司。key 改为带 `cid`，并补上"名下没有公司"的明确提示而不是空列表。
+- 棘轮上调：全库基线 **200 → 220** 条、占比 **42% → 47%**（当前实测 223/461 = 48.4%）。
+
 ## [5.15.0] 从审查到九分：契约、交付、多端与安全收口 — 2026-11-01
 
 > 来源：五视角审查（[审查报告](docs/审查报告_AI-EOS_2026-10-31.md)）与

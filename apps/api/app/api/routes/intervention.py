@@ -10,6 +10,11 @@ from app.api.deps import assert_company_owned, get_current_user, get_db
 from app.models.intervention import (ApprovalRequest, InterventionPolicy,
                                      OverrideLog, new_id, requires_approval)
 from app.models.user import User
+from app.schemas.responses_gate import (ActionCheckOut, ApprovalGateOut,
+                                        ApprovalRequestOut, DecideOut,
+                                        InterventionPolicyOut, OverrideLogOut,
+                                        OverrideOut, WhitelistDeletedOut,
+                                        WhitelistOut)
 
 router = APIRouter(prefix="/intervention", tags=["intervention"])
 
@@ -23,7 +28,8 @@ class PolicyIn(BaseModel):
     approval_actions: list[str] | None = None
 
 
-@router.get("/policy")
+@router.get("/policy", response_model=InterventionPolicyOut,
+            response_model_exclude_unset=True)
 async def get_policy(
     company_id: str = Query(...),
     project_id: str | None = Query(None),
@@ -57,7 +63,8 @@ def _policy_out(p: InterventionPolicy):
             "level": p.level, "approval_actions": p.approval_actions}
 
 
-@router.put("/policy")
+@router.put("/policy", response_model=InterventionPolicyOut,
+            response_model_exclude_unset=True)
 async def set_policy(
     data: PolicyIn,
     company_id: str = Query(...),
@@ -84,7 +91,7 @@ async def set_policy(
     return _policy_out(p)
 
 
-@router.post("/check")
+@router.post("/check", response_model=ActionCheckOut)
 async def check_action(
     action_type: str = Query(...),
     company_id: str = Query(...),
@@ -126,7 +133,8 @@ class RequestIn(BaseModel):
     force: bool = False   # true=策略说不需要也要走审批（Agent 自己拿不准）
 
 
-@router.post("/requests")
+@router.post("/requests", response_model=ApprovalGateOut,
+             response_model_exclude_unset=True)
 async def create_request(
     data: RequestIn,
     company_id: str = Query(...),
@@ -157,7 +165,7 @@ async def create_request(
             "status": "PENDING"}
 
 
-@router.get("/requests")
+@router.get("/requests", response_model=list[ApprovalRequestOut])
 async def list_requests(
     company_id: str = Query(...),
     status: str | None = Query(None),
@@ -180,7 +188,8 @@ class DecideIn(BaseModel):
     always_allow: bool = False   # V5.6.1：批准后写入免批白名单（工具级防审批疲劳）
 
 
-@router.post("/requests/{request_id}/decide")
+@router.post("/requests/{request_id}/decide", response_model=DecideOut,
+             response_model_exclude_unset=True)
 async def decide_request(
     request_id: str,
     data: DecideIn,
@@ -335,7 +344,7 @@ class OverrideIn(BaseModel):
     reason: str | None = None
 
 
-@router.post("/override")
+@router.post("/override", response_model=OverrideOut)
 async def create_override(
     data: OverrideIn,
     company_id: str = Query(...),
@@ -353,7 +362,7 @@ async def create_override(
     return {"id": log.id, "target": f"{data.target_type}:{data.target_id[:8]}"}
 
 
-@router.get("/overrides")
+@router.get("/overrides", response_model=list[OverrideLogOut])
 async def list_overrides(
     company_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -370,7 +379,7 @@ async def list_overrides(
 
 
 # ---------- V5.6.1 工具级免批白名单管理（学 Cline"始终允许"） ----------
-@router.get("/whitelist")
+@router.get("/whitelist", response_model=list[WhitelistOut])
 async def list_whitelist(
     company_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -389,7 +398,7 @@ async def list_whitelist(
     } for w in rows]
 
 
-@router.delete("/whitelist/{wl_id}")
+@router.delete("/whitelist/{wl_id}", response_model=WhitelistDeletedOut)
 async def delete_whitelist(
     wl_id: str,
     company_id: str = Query(...),

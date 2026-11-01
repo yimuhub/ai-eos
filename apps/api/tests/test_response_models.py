@@ -39,9 +39,11 @@ CORE_MODULES = frozenset({
 CORE_MIN_RATIO = 0.90
 
 # 2026-11-01 实测：112 / 471；同日补完知识库域（`/knowledge` + `/kb2` 共 20 条）
-# 后为 202 / 461 = 43.8%。地板取整到 200 / 0.42，任何时候都不许下调。
-BASELINE_TYPED = 200
-BASELINE_MIN_RATIO = 0.42
+# 后为 202 / 461 = 43.8%；再补完「老板批准」这条线（`/intervention` 10 条 +
+# `/experts` 11 条）后为 223 / 461 = 48.4%。地板取整到 220 / 0.47，
+# 任何时候都不许下调。
+BASELINE_TYPED = 220
+BASELINE_MIN_RATIO = 0.47
 MIN_TOTAL_OPERATIONS = 400
 
 

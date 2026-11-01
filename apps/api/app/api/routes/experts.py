@@ -22,6 +22,11 @@ from app.core.logging_config import get_logger
 from app.expert_library import SOURCE_URL, DEPT_NAMES, parse_expert_md
 from app.models.expert_template import ExpertTemplate
 from app.models.user import User
+from app.schemas.responses_gate import (ExpertBlueprintOut, ExpertDetailOut,
+                                       ExpertDepartmentOut, ExpertImportOut,
+                                       ExpertOriginalImportOut, ExpertPickOut,
+                                       ExpertPublicOut, ExpertSearchMissOut,
+                                       ExpertTeamOut)
 
 logger = get_logger(__name__)
 
@@ -56,7 +61,7 @@ def _detect_dept(fname: str) -> str:
     return "specialized"
 
 
-@router.post("/import", status_code=201)
+@router.post("/import", status_code=201, response_model=ExpertImportOut)
 async def import_experts(
     company_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -109,7 +114,8 @@ async def import_experts(
             "files": len(files)}
 
 
-@router.post("/import-original", status_code=201)
+@router.post("/import-original", status_code=201,
+             response_model=ExpertOriginalImportOut)
 async def import_original_experts(
     company_id: str = Query(...),
     disable_uncovered: int = Query(1, description="=1 时把没被原创覆盖的旧 agency-agents-zh 记录自动下架"),
@@ -211,7 +217,7 @@ def _original_path() -> str:
                         "..", "..", "..", "..", "content", "experts")
 
 
-@router.get("")
+@router.get("", response_model=list[ExpertPublicOut])
 async def list_experts(
     company_id: str = Query(...),
     department: str = Query(None),
@@ -234,7 +240,7 @@ async def list_experts(
     return [r.public_dict() for r in rows]
 
 
-@router.get("/departments")
+@router.get("/departments", response_model=list[ExpertDepartmentOut])
 async def expert_departments(company_id: str = Query(...),
                             db: AsyncSession = Depends(get_db),
                             user: User = Depends(get_current_user)):
@@ -251,7 +257,8 @@ class SearchIn(BaseModel):
     limit: int = 3
 
 
-@router.post("/search")
+@router.post("/search",
+             response_model=list[ExpertPickOut | ExpertSearchMissOut])
 async def search_experts(
     data: SearchIn,
     company_id: str = Query(...),
@@ -309,7 +316,7 @@ class TeamIn(BaseModel):
     headcount: int = 5
 
 
-@router.post("/team")
+@router.post("/team", response_model=ExpertTeamOut)
 async def build_team(
     data: TeamIn,
     company_id: str = Query(...),
@@ -388,7 +395,7 @@ async def build_team(
             "note": "团队蓝图已创建，请在工厂页逐个审查批准"}
 
 
-@router.get("/{eid}")
+@router.get("/{eid}", response_model=ExpertDetailOut)
 async def expert_detail(eid: str, company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
@@ -413,7 +420,7 @@ class ExpertEditIn(BaseModel):
     enabled: bool | None = None
 
 
-@router.put("/{eid}")
+@router.put("/{eid}", response_model=ExpertDetailOut)
 async def expert_edit(eid: str, data: ExpertEditIn,
                       company_id: str = Query(...),
                       db: AsyncSession = Depends(get_db),
@@ -439,7 +446,7 @@ async def expert_edit(eid: str, data: ExpertEditIn,
             "system_prompt": t.system_prompt or ""}
 
 
-@router.post("/{eid}/copy", status_code=201)
+@router.post("/{eid}/copy", status_code=201, response_model=ExpertDetailOut)
 async def expert_copy(eid: str, company_id: str = Query(...),
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
@@ -474,7 +481,7 @@ class ExpertManualIn(BaseModel):
     tags: list[str] | None = None
 
 
-@router.post("/manual", status_code=201)
+@router.post("/manual", status_code=201, response_model=ExpertDetailOut)
 async def expert_manual(data: ExpertManualIn,
                        company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
@@ -510,7 +517,7 @@ async def expert_manual(data: ExpertManualIn,
             "system_prompt": t.system_prompt or ""}
 
 
-@router.post("/{eid}/to-blueprint")
+@router.post("/{eid}/to-blueprint", response_model=ExpertBlueprintOut)
 async def expert_to_blueprint(eid: str, company_id: str = Query(...),
                              db: AsyncSession = Depends(get_db),
                              user: User = Depends(get_current_user)):
