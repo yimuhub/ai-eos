@@ -66,7 +66,7 @@ ai-eos/
 ├── docs/                       # 架构/API/Schema/测试报告等设计文档
 ├── plugins/                    # models/skills/providers 预留插件目录
 ├── storage/                    # uploads/ + artifacts/(Agent 成果自动归档)
-├── tools/                      # check.sh(交付前自检门禁) + check_api_contract.py(接口契约校验)
+├── tools/                      # check.sh(交付前自检门禁) + check_api_contract.py(接口契约校验) + check_response_shape.py(响应形状校验)
 ├── tests/                      # ⚠️ 历史手工脚本，非 pytest 用例（见 tests/LEGACY_SCRIPTS.md）
 ├── apps/api/tests/             # ✅ 当前测试套件（113 用例，pytest + httpx.ASGITransport）
 ├── docker/docker-compose.yml   # PG16 + Redis7（国内镜像源）
@@ -311,6 +311,10 @@ cd apps/web && npx tsc --noEmit && npx eslint app components lib
 
 # 前后端接口契约（独立运行，便于定位具体错配）
 cd apps/api && .venv/bin/python ../../tools/check_api_contract.py --strict
+
+# 响应形状契约：前端 `api.get<T>` 的 T 与后端顶层 schema 对不对得上
+# （路径对了、200 了，但数组被当 {items} 对象读——TS 与 404 都拦不住）
+cd apps/api && .venv/bin/python ../../tools/check_response_shape.py --strict
 ```
 
 ### 关于历史脚本

@@ -74,6 +74,13 @@ else
   bad "存在接口契约不匹配："; echo "$OUT"
 fi
 
+step "前后端响应形状（数组 vs 对象 门禁）"
+if OUT="$(cd "$API" && "$PY" "$ROOT/tools/check_response_shape.py" --strict 2>&1)"; then
+  grep -E '校验通过' <<<"$OUT" | sed 's/^✅/  ✓/' || ok "形状一致"
+else
+  bad "存在响应形状错配："; echo "$OUT"
+fi
+
 # ---------------------------------------------------------------- 前端
 step "前端：TypeScript 类型检查（strict）"
 if [[ -x "$WEB/node_modules/.bin/tsc" ]]; then
