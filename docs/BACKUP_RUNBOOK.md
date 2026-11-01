@@ -90,27 +90,29 @@ curl -f http://localhost:8001/health && curl -f http://localhost:8001/health/db
 再加同目录下的数据库备份。
 
 ```bash
-# 本地（默认写到仓库同级 ../aieos-backups/repo，保留最近 14 份）
+# 本地快照（默认写到仓库同级 ../aieos-backups/repo，保留最近 14 份）
 ./tools/backup_repo.sh
-
-# 云端副本（iCloud / OneDrive / 外置硬盘都行）——先加密再同步
-AIEOS_BACKUP_PASSPHRASE='自己定的长口令' \
-  ./tools/backup_repo.sh --encrypt --out ~/Library/Mobile\ Documents/com~apple~CloudDocs/aieos-backups
 ```
 
-口令只从环境变量读取，脚本不打印、不落盘。**口令必须单独记在密码管理器里**，
-丢了口令等于丢了备份。
+**云端就是 GitHub**：每次 `git push` 后，代码已经在 `origin/main` 上，这就是异地那一份。
+本机这份快照只解决一个 GitHub 管不到的问题——**还没提交的改动**（`git status` 里那些
+`M` / `??` 文件），防止本机突然坏掉时丢掉正在写的代码。
 
-### 6.1 三份副本，两个介质，一份异地（3-2-1）
+> 如果你还想额外放一份到 iCloud / 外置硬盘，脚本支持先加密再落盘：
+> `AIEOS_BACKUP_PASSPHRASE='自己定的长口令' ./tools/backup_repo.sh --encrypt --out <目标目录>`。
+> 这里的"口令"就是**加密密码**，只在这条命令里用；不用 iCloud 就完全不需要管它。
+> 用了就必须记在密码管理器里——丢了口令也就打不开备份了。
+
+### 6.1 必备两份，第三份可选
 
 | # | 位置 | 内容 | 频率 | 谁在维护 |
 |---|------|------|------|----------|
 | 1 | GitHub 私有仓库 `origin/main` | 已提交的代码 + 标签 + Release 说明 | 每次提交 / 每天 | 开发者手动 push |
 | 2 | 本机 `../aieos-backups/repo` | bundle + 工作区快照 + 数据库 | 每日自动（launchd） | `tools/backup_repo.sh` |
-| 3 | iCloud / OneDrive / 外置硬盘 | 加密后的第 2 份拷贝 | 每日自动 | 系统同步 / 手动 rsync |
+| 3 | iCloud / OneDrive / 外置硬盘（可选） | 加密后的第 2 份拷贝 | 每日自动 | 系统同步 / 手动 rsync |
 
-GitHub 解决"本机坏了"；本地快照解决"GitHub 挂了 / 误 force-push"；
-云端加密副本解决"本机硬盘和 GitHub 同时出问题"。
+GitHub 解决"本机坏了"；本地快照解决"GitHub 挂了 / 误 force-push / 改动还没提交"；
+第 3 份是给"本机硬盘和 GitHub 同时出问题"兜底的，不是必须。
 
 ### 6.2 每日自动备份（macOS launchd）
 
