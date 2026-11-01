@@ -148,6 +148,8 @@ os.environ["STORAGE_DIR"] = str(_TMP_ROOT / "storage")
 os.environ["AIEOS_SKILL_MARKET_AUTO"] = "0"
 os.environ["AIEOS_SKILL_AUTO_GENERATE"] = "0"
 os.environ["AIEOS_CEO_WEB_RESEARCH"] = "0"
+os.environ["AIEOS_CEO_WORKFLOW_AUTHOR"] = "0"
+os.environ["AIEOS_CEO_WORKFLOW_LLM"] = "0"
 # 清掉可能存在的模型密钥，确保"无密钥"路径被真实覆盖
 for _k in ("OPENAI_COMPAT_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"):
     os.environ.pop(_k, None)

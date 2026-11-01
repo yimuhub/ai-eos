@@ -116,6 +116,7 @@ class CeoLaunchOut(BaseModel):
     provider_cap: int
     provider_type: str
     new_agents: list[CeoNewAgentOut]
+    workflow: dict[str, Any] | None = None
 
 
 class CeoSlotOut(BaseModel):
@@ -162,6 +163,7 @@ class CeoMissionDetailOut(BaseModel):
     degraded: bool
     degrade_reason: str
     degraded_until: str
+    workflow_id: str
     stats: dict[str, Any]
     report_excerpt: str
     started_at: str

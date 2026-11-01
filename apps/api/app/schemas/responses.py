@@ -1049,3 +1049,38 @@ class DepartmentOverviewOut(BaseModel):
 
 class AgentsOverviewOut(BaseModel):
     departments: list[DepartmentOverviewOut]
+
+
+class WorkflowBriefOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    id: str
+    name: str
+    version: int
+    source: str
+    status: str
+    score: float | None
+    run_count: int
+    success_count: int
+    failure_count: int
+    reuse_key: str
+    previous_workflow_id: str
+
+
+class WorkflowFeedbackItemOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    id: str
+    workflow_id: str
+    success: bool
+    score: float
+    metrics: dict
+    lessons: list[str]
+    note: str
+    source: str
+    created_at: str
+
+
+class WorkflowFeedbackSubmitOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    feedback: WorkflowFeedbackItemOut
+    workflow: WorkflowBriefOut
+    optimized_from: str

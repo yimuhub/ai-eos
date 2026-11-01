@@ -92,6 +92,37 @@
 - **契约**：`CeoPlannedSubtaskOut.required_skills`、`CeoNewAgentOut.skills/skill_errors`、
   `AgentSkillProvisionOut`；CEO 契约 23 项与技能配备 3 项测试全部通过。
 
+### 新增：CEO 自动生成 / 自优化工作流（KB + 网络调研 + 版本化反馈）
+
+员工会干活还不够，得知道**按什么顺序干**。开工时 CEO 现在会自己写一套工作流，
+并在多轮成败反馈里持续升级，最终沉淀成公司可复用的「完美流程」。
+
+- **自动生成，不等老板画图**：拆解落库后、并发执行前，CEO 把准绳、子任务、
+  每步必备技能一起喂给模型，产出一张 START → … → END 的有向图；
+  模型不可用或返回坏 JSON 时退到**确定性顺序图**，不会因外呼失败卡住开工。
+- **知识库 + 网络调研**：生成前先按统筹标题走知识库 RAG 取公司自有经验，
+  再用内置搜索做一次 6 秒限时的公开资料调研，两者都拼进生成提示词；
+  调研失败只是少一份参考，不阻断主流程（`AIEOS_CEO_WEB_RESEARCH` 可关）。
+- **图不是随便存的**：只接受白名单节点类型（START/END/AGENT/APPROVAL/
+  CONDITION/WAIT/TASK/PARALLEL/MERGE），key 唯一、边两端必须存在、
+  必须能从 START 走到 END、最多 24 个节点；AGENT 节点的负责人按姓名解析到
+  真实员工 id，解析不到就退给统筹本人。
+- **版本化与复用**：每张工作流带 `version / source / reuse_key / score /
+  run_count / success_count / failure_count / previous_workflow_id`。
+  同名同计划的统筹，如果上一版评分 ≥ 90 就直接复用；否则升一个版本，
+  旧版归档，历史链可追溯。
+- **反馈驱动自优化**：统筹收尾时按完成率、偏离、失败、补跑算 0–100 分，
+  写一条 `workflow_feedback`（成功与否、分数、指标、经验教训）；
+  低于 80 分自动生成下一版，把失败原因与经验作为「上一轮教训」注入各
+  AGENT 节点的执行指令。也开放 `POST /workflows/{id}/feedback` 供老板手动
+  打分与追加经验，同样触发升版。
+- **可审计**：`workflow.generated` / `workflow.optimized` /
+  `workflow.feedback_recorded` 三类事件带版本、分数与来源。
+- **迁移与测试**：迁移 `0008`（`workflow_feedback` 表 + `workflow_definitions`
+  9 个新列 + `ceo_missions.workflow_id`），SQLite 自动补列与 Alembic 双轨一致；
+  新增 5 项离线测试，覆盖确定性图与审计、低分升版注入教训、模型图校验与
+  坏 JSON 兜底、同名同计划复用、反馈接口端到端。
+
 ### 新增：接口契约长尾（A3 续）
 
 - 再补 68 个响应模型：`governance` 23/23、`tokens` 13/13、`war_room` 14/15、

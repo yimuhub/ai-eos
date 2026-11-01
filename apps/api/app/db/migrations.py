@@ -52,6 +52,12 @@ _NEW_INDEXES: tuple[tuple[str, str, str], ...] = (
     ("agents", "group_id", "ix_agents_group_id"),
     ("agent_groups", "company_id", "ix_agent_groups_company_id"),
     ("agent_groups", "department_id", "ix_agent_groups_department_id"),
+    # CEO 工作流：老库补版本/复用键/统筹关联；workflow_feedback 是新表
+    ("workflow_definitions", "owner_agent_id",
+     "ix_workflow_definitions_owner_agent_id"),
+    ("workflow_definitions", "reuse_key",
+     "ix_workflow_definitions_reuse_key"),
+    ("ceo_missions", "workflow_id", "ix_ceo_missions_workflow_id"),
 )
 
 

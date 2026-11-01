@@ -73,6 +73,9 @@ class CeoMission(TimestampMixin, Base):
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     report: Mapped[str | None] = mapped_column(Text, nullable=True)
     report_artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # 本次统筹生成/复用的工作流（开工时落库，收尾后可能升到新版本）
+    workflow_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True)
     stats: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[str | None] = mapped_column(String(50), nullable=True)
     finished_at: Mapped[str | None] = mapped_column(String(50), nullable=True)

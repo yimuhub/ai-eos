@@ -1,5 +1,5 @@
 """Workflow CRUD + execution API (P2-02/P2-03 backend)."""
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,8 +9,11 @@ from app.core.permissions import Capability
 from app.core.scope import build_ctx
 from app.db.session import get_db
 from app.models.workflow import (NodeType, RunStatus, WorkflowDefinition,
-                                 WorkflowEdge, WorkflowExecution, WorkflowNode,
+                                 WorkflowEdge, WorkflowExecution,
+                                 WorkflowFeedback, WorkflowNode,
                                  WorkflowStep, WorkflowStatus)
+from app.schemas.responses import (WorkflowFeedbackItemOut,
+                                   WorkflowFeedbackSubmitOut)
 from app.services.event_system import log_event
 
 router = APIRouter(tags=["workflows"])
@@ -37,6 +40,14 @@ class WorkflowSaveIn(BaseModel):
     project_id: str | None = None
     nodes: list[NodeIn]
     edges: list[EdgeIn]
+
+
+class WorkflowFeedbackIn(BaseModel):
+    success: bool | None = None
+    score: float | None = None
+    lessons: list[str] = []
+    note: str | None = None
+    optimize: bool = True
 
 
 def _workflow_scope(ctx):
@@ -73,7 +84,13 @@ async def list_workflows(company_id: str, db: AsyncSession = Depends(get_db),
     ctx = await build_ctx(db, user, company_id)
     q = await db.execute(select(WorkflowDefinition).where(_workflow_scope(ctx)))
     return [{"id": w.id, "name": w.name, "description": w.description,
-             "status": w.status.value} for w in q.scalars()]
+             "status": w.status.value, "version": w.version,
+             "source": w.source, "score": w.score, "run_count": w.run_count,
+             "success_count": w.success_count,
+             "failure_count": w.failure_count,
+             "reuse_key": w.reuse_key or "",
+             "previous_workflow_id": w.previous_workflow_id or ""}
+            for w in q.scalars()]
 
 
 @router.get("/workflows/{wid}")
@@ -84,14 +101,90 @@ async def get_workflow(wid: str, db: AsyncSession = Depends(get_db),
         WorkflowNode.workflow_id == wid))
     edges_q = await db.execute(select(WorkflowEdge).where(
         WorkflowEdge.workflow_id == wid))
+    feedback_q = await db.execute(
+        select(WorkflowFeedback).where(WorkflowFeedback.workflow_id == wid)
+        .order_by(WorkflowFeedback.created_at.desc()).limit(10))
     return {
         "id": wf.id, "name": wf.name, "description": wf.description,
-        "status": wf.status.value,
+        "status": wf.status.value, "version": wf.version,
+        "source": wf.source, "score": wf.score, "run_count": wf.run_count,
+        "success_count": wf.success_count, "failure_count": wf.failure_count,
+        "reuse_key": wf.reuse_key or "",
+        "previous_workflow_id": wf.previous_workflow_id or "",
+        "owner_agent_id": wf.owner_agent_id or "",
+        "meta": wf.meta or {},
         "nodes": [{c.key: getattr(n, c.key) for c in n.__table__.columns}
                   for n in nodes_q.scalars()],
         "edges": [{"from_node": e.from_node, "to_node": e.to_node, "label": e.label}
                   for e in edges_q.scalars()],
+        "feedback": [_feedback_out(f) for f in feedback_q.scalars()],
     }
+
+
+def _feedback_out(row: WorkflowFeedback) -> dict:
+    return {
+        "id": row.id,
+        "workflow_id": row.workflow_id,
+        "success": bool(row.success),
+        "score": float(row.score or 0),
+        "metrics": row.metrics or {},
+        "lessons": row.lessons or [],
+        "note": row.note or "",
+        "source": row.source,
+        "created_at": row.created_at.isoformat() if row.created_at else "",
+    }
+
+
+@router.get("/workflows/{wid}/feedback",
+            response_model=list[WorkflowFeedbackItemOut])
+async def list_workflow_feedback(wid: str,
+                                 limit: int = Query(20, ge=1, le=100),
+                                 db: AsyncSession = Depends(get_db),
+                                 user=Depends(get_current_user)):
+    wf = await _wf_owned(db, user, wid)
+    rows = (await db.execute(
+        select(WorkflowFeedback).where(WorkflowFeedback.workflow_id == wf.id)
+        .order_by(WorkflowFeedback.created_at.desc()).limit(limit)
+    )).scalars().all()
+    return [_feedback_out(f) for f in rows]
+
+
+@router.post("/workflows/{wid}/feedback",
+             response_model=WorkflowFeedbackSubmitOut)
+async def submit_workflow_feedback(wid: str, data: WorkflowFeedbackIn,
+                                   db: AsyncSession = Depends(get_db),
+                                   user=Depends(get_current_user)):
+    """人工反馈一次运行结果：写入评分与经验，必要时立即升一版。
+
+    自动反馈由 CEO 收尾时写入；这个接口给「手动跑工作流」和老板复盘用。
+    """
+    wf = await _wf_owned(db, user, wid, Capability.OPERATE)
+    if data.score is None and data.success is None:
+        raise HTTPException(400, "success 与 score 至少给一个")
+    score = data.score if data.score is not None else (
+        100.0 if data.success else 0.0)
+    score = max(0.0, min(float(score), 100.0))
+    success = data.success if data.success is not None else score >= 60
+
+    from app.workflow_authoring import (OPTIMIZE_THRESHOLD, collect_lessons,
+                                        optimize_workflow, record_feedback,
+                                        workflow_brief)
+    row = await record_feedback(
+        db, wf, success=success, score=score, lessons=data.lessons,
+        note=data.note, source="manual", created_by=user.id)
+    target = wf
+    optimized_from = ""
+    if data.optimize and score < OPTIMIZE_THRESHOLD:
+        lessons = await collect_lessons(db, wf)
+        new = await optimize_workflow(db, wf, lessons)
+        if new is not None:
+            target = new
+            optimized_from = wf.id
+    await db.commit()
+    await db.refresh(row)
+    await db.refresh(target)
+    return {"feedback": _feedback_out(row), "workflow": workflow_brief(target),
+            "optimized_from": optimized_from}
 
 
 async def start_execution(db: AsyncSession, workflow_id: str,

@@ -1,7 +1,8 @@
 """Advanced Workflow Engine models (P2-02)."""
 import enum
 
-from sqlalchemy import JSON, Enum, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (JSON, Boolean, Enum, Float, ForeignKey, Index, Integer,
+                        String, Text)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -50,6 +51,24 @@ class WorkflowDefinition(TimestampMixin, Base):
         Enum(WorkflowStatus, native_enum=False, length=50), default=WorkflowStatus.DRAFT)
     created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
 
+    # --- CEO 生成与自优化 ---
+    # 同一个 reuse_key 下每次生成/优化是一个新版本；旧版本归档而不是删除，
+    # 便于对比「第几版把失败率降下来了」。
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    source: Mapped[str] = mapped_column(String(20), default="manual")
+    owner_agent_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True)
+    reuse_key: Mapped[str | None] = mapped_column(
+        String(200), nullable=True, index=True)
+    previous_workflow_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    run_count: Mapped[int] = mapped_column(Integer, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 生成依据（知识库命中 / 网络来源 / 拆解签名 / 累计经验），全部可审计
+    meta: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=dict)
+
 
 class WorkflowNode(TimestampMixin, Base):
     __tablename__ = "workflow_nodes"
@@ -90,6 +109,29 @@ class WorkflowExecution(TimestampMixin, Base):
     output_data: Mapped[dict | None] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
     started_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+
+
+class WorkflowFeedback(TimestampMixin, Base):
+    """一次运行后的评分与经验：优化下一版工作流的唯一输入。
+
+    评分刻意做成确定性公式（见 workflow_authoring.score_mission），不用模型：
+    同一批结果永远得到同一个分数，老板能自己复算，复盘时不会各说各话。
+    """
+    __tablename__ = "workflow_feedback"
+
+    workflow_id: Mapped[str] = mapped_column(
+        ForeignKey("workflow_definitions.id", ondelete="CASCADE"), index=True)
+    execution_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True)
+    mission_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True)
+    source: Mapped[str] = mapped_column(String(20), default="ceo")
+    success: Mapped[bool] = mapped_column(Boolean, default=False)
+    score: Mapped[float] = mapped_column(Float, default=0)
+    metrics: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=dict)
+    lessons: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class WorkflowStep(TimestampMixin, Base):

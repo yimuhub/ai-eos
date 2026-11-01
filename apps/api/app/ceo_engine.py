@@ -719,6 +719,25 @@ async def launch_mission(db: AsyncSession, mission_id: str,
                     company_id=mission.company_id)
     await db.commit()
 
+    # 工作流生成：知识库 + 网络调研 + 模型；任一步失败都退到确定性图，
+    # 绝不让「工作流画不出来」拖垮开工。先提交任务再外呼，避免 SQLite
+    # 写锁横跨网络请求。
+    workflow = None
+    try:
+        from app.workflow_authoring import (author_mission_workflow,
+                                            workflow_brief)
+        wf = await author_mission_workflow(db, mission, coord)
+        await db.commit()
+        workflow = workflow_brief(wf)
+    except Exception as exc:  # noqa: BLE001 — 工作流是增强项
+        logger.warning("工作流生成失败 mission=%s: %s: %s",
+                       mission.id, type(exc).__name__, exc)
+        try:
+            await db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        mission = await db.get(CeoMission, mission_id)
+
     import app.background_jobs as bg
     submitted = None if not submit else bg.submit_async(
         lambda session: run_mission(session, mission_id),
@@ -737,6 +756,7 @@ async def launch_mission(db: AsyncSession, mission_id: str,
         "provider_cap": mission.provider_cap,
         "provider_type": capacity["provider_type"],
         "new_agents": hired,
+        "workflow": workflow,
     }
 
 
@@ -1036,6 +1056,17 @@ async def _finalize(db: AsyncSession, mission: CeoMission,
         "degraded": bool(mission.degraded),
     }
 
+    # 工作流反馈：评分为确定性公式；低于阈值时把本次经验固化进下一版。
+    # 这一段失败只记日志，不影响报告与交付。
+    try:
+        from app.workflow_authoring import apply_mission_feedback
+        workflow_stats = await apply_mission_feedback(db, mission, results)
+        if workflow_stats:
+            mission.stats = {**mission.stats, **workflow_stats}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("工作流反馈失败 mission=%s: %s: %s",
+                       mission.id, type(exc).__name__, exc)
+
     parent = await db.get(Task, mission.parent_task_id) if mission.parent_task_id else None
     if parent is not None:
         parent.result = report
@@ -1223,6 +1254,7 @@ def mission_detail(mission: CeoMission, tasks: list[Task],
         "degraded": bool(mission.degraded),
         "degrade_reason": mission.degrade_reason or "",
         "degraded_until": mission.degraded_until or "",
+        "workflow_id": mission.workflow_id or "",
         "stats": mission.stats or {},
         "report_excerpt": (mission.report or "")[:400],
         "started_at": mission.started_at or "",
