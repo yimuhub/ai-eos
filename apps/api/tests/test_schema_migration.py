@@ -45,13 +45,13 @@ CREATE TABLE agent_executions (
 
 
 @asynccontextmanager
-async def legacy_engine():
+async def legacy_engine(ddl: str = _LEGACY_DDL):
     """一个只含"老表结构"的临时 SQLite 库。"""
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="aieos_migrate_"))
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp / 'legacy.db'}")
     try:
         async with engine.begin() as conn:
-            await conn.execute(text(_LEGACY_DDL))
+            await conn.execute(text(ddl))
         yield engine
     finally:
         await engine.dispose()
@@ -116,6 +116,40 @@ async def test_tables_absent_from_database_are_left_alone():
         async with engine.connect() as conn:
             tables = await conn.run_sync(lambda c: set(inspect(c).get_table_names()))
         assert tables == {"agent_executions"}, f"凭空多出了表：{tables}"
+
+
+_WORKFLOW_LEGACY_DDL = """
+CREATE TABLE workflow_definitions (
+    id VARCHAR(36) PRIMARY KEY,
+    company_id VARCHAR(36),
+    name VARCHAR(200),
+    status VARCHAR(20),
+    created_by VARCHAR(36)
+)
+"""
+
+
+async def test_workflow_version_columns_backfill_unambiguous_defaults():
+    """0008 给老流程补版本/计数列：老行填 1/0 没有歧义，必须自动补齐。"""
+    async with legacy_engine(_WORKFLOW_LEGACY_DDL) as engine:
+        async with engine.begin() as conn:
+            await conn.execute(text(
+                "INSERT INTO workflow_definitions (id, company_id, name, status)"
+                " VALUES ('w1', 'c1', '旧流程', 'PUBLISHED')"))
+
+        added = await ensure_columns(engine)
+
+        for col in ("version", "source", "run_count", "success_count",
+                    "failure_count"):
+            assert f"workflow_definitions.{col}" in added, \
+                f"未补齐 {col}，实际补齐：{added}"
+        async with engine.connect() as conn:
+            row = (await conn.execute(text(
+                "SELECT version, source, run_count, success_count, failure_count"
+                " FROM workflow_definitions WHERE id = 'w1'"))).one()
+        assert row.version == 1
+        assert row.source == "manual"
+        assert (row.run_count, row.success_count, row.failure_count) == (0, 0, 0)
 
 
 @asynccontextmanager

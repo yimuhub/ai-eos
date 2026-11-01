@@ -115,6 +115,37 @@ type CeoMissionItem = {
   finished_at: string;
 };
 
+type WorkflowBrief = {
+  id: string;
+  name: string;
+  version: number;
+  source: string;
+  status: string;
+  score: number | null;
+  run_count: number;
+  success_count: number;
+  failure_count: number;
+  reuse_key: string;
+  previous_workflow_id: string;
+};
+
+type WorkflowFeedbackItem = {
+  id: string;
+  workflow_id: string;
+  success: boolean;
+  score: number;
+  lessons: string[];
+  note: string;
+  source: string;
+  created_at: string;
+};
+
+type WorkflowDetail = WorkflowBrief & {
+  owner_agent_id: string;
+  meta: Record<string, unknown>;
+  feedback: WorkflowFeedbackItem[];
+};
+
 type CeoSlot = {
   task_id: string;
   title: string;
@@ -156,6 +187,8 @@ type CeoDetail = {
   report_excerpt: string;
   started_at: string;
   finished_at: string;
+  /** CEO 为此场统筹自动生成的工作流（为空表示生成失败，未影响开工） */
+  workflow_id: string;
   slots: CeoSlot[];
 };
 
@@ -192,6 +225,11 @@ const TERMINAL = ["COMPLETED", "FAILED", "CANCELLED"];
 const ACTIVE = ["PLANNING", "RUNNING", "RECLAIMING", "PAUSED"];
 const PARALLEL_PRESETS = [3, 5, 8, 10];
 const POLL_MS = 3000;
+
+const WF_SOURCE_LABEL: Record<string, string> = {
+  ceo: "CEO 自动生成",
+  manual: "手工编排",
+};
 
 const ACTION_LABEL: Record<"pause" | "resume" | "cancel" | "reclaim", string> = {
   pause: "已暂停",
@@ -458,6 +496,51 @@ export default function CeoPage() {
     () => api.get<CeoReport>(`/ceo/missions/${selectedId}/report`),
   );
 
+  /* ------ 5.5 工作流（CEO 自动生成，可人工反馈升级） ------ */
+  const activeWorkflowId = detail && detail.mission_id === selectedId ? detail.workflow_id : "";
+  const workflow = useResource<WorkflowDetail>(
+    cid && activeWorkflowId ? `workflow:${cid}:${activeWorkflowId}` : null,
+    () => api.get<WorkflowDetail>(`/workflows/${activeWorkflowId}`),
+  );
+  const [wfScore, setWfScore] = useState(80);
+  const [wfLessons, setWfLessons] = useState("");
+  const [wfBusy, setWfBusy] = useState(false);
+  const [wfError, setWfError] = useState("");
+  const [wfOptimized, setWfOptimized] = useState<WorkflowBrief | null>(null);
+
+  useEffect(() => {
+    setWfOptimized(null);
+    setWfError("");
+    setWfLessons("");
+  }, [activeWorkflowId]);
+
+  async function submitWorkflowFeedback() {
+    const current = workflow.data;
+    if (!current || wfBusy) return;
+    setWfBusy(true);
+    setWfError("");
+    try {
+      const lessons = wfLessons.split("\n").map((s) => s.trim()).filter(Boolean);
+      const res = await api.post<{ workflow: WorkflowBrief; optimized_from: string }>(
+        `/workflows/${current.id}/feedback`,
+        { score: wfScore, lessons, note: "CEO 指挥台人工复盘", optimize: true },
+      );
+      setWfLessons("");
+      workflow.refresh();
+      if (res.optimized_from) {
+        setWfOptimized(res.workflow);
+        notify("success", `反馈已记录；低于 80 分，已生成工作流 v${res.workflow.version}`);
+      } else {
+        setWfOptimized(null);
+        notify("success", "反馈已记录");
+      }
+    } catch (e) {
+      setWfError(describeError(e, "提交工作流反馈失败"));
+    } finally {
+      setWfBusy(false);
+    }
+  }
+
   /* ------ 6. CEO 日报 ------ */
   const digest = useResource<CeoDigest>(
     cid ? `ceo:digest:${cid}` : null,
@@ -533,6 +616,7 @@ export default function CeoPage() {
         effective_parallel: number;
         provider_cap: number;
         new_agents: NewAgent[];
+        workflow?: WorkflowBrief | null;
       }>(`/ceo/missions/${preview.mission_id}/launch`, { max_parallel: parallel });
       setPreview(null);
       setInstruction("");
@@ -543,7 +627,8 @@ export default function CeoPage() {
       notify(
         "success",
         `已开工：${res.subtask_count} 个子任务，实际并发 ${res.effective_parallel}（供应商上限 ${res.provider_cap}）` +
-          (hired > 0 ? `；新招 ${hired} 人已入职` : ""),
+          (hired > 0 ? `；新招 ${hired} 人已入职` : "") +
+          (res.workflow ? `；工作流 v${res.workflow.version} 已生成` : ""),
       );
     } catch (e) {
       setLaunchError(describeError(e, "开工失败"));
@@ -1101,6 +1186,123 @@ export default function CeoPage() {
               )}
 
               <NewAgentCards agents={activeDetail.new_agents} hired />
+
+              {/* 工作流：开工时由 CEO 按知识库 + 网络调研生成，收尾按反馈升版 */}
+              {activeDetail.workflow_id && (
+                <div className="rounded-xl p-3 space-y-2"
+                  style={{ border: "1px solid rgba(34,211,238,0.3)", background: "rgba(34,211,238,0.05)" }}>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[11px] font-medium" style={{ color: "#67e8f9" }}>
+                      🧭 工作流（CEO 自动生成）
+                    </span>
+                    {workflow.data && (
+                      <>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded"
+                          style={{ background: "rgba(34,211,238,0.14)", color: "#a5f3fc" }}>
+                          v{workflow.data.version}
+                        </span>
+                        <span className="text-[10px] text-[var(--muted)]">
+                          {WF_SOURCE_LABEL[workflow.data.source] || workflow.data.source}
+                        </span>
+                        <span className="text-[10px] text-[var(--muted)]">
+                          评分 {workflow.data.score == null ? "—" : workflow.data.score.toFixed(1)}
+                        </span>
+                        <span className="text-[10px] text-[var(--muted)]">
+                          跑过 {workflow.data.run_count} 次 · 成功 {workflow.data.success_count} · 失败 {workflow.data.failure_count}
+                        </span>
+                        <Link
+                          href={`/workflow-builder?open=${workflow.data.id}`}
+                          className="text-[10px] px-2 py-0.5 rounded ml-auto"
+                          style={{ border: "1px solid rgba(34,211,238,0.4)", color: "#a5f3fc" }}
+                        >
+                          查看流程图 →
+                        </Link>
+                      </>
+                    )}
+                  </div>
+
+                  {workflow.error && <InlineError>工作流读取失败：{workflow.error}</InlineError>}
+                  {!workflow.error && workflow.loading && !workflow.data && (
+                    <p className="text-xs text-[var(--muted)]">正在读取工作流…</p>
+                  )}
+
+                  {workflow.data && (
+                    <>
+                      <p className="text-[11px] leading-5 text-[var(--muted)]">
+                        {(workflow.data.reuse_key
+                          ? `复用键「${workflow.data.reuse_key}」`
+                          : "一次性流程") +
+                          (workflow.data.previous_workflow_id ? " · 由上一版反馈升级而来" : "")}
+                      </p>
+
+                      {wfOptimized && (
+                        <div className="text-[11px] rounded-md px-2 py-1"
+                          style={{ background: "rgba(52,211,153,0.1)", border: "1px solid rgba(52,211,153,0.35)", color: "#6ee7b7" }}>
+                          已根据本次反馈生成 v{wfOptimized.version}：
+                          <Link href={`/workflow-builder?open=${wfOptimized.id}`} className="underline ml-1">
+                            打开新版 →
+                          </Link>
+                        </div>
+                      )}
+
+                      {isTerminal(activeDetail.status) && (
+                        <div className="space-y-1">
+                          <div className="text-[10px] text-[var(--muted)]">
+                            给这套流程打分（低于 80 分自动升一版，并把经验写进下一版指令）
+                          </div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <input
+                              type="range"
+                              min={0}
+                              max={100}
+                              step={5}
+                              value={wfScore}
+                              onChange={(e) => setWfScore(Number(e.target.value))}
+                              className="w-36"
+                              aria-label="工作流评分"
+                            />
+                            <span className="tabular-nums text-xs text-[var(--foreground)] w-8">{wfScore}</span>
+                            <input
+                              value={wfLessons}
+                              onChange={(e) => setWfLessons(e.target.value)}
+                              placeholder="经验教训，一行一条（可空）"
+                              className="input !py-1 text-xs flex-1 min-w-[180px]"
+                            />
+                            <button
+                              type="button"
+                              onClick={submitWorkflowFeedback}
+                              disabled={wfBusy}
+                              className="btn-primary !py-1 !px-3 text-xs disabled:opacity-40 shrink-0"
+                            >
+                              {wfBusy ? "提交中…" : "提交反馈"}
+                            </button>
+                          </div>
+                          <InlineError>{wfError}</InlineError>
+                        </div>
+                      )}
+
+                      {workflow.data.feedback.length > 0 && (
+                        <div className="space-y-1 pt-0.5">
+                          {workflow.data.feedback.slice(0, 3).map((f) => (
+                            <div key={f.id} className="text-[10px] rounded-md px-2 py-1"
+                              style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--border)" }}>
+                              <span style={{ color: f.success ? "#6ee7b7" : "#fca5a5" }}>
+                                {f.score.toFixed(0)} 分
+                              </span>
+                              <span className="text-[var(--muted)]">
+                                {" "}· {f.source === "manual" ? "人工反馈" : "CEO 自动评分"} · {fmtTime(f.created_at)}
+                              </span>
+                              {f.lessons.length > 0 && (
+                                <span className="text-[var(--foreground)]"> — {f.lessons.join("；")}</span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
 
               {/* 追加指令（准绳升级） */}
               {!isTerminal(activeDetail.status) && (

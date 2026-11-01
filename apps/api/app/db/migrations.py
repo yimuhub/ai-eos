@@ -15,9 +15,10 @@
 
 ## 边界
 
-* 只自动补**可空列**，以及非空但"老行有唯一正确答案"的 JSON 集合列
-  （`default=list/dict` → 补 '[]'/'{}'）。其余非空列会被跳过并告警——
-  这类改动需要人工决策（老行填什么值），不该由启动流程替用户判断。
+* 只自动补**可空列**，以及非空但"老行有唯一正确答案"的列
+  （JSON 集合列 → 补 '[]'/'{}'；版本/计数等语义确定的列见 `_SAFE_BACKFILL`
+  白名单）。其余非空列会被跳过并告警——这类改动需要人工决策（老行填什么值），
+  不该由启动流程替用户判断。
 * 不删除、不改类型、不改约束。它不是迁移框架，只是「让升级不炸」。
 * **只在 SQLite 方言下运行**。PostgreSQL 的结构变更统一走 Alembic
   迁移，避免两套机制双轨打架（同一列被两边各加一次）。
@@ -212,15 +213,34 @@ def _auto_addable(column) -> bool:
         bool(column.nullable) or _default_clause(column) != "")
 
 
-def _default_literal(column) -> str | None:
-    """非空列里可以安全机械补值的子集：JSON 集合列的 list/dict 默认值。
+# 非空标量列的补值白名单：只收「老行填什么没有歧义」的字段。
+#
+# 为什么不按 `column.default` 一刀切：默认值是给**新行**用的，
+# 老行可能处于一个当时还没有该概念的状态，机械填进去反而制造错误事实
+# （比如给历史订单补上 status='PENDING'）。这里逐个确认语义后才放行。
+_SAFE_BACKFILL: dict[tuple[str, str], str] = {
+    # 工作流版本化（0008）：历史流程都是第一版、非 CEO 生成、从未跑过
+    ("workflow_definitions", "version"): "1",
+    ("workflow_definitions", "source"): "'manual'",
+    ("workflow_definitions", "run_count"): "0",
+    ("workflow_definitions", "success_count"): "0",
+    ("workflow_definitions", "failure_count"): "0",
+}
 
-    形如 `Mapped[list] = mapped_column(JSON, default=list)` 的列（附件列表
-    之类）语义上"没有就是空集合"，老行填 '[]' 是唯一正确答案；其余非空列
-    仍要人来决定老行该填什么，继续跳过并告警。
+
+def _default_literal(column) -> str | None:
+    """非空列里可以安全机械补值的子集。
+
+    ① 白名单里的版本/计数列；
+    ② JSON 集合列的 list/dict 默认值（"没有就是空集合"）。
+    其余非空列仍要人来决定老行该填什么，继续跳过并告警。
     """
     if column.nullable or column.primary_key:
         return None
+    table_name = getattr(getattr(column, "table", None), "name", "")
+    allowed = _SAFE_BACKFILL.get((table_name, column.name))
+    if allowed is not None:
+        return allowed
     if not isinstance(column.type, JSON):
         return None
     arg = getattr(column.default, "arg", None)

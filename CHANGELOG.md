@@ -118,6 +118,13 @@
   打分与追加经验，同样触发升版。
 - **可审计**：`workflow.generated` / `workflow.optimized` /
   `workflow.feedback_recorded` 三类事件带版本、分数与来源。
+- **前端**：CEO 指挥台的作战视图新增「工作流」卡片（版本/来源/评分/运行次数/
+  复用键，可直达流程图）；终态可当场打分与写经验，低于 80 分立即升版。
+  工作流编排页支持 `?open=<id>` 载入 CEO 生成的流程，并在同一页提交反馈、
+  载入新版。
+- **老库升级**：新增的非空列（version/source/run_count/success_count/
+  failure_count）走 `_SAFE_BACKFILL` 白名单机械补值（1 / manual / 0），
+  用户升级后启动即生效，不需要手工迁移。
 - **迁移与测试**：迁移 `0008`（`workflow_feedback` 表 + `workflow_definitions`
   9 个新列 + `ceo_missions.workflow_id`），SQLite 自动补列与 Alembic 双轨一致；
   新增 5 项离线测试，覆盖确定性图与审计、低分升版注入教训、模型图校验与

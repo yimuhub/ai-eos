@@ -1,6 +1,6 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { api } from "@/lib/api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, describeError } from "@/lib/api";
 import { useResource } from "@/lib/useResource";
 import { notify } from "@/components/Toast";
 import type { Company } from "@/lib/types";
@@ -11,6 +11,19 @@ type Node = {
 };
 type Edge = { from_node: string; to_node: string; label?: string | null };
 type Agent = { id: string; name: string };
+
+type FeedbackItem = {
+  id: string; workflow_id: string; success: boolean; score: number;
+  lessons: string[]; note: string; source: string; created_at: string;
+};
+
+type WorkflowMeta = {
+  id: string; name: string; version: number; source: string; status: string;
+  score: number | null; run_count: number; success_count: number;
+  failure_count: number; reuse_key: string; previous_workflow_id: string;
+  feedback: FeedbackItem[];
+};
+
 
 const NODE_TYPES = [
   { type: "START", label: "开始", color: "bg-green-700" },
@@ -43,6 +56,73 @@ export default function WorkflowBuilderPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);  // 工作流运行轮询句柄
   const linkRef = useRef<{ from: string; x: number; y: number } | null>(null);
   const [linkPreview, setLinkPreview] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+
+  /* 从 CEO 指挥台跳转过来时看的是服务端已落库的流程（含版本/评分） */
+  const [meta, setMeta] = useState<WorkflowMeta | null>(null);
+  const [fbScore, setFbScore] = useState(80);
+  const [fbLessons, setFbLessons] = useState("");
+  const [fbBusy, setFbBusy] = useState(false);
+  const [fbError, setFbError] = useState("");
+  const [optimized, setOptimized] = useState<{ id: string; version: number } | null>(null);
+
+  const loadWorkflow = useCallback(async (id: string) => {
+    try {
+      const wf = await api.get<WorkflowMeta & { nodes: Node[]; edges: Edge[] }>(`/workflows/${id}`);
+      setName(wf.name);
+      setNodes((wf.nodes || []).map((n) => ({
+        node_key: n.node_key, node_type: n.node_type, name: n.name,
+        config: n.config || {}, position_x: n.position_x || 0, position_y: n.position_y || 0,
+      })));
+      setEdges(wf.edges || []);
+      setSavedId(wf.id);
+      setMeta(wf);
+      setSelected(null);
+      setOptimized(null);
+      setFbError("");
+    } catch (e) {
+      notify("error", describeError(e, "载入工作流失败"));
+    }
+  }, []);
+
+  const refreshMeta = useCallback(async (id: string) => {
+    try {
+      setMeta(await api.get<WorkflowMeta>(`/workflows/${id}`));
+    } catch {
+      // 元数据刷新失败不影响已经展示的图；下次载入会纠正
+    }
+  }, []);
+
+  useEffect(() => {
+    const open = new URLSearchParams(window.location.search).get("open");
+    if (open) void loadWorkflow(open);
+  }, [loadWorkflow]);
+
+  async function submitFeedback() {
+    if (!savedId || fbBusy) return;
+    setFbBusy(true);
+    setFbError("");
+    try {
+      const lessons = fbLessons.split("\n").map((s) => s.trim()).filter(Boolean);
+      const res = await api.post<{ workflow: { id: string; version: number }; optimized_from: string }>(
+        `/workflows/${savedId}/feedback`,
+        { score: fbScore, lessons, note: "工作流编排页人工复盘", optimize: true },
+      );
+      setFbLessons("");
+      await refreshMeta(savedId);
+      if (res.optimized_from) {
+        setOptimized({ id: res.workflow.id, version: res.workflow.version });
+        notify("success", `反馈已记录；低于 80 分，已生成 v${res.workflow.version}`);
+      } else {
+        setOptimized(null);
+        notify("success", "反馈已记录");
+      }
+    } catch (e) {
+      setFbError(describeError(e, "提交反馈失败"));
+    } finally {
+      setFbBusy(false);
+    }
+  }
+
 
   function addNode(type: string) {
     const key = `n${Date.now().toString(36)}${Math.floor(Math.random() * 100)}`;
@@ -125,6 +205,7 @@ export default function WorkflowBuilderPage() {
     });
     setSavedId(res.id);
     notify("success", `已保存：${res.name}`);
+    void refreshMeta(res.id);
   }
 
   async function run() {
@@ -165,6 +246,21 @@ export default function WorkflowBuilderPage() {
           className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 px-4 py-1.5 rounded-md text-sm">▶ 运行</button>
         {runStatus && <span className="text-xs text-[var(--muted)]">{runStatus}</span>}
       </div>
+
+      {meta && (
+        <div className="flex items-center gap-2 flex-wrap text-[11px] text-[var(--muted)] mb-2">
+          <span className="px-1.5 py-0.5 rounded"
+            style={{ background: "rgba(34,211,238,0.14)", color: "#a5f3fc" }}>
+            v{meta.version}
+          </span>
+          <span>{meta.source === "ceo" ? "CEO 自动生成" : "手工编排"}</span>
+          <span>状态 {meta.status}</span>
+          <span>评分 {meta.score == null ? "—" : meta.score.toFixed(1)}</span>
+          <span>跑过 {meta.run_count} 次 · 成功 {meta.success_count} · 失败 {meta.failure_count}</span>
+          {meta.reuse_key && <span>复用键「{meta.reuse_key}」</span>}
+          {meta.previous_workflow_id && <span>由上一版反馈升级</span>}
+        </div>
+      )}
 
       <div className="flex gap-2 mb-2 flex-wrap">
         {NODE_TYPES.map((t) => (
@@ -227,6 +323,75 @@ export default function WorkflowBuilderPage() {
           );
         })}
       </div>
+
+      {/* 反馈：低于 80 分自动生成下一版，把经验注入执行指令 */}
+      {savedId && (
+        <div className="mt-3 card-lg p-3 space-y-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-xs text-[var(--muted)]">流程反馈</span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              step={5}
+              value={fbScore}
+              onChange={(e) => setFbScore(Number(e.target.value))}
+              className="w-36"
+              aria-label="工作流评分"
+            />
+            <span className="tabular-nums text-xs w-8">{fbScore}</span>
+            <input
+              value={fbLessons}
+              onChange={(e) => setFbLessons(e.target.value)}
+              placeholder="经验教训，一行一条（可空）"
+              className="input !py-1 text-xs flex-1 min-w-[180px]"
+            />
+            <button
+              type="button"
+              onClick={submitFeedback}
+              disabled={fbBusy}
+              className="btn-primary !py-1 !px-3 text-xs disabled:opacity-40 shrink-0"
+            >
+              {fbBusy ? "提交中…" : "提交反馈"}
+            </button>
+            <span className="text-[10px] text-[var(--muted)]">低于 80 分自动升一版</span>
+          </div>
+
+          {optimized && (
+            <div className="text-[11px] rounded-md px-2 py-1 flex items-center gap-2 flex-wrap"
+              style={{ background: "rgba(52,211,153,0.1)", border: "1px solid rgba(52,211,153,0.35)", color: "#6ee7b7" }}>
+              已根据反馈生成 v{optimized.version}。
+              <button
+                type="button"
+                onClick={() => void loadWorkflow(optimized.id)}
+                className="underline"
+              >
+                载入新版
+              </button>
+            </div>
+          )}
+          {fbError && (
+            <div className="text-[11px]" style={{ color: "#fca5a5" }}>{fbError}</div>
+          )}
+
+          {meta?.feedback && meta.feedback.length > 0 && (
+            <div className="space-y-1">
+              {meta.feedback.slice(0, 3).map((f) => (
+                <div key={f.id} className="text-[10px] rounded-md px-2 py-1"
+                  style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--border)" }}>
+                  <span style={{ color: f.success ? "#6ee7b7" : "#fca5a5" }}>{f.score.toFixed(0)} 分</span>
+                  <span className="text-[var(--muted)]">
+                    {" "}· {f.source === "manual" ? "人工反馈" : "CEO 自动评分"} · {f.created_at.slice(0, 16).replace("T", " ")}
+                  </span>
+                  {f.lessons.length > 0 && (
+                    <span className="text-[var(--foreground)]"> — {f.lessons.join("；")}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 属性面板 */}
       {sel && (

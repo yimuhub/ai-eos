@@ -734,8 +734,9 @@ async def launch_mission(db: AsyncSession, mission_id: str,
                        mission.id, type(exc).__name__, exc)
         try:
             await db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as rollback_exc:  # noqa: BLE001 — 回滚失败也要留痕
+            logger.warning("工作流生成失败后的回滚未成功 mission=%s: %s: %s",
+                           mission.id, type(rollback_exc).__name__, rollback_exc)
         mission = await db.get(CeoMission, mission_id)
 
     import app.background_jobs as bg
