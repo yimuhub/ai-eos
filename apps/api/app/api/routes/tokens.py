@@ -16,6 +16,9 @@ from app.models.company import Company, Department
 from app.models.membership import CompanyMember
 from app.models.token_usage import PricingConfig, TokenUsage, new_id
 from app.models.user import User
+from app.schemas.responses_governance import (
+    PricingConfigOut, PricingDeletedOut, PricingModelOptionOut, PricingUpsertOut,
+    ScenarioUsageOut, TokenSummaryOut, UsageGroupOut, UsageLogOut)
 
 logger = get_logger(__name__)
 
@@ -75,7 +78,7 @@ class PricingIn(BaseModel):
     note: str | None = None
 
 
-@router.get("/pricing")
+@router.get("/pricing", response_model=list[PricingConfigOut])
 async def list_pricing(db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
     """计费标准列表（带模型名回填）。"""
@@ -97,7 +100,7 @@ async def list_pricing(db: AsyncSession = Depends(get_db),
     return out
 
 
-@router.get("/pricing/models")
+@router.get("/pricing/models", response_model=list[PricingModelOptionOut])
 async def list_models_for_pricing(db: AsyncSession = Depends(get_db),
                                   user: User = Depends(get_current_user)):
     """可配置计费的模型清单（模型配置页的全部模型）。"""
@@ -106,7 +109,7 @@ async def list_models_for_pricing(db: AsyncSession = Depends(get_db),
              "provider_type": str(m.provider_type)} for m in q.scalars().all()]
 
 
-@router.post("/pricing", status_code=201)
+@router.post("/pricing", status_code=201, response_model=PricingUpsertOut)
 async def upsert_pricing(data: PricingIn, db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
     """新建或更新（按 model_id 幂等）计费标准。"""
@@ -144,7 +147,7 @@ async def upsert_pricing(data: PricingIn, db: AsyncSession = Depends(get_db),
     return {"id": p.id, "model_id": p.model_id, "enabled": p.enabled}
 
 
-@router.delete("/pricing/{pid}")
+@router.delete("/pricing/{pid}", response_model=PricingDeletedOut)
 async def delete_pricing(pid: str, db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
     p = await db.get(PricingConfig, pid)
@@ -245,7 +248,7 @@ def _parse_range(days: int | None, start: str | None, end: str | None):
 
 # ================= 六维统计接口 =================
 
-@router.get("/stats/summary")
+@router.get("/stats/summary", response_model=TokenSummaryOut)
 async def stats_summary(company_id: str = Query(None),
                         start: str = Query(None), end: str = Query(None),
                         days: int = Query(30),
@@ -281,7 +284,7 @@ async def stats_summary(company_id: str = Query(None),
             "trend": trend}
 
 
-@router.get("/stats/by-agent")
+@router.get("/stats/by-agent", response_model=list[UsageGroupOut])
 async def stats_by_agent(company_id: str = Query(...), days: int = Query(30),
                          db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
@@ -294,7 +297,7 @@ async def stats_by_agent(company_id: str = Query(...), days: int = Query(30),
     return rows
 
 
-@router.get("/stats/by-department")
+@router.get("/stats/by-department", response_model=list[UsageGroupOut])
 async def stats_by_department(company_id: str = Query(...), days: int = Query(30),
                               db: AsyncSession = Depends(get_db),
                               user: User = Depends(get_current_user)):
@@ -323,7 +326,7 @@ async def stats_by_department(company_id: str = Query(...), days: int = Query(30
     return await _attach_names(db, out_rows, "department")
 
 
-@router.get("/stats/by-company")
+@router.get("/stats/by-company", response_model=list[UsageGroupOut])
 async def stats_by_company(days: int = Query(30),
                            db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
@@ -338,7 +341,7 @@ async def stats_by_company(days: int = Query(30),
     return await _attach_names(db, rows, "company")
 
 
-@router.get("/stats/by-project")
+@router.get("/stats/by-project", response_model=list[UsageGroupOut])
 async def stats_by_project(company_id: str = Query(...), days: int = Query(30),
                            db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
@@ -351,7 +354,7 @@ async def stats_by_project(company_id: str = Query(...), days: int = Query(30),
     return await _attach_names(db, rows, "project")
 
 
-@router.get("/stats/by-task")
+@router.get("/stats/by-task", response_model=list[UsageGroupOut])
 async def stats_by_task(company_id: str = Query(...), days: int = Query(30),
                         limit: int = Query(50, le=200),
                         db: AsyncSession = Depends(get_db),
@@ -376,7 +379,7 @@ _SCENARIO_BUDGET_HINT = {
 }
 
 
-@router.get("/stats/by-scenario")
+@router.get("/stats/by-scenario", response_model=list[ScenarioUsageOut])
 async def stats_by_scenario(company_id: str = Query(...), days: int = Query(30),
                             db: AsyncSession = Depends(get_db),
                             user: User = Depends(get_current_user)):
@@ -405,14 +408,14 @@ SCENARIO_LABELS = {
 }
 
 
-@router.get("/stats/scenario-labels")
+@router.get("/stats/scenario-labels", response_model=dict[str, str])
 async def scenario_labels(user: User = Depends(get_current_user)):
     return SCENARIO_LABELS
 
 
 # ================= 明细流水 =================
 
-@router.get("/usage-logs")
+@router.get("/usage-logs", response_model=list[UsageLogOut])
 async def usage_logs(company_id: str = Query(...), limit: int = Query(100, le=500),
                      offset: int = Query(0),
                      scenario: str = Query(None), agent_id: str = Query(None),

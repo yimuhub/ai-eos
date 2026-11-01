@@ -26,6 +26,19 @@ from app.schemas.responses import (
     ArtifactCommentOut,
     ArtifactDeclineOut,
 )
+from app.schemas.responses_ops import (
+    ArtifactCreatedOut,
+    ArtifactDeletedOut,
+    ArtifactDetailOut,
+    ArtifactListItemOut,
+    ArtifactNewVersionOut,
+    ArtifactPublishDecideOut,
+    ArtifactPublishOut,
+    ArtifactReviewDecisionOut,
+    ArtifactSopOut,
+    ArtifactSubmitOut,
+    ArtifactVersionContentOut,
+)
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
 logger = get_logger(__name__)
@@ -61,7 +74,7 @@ class ReviewIn(BaseModel):
     reviewer_agent_id: str | None = None
 
 
-@router.post("")
+@router.post("", response_model=ArtifactCreatedOut)
 async def create_artifact(
     data: ArtifactCreate,
     company_id: str = Query(...),
@@ -90,7 +103,7 @@ async def create_artifact(
             "current_version": 1, "task_id": art.task_id}
 
 
-@router.get("")
+@router.get("", response_model=list[ArtifactListItemOut])
 async def list_artifacts(
     company_id: str = Query(...),
     project_id: str | None = Query(None),
@@ -115,7 +128,7 @@ async def list_artifacts(
              "accepted_at": a.accepted_at} for a in rows]
 
 
-@router.get("/{artifact_id}")
+@router.get("/{artifact_id}", response_model=ArtifactDetailOut)
 async def get_artifact(
     artifact_id: str,
     db: AsyncSession = Depends(get_db),
@@ -144,7 +157,8 @@ async def get_artifact(
     }
 
 
-@router.get("/{artifact_id}/versions/{version}")
+@router.get("/{artifact_id}/versions/{version}",
+            response_model=ArtifactVersionContentOut)
 async def get_version_content(
     artifact_id: str,
     version: int,
@@ -163,7 +177,7 @@ async def get_version_content(
             "status": v.status.value}
 
 
-@router.post("/{artifact_id}/versions")
+@router.post("/{artifact_id}/versions", response_model=ArtifactNewVersionOut)
 async def submit_new_version(
     artifact_id: str,
     data: VersionSubmit,
@@ -195,7 +209,7 @@ async def submit_new_version(
             "status": art.status.value}
 
 
-@router.post("/{artifact_id}/submit")
+@router.post("/{artifact_id}/submit", response_model=ArtifactSubmitOut)
 async def submit_for_review(
     artifact_id: str,
     data: VersionSubmit | None = None,
@@ -226,7 +240,7 @@ async def submit_for_review(
             "current_version": art.current_version}
 
 
-@router.post("/{artifact_id}/review")
+@router.post("/{artifact_id}/review", response_model=ArtifactReviewDecisionOut)
 async def review_artifact(
     artifact_id: str,
     data: ReviewIn,
@@ -436,7 +450,10 @@ async def _ensure_published_at_column(db: AsyncSession) -> None:  # pragma: no c
         logger.warning("[artifacts] 已为旧库幂等补列 artifacts.published_at")
 
 
-@router.post("/{artifact_id}/publish")
+# exclude_unset：直接发布 / 已发布幂等 / 需二次确认是三种不同返回，
+# 否则没走到的分支会多出 null 键（前端按 key 是否存在分支时会变行为）。
+@router.post("/{artifact_id}/publish", response_model=ArtifactPublishOut,
+             response_model_exclude_unset=True)
 async def publish_artifact(
     artifact_id: str,
     db: AsyncSession = Depends(get_db),
@@ -505,7 +522,7 @@ async def publish_artifact(
             "message": "已发布：交付物可对外交付"}
 
 
-@router.post("/{artifact_id}/publish/decide")
+@router.post("/{artifact_id}/publish/decide", response_model=ArtifactPublishDecideOut)
 async def decide_publish(
     artifact_id: str,
     data: ReviewIn,
@@ -540,7 +557,7 @@ async def decide_publish(
             "published": data.decision == "approve"}
 
 
-@router.delete("/{artifact_id}")
+@router.delete("/{artifact_id}", response_model=ArtifactDeletedOut)
 async def delete_artifact(
     artifact_id: str,
     db: AsyncSession = Depends(get_db),
@@ -556,7 +573,7 @@ async def delete_artifact(
     return {"id": artifact_id, "deleted": True}
 
 
-@router.get("/{artifact_id}/sop")
+@router.get("/{artifact_id}/sop", response_model=ArtifactSopOut)
 async def artifact_sop(
     artifact_id: str,
     db: AsyncSession = Depends(get_db),
@@ -615,6 +632,8 @@ async def artifact_sop(
             "markdown": "\n".join(lines), "versions": len(versions)}
 
 
+# 无 response_model：StreamingResponse 的 zip 二进制（实测 content-type
+# application/zip），声明模型只会让 OpenAPI 的 200 响应与真实字节流不一致。
 @router.get("/{artifact_id}/download.zip")
 async def download_artifact_zip(
     artifact_id: str,

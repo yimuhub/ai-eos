@@ -21,6 +21,14 @@ from app.models.p3_governance import (AgentSandbox, AgentVersion,
                                       PackageInstallation,
                                       SelfImprovementCase)
 from app.models.user import User
+from app.schemas.responses_governance import (
+    AgentRollbackOut, AutonomousConfigOut, AutonomousLevelOut,
+    AutonomousLogOut, AutonomousOverviewItemOut, AutonomousSettingsDeletedOut,
+    AutonomousSettingsSavedOut, CaseDecisionOut, CompanyFromTemplateOut,
+    ExecutionLoggedOut, EmergencyStopOut, ImprovementCaseOut,
+    ImprovementDeployOut, ImprovementProposedOut, InstallationRollbackOut,
+    MarketplacePackageOut, PackageInstallOut, PackagePublishedOut,
+    ResumeCheckpointOut, SandboxTestOut, TemplateOut, TemplateSavedOut)
 
 router = APIRouter(prefix="/governance", tags=["governance"],
                    dependencies=[Depends(require_company_scope())])
@@ -66,7 +74,8 @@ class ImprovementIn(BaseModel):
     expected_impact: str | None = None
 
 
-@router.post("/improvements", status_code=201)
+@router.post("/improvements", status_code=201,
+             response_model=ImprovementProposedOut)
 async def propose_improvement(
     data: ImprovementIn,
     company_id: str = Query(...),
@@ -94,7 +103,7 @@ async def propose_improvement(
     return {"id": case.id, "status": case.status}
 
 
-@router.post("/improvements/{iid}/sandbox-test")
+@router.post("/improvements/{iid}/sandbox-test", response_model=SandboxTestOut)
 async def sandbox_test(
     iid: str,
     test_score: float = Query(0),
@@ -132,7 +141,7 @@ class DeployIn(BaseModel):
     note: str | None = None
 
 
-@router.post("/improvements/{iid}/deploy")
+@router.post("/improvements/{iid}/deploy", response_model=ImprovementDeployOut)
 async def deploy_improvement(
     iid: str,
     data: DeployIn,
@@ -182,7 +191,8 @@ async def deploy_improvement(
             "deployed_version": cur_ver + 2, "rollback_version": cur_ver + 1}
 
 
-@router.post("/agents/{agent_id}/rollback/{version}")
+@router.post("/agents/{agent_id}/rollback/{version}",
+             response_model=AgentRollbackOut)
 async def rollback_agent(
     agent_id: str,
     version: int,
@@ -233,7 +243,8 @@ class PackageIn(BaseModel):
     manifest: dict | None = None
 
 
-@router.post("/marketplace/packages", status_code=201)
+@router.post("/marketplace/packages", status_code=201,
+             response_model=PackagePublishedOut)
 async def publish_package(
     data: PackageIn,
     db: AsyncSession = Depends(get_db),
@@ -253,7 +264,7 @@ async def publish_package(
     return {"id": p.id, "key": p.key, "version": p.latest_version}
 
 
-@router.get("/marketplace/packages")
+@router.get("/marketplace/packages", response_model=list[MarketplacePackageOut])
 async def list_packages(db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
     q = await db.execute(select(MarketplacePackage).where(
@@ -264,7 +275,8 @@ async def list_packages(db: AsyncSession = Depends(get_db),
              "dependencies": p.dependencies} for p in q.scalars().all()]
 
 
-@router.post("/marketplace/packages/{pid}/install", status_code=201)
+@router.post("/marketplace/packages/{pid}/install", status_code=201,
+             response_model=PackageInstallOut)
 async def install_package(
     pid: str,
     company_id: str = Query(...),
@@ -296,7 +308,8 @@ async def install_package(
             "package": p.name, "version": p.latest_version}
 
 
-@router.post("/installations/{inst_id}/rollback")
+@router.post("/installations/{inst_id}/rollback",
+             response_model=InstallationRollbackOut)
 async def rollback_installation(inst_id: str,
                                 db: AsyncSession = Depends(get_db),
                                 user: User = Depends(get_current_user)):
@@ -356,7 +369,7 @@ BUILTIN_TEMPLATES = {
 }
 
 
-@router.get("/templates")
+@router.get("/templates", response_model=list[TemplateOut])
 async def list_templates(company_id: str | None = Query(None),
                          db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
@@ -381,7 +394,8 @@ class FromTemplateIn(BaseModel):
     company_name: str | None = None
 
 
-@router.post("/create-company-from-template", status_code=201)
+@router.post("/create-company-from-template", status_code=201,
+             response_model=CompanyFromTemplateOut)
 async def create_from_template(
     data: FromTemplateIn,
     owner_company_id: str = Query(...),   # 挂在哪个用户/公司下
@@ -463,7 +477,7 @@ async def create_from_template(
         raise HTTPException(500, f"创建失败: {e}")
 
 
-@router.post("/save-company-as-template")
+@router.post("/save-company-as-template", response_model=TemplateSavedOut)
 async def save_as_template(
     company_id: str = Query(...),
     key: str = Query(...),
@@ -511,7 +525,7 @@ class AutoSettingsIn(BaseModel):
     action_limit: int | None = None
 
 
-@router.put("/autonomous-settings")
+@router.put("/autonomous-settings", response_model=AutonomousSettingsSavedOut)
 async def set_autonomous_level(
     data: AutoSettingsIn,
     company_id: str = Query(...),
@@ -550,7 +564,7 @@ async def set_autonomous_level(
                        "actions": data.action_limit}}
 
 
-@router.get("/autonomous-settings")
+@router.get("/autonomous-settings", response_model=AutonomousLevelOut)
 async def get_autonomous_level(
     company_id: str = Query(...),
     scope_type: str = Query("COMPANY"),
@@ -570,7 +584,7 @@ async def get_autonomous_level(
                         "actions": s.action_limit} if s else None)}
 
 
-@router.get("/autonomous-overview")
+@router.get("/autonomous-overview", response_model=list[AutonomousOverviewItemOut])
 async def autonomous_overview(
     company_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -604,7 +618,8 @@ async def autonomous_overview(
     return out
 
 
-@router.delete("/autonomous-overview/{settings_id}")
+@router.delete("/autonomous-overview/{settings_id}",
+               response_model=AutonomousSettingsDeletedOut)
 async def delete_autonomous_settings(
     settings_id: str,
     company_id: str = Query(...),
@@ -636,7 +651,7 @@ async def delete_autonomous_settings(
             "message": "已清除专属设置，该对象将回落到公司默认自治等级"}
 
 
-@router.get("/autonomous-logs")
+@router.get("/autonomous-logs", response_model=list[AutonomousLogOut])
 async def list_autonomous_logs(
     company_id: str = Query(...),
     limit: int = Query(20, le=100),
@@ -659,7 +674,8 @@ async def list_autonomous_logs(
             for r in q.scalars().all()]
 
 
-@router.post("/autonomous-configs", status_code=201)
+@router.post("/autonomous-configs", status_code=201,
+             response_model=AutonomousConfigOut)
 async def upsert_autonomous_config(
     data: dict,
     company_id: str = Query(...),
@@ -701,7 +717,7 @@ async def upsert_autonomous_config(
             "max_parallel": s.action_limit, "rate_limit_per_min": s.cost_limit}
 
 
-@router.post("/emergency-resume")
+@router.post("/emergency-resume", response_model=ResumeCheckpointOut)
 async def emergency_resume_alias(
     company_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -722,7 +738,8 @@ class ExecutionLogIn(BaseModel):
     cost_estimate: float | None = None
 
 
-@router.post("/autonomous-executions", status_code=201)
+@router.post("/autonomous-executions", status_code=201,
+             response_model=ExecutionLoggedOut)
 async def log_execution(
     data: ExecutionLogIn,
     company_id: str = Query(...),
@@ -754,7 +771,7 @@ class EmergencyStopIn(BaseModel):
     checkpoint: dict | None = None
 
 
-@router.post("/emergency-stop")
+@router.post("/emergency-stop", response_model=EmergencyStopOut)
 async def emergency_stop(
     company_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -785,7 +802,7 @@ async def emergency_stop(
             "checkpoint_saved": bool(data and data.checkpoint)}
 
 
-@router.post("/resume-from-checkpoint")
+@router.post("/resume-from-checkpoint", response_model=ResumeCheckpointOut)
 async def resume_from_checkpoint(
     company_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -816,7 +833,7 @@ async def resume_from_checkpoint(
     return {"resumed": resumed, "restored_checkpoint": cp}
 
 
-@router.get("/self-improvement-cases")
+@router.get("/self-improvement-cases", response_model=list[ImprovementCaseOut])
 async def list_improvement_cases(
     company_id: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
@@ -842,7 +859,8 @@ async def list_improvement_cases(
              "status": r.status} for r in rows]
 
 
-@router.put("/self-improvement-cases/{iid}/{decision}")
+@router.put("/self-improvement-cases/{iid}/{decision}",
+            response_model=CaseDecisionOut)
 async def decide_improvement_case(
     iid: str, decision: str,
     db: AsyncSession = Depends(get_db),

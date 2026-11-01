@@ -32,6 +32,16 @@ from app.models.agent import Agent, AgentModelConfig, Model, ModelProviderType
 from app.models.company import Company
 from app.models.membership import CompanyMember
 from app.models.user import User
+from app.schemas.responses_ops import (
+    ModelBatchImportOut,
+    ModelBindAgentsOut,
+    ModelConfigItemOut,
+    ModelCreatedOut,
+    ModelTestOut,
+    ModelUpdatedOut,
+    ModelsDiagnosticsOut,
+    ProviderModelsListOut,
+)
 
 router = APIRouter(prefix="/models", tags=["models"])
 logger = logging.getLogger(__name__)
@@ -204,6 +214,9 @@ def _persist_env_key(env_name: str, api_key: str) -> None:
     os.environ[env_name] = api_key
 
 
+# 有意**不**声明 response_model：返回体里的 `masked` 是密钥片段
+# （`key[:4] + "…" + key[-4:]`），不是「密钥是否存在」的布尔值。把它写进
+# 契约等于固化「接口回显密钥材料」，这一步需要先过安全评审（见 A3 报告）。
 @router.post("/env-key")
 async def save_env_key(data: EnvKeyIn, user: User = Depends(get_current_user)):
     """把模型密钥写进本机 .env 并立即生效。
@@ -286,7 +299,7 @@ def _record_test_result(m: Model, ok: bool, error: str | None) -> None:
     m.config = config
 
 
-@router.get("/diagnostics")
+@router.get("/diagnostics", response_model=ModelsDiagnosticsOut)
 async def diagnostics(db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
     """模型配置就绪自检。
@@ -358,7 +371,7 @@ async def diagnostics(db: AsyncSession = Depends(get_db),
     }
 
 
-@router.get("")
+@router.get("", response_model=list[ModelConfigItemOut])
 async def list_models(company_id: str | None = Query(None),
                       db: AsyncSession = Depends(get_db),
                       user=Depends(get_current_user)):
@@ -386,7 +399,7 @@ async def list_models(company_id: str | None = Query(None),
     ]
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=ModelCreatedOut)
 async def create_model(data: ModelIn, db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
     try:
@@ -412,7 +425,9 @@ async def create_model(data: ModelIn, db: AsyncSession = Depends(get_db),
             "company_id": m.company_id}
 
 
-@router.patch("/{mid}")
+# exclude_unset：`claimed` 只在「认领未归属配置」那一支出现。
+@router.patch("/{mid}", response_model=ModelUpdatedOut,
+              response_model_exclude_unset=True)
 async def update_model(mid: str, data: dict, db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
     """修改模型配置。未归属的配置只允许被「认领」（补上 company_id）。"""
@@ -479,7 +494,11 @@ async def delete_model(mid: str, db: AsyncSession = Depends(get_db),
     await db.commit()
 
 
-@router.post("/{mid}/test")
+# exclude_unset：成功支（reply/raw_model）与失败支（error）互斥。
+# 备注：失败支的 error 是上游异常原文截断 500，实测不含密钥，但含 base_url
+# 一类的上游信息——这是这个端点既有的行为，本轮没有改动它。
+@router.post("/{mid}/test", response_model=ModelTestOut,
+             response_model_exclude_unset=True)
 async def test_model(mid: str, db: AsyncSession = Depends(get_db),
                      user=Depends(get_current_user)):
     """Ping the provider with a tiny prompt."""
@@ -522,7 +541,7 @@ class BindAgentsIn(BaseModel):
     only_unbound: bool = True      # True：只补“还没有该角色绑定”的员工，不动手工配过的
 
 
-@router.post("/{mid}/bind-agents")
+@router.post("/{mid}/bind-agents", response_model=ModelBindAgentsOut)
 async def bind_model_to_agents(mid: str, data: BindAgentsIn,
                                db: AsyncSession = Depends(get_db),
                                user=Depends(get_current_user)):
@@ -585,7 +604,9 @@ class FetchModelsIn(BaseModel):
     api_key_env: str | None = None
 
 
-@router.post("/providers/list-models")
+# exclude_unset：ok 支（base_url/models）与 error 支（error）互斥。
+@router.post("/providers/list-models", response_model=ProviderModelsListOut,
+             response_model_exclude_unset=True)
 async def list_provider_models(data: FetchModelsIn,
                                user=Depends(get_current_user)):
     """从供应商拉取可用模型列表（OpenAI 兼容 GET /v1/models）。
@@ -662,7 +683,7 @@ class BatchSelectIn(BaseModel):
     model_ids: list[str]      # 用户勾选要启用的模型 id 列表
 
 
-@router.post("/providers/batch-import")
+@router.post("/providers/batch-import", response_model=ModelBatchImportOut)
 async def batch_import_models(data: BatchSelectIn,
                               db: AsyncSession = Depends(get_db),
                               user=Depends(get_current_user)):
@@ -691,12 +712,16 @@ async def batch_import_models(data: BatchSelectIn,
             "skipped_existing": existed}
 
 
+# 有意**不**声明 response_model：`convert_model_id` 的值来自 POST 进来的自由
+# 配置（settings 没开 validate_assignment，任何 JSON 值都能存住并原样回显），
+# 声明成 str 会把「用户存了个对象」从可用变成 500。
 @router.get("/convert-config")
 async def get_convert_config(user=Depends(get_current_user)):
     from app.core.config import settings
     return {"convert_model_id": getattr(settings, "doc_convert_model_id", "") or ""}
 
 
+# 同上：返回的是用户自己 POST 进来的任意值的回显，不建模型。
 @router.post("/convert-config")
 async def set_convert_config(data: dict, user=Depends(get_current_user)):
     """设置专用文档转换大模型（低成本模型），用于上传资料→MD 转换。"""

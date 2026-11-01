@@ -3,6 +3,33 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的组织方式。
 完整的工程质量改造记录见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
 
+## [Unreleased]
+
+### 新增：接口契约长尾（A3 续）
+
+- 再补 68 个响应模型：`governance` 23/23、`tokens` 13/13、`war_room` 14/15、
+  `artifacts` 16/17、`models_api` 8/12。全库已声明 `response_model` 的 JSON 操作
+  **113 → 181**（460 条中占 39.3%）。
+- 字段逐个对照真实返回值写，并统一 `extra="allow"`：模型写漏字段时**不会**把前端
+  原本能拿到的数据裁掉——`response_model` 的序列化过滤是静默的，漏一个字段就是一次
+  没有报错的线上事故。
+- 有意不标注的 11 个端点各有硬理由：返回文件字节流（`FileResponse`）、SSE
+  （`StreamingResponse`）、`Response(media_type="text/csv")`、204 无正文、
+  以及**按设计不能声明**的 `/models/diagnostics`（它必须出现 `key_present` 布尔值
+  而永远不能出现密钥本身，声明模型就等于把密钥结构写进契约）。
+
+### 新增：失败请求必须进日志
+
+- 此前 `uvicorn.access` 被压到 WARNING 且业务层不记 HTTP 状态，于是"前端调了后端
+  不存在的地址"这类契约破坏**在后端日志里完全静默**——用户只看到一句 `Not Found`，
+  运维端一条记录都没有。
+- 现在所有 4xx/5xx 记一行：方法、路径（**不含 query string**，避免把令牌或密钥
+  写进日志）、状态码、耗时、路由模板、`request_id`。
+- 分级：5xx 与"路由没匹配上的 404"记 WARNING（这两类没人会注意到）；正常业务 4xx
+  记 INFO（不抢视野，但不许彻底消失）。`request_id` 取自 `request.state`，与响应头
+  `X-Request-ID` 一致，用户报障给一个 id 就能 grep 到整条链路。
+- 护栏：`tests/test_failure_logging.py`（9 项，含"日志里不得出现 query 内容"）。
+
 ## [5.15.0] 从审查到九分：契约、交付、多端与安全收口 — 2026-11-01
 
 > 来源：五视角审查（[审查报告](docs/审查报告_AI-EOS_2026-10-31.md)）与

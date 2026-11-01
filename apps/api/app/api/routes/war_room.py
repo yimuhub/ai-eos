@@ -31,6 +31,22 @@ from app.models.company import Company
 from app.models.user import User
 from app.models.war_room import WarRoomSession, WarRoomTask
 from app.model_gateway import ModelGateway
+from app.schemas.responses_ops import (
+    WarRoomAcknowledgeOut,
+    WarRoomAnnounceOut,
+    WarRoomBatchDeleteOut,
+    WarRoomBossSayOut,
+    WarRoomChatListOut,
+    WarRoomFinalizeOut,
+    WarRoomKickoffOut,
+    WarRoomLifecycleOut,
+    WarRoomReviewOut,
+    WarRoomSessionsOut,
+    WarRoomSessionOut,
+    WarRoomSnapshotOut,
+    WarRoomStartOut,
+    WarRoomTeamOut,
+)
 
 router = APIRouter(prefix="/war-room", tags=["war-room"])
 logger = logging.getLogger("war_room")
@@ -189,7 +205,7 @@ def _session_out(sess: WarRoomSession, tasks: list[WarRoomTask], agents_by_id: d
     }
 
 
-@router.get("/sessions")
+@router.get("/sessions", response_model=WarRoomSessionsOut)
 async def list_sessions(company_id: str = Query(...),
                         project_id: str | None = Query(None),
                         db: AsyncSession = Depends(get_db),
@@ -223,7 +239,7 @@ class KickoffIn(BaseModel):
     deliverable_format: str | None = None   # 不指定则由负责人在分析中决定
 
 
-@router.post("/kickoff", status_code=201)
+@router.post("/kickoff", status_code=201, response_model=WarRoomKickoffOut)
 async def kickoff(data: KickoffIn, db: AsyncSession = Depends(get_db),
                   user: User = Depends(get_current_user)):
     await _owned_company(db, user.id, data.company_id, Capability.OPERATE)
@@ -412,7 +428,10 @@ class SessionActionIn(BaseModel):
     action: str   # pause | resume | stop | delete
 
 
-@router.post("/sessions/{sid}/lifecycle")
+# exclude_unset：pause/resume/stop 与 delete 是两条不同分支的返回，
+# 不给分支专属字段加 exclude_unset 会让另一支凭空多出 null 键。
+@router.post("/sessions/{sid}/lifecycle", response_model=WarRoomLifecycleOut,
+             response_model_exclude_unset=True)
 async def session_lifecycle(sid: str, data: SessionActionIn,
                             company_id: str = Query(...),
                             db: AsyncSession = Depends(get_db),
@@ -458,7 +477,7 @@ class BatchDeleteIn(BaseModel):
     session_ids: list[str]
 
 
-@router.post("/sessions/batch-delete")
+@router.post("/sessions/batch-delete", response_model=WarRoomBatchDeleteOut)
 async def batch_delete_sessions(data: BatchDeleteIn,
                                 company_id: str = Query(...),
                                 db: AsyncSession = Depends(get_db),
@@ -485,7 +504,7 @@ async def batch_delete_sessions(data: BatchDeleteIn,
 
 
 # ---------- 参战成员与进度 ----------
-@router.get("/sessions/{sid}/team")
+@router.get("/sessions/{sid}/team", response_model=WarRoomTeamOut)
 async def session_team(sid: str, company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
@@ -538,6 +557,8 @@ async def session_team(sid: str, company_id: str = Query(...),
 
 
 # ---------- 文件预览/下载 ----------
+# 无 response_model：返回的是 FileResponse（二进制/markdown 原文），
+# 不是 JSON 对象，声明模型只会让 OpenAPI 说谎。
 @router.get("/sessions/{sid}/file")
 async def session_file(sid: str, name: str = Query(...),
                        company_id: str = Query(...),
@@ -567,7 +588,7 @@ class BossSayIn(BaseModel):
     text: str
 
 
-@router.post("/sessions/{sid}/say")
+@router.post("/sessions/{sid}/say", response_model=WarRoomBossSayOut)
 async def boss_say(sid: str, data: BossSayIn,
                    company_id: str = Query(...),
                    db: AsyncSession = Depends(get_db),
@@ -642,7 +663,7 @@ async def boss_say(sid: str, data: BossSayIn,
 
 
 # ---------- 群聊消息流 ----------
-@router.get("/sessions/{sid}/chat")
+@router.get("/sessions/{sid}/chat", response_model=WarRoomChatListOut)
 async def session_chat(sid: str, company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
@@ -664,7 +685,7 @@ async def session_chat(sid: str, company_id: str = Query(...),
     return {"messages": out}
 
 
-@router.get("/sessions/{sid}/snapshot")
+@router.get("/sessions/{sid}/snapshot", response_model=WarRoomSnapshotOut)
 async def session_snapshot(sid: str, company_id: str = Query(...),
                            since_id: str | None = Query(None),
                            db: AsyncSession = Depends(get_db),
@@ -721,7 +742,7 @@ async def session_snapshot(sid: str, company_id: str = Query(...),
 
 
 # ---------- 2. 宣告协议 ----------
-@router.post("/{sid}/announce")
+@router.post("/{sid}/announce", response_model=WarRoomAnnounceOut)
 async def announce(sid: str, company_id: str = Query(...),
                    db: AsyncSession = Depends(get_db),
                    user: User = Depends(get_current_user)):
@@ -772,7 +793,7 @@ async def announce(sid: str, company_id: str = Query(...),
 
 
 # ---------- 3. 看板 ----------
-@router.get("/{sid}")
+@router.get("/{sid}", response_model=WarRoomSessionOut)
 async def get_session(sid: str, company_id: str = Query(...),
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
@@ -791,7 +812,7 @@ class AckIn(BaseModel):
     feedback: str | None = None   # correct=False 时必填纠正意见
 
 
-@router.post("/{sid}/acknowledge")
+@router.post("/{sid}/acknowledge", response_model=WarRoomAcknowledgeOut)
 async def acknowledge(sid: str, data: AckIn,
                       company_id: str = Query(...),
                       db: AsyncSession = Depends(get_db),
@@ -936,7 +957,7 @@ async def _settle_session_after_failure(session, sid: str) -> None:
         logger.warning("war-room session %s settle failed: %s", sid, e)
 
 
-@router.post("/{sid}/start")
+@router.post("/{sid}/start", response_model=WarRoomStartOut)
 async def start_exec(sid: str, company_id: str = Query(...),
                      db: AsyncSession = Depends(get_db),
                      user: User = Depends(get_current_user)):
@@ -1033,7 +1054,7 @@ class ReviewIn(BaseModel):
     reviewer: str = "leader"   # leader / boss（人工干预）
 
 
-@router.post("/tasks/{tid}/review")
+@router.post("/tasks/{tid}/review", response_model=WarRoomReviewOut)
 async def review_task(tid: str, data: ReviewIn,
                       company_id: str = Query(...),
                       db: AsyncSession = Depends(get_db),
@@ -1054,7 +1075,7 @@ async def review_task(tid: str, data: ReviewIn,
 
 
 # ---------- 7. 最终汇总 ----------
-@router.post("/{sid}/finalize")
+@router.post("/{sid}/finalize", response_model=WarRoomFinalizeOut)
 async def finalize(sid: str, company_id: str = Query(...),
                    db: AsyncSession = Depends(get_db),
                    user: User = Depends(get_current_user)):
