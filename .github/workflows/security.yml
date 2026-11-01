@@ -50,7 +50,7 @@ jobs:
           - javascript-typescript
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 初始化 CodeQL（security-and-quality 查询集）
         uses: github/codeql-action/init@v3
@@ -85,7 +85,7 @@ jobs:
       contents: read
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 安装 uv
         uses: astral-sh/setup-uv@v4
@@ -164,7 +164,7 @@ jobs:
       - name: 检出代码
         # 默认 fetch-depth: 1 即可：扫描用 git ls-files（读索引/工作区），
         # 不需要历史提交。
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: 安装 uv
         uses: astral-sh/setup-uv@v4
