@@ -30,6 +30,19 @@
   `X-Request-ID` 一致，用户报障给一个 id 就能 grep 到整条链路。
 - 护栏：`tests/test_failure_logging.py`（9 项，含"日志里不得出现 query 内容"）。
 
+### 修正：逐条打印 SQL 与 `DEBUG` 解耦
+
+- 此前 `echo=settings.debug`，而 `debug` 默认为 true。本机跑真实库时调度器每 15
+  秒轮询一次，每次把 SELECT、参数、BEGIN/COMMIT 全量写两遍（stdlib 与项目
+  formatter 各一次），14 分钟就 245 KB，日志里真正的错误被冲走了。
+- 新增 `sql_echo`（环境变量 `SQL_ECHO`，默认 **false**），主 engine 与后台任务
+  engine 都改用它；`DEBUG` 只负责 /docs、/redoc、/openapi.json 与 /metrics 的门禁。
+- 顺带删掉 `meetings.py`、`workflows.py` 里两处 `settings.debug = False`——那是为了
+  静音 SQL 而在运行时改全局配置，副作用是把 /docs 关掉、把 /metrics 的鉴权门禁改掉。
+- `SQL_ECHO=true` 现在会进启动告警：绑定参数原样落日志，里面可能有密钥、token 与
+  用户数据。护栏：`test_sql_echo_is_decoupled_from_debug`、
+  `test_settings_debug_is_never_reassigned_at_runtime`。
+
 ## [5.15.0] 从审查到九分：契约、交付、多端与安全收口 — 2026-11-01
 
 > 来源：五视角审查（[审查报告](docs/审查报告_AI-EOS_2026-10-31.md)）与

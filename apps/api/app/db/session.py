@@ -59,7 +59,7 @@ def register_sqlite_pragmas(async_engine) -> bool:
 
 
 _is_sqlite = settings.database_url.startswith("sqlite")
-_engine_kwargs: dict = {"echo": settings.debug}
+_engine_kwargs: dict = {"echo": settings.sql_echo}
 if _is_sqlite:
     # sqlite3 连接级超时：与 PRAGMA busy_timeout 保持同一量级，
     # 避免"PRAGMA 还没生效前"的首次加锁仍按 5 秒放弃。

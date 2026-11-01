@@ -138,8 +138,10 @@ os.environ["JWT_SECRET"] = "test-only-secret-not-for-production"
 os.environ["AIEOS_ENV"] = "test"
 # 测试默认安静，排查问题时设 AIEOS_LOG_LEVEL=DEBUG 即可看到全部失败细节
 os.environ.setdefault("AIEOS_LOG_LEVEL", "ERROR")
-# SQLAlchemy echo 跟随 settings.debug，必须关掉否则刷屏
+# 测试期不暴露 /docs（DEBUG 控制），并显式钉死 SQL 逐条打印——
+# SQL_ECHO 现在独立于 DEBUG，本机 .env 里开着它也不该把测试输出灌满
 os.environ["DEBUG"] = "false"
+os.environ["SQL_ECHO"] = "false"
 os.environ["STORAGE_DIR"] = str(_TMP_ROOT / "storage")
 # 清掉可能存在的模型密钥，确保"无密钥"路径被真实覆盖
 for _k in ("OPENAI_COMPAT_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"):

@@ -284,6 +284,46 @@ def test_development_starts_but_warns(monkeypatch):
     assert any("DEBUG" in w for w in warnings), f"debug 未告警：{warnings}"
 
 
+def test_sql_echo_is_decoupled_from_debug(monkeypatch):
+    """逐条打印 SQL 由 SQL_ECHO 单独控制，默认关，不再跟随 DEBUG。
+
+    以前是 `echo=settings.debug`，两个后果都真实发生过：默认真实库下
+    调度器每 15 秒轮询一次，日志被 SELECT 灌到上百 MB；想安静的人只能
+    在运行时改 settings.debug，而那会连带关掉 /docs 与 /metrics。
+    """
+    quiet = _build_settings(monkeypatch, DEBUG="true", JWT_SECRET="a" * 64)
+    assert quiet.sql_echo is False, "DEBUG=true 不该顺带打开 SQL 打印"
+    assert not any("SQL_ECHO" in w for w in quiet.security_warnings())
+
+    loud = _build_settings(monkeypatch, DEBUG="false", SQL_ECHO="true",
+                           JWT_SECRET="a" * 64)
+    assert loud.sql_echo is True
+    assert any("SQL_ECHO" in w for w in loud.security_warnings()), \
+        "SQL 打印会把绑定参数原样写进日志，必须告警"
+
+    for rel in ("app/db/session.py", "app/background_jobs.py"):
+        src = (API_ROOT / rel).read_text(encoding="utf-8")
+        assert re.search(r'"echo":\s*settings\.sql_echo', src), f"{rel} 的 echo 没接 SQL_ECHO"
+
+
+def test_settings_debug_is_never_reassigned_at_runtime():
+    """禁止运行时改写 settings.debug——它会连带改变 /docs 与 /metrics 的姿态。
+
+    静音 SQL 请设 SQL_ECHO，不要动全局配置对象。
+    """
+    hits = []
+    for path in _python_files():
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if (isinstance(target, ast.Attribute)
+                            and target.attr == "debug"
+                            and isinstance(target.value, ast.Name)
+                            and target.value.id == "settings"):
+                        hits.append(f"{path.relative_to(API_ROOT)}:{node.lineno}")
+    assert hits == [], f"运行时改写了 settings.debug：{hits}"
+
+
 # ---------------------------------------------------------------------------
 # 前端体验护栏
 #

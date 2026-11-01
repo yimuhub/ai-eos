@@ -215,8 +215,6 @@ async def end_meeting(mid: str, db: AsyncSession = Depends(get_db),
     import app.background_jobs as background_jobs
 
     async def _finalize_now(session):
-        from app.core.config import settings
-        settings.debug = False
         from app.meeting_engine import _agents_of, _history, _finalize
         meeting = await session.get(Meeting, mid)
         agents = await _agents_of(session, meeting)

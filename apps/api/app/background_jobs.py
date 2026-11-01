@@ -122,7 +122,8 @@ def _default_job_timeout_s() -> float:
 def _make_session_factory():
     from app.core.config import settings
     from app.db.session import SQLITE_CONNECT_TIMEOUT_S, register_sqlite_pragmas
-    kwargs: dict = {"poolclass": None, "pool_pre_ping": True}
+    kwargs: dict = {"poolclass": None, "pool_pre_ping": True,
+                    "echo": settings.sql_echo}
     if settings.database_url.startswith("sqlite"):
         kwargs["connect_args"] = {"timeout": SQLITE_CONNECT_TIMEOUT_S}
     engine = create_async_engine(settings.database_url, **kwargs)

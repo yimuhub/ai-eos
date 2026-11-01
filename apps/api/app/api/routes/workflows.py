@@ -152,8 +152,6 @@ def _run_in_background(execution_id: str):
     import app.background_jobs as background_jobs
 
     async def _job(session):
-        from app.core.config import settings
-        settings.debug = False
         from app.workflow_runtime import advance_execution
         await advance_execution(session, execution_id)
 

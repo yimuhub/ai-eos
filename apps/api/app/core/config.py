@@ -183,6 +183,11 @@ class Settings(BaseSettings):
 
     app_name: str = "AI-EOS API"
     debug: bool = True
+    # 逐条打印 SQL 与参数，由 SQL_ECHO 单独控制，不再跟随 DEBUG。
+    # 跟随 DEBUG 有两个后果：默认真实库下调度器每 15 秒轮询一次，日志被
+    # SELECT 灌到上百 MB；而想安静的人只能去改 settings.debug，那会连带
+    # 关掉 /docs 与 /metrics（曾有两处路由就这么干过）。
+    sql_echo: bool = False
     # 全功能测试台开关：生产环境设 false（默认随 debug）
     enable_full_function_test_page: bool | None = None
 
@@ -341,6 +346,12 @@ class Settings(BaseSettings):
         # 正确默认值，把它放进本列表会让"配置已加固"永远无法收敛到零告警。
         if self.debug:
             warnings.append("DEBUG=True（开发模式）。部署前请设 DEBUG=false。")
+        if self.sql_echo:
+            warnings.append(
+                "SQL_ECHO=True：每条语句连同绑定参数原样写进日志——"
+                "里面可能有密钥、token 和用户数据。只适合本地临时排查，"
+                "部署前请设 SQL_ECHO=false。"
+            )
         if self.test_page_enabled:
             warnings.append(
                 "全功能测试台处于开放状态（enable_full_function_test_page 未设为 false，"
