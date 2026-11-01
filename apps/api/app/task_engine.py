@@ -92,6 +92,10 @@ async def transition(
         db, "task.status_changed", "task", task.id, actor_type, actor_id,
         {"from": old.value, "to": new_status.value},
     )
+    # 完成/失败必须让任务创建人知道。通知与状态同事务：commit 由本函数
+    # （commit=True）或调用方决定，通知失败只记 warning，不影响状态机。
+    from app.services.notification_service import notify_task_terminal
+    await notify_task_terminal(db, task, new_status.value)
     if commit:
         await db.commit()
     return task

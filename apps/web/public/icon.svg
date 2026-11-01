@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="AI-EOS">
+  <defs>
+    <linearGradient id="aieos" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#09090f"/>
+  <rect x="16" y="16" width="480" height="480" rx="96" fill="none" stroke="#23232e" stroke-width="2"/>
+  <path d="M256 112 L392 400 H322 L256 262 L190 400 H120 Z" fill="url(#aieos)"/>
+  <circle cx="256" cy="84" r="14" fill="#22d3ee"/>
+</svg>

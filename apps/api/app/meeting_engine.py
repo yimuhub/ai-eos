@@ -380,6 +380,10 @@ async def _finalize(db: AsyncSession, meeting: Meeting, history: list[dict]):
     meeting.summary = (decisions[0].content if decisions else "会议完成，无正式决策")
 
     await _say(db, meeting, "会议结束。纪要与行动项已生成。", "system", None, "closing")
+    # 纪要写库与通知同事务提交：只有真正拿到"纪要生成权"的 worker 会走到这里，
+    # 幂等占位符（_FINALIZING）已挡住并发重复提取，因此不会重复通知。
+    from app.services.notification_service import notify_meeting_minutes
+    await notify_meeting_minutes(db, meeting)
     await db.commit()
     return decisions, actions
 

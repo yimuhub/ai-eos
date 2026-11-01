@@ -11,6 +11,11 @@
 //   - `keywords` 检索别名（英文名、拼音首字母、口语说法），让用户按自己的词找到页面；
 //   - `hidden`  不进侧边栏、但可被搜索到（如内部测试台），把菜单收敛成"老板真正关心的"。
 //
+// ## 导航收敛（42 → 12）
+// 侧边栏只保留每天要用的 11 个入口 + 1 个「全部页面」，分 5 组；
+// 其余页面用 `hidden: true` 留在 NAV_GROUPS 里：⌘K 仍可搜索、侧边栏「全部页面」
+// 仍可按分组浏览。**隐藏不是删除**——路由、标题、别名、说明全部原样保留。
+//
 // 新增页面时**只需要改这一个文件**，侧边栏与命令面板自动生效。
 
 export type NavItem = {
@@ -33,20 +38,23 @@ export type NavGroup = {
   items: NavItem[];
 };
 
-/** 侧边栏分组：按老板的使用动线排列——先看战况、再管组织、然后干活、沉淀资产、最后复盘 */
+/** 侧边栏分组：按老板的使用动线排列——先看战况、再管组织、然后干活、沉淀资产、最后复盘。
+ *
+ * 只有 11 项带 `hidden` 之外的页面会出现在侧边栏；其余全部保留在分组里，
+ * 供 ⌘K 与「全部页面」使用。 */
 export const NAV_GROUPS: NavGroup[] = [
   {
     title: "指挥中枢",
     hint: "每天先看这里：现在在打什么仗、仗打到哪了",
     items: [
       { href: "/workspace", label: "工作台", icon: "◧", desc: "左看人、中间下指令、右边看产出，一张屏干完活", keywords: ["workspace", "gongzuotai", "工作台", "对话", "聊天", "首页", "home"] },
-      { href: "/dashboard", label: "指挥中心", icon: "◈", desc: "全局总览：公司、员工、任务与今日动向", keywords: ["dashboard", "zhihuizhongxin", "总览", "概览", "看板"] },
-      { href: "/command", label: "一句话指挥台", icon: "📣", desc: "说一句话，AI 判断派活/专家组队/作战室立项，每步都有你的确认点", keywords: ["command", "zhichutai", "指挥台", "一句话", "下达", "派活", "组队", "立项", "orchestrator"] },
-      { href: "/projects", label: "项目中心", icon: "▤", desc: "按项目组织目标：建项目、拉团队、下目标", keywords: ["project", "xiangmu", "项目", "目标"] },
+      { href: "/dashboard", label: "指挥中心", icon: "◈", desc: "全局总览：公司、员工、任务与今日动向", keywords: ["dashboard", "zhihuizhongxin", "总览", "概览", "看板"], hidden: true },
+      { href: "/command", label: "一句话指挥台", icon: "📣", desc: "说一句话，AI 判断派活/专家组队/作战室立项，每步都有你的确认点", keywords: ["command", "zhichutai", "指挥台", "一句话", "下达", "派活", "组队", "立项", "orchestrator"], hidden: true },
+      { href: "/projects", label: "项目中心", icon: "▤", desc: "按项目组织目标：建项目、拉团队、下目标", keywords: ["project", "xiangmu", "项目", "目标"], hidden: true },
       { href: "/warroom", label: "作战室", icon: "🎯", desc: "盯单个目标的实时执行过程与产出", keywords: ["warroom", "zuozhanshi", "作战", "盯盘"] },
       { href: "/tasks", label: "任务", icon: "◉", desc: "所有任务的统一列表：状态、负责人、产物", keywords: ["task", "renwu", "ren wu", "任务", "待办"] },
-      { href: "/autonomous", label: "自治运行", icon: "♾", desc: "让员工自己持续跑：自治等级与紧急停止", keywords: ["autonomous", "zizhi", "自治", "自动运行", "停机"] },
-      { href: "/companies", label: "公司管理", icon: "🏢", desc: "建公司、切公司、管理公司基本信息", keywords: ["company", "gongsi", "公司", "多公司", "租户"] },
+      { href: "/autonomous", label: "自治运行", icon: "♾", desc: "让员工自己持续跑：自治等级与紧急停止", keywords: ["autonomous", "zizhi", "自治", "自动运行", "停机"], hidden: true },
+      { href: "/companies", label: "公司管理", icon: "🏢", desc: "建公司、切公司、管理公司基本信息", keywords: ["company", "gongsi", "公司", "多公司", "租户"], hidden: true },
     ],
   },
   {
@@ -55,10 +63,10 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/agents", label: "Agent 团队", icon: "⬡", desc: "你的数字员工：新建、编辑、暂停、批量管理", keywords: ["agent", "employee", "员工", "yuangong", "智能体", "团队成员"] },
       { href: "/organization", label: "组织架构", icon: "⌗", desc: "部门树与汇报关系，决定谁向谁汇报", keywords: ["organization", "org", "zuzhi", "部门", "架构", "汇报线"] },
-      { href: "/factory", label: "Agent 工厂", icon: "✦", desc: "按目标批量生成整套团队，而不是一个个招", keywords: ["factory", "gongchang", "工厂", "批量生成", "建团队"] },
-      { href: "/experts", label: "专家库", icon: "📚", desc: "265 位即插即用专家人设：找专家、组队、一键进工厂上岗", keywords: ["expert", "zhuanjia", "专家", "角色库", "agency", "模板", "人设"] },
-      { href: "/agent-offboarding", label: "离职交接", icon: "⇥", desc: "员工离职时把记忆、任务、资产交接给接手人", keywords: ["offboarding", "lizhi", "离职", "交接", "辞退"] },
-      { href: "/models", label: "模型配置", icon: "◈", desc: "接入哪家大模型、用哪个密钥、谁绑哪个模型", keywords: ["model", "moxing", "模型", "密钥", "API Key", "LLM", "大模型"] },
+      { href: "/factory", label: "Agent 工厂", icon: "✦", desc: "按目标批量生成整套团队，而不是一个个招", keywords: ["factory", "gongchang", "工厂", "批量生成", "建团队"], hidden: true },
+      { href: "/experts", label: "专家库", icon: "📚", desc: "265 位即插即用专家人设：找专家、组队、一键进工厂上岗", keywords: ["expert", "zhuanjia", "专家", "角色库", "agency", "模板", "人设"], hidden: true },
+      { href: "/agent-offboarding", label: "离职交接", icon: "⇥", desc: "员工离职时把记忆、任务、资产交接给接手人", keywords: ["offboarding", "lizhi", "离职", "交接", "辞退"], hidden: true },
+      { href: "/models", label: "模型配置", icon: "◈", desc: "接入哪家大模型、用哪个密钥、谁绑哪个模型", keywords: ["model", "moxing", "模型", "密钥", "API Key", "LLM", "大模型"], hidden: true },
     ],
   },
   {
@@ -67,9 +75,9 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/meetings", label: "会议中心", icon: "◍", desc: "多个员工开会讨论问题，产出结论", keywords: ["meeting", "huiyi", "会议", "讨论"] },
       { href: "/workflow-builder", label: "工作流", icon: "⇄", desc: "把多步骤流程串起来，按顺序自动执行", keywords: ["workflow", "gongzuoliu", "工作流", "流程", "编排"] },
-      { href: "/schedules", label: "日程安排", icon: "🗓", desc: "定时触发：每天/每周固定时间自动开工", keywords: ["schedule", "richeng", "日程", "定时", "cron", "排期"] },
-      { href: "/automation", label: "自动化规则", icon: "🤖", desc: "「发生 X 就做 Y」的事件触发规则", keywords: ["automation", "zidonghua", "自动化", "触发器", "规则"] },
-      { href: "/device-console", label: "设备操作台", icon: "🖥", desc: "授权员工操作本机：执行命令、读写文件", keywords: ["device", "computer", "shebei", "设备", "本机", "命令行", "shell"] },
+      { href: "/schedules", label: "日程安排", icon: "🗓", desc: "定时触发：每天/每周固定时间自动开工", keywords: ["schedule", "richeng", "日程", "定时", "cron", "排期"], hidden: true },
+      { href: "/automation", label: "自动化规则", icon: "🤖", desc: "「发生 X 就做 Y」的事件触发规则", keywords: ["automation", "zidonghua", "自动化", "触发器", "规则"], hidden: true },
+      { href: "/device-console", label: "设备操作台", icon: "🖥", desc: "授权员工操作本机：执行命令、读写文件", keywords: ["device", "computer", "shebei", "设备", "本机", "命令行", "shell"], hidden: true },
     ],
   },
   {
@@ -77,34 +85,49 @@ export const NAV_GROUPS: NavGroup[] = [
     hint: "员工学什么、产出放哪、下次怎么复用",
     items: [
       { href: "/knowledge", label: "知识库", icon: "❑", desc: "上传资料作为员工的事实依据，减少胡编", keywords: ["knowledge", "zhishi", "知识", "文档", "RAG", "资料"] },
-      { href: "/skill-center", label: "技能中心", icon: "⚡", desc: "员工会哪些技能、哪些可被学会", keywords: ["skill", "jineng", "技能", "能力"] },
-      { href: "/artifacts", label: "成果中心", icon: "▣", desc: "员工交出来的成品：报告、表格、代码", keywords: ["artifact", "chengguo", "成果", "产出", "交付物"] },
+      { href: "/skill-center", label: "技能中心", icon: "⚡", desc: "员工会哪些技能、哪些可被学会", keywords: ["skill", "jineng", "技能", "能力"], hidden: true },
+      { href: "/artifacts", label: "成果中心", icon: "▣", desc: "员工交出来的成品：报告、表格、代码", keywords: ["artifact", "chengguo", "成果", "产出", "交付物"], hidden: true },
       { href: "/delivery", label: "交付中心", icon: "📦", desc: "按批次查看交付物与验收状态", keywords: ["delivery", "jiaofu", "交付", "验收"] },
-      { href: "/doc-styles", label: "文档风格", icon: "🎨", desc: "统一文档模板与排版风格，产出不用再返工", keywords: ["style", "template", "fengge", "风格", "排版", "格式"] },
-      { href: "/memory", label: "记忆库", icon: "🧠", desc: "员工记住的事实与经验，可查可删", keywords: ["memory", "jiyi", "记忆", "长期记忆"] },
-      { href: "/templates", label: "模板库", icon: "📋", desc: "可复用的任务与文档模板", keywords: ["template", "muban", "模板"] },
-      { href: "/assets", label: "素材资产", icon: "🖼", desc: "图片等素材的统一管理", keywords: ["asset", "sucai", "素材", "图片", "资产"] },
+      { href: "/doc-styles", label: "文档风格", icon: "🎨", desc: "统一文档模板与排版风格，产出不用再返工", keywords: ["style", "template", "fengge", "风格", "排版", "格式"], hidden: true },
+      { href: "/memory", label: "记忆库", icon: "🧠", desc: "员工记住的事实与经验，可查可删", keywords: ["memory", "jiyi", "记忆", "长期记忆"], hidden: true },
+      { href: "/templates", label: "模板库", icon: "📋", desc: "可复用的任务与文档模板", keywords: ["template", "muban", "模板"], hidden: true },
+      { href: "/assets", label: "素材资产", icon: "🖼", desc: "图片等素材的统一管理", keywords: ["asset", "sucai", "素材", "图片", "资产"], hidden: true },
     ],
   },
   {
     title: "成长与治理",
     hint: "员工有没有进步、有没有越界、钱花在哪",
     items: [
-      { href: "/growth-center", label: "成长中心", icon: "🌱", desc: "员工的成长路径与培养动作", keywords: ["growth", "chengzhang", "成长", "培养"] },
-      { href: "/reflection", label: "复盘中心", icon: "🔄", desc: "任务结束后的自我复盘与教训沉淀", keywords: ["reflection", "fupan", "复盘", "总结", "教训"] },
-      { href: "/training", label: "培训中心", icon: "🎓", desc: "针对性训练员工并对比训练前后效果", keywords: ["training", "peixun", "培训", "训练"] },
-      { href: "/performance", label: "绩效中心", icon: "📊", desc: "系统靠不靠谱：成功率、耗时、失败原因，以及谁在拖后腿", keywords: ["performance", "jixiao", "绩效", "考核", "KPI", "可靠性", "成功率", "度量", "metrics", "失败原因", "归因"] },
-      { href: "/governance", label: "治理与审计", icon: "⬢", desc: "合规策略与越界行为的审计记录", keywords: ["governance", "zhili", "治理", "合规", "审计"] },
-      { href: "/external-agents", label: "外部协作", icon: "🔗", desc: "接入外部 Agent 参与公司业务", keywords: ["external", "waibu", "外部", "第三方", "协作"] },
-      { href: "/intervention", label: "干预中心", icon: "🛠", desc: "员工卡住或跑偏时，人工介入并批准", keywords: ["intervention", "ganyu", "干预", "人工", "审批", "介入"] },
-      { href: "/skill-growth", label: "技能成长档案", icon: "📈", desc: "技能随任务增长的完整档案", keywords: ["skill growth", "jineng", "成长档案", "技能曲线"] },
+      { href: "/growth-center", label: "成长中心", icon: "🌱", desc: "员工的成长路径与培养动作", keywords: ["growth", "chengzhang", "成长", "培养"], hidden: true },
+      { href: "/reflection", label: "复盘中心", icon: "🔄", desc: "任务结束后的自我复盘与教训沉淀", keywords: ["reflection", "fupan", "复盘", "总结", "教训"], hidden: true },
+      { href: "/training", label: "培训中心", icon: "🎓", desc: "针对性训练员工并对比训练前后效果", keywords: ["training", "peixun", "培训", "训练"], hidden: true },
+      { href: "/performance", label: "绩效中心", icon: "📊", desc: "系统靠不靠谱：成功率、耗时、失败原因，以及谁在拖后腿", keywords: ["performance", "jixiao", "绩效", "考核", "KPI", "可靠性", "成功率", "度量", "metrics", "失败原因", "归因"], hidden: true },
+      { href: "/governance", label: "治理与审计", icon: "⬢", desc: "合规策略与越界行为的审计记录", keywords: ["governance", "zhili", "治理", "合规", "审计"], hidden: true },
+      { href: "/external-agents", label: "外部协作", icon: "🔗", desc: "接入外部 Agent 参与公司业务", keywords: ["external", "waibu", "外部", "第三方", "协作"], hidden: true },
+      { href: "/intervention", label: "干预中心", icon: "🛠", desc: "员工卡住或跑偏时，人工介入并批准", keywords: ["intervention", "ganyu", "干预", "人工", "审批", "介入"], hidden: true },
+      { href: "/skill-growth", label: "技能成长档案", icon: "📈", desc: "技能随任务增长的完整档案", keywords: ["skill growth", "jineng", "成长档案", "技能曲线"], hidden: true },
       { href: "/token-stats", label: "Token统计", icon: "🪙", desc: "花了多少钱、花在哪个模型上", keywords: ["token", "cost", "billing", "统计", "费用", "成本", "计费"] },
-      { href: "/lan-share", label: "局域网共享", icon: "📡", desc: "手机扫二维码接入同一份数据：Web 版直进、App 接管、开机自启", keywords: ["lan", "share", "lajuan", "局域网", "共享", "扫码", "二维码", "手机", "mobile", "二维码", "qrcode", "开机自启", "autostart", "配对", "pairing"] },
+      { href: "/lan-share", label: "局域网共享", icon: "📡", desc: "手机扫二维码接入同一份数据：Web 版直进、App 接管、开机自启", keywords: ["lan", "share", "lajuan", "局域网", "共享", "扫码", "二维码", "手机", "mobile", "二维码", "qrcode", "开机自启", "autostart", "配对", "pairing"], hidden: true },
       { href: "/diagnostics", label: "系统诊断", icon: "🩺", desc: "一键体检数据库/磁盘/局域网/升级通道，异常项给修复建议", keywords: ["diagnostics", "doctor", "诊断", "体检", "健康"] },
-      { href: "/logs", label: "审计日志", icon: "📜", desc: "系统里发生过的每一件事", keywords: ["log", "audit", "日志", "审计", "记录"] },
+      { href: "/logs", label: "审计日志", icon: "📜", desc: "系统里发生过的每一件事", keywords: ["log", "audit", "日志", "审计", "记录"], hidden: true },
     ],
   },
 ];
+
+/** 侧边栏真正渲染的分组（过滤 hidden 与空分组）。 */
+export const SIDEBAR_GROUPS: NavGroup[] = NAV_GROUPS
+  .map((group) => ({ ...group, items: group.items.filter((item) => !item.hidden) }))
+  .filter((group) => group.items.length > 0);
+
+/** 侧边栏可见条目数（不含「全部页面」入口）。 */
+export const SIDEBAR_ITEM_COUNT = SIDEBAR_GROUPS.reduce((sum, group) => sum + group.items.length, 0);
+
+/** 侧边栏末尾的「全部页面」入口：打开命令面板的全部页面视图。 */
+export const ALL_PAGES_ENTRY = {
+  label: "全部页面",
+  icon: "▦",
+  desc: "按分组浏览全部页面，也可以直接搜索",
+} as const;
 
 /** 不进侧边栏、但仍可被 ⌘K 搜到的内部页面。
  *

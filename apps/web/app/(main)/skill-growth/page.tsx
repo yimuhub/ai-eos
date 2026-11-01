@@ -1,7 +1,7 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
-import type { Company } from "@/lib/types";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 
 type Agent = { id: string; name: string };
 type Skill = { skill: string; level: string; experience_count: number; evidence_count: number };
@@ -9,22 +9,42 @@ type Skill = { skill: string; level: string; experience_count: number; evidence_
 const LEVEL_ZH: Record<string, string> = { BEGINNER: "入门", JUNIOR: "初级", INTERMEDIATE: "中级", ADVANCED: "高级", EXPERT: "专家" };
 
 export default function SkillGrowthPage() {
-  const [agents, setAgents] = useState<Agent[]>([]);
+  // 激活公司可订阅：切公司后员工与技能树自动跟随，不再用 `/companies → cs[0]` 快照。
+  const cid = useActiveCompanyId();
+  // 员工列表与技能树互不依赖：并发拉取，任一失败退回空值（与原实现各自 catch 一致）。
+  const { data: bundle } = useResource(
+    cid ? `skill-growth:${cid}` : null,
+    async () => {
+      const [agents, nodes] = await Promise.allSettled([
+        api.get<Agent[]>("/agents"),
+        api.get<any[]>(`/skill-growth/tree?company_id=${cid}`),
+      ]);
+      return {
+        cid,
+        agents: agents.status === "fulfilled" ? agents.value || [] : [],
+        nodes: nodes.status === "fulfilled" ? nodes.value || [] : [],
+      };
+    },
+  );
+  // 切公司时旧 bundle 先不渲染，避免技能树短暂混用上一家公司的数据。
+  const active = bundle && bundle.cid === cid ? bundle : null;
+  const agents = useMemo<Agent[]>(() => active?.agents ?? [], [active]);
+  const nodes = useMemo<any[]>(() => active?.nodes ?? [], [active]);
   const [agentId, setAgentId] = useState("");
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [nodes, setNodes] = useState<any[]>([]);
   const [msg, setMsg] = useState("");
 
+  // 默认选中第一位员工；员工列表变化（换公司/增删）时修正选择。
   useEffect(() => {
-    api.get("/agents").then((a: Agent[]) => { setAgents(a); if (a.length) setAgentId(a[0].id); }).catch(() => {});
-    api.get<Company[]>("/companies").then((cs) => {
-      if (cs[0]?.id) api.get(`/skill-growth/tree?company_id=${cs[0].id}`).then(setNodes).catch(() => {});
-    }).catch(() => {});
-  }, []);
+    if (agents.length && !agents.some((a) => a.id === agentId)) setAgentId(agents[0].id);
+    else if (!agents.length && agentId) setAgentId("");
+  }, [agents, agentId]);
 
-  useEffect(() => {
-    if (agentId) api.get(`/skill-growth/agents/${agentId}/matrix`).then(setSkills).catch(() => {});
-  }, [agentId]);
+  // 技能矩阵按员工缓存：切换员工时先显示缓存，随后按新鲜度重取。
+  const { data: matrix, refresh: refreshMatrix } = useResource<Skill[]>(
+    agentId ? `skill-growth:matrix:${agentId}` : null,
+    () => api.get<Skill[]>(`/skill-growth/agents/${agentId}/matrix`),
+  );
+  const skills = useMemo<Skill[]>(() => matrix ?? [], [matrix]);
 
   async function acquire(skillNode: any) {
     try {
@@ -34,7 +54,7 @@ export default function SkillGrowthPage() {
         evidence: [{ type: "assignment" }],
       });
       setMsg(`✅ ${skillNode.name} 已添加`);
-      api.get(`/skill-growth/agents/${agentId}/matrix`).then(setSkills).catch(() => {});
+      refreshMatrix();
     } catch (e: any) {
       setMsg(e.message || String(e));
     }

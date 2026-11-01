@@ -60,6 +60,9 @@ async def orchestrate_task(data: OrchestrateIn,
             p2 = await session.get(Task, task_id)
             if p2 and p2.status in (TS.PLANNING, TS.RUNNING):
                 p2.status = TS.FAILED
+                from app.services.notification_service import notify_task_terminal
+                await notify_task_terminal(session, p2, "FAILED",
+                                           error="编排失败，详见服务端日志")
             c2 = await session.get(Agent, data.coordinator_agent_id)
             if c2 and c2.status.value == "RUNNING":
                 c2.status = AgentStatus.IDLE

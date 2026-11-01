@@ -23,6 +23,10 @@ from .collaboration import (AgentCollaboration, AgentMessage,  # noqa: F401
 from .knowledge import KBChunk, KBDocument, KBDocumentStatus  # noqa: F401
 from .memory import AgentMemory, MemoryType  # noqa: F401
 from .artifact import Artifact, ArtifactStatus, ArtifactVersion  # noqa: F401
+from .deliverable import DeliverableComment  # noqa: F401
+from .queue_item import QueueItem, QueueItemStatus  # noqa: F401
+from .subscription import CompanySubscription, SubscriptionStatus  # noqa: F401
+from .company_secret import CompanySecret  # noqa: F401
 from .intervention import (ApprovalRequest, InterventionPolicy,  # noqa: F401
                            OverrideLog)
 from .performance import PerformanceSnapshot  # noqa: F401
@@ -61,3 +65,6 @@ from .mailbox import AgentMailbox, MailMessage  # noqa: F401
 from .chat_group import ChatGroup  # noqa: F401
 from .whitelist import ApprovalWhitelist  # noqa: F401
 from .worklog import AgentWorklog, WorklogStatus  # noqa: F401
+from .notification import Notification  # noqa: F401
+from .push_subscription import PushSubscription  # noqa: F401
+from .thread_read import ThreadRead  # noqa: F401

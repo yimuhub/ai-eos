@@ -6,7 +6,7 @@
 
 群聊消息仍存 group_chat_messages（scope="group", scope_id=本表 id）。
 """
-from sqlalchemy import JSON, String
+from sqlalchemy import JSON, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -15,6 +15,12 @@ from .base import TimestampMixin
 
 class ChatGroup(TimestampMixin, Base):
     __tablename__ = "chat_groups"
+    # 同一公司同一内置分组只能有一行；preset_id 为 NULL 的自建群在 SQLite/Postgres
+    # 下都不参与唯一性（多个 NULL 合法），不受影响。
+    __table_args__ = (
+        UniqueConstraint("company_id", "preset_id",
+                         name="uq_chat_group_company_preset"),
+    )
 
     company_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)

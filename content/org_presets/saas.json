@@ -1,0 +1,237 @@
+{
+  "id": "saas",
+  "industry": "互联网/SaaS",
+  "emoji": "🚀",
+  "departments": [
+    {
+      "name": "产品部",
+      "desc": "互联网/SaaS·产品部核心职能：需求洞察、产品规划与版本交付",
+      "agents": [
+        {
+          "name": "产品经理",
+          "role": "产品规划",
+          "expert_slug": "product-manager"
+        },
+        {
+          "name": "产品运营",
+          "role": "版本运营",
+          "expert_slug": "product-trend-researcher"
+        },
+        {
+          "name": "用户研究员",
+          "role": "用户研究",
+          "expert_slug": "design-ux-researcher"
+        }
+      ]
+    },
+    {
+      "name": "研发部",
+      "desc": "互联网/SaaS·研发部核心职能：架构、前后端交付与持续部署",
+      "agents": [
+        {
+          "name": "后端架构师",
+          "role": "系统架构",
+          "expert_slug": "engineering-backend-architect"
+        },
+        {
+          "name": "前端开发",
+          "role": "Web 前端",
+          "expert_slug": "engineering-frontend-developer"
+        },
+        {
+          "name": "DevOps",
+          "role": "持续交付",
+          "expert_slug": "engineering-devops-automator"
+        }
+      ]
+    },
+    {
+      "name": "增长部",
+      "desc": "互联网/SaaS·增长部核心职能：获客、激活、转化与内容增长",
+      "agents": [
+        {
+          "name": "增长黑客",
+          "role": "用户增长",
+          "expert_slug": "marketing-growth-hacker"
+        },
+        {
+          "name": "SEO 专家",
+          "role": "搜索增长",
+          "expert_slug": "marketing-seo-specialist"
+        },
+        {
+          "name": "内容营销",
+          "role": "内容增长",
+          "expert_slug": "marketing-content-creator"
+        }
+      ]
+    },
+    {
+      "name": "客户成功部",
+      "desc": "互联网/SaaS·客户成功部核心职能：上手、留存、续费与增购",
+      "agents": [
+        {
+          "name": "客户成功经理",
+          "role": "客户留存",
+          "expert_slug": "customer-success-manager"
+        },
+        {
+          "name": "支持专员",
+          "role": "工单支持",
+          "expert_slug": "support-support-responder"
+        },
+        {
+          "name": "续费顾问",
+          "role": "续费增购",
+          "expert_slug": "sales-account-strategist"
+        }
+      ]
+    },
+    {
+      "name": "财务与运营",
+      "desc": "互联网/SaaS·财务与运营核心职能：订阅收入、成本与回款管理",
+      "agents": [
+        {
+          "name": "财务分析师",
+          "role": "收入分析",
+          "expert_slug": "finance-financial-analyst"
+        },
+        {
+          "name": "财务 BP",
+          "role": "预算与回款",
+          "expert_slug": "finance-bookkeeper-controller"
+        },
+        {
+          "name": "运营经理",
+          "role": "流程运营",
+          "expert_slug": "operations-manager"
+        }
+      ]
+    }
+  ],
+  "deliverable_templates": [
+    {
+      "key": "prd",
+      "name": "PRD 产品需求文档",
+      "artifact_type": "document",
+      "outline": [
+        "背景与目标",
+        "目标用户与使用场景",
+        "需求范围与非目标",
+        "功能规格与交互流程",
+        "非功能需求",
+        "数据指标与埋点",
+        "上线计划与风险"
+      ]
+    },
+    {
+      "key": "growth_experiment",
+      "name": "增长实验方案",
+      "artifact_type": "experiment_plan",
+      "outline": [
+        "实验假设",
+        "目标指标与护栏指标",
+        "实验设计与分流",
+        "样本量与时长期",
+        "执行计划",
+        "结果判定标准",
+        "复盘与下一步"
+      ]
+    },
+    {
+      "key": "customer_success_review",
+      "name": "客户成功复盘",
+      "artifact_type": "report",
+      "outline": [
+        "客户概况与关键联系人",
+        "健康度与产品使用数据",
+        "本期关键问题与处理结果",
+        "续费与增购风险",
+        "客户声音与需求归纳",
+        "下期行动计划"
+      ]
+    }
+  ],
+  "task_templates": [
+    {
+      "key": "retention_funnel",
+      "title": "梳理新用户 7 日留存漏斗并输出 3 个流失节点改进项",
+      "description": "按注册、首次创建、邀请同事、首次交付、第 7 日回访拆分漏斗，定位流失率最高的 3 个节点，每项给出可验证的改进方案与负责人。",
+      "priority": "HIGH",
+      "department": "产品部",
+      "role": "产品经理"
+    },
+    {
+      "key": "churn_interviews",
+      "title": "访谈 5 位近 30 天流失客户并提交流失原因归纳报告",
+      "description": "从流失客户名单中抽取 5 位完成 30 分钟访谈，按价格、功能缺口、上手成本、迁移成本归类原因，输出可执行的挽回与产品改进建议。",
+      "priority": "HIGH",
+      "department": "客户成功部",
+      "role": "客户成功经理"
+    },
+    {
+      "key": "invite_tracking",
+      "title": "为「邀请同事」功能补齐埋点事件并验证 48 小时数据无断流",
+      "description": "定义曝光、点击、发送、接受四类事件及属性，完成前后端上报，核对实验环境与生产环境数据一致后再上线。",
+      "priority": "NORMAL",
+      "department": "研发部",
+      "role": "后端架构师"
+    },
+    {
+      "key": "annual_pricing_ab",
+      "title": "上线定价页「年付默认选中」A/B 实验并给出转化率结论",
+      "description": "以月付为对照，检验年付默认选中对试用转付费的影响；护栏指标为退款率与客单价，实验周期不少于 14 天。",
+      "priority": "HIGH",
+      "department": "增长部",
+      "role": "增长黑客"
+    },
+    {
+      "key": "signup_latency",
+      "title": "把注册到首个工作区的 P95 响应时间从 1.2 秒降到 800 毫秒内",
+      "description": "定位慢查询与串行远程调用，补充索引或缓存，并在预发环境用压测报告证明 P95 达标、错误率不高于 0.5%。",
+      "priority": "URGENT",
+      "department": "研发部",
+      "role": "后端架构师"
+    },
+    {
+      "key": "seo_keyword_map",
+      "title": "产出 Q2 SEO 关键词地图并交付 8 篇选题大纲",
+      "description": "围绕「项目管理」「团队协作」「AI 工作流」三组主题完成搜索量与竞争度评估，输出关键词到落地页的映射表及 8 篇可直接写作的选题大纲。",
+      "priority": "NORMAL",
+      "department": "增长部",
+      "role": "SEO 专家"
+    },
+    {
+      "key": "health_score",
+      "title": "建立客户健康度评分模型并输出本周高风险客户清单",
+      "description": "综合登录频次、核心功能使用深度、工单情绪与席位数变化计算 0-100 健康分，标出连续两周下降且低于 40 分的客户并给出跟进动作。",
+      "priority": "NORMAL",
+      "department": "客户成功部",
+      "role": "支持专员"
+    },
+    {
+      "key": "mrr_forecast",
+      "title": "完成本月 MRR/ARR 拆解表并给出下月订阅收入预测",
+      "description": "拆分新增、扩张、收缩、流失四类收入变动，核对账单与合同数据，给出基准/乐观/保守三档预测及关键假设。",
+      "priority": "HIGH",
+      "department": "财务与运营",
+      "role": "财务分析师"
+    },
+    {
+      "key": "overdue_collection",
+      "title": "梳理逾期 30 天以上应收账款并输出回款计划",
+      "description": "逐笔核对发票、合同与到账记录，按金额和账龄分级，明确催收责任人、承诺回款日与升级路径。",
+      "priority": "NORMAL",
+      "department": "财务与运营",
+      "role": "财务 BP"
+    },
+    {
+      "key": "release_notes",
+      "title": "发布 v1.4 版本更新说明并同步站内信与邮件",
+      "description": "整理本版本 5 项功能变更与 3 项修复，按用户价值排序撰写更新说明，完成站内信、邮件与帮助中心三处同步。",
+      "priority": "NORMAL",
+      "department": "产品部",
+      "role": "产品运营"
+    }
+  ]
+}

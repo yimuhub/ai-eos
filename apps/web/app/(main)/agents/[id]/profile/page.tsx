@@ -1,12 +1,10 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import Link from "next/link";
-import { useRef } from "react";
 import { api, describeError } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
 import { notify } from "@/components/Toast";
-import type { Company } from "@/lib/types";
 
 /* ============================================================
    综合档案页：成长 / 训练 / 技能 / 私人知识库 / 复盘 / 考核 / 职业
@@ -25,7 +23,6 @@ type Lesson = { id: string; lesson: string };
 type Review = { id: string; source: string; score: number };
 type CareerRec = { title: string; change_type: string; is_current: boolean };
 type MemoryItem = { id: string; content: string; type: string; created_at: string };
-type SkillNode = { id: string; name: string };
 
 const TABS = ["成长", "训练", "技能", "私人知识库", "记忆", "复盘", "考核", "职业", "邮箱", "下班学习", "工牌"] as const;
 const LEVEL_ZH: Record<string, string> = {
@@ -38,26 +35,39 @@ const MEM_TYPE_ZH: Record<string, string> = {
 export default function AgentProfilePage() {
   const { id: agentId } = useParams<{ id: string }>();
   const router = useRouter();
+  // 激活公司：可订阅 —— 切公司后技能库 / 记忆自动换数据，不再一次性取 cs[0]
+  const cid = useActiveCompanyId();
   const [agentName, setAgentName] = useState("");
   const [tab, setTab] = useState<(typeof TABS)[number]>("成长");
 
-  // V5.8 ⑨ Agent Card（员工工牌）：能力清单 + needs-auth 态
-  const [card, setCard] = useState<any>(null);
+  /* ---------- 数据（统一交给 useResource：去重、缓存、回窗重取） ---------- */
+  // 员工列表（只取名字）与工牌
+  const { data: agentRows } = useResource<{ id: string; name: string }[]>(
+    "agents:all",
+    () => api.get<{ id: string; name: string }[]>("/agents"),
+  );
   useEffect(() => {
-    if (!agentId) return;
-    api.get(`/agents/${agentId}/card`).then(setCard).catch(() => setCard(null));
-  }, [agentId]);
+    setAgentName(agentRows?.find((a) => a.id === agentId)?.name || "");
+  }, [agentRows, agentId]);
+
+  // V5.8 ⑨ Agent Card（员工工牌）：能力清单 + needs-auth 态
+  const { data: card } = useResource<any>(
+    agentId ? `agent:card:${agentId}` : null,
+    () => api.get(`/agents/${agentId}/card`),
+  );
 
   // V5.7 ⑥⑦ 下班学习：工作日志列表 + 写日志 + 老板审批（成长也要点头）
-  const [worklogs, setWorklogs] = useState<any[]>([]);
+  const { data: worklogRows, refresh: refreshWorklogs } = useResource<any[]>(
+    agentId ? `agent:worklogs:${agentId}` : null,
+    async () => {
+      const r = await api.get<any[]>(`/worklogs?agent_id=${agentId}`);
+      return Array.isArray(r) ? r : [];
+    },
+  );
+  const worklogs = useMemo<any[]>(() => worklogRows ?? [], [worklogRows]);
   const [wlContent, setWlContent] = useState("");
   const [wlLessons, setWlLessons] = useState("");
   const [wlMsg, setWlMsg] = useState("");
-  const loadWorklogs = () => {
-    if (!agentId) return;
-    api.get(`/worklogs?agent_id=${agentId}`).then((r: any) => setWorklogs(Array.isArray(r) ? r : [])).catch(() => setWorklogs([]));
-  };
-  useEffect(() => { loadWorklogs(); }, [agentId]);
 
   async function postWorklog() {
     if (!wlContent.trim()) { notify("warning", "先写点日志内容"); return; }
@@ -69,7 +79,7 @@ export default function AgentProfilePage() {
       });
       setWlContent(""); setWlLessons("");
       setWlMsg("✅ 日志已提交，等老板审批后沉淀为高置信记忆");
-      loadWorklogs();
+      refreshWorklogs();
     } catch (e: any) { setWlMsg(`❌ ${e.message || "提交失败"}`); }
   }
 
@@ -77,34 +87,53 @@ export default function AgentProfilePage() {
     try {
       await api.post(`/worklogs/${wl.id}/decide?agent_id=${agentId}`,
         { decision, comment: decision === "reject" ? "老板否决" : null });
-      loadWorklogs();
+      refreshWorklogs();
       notify("success", decision === "approve" ? "已批准，已沉淀为高置信记忆（0.95）" : "已否决");
     } catch (e: any) { notify("error", e.message || "决策失败"); }
   }
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [skillNodes, setSkillNodes] = useState<SkillNode[]>([]);
-  const [memories, setMemories] = useState<MemoryItem[]>([]);
-  const [lessons, setLessons] = useState<Lesson[]>([]);
-  const [reviews, setReviews] = useState<Review[]>([]);
-  const [career, setCareer] = useState<CareerRec[]>([]);
+
+  // 档案类资源：参数只依赖路由 id（记忆额外依赖公司）
+  const { data: profile, refresh: refreshProfile } = useResource<Profile>(
+    agentId ? `agent:profile:${agentId}` : null,
+    () => api.get<Profile>(`/learning/agents/${agentId}/profile`),
+  );
+  const { data: skillRows, refresh: refreshSkills } = useResource<Skill[]>(
+    agentId ? `agent:skills:${agentId}` : null,
+    () => api.get<Skill[]>(`/skill-growth/agents/${agentId}/matrix`),
+  );
+  const skills = useMemo<Skill[]>(() => skillRows ?? [], [skillRows]);
+  const { data: lessonRows, refresh: refreshLessons, mutate: mutateLessons } = useResource<Lesson[]>(
+    agentId ? `agent:lessons:${agentId}` : null,
+    () => api.get<Lesson[]>(`/reflection/agents/${agentId}/lessons`),
+  );
+  const lessons = useMemo<Lesson[]>(() => lessonRows ?? [], [lessonRows]);
+  const { data: reviewRows, refresh: refreshReviews } = useResource<Review[]>(
+    agentId ? `agent:reviews:${agentId}` : null,
+    () => api.get<Review[]>(`/reviews/agents/${agentId}`),
+  );
+  const reviews = useMemo<Review[]>(() => reviewRows ?? [], [reviewRows]);
+  const { data: careerRows, refresh: refreshCareer } = useResource<CareerRec[]>(
+    agentId ? `agent:career:${agentId}` : null,
+    () => api.get<CareerRec[]>(`/career/agents/${agentId}/timeline`),
+  );
+  const career = useMemo<CareerRec[]>(() => careerRows ?? [], [careerRows]);
   // V5.5 C3：Agent 专属邮箱（收件箱 / 代答 / 别名）
-  const [mailbox, setMailbox] = useState<any>(null);
-  const [messages, setMessages] = useState<any[]>([]);
+  const { data: mailboxRows, refresh: refreshMailbox } = useResource<any[]>(
+    agentId ? `agent:mailboxes:${agentId}` : null,
+    () => api.get<any[]>(`/mailboxes?agent_id=${agentId}`),
+  );
+  const mailbox = mailboxRows?.[0] || null;
+  // 收件箱依赖 mailbox.id：mailbox 未就绪时 key 为 null，不发请求
+  const { data: messageRows, refresh: refreshMessages } = useResource<any[]>(
+    mailbox ? `mailbox:messages:${mailbox.id}` : null,
+    () => api.get<any[]>(`/mailboxes/messages?mailbox_id=${mailbox.id}`),
+  );
+  const messages = useMemo<any[]>(() => messageRows ?? [], [messageRows]);
   const [aliasInput, setAliasInput] = useState("");
   const [replyBody, setReplyBody] = useState("");
   const [replyTo, setReplyTo] = useState<string | null>(null);
   const [inSubject, setInSubject] = useState("");
   const [inBody, setInBody] = useState("");
-
-  const loadMailbox = useCallback((aid: string) => {
-    api.get(`/mailboxes?agent_id=${aid}`).then((list: any[]) => {
-      setMailbox(list[0] || null);
-      if (list[0]) api.get(`/mailboxes/messages?mailbox_id=${list[0].id}`).then(setMessages).catch(() => {});
-      else setMessages([]);
-    }).catch(() => setMailbox(null));
-  }, []);
-  useEffect(() => { if (agentId) loadMailbox(agentId); }, [agentId, loadMailbox]);
 
   const createMailbox = async () => {
     if (!aliasInput.trim()) { notify("warning", "⚠️ 先填邮箱别名"); return; }
@@ -112,7 +141,8 @@ export default function AgentProfilePage() {
       const r = await api.post(`/mailboxes`, { agent_id: agentId, alias: aliasInput.trim() });
       notify("success", `✅ 已开通 ${r.alias}`);
       setAliasInput("");
-      loadMailbox(agentId);
+      refreshMailbox();
+      refreshMessages();
     } catch (e: any) { notify("error", `❌ ${describeError(e)}`); }
   };
   const sendInboxMsg = async () => {
@@ -120,7 +150,7 @@ export default function AgentProfilePage() {
     try {
       await api.post(`/mailboxes/messages`, { mailbox_id: mailbox.id, subject: inSubject || "老板来信", body: inBody, from_addr: "boss@aieos.local" });
       setInSubject(""); setInBody("");
-      api.get(`/mailboxes/messages?mailbox_id=${mailbox.id}`).then(setMessages).catch(() => {});
+      refreshMessages();
       notify("success", "✅ 已写入收件箱");
     } catch (e: any) { notify("error", `❌ ${describeError(e)}`); }
   };
@@ -129,17 +159,25 @@ export default function AgentProfilePage() {
     try {
       await api.post(`/mailboxes/messages/${mid}/reply`, { body: replyBody || "（代答）收到，谢谢。" });
       setReplyBody(""); setReplyTo(null);
-      api.get(`/mailboxes/messages?mailbox_id=${mailbox.id}`).then(setMessages).catch(() => {});
+      refreshMessages();
       notify("success", "✅ 代答已发出");
     } catch (e: any) { notify("error", `❌ ${describeError(e)}`); }
   };
-  const [nodes, setNodes] = useState<any[]>([]);
+  const { data: nodeRows } = useResource<any[]>(
+    cid ? `agent:skill-nodes:${cid}` : null,
+    () => api.get<any[]>(`/skills?company_id=${cid}`),
+  );
+  const nodes = useMemo<any[]>(() => nodeRows ?? [], [nodeRows]);
   const [trTitle, setTrTitle] = useState("");
   const [trInput, setTrInput] = useState("");
   const [trUploading, setTrUploading] = useState(false);
   const trFileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
-  const [kbDocs, setKbDocs] = useState<any[]>([]);
+  const { data: kbDocRows } = useResource<any[]>(
+    agentId ? `agent:kbdocs:${agentId}` : null,
+    () => api.get<any[]>(`/kb2/agents/${agentId}/documents`),
+  );
+  const kbDocs = useMemo<any[]>(() => kbDocRows ?? [], [kbDocRows]);
   const [uploadNote, setUploadNote] = useState("");
   const [msg, setMsg] = useState("");
   // 记忆新增
@@ -149,50 +187,35 @@ export default function AgentProfilePage() {
   // 学习技能
   const [showLearn, setShowLearn] = useState(false);
 
-  const cidRef = useRef("");
+  // 员工长期记忆（来自 growth-center 详情，按公司隔离）
+  const { data: memoryRows, refresh: refreshMemories } = useResource<MemoryItem[]>(
+    agentId && cid ? `agent:memories:${cid}:${agentId}` : null,
+    async () => {
+      const d = await api.get<{ memories?: MemoryItem[] }>(
+        `/growth-center/agents/${agentId}/detail?company_id=${cid}`);
+      return d?.memories || [];
+    },
+  );
+  const memories = useMemo<MemoryItem[]>(() => memoryRows ?? [], [memoryRows]);
 
-  const refreshAll = useCallback(async (aid: string) => {
-    api.get(`/learning/agents/${aid}/profile`).then(setProfile).catch(() => {});
-    api.get(`/skill-growth/agents/${aid}/matrix`).then(setSkills).catch(() => {});
-    api.get(`/reflection/agents/${aid}/lessons`).then(setLessons).catch(() => {});
-    api.get(`/reviews/agents/${aid}`).then(setReviews).catch(() => {});
-    api.get(`/career/agents/${aid}/timeline`).then(setCareer).catch(() => {});
-    // 记忆列表：等 company_id 就绪后再取
-    const loadMemories = () =>
-      api.get(`/growth-center/agents/${aid}/detail?company_id=${cidRef.current}`)
-        .then((d: any) => setMemories(d?.memories || [])).catch(() => {});
-    api.get<Company[]>("/companies").then((cs) => {
-      if (cs.length && !cidRef.current) cidRef.current = cs[0].id;
-      loadMemories();
-    }).catch(loadMemories);
-  }, []);
-
-  useEffect(() => {
-    if (!agentId) return;
-    api.get("/agents").then((as: any[]) => {
-      setAgentName(as.find((a: any) => a.id === agentId)?.name || "");
-    }).catch(() => {});
-    api.get("/kb2/agents/" + agentId + "/documents").then(setKbDocs).catch(() => {});
-    api.get<Company[]>("/companies").then((cs) => {
-      if (cs[0]?.id) {
-        cidRef.current = cs[0].id;
-        api.get(`/skills?company_id=${cs[0].id}`).then((all: any[]) => {
-          // 公共技能在前，专属在后；排除已掌握
-          setNodes(all);
-        }).catch(() => {});
-      }
-    }).catch(() => {});
-    refreshAll(agentId);
-  }, [agentId, refreshAll]);
+  // 写操作后刷新档案类数据（原 refreshAll 的职责）
+  const refreshAll = useCallback(() => {
+    refreshProfile();
+    refreshSkills();
+    refreshLessons();
+    refreshReviews();
+    refreshCareer();
+    refreshMemories();
+  }, [refreshProfile, refreshSkills, refreshLessons, refreshReviews, refreshCareer, refreshMemories]);
 
   async function uploadTrainingFile(f: File) {
-    if (!agentId || !cidRef.current) return;
+    if (!agentId || !cid) return;
     setTrUploading(true);
     try {
       const fd = new FormData();
       fd.append("file", f);
       const d = await api.upload<{ ok?: boolean; chunks?: number }>(
-        `/training/upload-material?agent_id=${agentId}&company_id=${cidRef.current}`, fd);
+        `/training/upload-material?agent_id=${agentId}&company_id=${cid}`, fd);
       if (d.ok) {
         setTrInput((prev: string) => (prev ? prev + "\n\n" : "") + `【来自附件 ${f.name} 的内容已入库私人知识库】`);
         setMsg(`✅ 附件 ${f.name} 已转 MD 存入私人知识库（${d.chunks} 块）`);
@@ -209,7 +232,7 @@ export default function AgentProfilePage() {
       await api.post(`/training/sessions?agent_id=${agentId}`,
         { training_type: "CONVERSATION", title: trTitle, raw_input: trInput });
       setMsg("✅ 训练完成");
-      refreshAll(agentId);
+      refreshAll();
       setTrTitle(""); setTrInput("");
     } catch (e: any) { setMsg("❌ " + (e.message || String(e))); }
     setBusy(false);
@@ -221,7 +244,7 @@ export default function AgentProfilePage() {
     try {
       await api.post(`/skills/${slug}/install`, { agent_id: agentId });
       setMsg(`✅ 已添加「${nodeName}」`);
-      refreshAll(agentId);
+      refreshAll();
     } catch (e: any) { setMsg("❌ " + (e.message || String(e))); }
     setBusy(false);
   }
@@ -239,7 +262,7 @@ export default function AgentProfilePage() {
       } catch { fail++; }
     }
     setMsg(`✅ 已添加 ${ok} 个技能${fail ? `，${fail} 个失败` : ""}`);
-    refreshAll(agentId);
+    refreshAll();
     setBusy(false);
   }
 
@@ -249,25 +272,26 @@ export default function AgentProfilePage() {
       description: "移除后该员工将无法再执行依赖这项技能的任务，可稍后重新学习。",
       confirmText: "移除",
     }))) return;
+    if (!cid) return;
     try {
-      await api.del(`/skill-growth/agents/${agentId}/skills/${asnId}?company_id=${cidRef.current}`);
+      await api.del(`/skill-growth/agents/${agentId}/skills/${asnId}?company_id=${cid}`);
       setMsg("✅ 已移除技能");
-      refreshAll(agentId);
+      refreshAll();
     } catch (e: any) { setMsg("❌ 移除失败"); }
   }
 
   async function addMemory() {
-    if (!memContent.trim() || !agentId) return;
+    if (!memContent.trim() || !agentId || !cid) return;
     try {
       const r = await api.post("/growth-center/memories", {
-        agent_id: agentId, company_id: cidRef.current,
+        agent_id: agentId, company_id: cid,
         content: memContent.trim(), memory_type: memType,
       });
       if (r.ok) {
         setMemContent("");
         setShowAddMem(false);
         setMsg("✅ 已添加记忆");
-        refreshAll(agentId);
+        refreshAll();
       }
     } catch (e: any) { setMsg("❌ 添加失败"); }
   }
@@ -278,10 +302,11 @@ export default function AgentProfilePage() {
       description: "员工将不再记得这条事实，后续任务中不会再引用。",
       confirmText: "删除",
     }))) return;
+    if (!cid) return;
     try {
-      await api.del(`/growth-center/memories/${memoryId}?company_id=${cidRef.current}`);
+      await api.del(`/growth-center/memories/${memoryId}?company_id=${cid}`);
       setMsg("✅ 已删除记忆");
-      refreshAll(agentId);
+      refreshAll();
     } catch (e: any) { setMsg("❌ 删除失败"); }
   }
 
@@ -293,7 +318,7 @@ export default function AgentProfilePage() {
     }))) return;
     try {
       await api.del(`/reflection/agents/${agentId}/lessons/${lessonId}`);
-      setLessons(prev => prev.filter(l => l.id !== lessonId));
+      mutateLessons(lessons.filter((l) => l.id !== lessonId));
       notify("success", "已删除该条复盘");
     } catch (e) {
       // 原实现 `catch { /* ignore */ }` 让删除失败完全无声
@@ -642,7 +667,7 @@ export default function AgentProfilePage() {
                 <span className="font-medium">📧 {mailbox.alias}</span>
                 <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300">已开通</span>
                 <span className="text-xs text-[var(--muted)] ml-auto">自动回复：{mailbox.auto_reply ? "开" : "关"}</span>
-                <button onClick={() => loadMailbox(agentId!)} className="text-xs text-[var(--muted)] hover:text-[var(--accent)]">⟳ 刷新</button>
+                <button onClick={() => { refreshMailbox(); refreshMessages(); }} className="text-xs text-[var(--muted)] hover:text-[var(--accent)]">⟳ 刷新</button>
               </div>
               {/* 模拟来信（站内通道演示） */}
               <div className="card card-static p-3 space-y-2">

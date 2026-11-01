@@ -11,6 +11,9 @@ from app.learning_engine import (add_growth_event, ensure_profile,
 from app.models.agent import Agent
 from app.models.learning import (AgentLearningRecord, GrowthEventType)
 from app.models.user import User
+from app.schemas.responses import (GrowthEventOut, LearningProfileOut,
+                                   LearningRecordCreatedOut,
+                                   LearningRecordUpdatedOut, ProfilePatchOut)
 
 router = APIRouter(prefix="/learning", tags=["learning"])
 
@@ -22,7 +25,8 @@ async def _agent(db: AsyncSession, agent_id: str, user_id: str) -> Agent:
     return await assert_agent_owned(db, user_id, agent_id)
 
 
-@router.get("/agents/{agent_id}/profile")
+@router.get("/agents/{agent_id}/profile",
+            response_model=LearningProfileOut)
 async def profile(
     agent_id: str,
     db: AsyncSession = Depends(get_db),
@@ -40,7 +44,9 @@ class ProfileUpdate(BaseModel):
     learning_goals: list[str] | None = None
 
 
-@router.patch("/agents/{agent_id}/profile")
+@router.patch("/agents/{agent_id}/profile",
+              response_model=ProfilePatchOut,
+              response_model_exclude_none=True)
 async def patch_profile(
     agent_id: str,
     data: ProfileUpdate,
@@ -83,7 +89,8 @@ class LearningGoalIn(BaseModel):
     plan: dict | None = None
 
 
-@router.post("/agents/{agent_id}/learning-records", status_code=201)
+@router.post("/agents/{agent_id}/learning-records", status_code=201,
+             response_model=LearningRecordCreatedOut)
 async def create_learning_record(
     agent_id: str,
     data: LearningGoalIn,
@@ -107,7 +114,8 @@ class ProgressIn(BaseModel):
     status: str | None = None
 
 
-@router.patch("/learning-records/{record_id}")
+@router.patch("/learning-records/{record_id}",
+              response_model=LearningRecordUpdatedOut)
 async def update_learning_record(
     record_id: str,
     data: ProgressIn,
@@ -117,6 +125,8 @@ async def update_learning_record(
     rec = await db.get(AgentLearningRecord, record_id)
     if not rec:
         raise HTTPException(404, "not found")
+    # 学习记录属员工私有数据：没有归属校验时，知道 record_id 就能改别家进度。
+    await _agent(db, rec.agent_id, user.id)
     if not 0 <= data.progress <= 100:
         raise HTTPException(400, "progress 0-100")
     rec.progress = data.progress
@@ -128,7 +138,8 @@ async def update_learning_record(
     return {"id": rec.id, "progress": rec.progress, "status": rec.status}
 
 
-@router.get("/agents/{agent_id}/growth-events")
+@router.get("/agents/{agent_id}/growth-events",
+            response_model=list[GrowthEventOut])
 async def growth_events(
     agent_id: str,
     limit: int = Query(100, ge=1, le=500),

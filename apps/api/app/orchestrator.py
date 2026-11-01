@@ -113,8 +113,14 @@ async def orchestrate(db: AsyncSession, parent: Task, coordinator: Agent) -> Tas
             try:
                 async with factory() as s2:
                     t2 = await s2.get(Task, task_id)
+                    failed_now = False
                     if t2 and t2.status == TaskStatus.RUNNING:
                         t2.status = TaskStatus.FAILED
+                        failed_now = True
+                    if failed_now:
+                        from app.services.notification_service import notify_task_terminal
+                        await notify_task_terminal(
+                            s2, t2, "FAILED", error=str(exc)[:500])
                     await log_event(s2, "orchestrator.subtask_failed", "task",
                                     task_id, "agent", agent_id, {"error": str(exc)[:500]})
                     await s2.commit()

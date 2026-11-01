@@ -1,8 +1,8 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
-import type { Company } from "@/lib/types";
 
 type Agent = { id: string; name: string; role?: string; department_id?: string | null };
 type Dept = { id: string; name: string };
@@ -34,11 +34,10 @@ const LEVEL_BADGE: Record<number, string> = {
 };
 
 export default function AutonomousPage() {
+  // 激活公司可订阅：切公司后作用域规则/日志/部门自动跟随，不再用 `/companies → cs[0]` 快照。
+  const cid = useActiveCompanyId() ?? "";
   const [companyLv, setCompanyLv] = useState<number>(2);
   const [stopped, setStopped] = useState(false);
-  // 显式保存当前公司 id：原代码在删除请求里写死 `company_id=x` 占位符，
-  // 只有在 api 层已记录激活公司时才会被替换，否则会把字面量 "x" 发给后端 → 404。
-  const [cid, setCid] = useState("");
   const [scopes, setScopes] = useState<ScopeRow[]>([]);
   const [logs, setLogs] = useState<LogItem[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -61,36 +60,50 @@ export default function AutonomousPage() {
     setTimeout(() => setMsg(""), 4000);
   };
 
-  const load = useCallback(async () => {
-    try {
+  /**
+   * 六块数据一次并发取回，交给统一数据层缓存/去重/聚焦重取。
+   * 任一项失败退回空值（与原来的 Promise.allSettled 逐项兜底一致），
+   * 不会因为一个口径挂了整页空白；settings 失败时用 null 表示"本次没取到"，
+   * 避免用默认值覆盖用户刚设置的本地状态。
+   */
+  const { data: bundle, refresh: load } = useResource(
+    cid ? `autonomous:${cid}` : null,
+    async () => {
       const [s, ov, l, a, d, c] = await Promise.allSettled([
         api.get("/governance/autonomous-settings"),
         api.get("/governance/autonomous-overview"),
         api.get("/governance/autonomous-logs?limit=30"),
         api.get("/agents"),
-        api.get<Company[]>(`/companies`).then(async (cs) => {
-          const id = cs[0]?.id;
-          if (id) setCid(id);
-          return id ? api.get(`/companies/${id}/departments`) : [];
-        }),
+        api.get(`/companies/${cid}/departments`),
         api.get("/external-agents"),
       ]);
-      if (s.status === "fulfilled") {
-        setCompanyLv(s.value?.level ?? 2);
-        setStopped(!!s.value?.emergency_stopped);
-      }
-      if (ov.status === "fulfilled") setScopes(Array.isArray(ov.value) ? ov.value : []);
-      if (l.status === "fulfilled") setLogs(Array.isArray(l.value) ? l.value : []);
-      if (a.status === "fulfilled") setAgents(Array.isArray(a.value) ? a.value : []);
-      if (d.status === "fulfilled" && Array.isArray(d.value)) {
-        const rows = d.value as any[];
-        setDepts(rows.map((x) => ({ id: x.id, name: x.name })));
-      }
-      if (c.status === "fulfilled") setConnections(c.value?.connections || []);
-    } catch { /* 静默 */ }
-  }, []);
+      return {
+        cid,
+        level: s.status === "fulfilled" ? (s.value?.level ?? 2) : null,
+        stopped: s.status === "fulfilled" ? !!s.value?.emergency_stopped : null,
+        scopes: ov.status === "fulfilled" && Array.isArray(ov.value) ? ov.value : [],
+        logs: l.status === "fulfilled" && Array.isArray(l.value) ? l.value : [],
+        agents: a.status === "fulfilled" && Array.isArray(a.value) ? a.value : [],
+        depts: d.status === "fulfilled" && Array.isArray(d.value)
+          ? (d.value as any[]).map((x) => ({ id: x.id, name: x.name }))
+          : [],
+        connections: c.status === "fulfilled" ? c.value?.connections || [] : [],
+      };
+    },
+  );
+  // 切公司时旧 bundle 先不渲染，避免规则/日志短暂显示上一家公司的数据。
+  const active = bundle && bundle.cid === cid ? bundle : null;
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (!active) return;
+    if (active.level !== null) setCompanyLv(active.level);
+    if (active.stopped !== null) setStopped(active.stopped);
+    setScopes(active.scopes);
+    setLogs(active.logs);
+    setAgents(active.agents);
+    setDepts(active.depts);
+    setConnections(active.connections);
+  }, [active]);
 
   /* ---------- 公司级 ---------- */
   async function setCompany(level: number) {

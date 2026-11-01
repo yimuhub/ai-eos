@@ -183,6 +183,11 @@ async def execute(cid: str, data: ExecuteIn,
             reason=(f"外部 Agent「{conn.name}」收到外发执行请求："
                     f"{(data.task_input or '')[:100]}"))
         db.add(req)
+        from app.services.notification_service import notify_approval_pending
+        await notify_approval_pending(
+            db, company_id=conn.company_id,
+            title=f"待审批：外部 Agent「{conn.name}」外发",
+            body=req.reason)
         await db.commit()
         return {"status": "pending_approval", "approval_id": req.id,
                 "message": "已生成审批单，等待老板批准后执行"}

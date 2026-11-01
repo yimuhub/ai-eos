@@ -13,12 +13,14 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import assert_company_capability, get_current_user, get_db
 from app.core.permissions import Capability
 from app.models.agent import Agent, AgentStatus
 from app.models.chat_group import ChatGroup
+from app.models.company import Company
 from app.models.expert_template import ExpertTemplate
 from app.services.event_system import log_event
 
@@ -207,72 +209,125 @@ async def _expert_map(db: AsyncSession, company_id: str, slugs: list[str]) -> di
 async def ensure_preset(pid: str, data: EnsureIn,
                         db: AsyncSession = Depends(get_db),
                         user=Depends(get_current_user)):
-    """创建/返回内置分组；缺的员工按专家库人设自动生成（幂等）。"""
+    """创建/返回内置分组；缺的员工按专家库人设自动生成（幂等）。
+
+    并发口径：
+    - 同一 (company_id, preset_id) 用 runtime_locks 串行化，避免重复建组；
+    - `chat_groups(company_id, preset_id)` 唯一约束兜底，冲突时回查已有组；
+    - 新建员工前先过 agents.py 的配额闸门（与 POST /agents 同口径），
+      超限落审批单并 409，绝不静默超编。
+    """
+    from app.task_engine import acquire_lock, release_lock
+
     await _owned_company(db, user.id, data.company_id, Capability.OPERATE)
     preset = _load_preset(pid)
     roster = preset.get("agents", [])
     if not roster:
         raise HTTPException(400, "该分组没有成员配置")
 
-    group = (await db.execute(select(ChatGroup).where(
-        ChatGroup.company_id == data.company_id,
-        ChatGroup.preset_id == pid))).scalars().first()
+    lock_key = f"chatgroup:{data.company_id}:{pid}"
+    lock_owner = uuid.uuid4().hex
+    if not await acquire_lock(db, lock_key, lock_owner, ttl_seconds=30):
+        raise HTTPException(409, "该分组正在创建中，请稍后重试")
 
-    agents = (await db.execute(select(Agent).where(
-        Agent.company_id == data.company_id))).scalars().all()
-    by_name = {a.name: a for a in agents}
-    slugs = [a.get("expert_slug") for a in roster if a.get("expert_slug")]
-    experts = await _expert_map(db, data.company_id, slugs)
+    try:
+        group = (await db.execute(select(ChatGroup).where(
+            ChatGroup.company_id == data.company_id,
+            ChatGroup.preset_id == pid))).scalars().first()
 
-    created, skipped = [], []
-    for a in roster:
-        name = (a.get("name") or "").strip()
-        if not name:
-            continue
-        hit = by_name.get(name)
-        if hit:
-            skipped.append({"id": str(hit.id), "name": hit.name})
-            continue
-        tpl = experts.get(a.get("expert_slug") or "")
-        agent = Agent(
-            company_id=data.company_id,
-            name=name,
-            role=a.get("role"),
-            description=a.get("duties") or (tpl.description if tpl else None),
-            system_prompt=(tpl.system_prompt if tpl else None),
-            expert_template_id=tpl.id if tpl else None,
-            memory_config={"group_preset": pid},
-            status=AgentStatus.IDLE,
-        )
-        db.add(agent)
-        await db.flush()
-        by_name[name] = agent
-        created.append({"id": str(agent.id), "name": agent.name, "role": agent.role})
-        await log_event(db, "agent.created", "agent", str(agent.id), "user", user.id,
-                        {"name": agent.name, "source": f"chat_group:{pid}"})
+        agents = (await db.execute(select(Agent).where(
+            Agent.company_id == data.company_id))).scalars().all()
+        by_name = {a.name: a for a in agents}
 
-    member_ids = [str(by_name[a["name"]].id) for a in roster
-                  if a.get("name") and a["name"] in by_name]
-    if group is None:
-        group = ChatGroup(
-            id=str(uuid.uuid4()),
-            company_id=data.company_id,
-            name=preset.get("name") or pid,
-            kind="preset",
-            preset_id=pid,
-            agent_ids=member_ids,
-            created_by=user.id,
-        )
-        db.add(group)
-    else:
-        group.agent_ids = member_ids
-    await db.commit()
-    await db.refresh(group)
+        # 先算清本次要新建几个人，在任何 Agent 落库前做配额检查。
+        new_names: list[str] = []
+        for a in roster:
+            name = (a.get("name") or "").strip()
+            if name and name not in by_name and name not in new_names:
+                new_names.append(name)
+        if new_names:
+            from app.api.routes.agents import _enforce_agent_quota
+            company = await db.get(Company, data.company_id)
+            if company is None:
+                raise HTTPException(404, "Company not found")
+            # 内置分组成员不挂部门，配额按「公司直挂」口径（department_id=None）统计。
+            await _enforce_agent_quota(
+                db, company, user, None, adding=len(new_names),
+                label=f"内置群聊「{preset.get('name') or pid}」的新员工")
 
-    item = await _serialize(db, data.company_id, group)
-    item["emoji"] = preset.get("emoji")
-    item["hint"] = preset.get("hint")
-    return {"group": item, "created": created, "reused": skipped}
+        slugs = [a.get("expert_slug") for a in roster if a.get("expert_slug")]
+        experts = await _expert_map(db, data.company_id, slugs)
+
+        created, skipped = [], []
+        for a in roster:
+            name = (a.get("name") or "").strip()
+            if not name:
+                continue
+            hit = by_name.get(name)
+            if hit:
+                skipped.append({"id": str(hit.id), "name": hit.name})
+                continue
+            tpl = experts.get(a.get("expert_slug") or "")
+            agent = Agent(
+                company_id=data.company_id,
+                name=name,
+                role=a.get("role"),
+                description=a.get("duties") or (tpl.description if tpl else None),
+                system_prompt=(tpl.system_prompt if tpl else None),
+                expert_template_id=tpl.id if tpl else None,
+                memory_config={"group_preset": pid},
+                status=AgentStatus.IDLE,
+            )
+            db.add(agent)
+            await db.flush()
+            by_name[name] = agent
+            created.append({"id": str(agent.id), "name": agent.name, "role": agent.role})
+            await log_event(db, "agent.created", "agent", str(agent.id), "user", user.id,
+                            {"name": agent.name, "source": f"chat_group:{pid}"})
+
+        member_ids = [str(by_name[a["name"]].id) for a in roster
+                      if a.get("name") and a["name"] in by_name]
+        if group is None:
+            group = ChatGroup(
+                id=str(uuid.uuid4()),
+                company_id=data.company_id,
+                name=preset.get("name") or pid,
+                kind="preset",
+                preset_id=pid,
+                agent_ids=member_ids,
+                created_by=user.id,
+            )
+            db.add(group)
+        else:
+            group.agent_ids = member_ids
+
+        try:
+            await db.commit()
+        except IntegrityError:
+            # 并发下另一请求先建好了同一个 (company, preset) 的组：
+            # 回滚本次新建，回查已有组按幂等结果返回（不重复建组/建人）。
+            await db.rollback()
+            group = (await db.execute(select(ChatGroup).where(
+                ChatGroup.company_id == data.company_id,
+                ChatGroup.preset_id == pid))).scalars().first()
+            if group is None:
+                raise HTTPException(409, "该分组正在创建中，请稍后重试")
+            item = await _serialize(db, data.company_id, group)
+            item["emoji"] = preset.get("emoji")
+            item["hint"] = preset.get("hint")
+            return {"group": item, "created": [],
+                    "reused": [{"id": m["id"], "name": m["name"]}
+                               for m in item["members"]]}
+
+        await db.refresh(group)
+        item = await _serialize(db, data.company_id, group)
+        item["emoji"] = preset.get("emoji")
+        item["hint"] = preset.get("hint")
+        return {"group": item, "created": created, "reused": skipped}
+    finally:
+        # 异常路径的残留写入不能借释放锁的 commit 顺手落库
+        await db.rollback()
+        await release_lock(db, lock_key, lock_owner)
 
 
 class GroupIn(BaseModel):

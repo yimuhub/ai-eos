@@ -245,3 +245,44 @@ export function clock(iso?: string | null): string {
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
+
+/* ---------- C2 左栏按项目分组 ---------- */
+
+export type ProjectGroup<T> = {
+  /** 项目 id；null 表示「未归项目」 */
+  projectId: string | null;
+  name: string;
+  threads: T[];
+};
+
+/**
+ * 把（已过滤/已排序的）会话按 projectId 分组。
+ *
+ * 纯函数，便于单测：
+ * - 组顺序跟随 projects 的顺序，空组不出现；「未归项目」永远排在最后；
+ * - 组内保持传入顺序（调用方已处理好置顶/未读/搜索/类型筛选）；
+ * - projectId 指向不存在的项目时归入「未归项目」，不凭空造一个标题。
+ */
+export function groupThreadsByProject<T extends { projectId?: string | null }>(
+  threads: readonly T[],
+  projects: readonly { id: string; name: string }[],
+  ungroupedLabel = "未归项目",
+): ProjectGroup<T>[] {
+  const buckets = new Map<string | null, T[]>();
+  const known = new Set(projects.map((p) => p.id));
+  for (const t of threads) {
+    const pid = t.projectId && known.has(t.projectId) ? t.projectId : null;
+    const list = buckets.get(pid);
+    if (list) list.push(t);
+    else buckets.set(pid, [t]);
+  }
+
+  const out: ProjectGroup<T>[] = [];
+  for (const p of projects) {
+    const list = buckets.get(p.id);
+    if (list && list.length) out.push({ projectId: p.id, name: p.name, threads: list });
+  }
+  const rest = buckets.get(null);
+  if (rest && rest.length) out.push({ projectId: null, name: ungroupedLabel, threads: rest });
+  return out;
+}

@@ -2,10 +2,9 @@
 Draft -> In Review -> Approved workflow.
 """
 import enum
-import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import Enum, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -42,6 +41,11 @@ class Artifact(Base):
     created_by: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[datetime] = mapped_column(default=_now)
     published_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
+    task_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True,
+        index=True)
+    accepted_by: Mapped[str | None] = mapped_column(String(36))
+    accepted_at: Mapped[datetime | None] = mapped_column(nullable=True, default=None)
 
 
 class ArtifactVersion(Base):
@@ -69,7 +73,10 @@ ALLOWED_TRANSITIONS = {
     ArtifactStatus.IN_REVIEW: {ArtifactStatus.APPROVED, ArtifactStatus.REJECTED,
                                ArtifactStatus.DRAFT},  # 可撤回
     ArtifactStatus.REJECTED: {ArtifactStatus.IN_REVIEW},  # 修改后重新提交
-    ArtifactStatus.APPROVED: {ArtifactStatus.ARCHIVED},
+    ArtifactStatus.APPROVED: {
+        ArtifactStatus.ARCHIVED,
+        ArtifactStatus.REJECTED,   # B2 验收退回返工（不是审核驳回）
+    },
     ArtifactStatus.ARCHIVED: set(),
 }
 

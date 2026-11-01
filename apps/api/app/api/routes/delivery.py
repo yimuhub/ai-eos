@@ -22,6 +22,9 @@ from app.models.asset import Asset
 from app.models.company import Company
 from app.models.project import Project
 from app.models.user import User
+from app.schemas.responses import (DeliveryAgentFolderDetailOut,
+                                   DeliveryByAgentOut, DeliveryByProjectOut,
+                                   DeliveryByTaskOut, DeliveryFilesOut)
 
 router = APIRouter(prefix="/delivery", tags=["delivery"])
 
@@ -58,7 +61,7 @@ def _file_info(a: Asset) -> dict:
     }
 
 
-@router.get("/by-agent")
+@router.get("/by-agent", response_model=DeliveryByAgentOut)
 async def by_agent(company_id: str = Query(...),
                    db: AsyncSession = Depends(get_db),
                    user: User = Depends(get_current_user)):
@@ -99,7 +102,7 @@ async def by_agent(company_id: str = Query(...),
     return {"folders": folders}
 
 
-@router.get("/by-project")
+@router.get("/by-project", response_model=DeliveryByProjectOut)
 async def by_project(company_id: str = Query(...),
                      db: AsyncSession = Depends(get_db),
                      user: User = Depends(get_current_user)):
@@ -147,12 +150,13 @@ async def download(asset_id: str, db: AsyncSession = Depends(get_db),
 
 # ---------------- 聊天页用：单个 Agent 的交付文件夹 ----------------
 
-@router.get("/agents/{aid}/folder")
+@router.get("/agents/{aid}/folder",
+            response_model=DeliveryAgentFolderDetailOut)
 async def agent_folder(aid: str, db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
-    from app.api.routes.agent_chat import _owned
+    from app.api.deps import assert_agent_owned
 
-    a = await _owned(db, user.id, aid)
+    a = await assert_agent_owned(db, user.id, aid)
     assets = (await db.execute(select(Asset).where(
         Asset.agent_id == str(a.id)).order_by(Asset.created_at.desc())
     )).scalars().all()
@@ -160,7 +164,7 @@ async def agent_folder(aid: str, db: AsyncSession = Depends(get_db),
             "files": [_file_info(x) for x in assets]}
 
 
-@router.get("/by-task")
+@router.get("/by-task", response_model=DeliveryByTaskOut)
 async def by_task(company_id: str = Query(...),
                   db: AsyncSession = Depends(get_db),
                   user: User = Depends(get_current_user)):
@@ -187,7 +191,7 @@ async def by_task(company_id: str = Query(...),
     return {"groups": groups}
 
 
-@router.get("/by-scope")
+@router.get("/by-scope", response_model=DeliveryFilesOut)
 async def by_scope(company_id: str = Query(...),
                    scope: str = Query(...), scope_id: str = Query(...),
                    db: AsyncSession = Depends(get_db),

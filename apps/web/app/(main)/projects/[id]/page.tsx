@@ -1,14 +1,14 @@
 "use client";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { api, describeError, downloadURL, fetchBlobURL } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
 import { notify } from "@/components/Toast";
 import { TASK_STATUS_ZH, zh } from "@/lib/i18n";
 import { DeliverablesPanel, ProjectLogsPanel } from "@/components/DeliverablesLogs";
 import type { FolderFile } from "@/components/DeliverablesLogs";
-import type { Company } from "@/lib/types";
 
 /* ============================================================
    项目详情 v2：生命周期操作（暂停/恢复/停止/删除）
@@ -58,17 +58,42 @@ const STATUS_ZH: Record<string, { label: string; cls: string; dot: string }> = {
 export default function ProjectDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  const [d, setD] = useState<Detail | null>(null);
-  const [progress, setProgress] = useState<any>(null);
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [skills, setSkills] = useState<SkillRow[]>([]);
-  const [depts, setDepts] = useState<{ id: string; name: string }[]>([]);
+  // 激活公司：可订阅 —— 部门下拉 / 群聊 / 交付文件都跟随顶栏切公司
+  const cid = useActiveCompanyId();
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const [memberPanelOpen, setMemberPanelOpen] = useState(false);
-  const [cid, setCid] = useState("");
   const [memberPick, setMemberPick] = useState("");
   const [milestoneName, setMilestoneName] = useState("");
+
+  // 项目详情与进度：参数只依赖路由 id，交给统一数据层（缓存 + 回窗重取）
+  const { data: d, refresh: refreshDetail } = useResource<Detail>(
+    id ? `project:${id}` : null,
+    () => api.get<Detail>(`/projects/${id}`),
+  );
+  const { data: progressData, refresh: refreshProgress } = useResource<any>(
+    id ? `project:progress:${id}` : null,
+    () => api.get(`/projects/${id}/progress`),
+  );
+  const progress = progressData;
+  // 写操作后刷新详情与进度（原 load() 的职责）
+  const load = () => { refreshDetail(); refreshProgress(); };
+
+  const { data: agentData } = useResource<Agent[]>(
+    "agents:all",
+    () => api.get<Agent[]>("/agents"),
+  );
+  const agents = useMemo<Agent[]>(() => agentData ?? [], [agentData]);
+  const { data: skillData } = useResource<SkillRow[]>(
+    "skills:all",
+    () => api.get<SkillRow[]>("/skills"),
+  );
+  const skills = useMemo<SkillRow[]>(() => skillData ?? [], [skillData]);
+  const { data: deptData } = useResource<{ id: string; name: string }[]>(
+    cid ? `org:depts:${cid}` : null,
+    () => api.get<{ id: string; name: string }[]>(`/companies/${cid}/departments`),
+  );
+  const depts = useMemo<{ id: string; name: string }[]>(() => deptData ?? [], [deptData]);
 
   // 聊天面板
   const [chatOpen, setChatOpen] = useState(true);
@@ -87,26 +112,9 @@ export default function ProjectDetailPage() {
   const [selSkills, setSelSkills] = useState<Set<string>>(new Set());
   const [manualSending, setManualSending] = useState(false);
 
-  const load = useCallback(async () => {
-    if (!id) return;
-    setD(await api.get(`/projects/${id}`));
-    try { setProgress(await api.get(`/projects/${id}/progress`)); } catch {}
-  }, [id]);
-
   const [chatHist, setChatHist] = useState(false);
   const [folderOpen, setFolderOpen] = useState(false);
   const [folderFiles, setFolderFiles] = useState<FolderFile[]>([]);
-  useEffect(() => {
-    load();
-    api.get("/agents").then(setAgents).catch(() => {});
-    api.get("/skills").then(setSkills).catch(() => {});
-    api.get<Company[]>("/companies").then(async (cs) => {
-      if (cs.length) {
-        setCid(cs[0].id);
-        try { setDepts(await api.get(`/companies/${cs[0].id}/departments`)); } catch {}
-      }
-    }).catch(() => {});
-  }, [load]);
 
   // 群聊历史加载（cid 就绪后触发一次）
   useEffect(() => {
@@ -135,7 +143,7 @@ export default function ProjectDetailPage() {
     try {
       // 原来不看返回就重新加载：暂停/停止失败时界面上毫无痕迹
       await api.post(`/projects/${id}/lifecycle`, { action });
-      await load();
+      load();
     } catch (e) { setMsg(`❌ ${describeError(e, "操作失败")}`); }
     setBusy(false);
   }
@@ -197,7 +205,7 @@ export default function ProjectDetailPage() {
       setChatLog((prev) => prev.concat(
         replies.map((rep) => ({ role: rep.agent_name || rep.agent_id || 'agent', text: rep.text || '',
                                  isAgent: true, agent: rep.agent_name, search: rep.search_used || false }))));
-      await load();
+      load();
     } catch (e) {
       setChatLog((prev) => [...prev, { role: "assistant", text: `出错了：${describeError(e, "发送失败")}` }]);
     }
@@ -237,7 +245,7 @@ export default function ProjectDetailPage() {
                                  isAgent: true, agent: rep.agent_name, search: rep.search_used || false }))));
       setSelAgents(new Set()); setSelDepts(new Set()); setSelSkills(new Set());
       setManualMode(false);
-      await load();
+      load();
     } catch (e) {
       setChatLog((prev) => [...prev, { role: "assistant", text: `出错了：${describeError(e, "发送失败")}` }]);
     }
@@ -259,7 +267,7 @@ export default function ProjectDetailPage() {
         role: "assistant",
         text: `✅ 参考资料「${file.name}」已存入知识库并关联到本项目。`,
       }]);
-      await load();
+      load();
     } catch (e) {
       setChatLog((prev) => [...prev, {
         role: "assistant", text: `上传失败：${describeError(e, "上传失败")}` }]);

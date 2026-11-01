@@ -83,7 +83,86 @@ curl -f http://localhost:8001/health && curl -f http://localhost:8001/health/db
 4. 抽查一条历史任务/成果可打开
 5. 检查日志无连续 ERROR：`tail -100 logs/ai-eos.log`
 
-## 6. 保留策略建议
+## 6. 代码仓库双份备份（本地 + 云端）
+
+数据库和 `.env` 由 `tools/backup.sh` 负责；**代码**由 `tools/backup_repo.sh` 负责。
+一份代码备份 = git bundle（已提交的全部历史）+ 工作区快照（尚未提交的改动），
+再加同目录下的数据库备份。
+
+```bash
+# 本地（默认写到仓库同级 ../aieos-backups/repo，保留最近 14 份）
+./tools/backup_repo.sh
+
+# 云端副本（iCloud / OneDrive / 外置硬盘都行）——先加密再同步
+AIEOS_BACKUP_PASSPHRASE='自己定的长口令' \
+  ./tools/backup_repo.sh --encrypt --out ~/Library/Mobile\ Documents/com~apple~CloudDocs/aieos-backups
+```
+
+口令只从环境变量读取，脚本不打印、不落盘。**口令必须单独记在密码管理器里**，
+丢了口令等于丢了备份。
+
+### 6.1 三份副本，两个介质，一份异地（3-2-1）
+
+| # | 位置 | 内容 | 频率 | 谁在维护 |
+|---|------|------|------|----------|
+| 1 | GitHub 私有仓库 `origin/main` | 已提交的代码 + 标签 + Release 说明 | 每次提交 / 每天 | 开发者手动 push |
+| 2 | 本机 `../aieos-backups/repo` | bundle + 工作区快照 + 数据库 | 每日自动（launchd） | `tools/backup_repo.sh` |
+| 3 | iCloud / OneDrive / 外置硬盘 | 加密后的第 2 份拷贝 | 每日自动 | 系统同步 / 手动 rsync |
+
+GitHub 解决"本机坏了"；本地快照解决"GitHub 挂了 / 误 force-push"；
+云端加密副本解决"本机硬盘和 GitHub 同时出问题"。
+
+### 6.2 每日自动备份（macOS launchd）
+
+```bash
+mkdir -p ~/Library/LaunchAgents
+cat > ~/Library/LaunchAgents/dev.aieos.backup.plist <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.aieos.backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd "$HOME/Documents/张阗/ai-eos" &amp;&amp; ./tools/backup_repo.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>/tmp/aieos-backup.log</string>
+  <key>StandardErrorPath</key><string>/tmp/aieos-backup.err</string>
+</dict></plist>
+PLIST
+launchctl load ~/Library/LaunchAgents/dev.aieos.backup.plist
+```
+
+需要同时上云时，把 `ProgramArguments` 里那条命令换成带 `AIEOS_BACKUP_PASSPHRASE`
+和 `--encrypt --out <iCloud 目录>` 的版本（口令建议从 `~/.config/aieos/backup.env`
+读取，该文件权限设 `600`，且不要放进任何被 git 跟踪的目录）。
+
+### 6.3 从备份恢复代码
+
+```bash
+# 方式一：从 bundle 完整重建（含所有分支和标签）
+git clone aieos-repo-YYYYmmdd-HHMMSS-<host>.bundle ai-eos-restored
+cd ai-eos-restored && git remote set-url origin <GitHub 地址> && git push -u origin --all
+
+# 方式二：只找回未提交的改动（解开工作区快照）
+mkdir /tmp/wt && tar -xzf aieos-repo-...-worktree.tar.gz -C /tmp/wt
+# 然后把 /tmp/wt 与当前仓库对比，挑回需要的文件
+
+# 加密产物先解密
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+  -pass env:AIEOS_BACKUP_PASSPHRASE \
+  -in aieos-repo-....bundle.enc -out aieos-repo-....bundle
+
+# 数据库 / .env 从 tools/restore.sh 恢复（见第 4 节）
+```
+
+恢复后先跑 `/health`、`/health/db` 与 `./tools/check.sh --fast`，确认代码与数据都可用。
+
+## 7. 保留策略建议
 
 - 每日 1 份，保留 7 天；每周 1 份，保留 4 周；每月 1 份，保留 3 个月。
 - 备份与生产不在同一台机器；密钥文件（`.env`）单独离线保管。

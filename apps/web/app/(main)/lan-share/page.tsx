@@ -12,9 +12,10 @@
  *  - API 地址：从本页对 API_BASE 的相对位置推（壳模式 8001）
  *  - 开机自启：window.aieosDesktop IPC（浏览器访问时置灰）
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { api } from "@/lib/api";
+import { useResource } from "@/lib/useResource";
 import { notify } from "@/components/Toast";
 import { confirmAction } from "@/components/ConfirmDialog";
 
@@ -37,8 +38,16 @@ export default function LanSharePage() {
   // V5.4 配对码 + 设备授权
   const [pairToken, setPairToken] = useState("");
   const [pairBusy, setPairBusy] = useState(false);
-  const [devices, setDevices] = useState<DeviceRow[]>([]);
-  const [devLoaded, setDevLoaded] = useState(false);
+  // 已授权设备：统一数据层（缓存 + 回窗重取），吊销后 refresh
+  const { data: deviceData, loading: devLoading, refresh: refreshDevices } = useResource<DeviceRow[]>(
+    "lan-share:devices",
+    async () => {
+      try { return await api.get<DeviceRow[]>("/devices"); }
+      catch { return []; /* 无设备或后端不可达：列表留空 */ }
+    },
+  );
+  const devices = useMemo<DeviceRow[]>(() => deviceData ?? [], [deviceData]);
+  const devLoaded = !devLoading;
 
   useEffect(() => {
     setIsDesktop(!!window.aieosDesktop);
@@ -56,6 +65,7 @@ export default function LanSharePage() {
     const m = o.match(/:(\d+)$/);
     const frontPort = m ? m[1] : "";
     setApiPort(frontPort === "8000" ? "8001" : "8000");
+    // 本机网卡探测是"环境快照"（含离线回退逻辑），不属于列表数据，仍由页面自己处理
     api.get("/clients/lan").then((d: any) => {
       setLanIp(d.lan_ip || "");
       setReachable(!!d.reachable);
@@ -64,19 +74,11 @@ export default function LanSharePage() {
       setLanIp(window.location.hostname !== "localhost" ? window.location.hostname : "");
       setReachable(window.location.hostname !== "localhost");
     }).finally(() => setLoaded(true));
-    loadDevices();
   }, []);
 
   const webUrl = lanIp ? `${window.location.protocol}//${lanIp}${window.location.port ? ":" + window.location.port : ""}` : "";
   const apiUrl = lanIp ? `http://${lanIp}:${apiPort}` : "";
   const pairUrl = pairToken ? window.location.origin + "/pair?token=" + pairToken : "";
-
-  const loadDevices = async () => {
-    try {
-      setDevices(await api.get<DeviceRow[]>("/devices"));
-    } catch { /* 无设备或后端不可达：列表留空 */ }
-    finally { setDevLoaded(true); }
-  };
 
   const createPairing = async () => {
     setPairBusy(true);
@@ -99,7 +101,7 @@ export default function LanSharePage() {
     try {
       const r = await api.post<any>(`/devices/${d.id}/revoke`, {});
       notify("success", `已吊销（${r.sessions_revoked ?? 0} 个会话立即失效）`);
-      loadDevices();
+      refreshDevices();
     } catch (e: any) {
       notify("error", "吊销失败：" + (e?.message || ""));
     }

@@ -4,7 +4,7 @@
 
 **The AI-Native Enterprise Operating System — Found an AI Company, Hire Digital Employees, Delegate Work**
 
-[![Phase](https://img.shields.io/badge/version-v5.14.0-blue.svg?style=flat-square)](#-latest-v5140)
+[![Phase](https://img.shields.io/badge/version-v5.15.0-blue.svg?style=flat-square)](#-latest-v5150)
 [![License: BSL 1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12+-green.svg?style=flat-square)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688.svg?style=flat-square)](https://fastapi.tiangolo.com)
@@ -69,7 +69,7 @@ AI chatbots answer questions — but the work still lands on your desk. Meanwhil
 - Capability × role matrix as a single source of truth; per-route ownership checks. *Note:* the matrix defines OWNER/ADMIN/MEMBER/VIEWER, but multi-member companies aren't open yet — `resolve_role` currently returns OWNER for the company owner and nothing else, so treat today's isolation as **per-user**, not shared-org tenancy.
 
 ### 8. 🎭 Onboarding for Humans
-- A 3-step wizard (about 1 minute), a **keyless demo mode** to try before configuring models, Chinese actionable error messages, and a ⌘K command palette with pinyin search.
+- A 4-step wizard (about 1 minute), a **keyless demo mode** to try before configuring models, Chinese actionable error messages, and a ⌘K command palette with pinyin search. The wizard survives an interruption: answers are kept in `sessionStorage`, and a model that saved but failed the connectivity test can be resumed from step 4.
 - **One screen for everything**: `/workspace` is the only shell. Sidebar, ⌘K and in-page links open features as **tabs in the right panel** while the chat and left rail stay put; old direct URLs redirect into the workbench (tabs are closable, restored on reload, and go full-screen on narrow viewports).
 
 ---
@@ -109,7 +109,7 @@ flowchart TD
     Engines --> Storage
 ```
 
-**Scale (measured from source, v5.14.0)**: backend 31,893 lines / 168 files / 420 operations over 365 paths / 104 tables / 32 Alembic migrations; frontend 24,938 lines / 47 page routes; backend suite **324 passed** (plus 38 e2e checks).
+**Scale (measured from source, v5.15.0)**: backend 42,836 lines / 203 files / 471 operations over 408 paths / 100 tables / 39 Alembic revisions (legacy 34 + baseline 0001–0005); frontend 39,463 lines / 51 page routes; backend suite **781 tests** (plus 38 e2e checks).
 
 > Two honest caveats, because "it works" and "it's been verified" are different claims:
 > - **`alembic upgrade head` is PostgreSQL-only.** One historical migration (`23e9b97bb927`) hits SQLite's
@@ -192,7 +192,19 @@ cd apps/web && npm run test          # vitest (frontend)
 
 ---
 
-## 📦 Latest: v5.14.0
+## 📦 Latest: v5.15.0
+
+*From audit to nine: contracts, deliverable loop, multi-device and security closed — 2026-11-01. Full entry in [`CHANGELOG.md`](CHANGELOG.md).*
+
+- 🛡 **Stable API contract.** Every error now carries `{detail, code, message, request_id}`, `/api/v1` is an alias of the same routes, and core business routes (agents / tasks / projects / delivery / review / schedules / skills / learning / performance / reflection) declare `response_model` on 90% of operations via 113 typed schemas. A ratchet test stops regressions; the global OpenAPI ratio is 113/471.
+- 🧾 **Deliverable loop.** Artifacts link to tasks, accept/decline with idempotent state, comments, and a task inbox with four buckets (in progress / to accept / done / failed) — "submit → accept" is now a real workflow.
+- 📱 **Multi-device.** `/m` PWA with approvals, Web Push (`push_subscriptions` + VAPID + 404/410 cleanup), and cross-device read state (`thread_reads`, max-merge, never decreases).
+- 🏭 **One-command company.** SaaS industry pack (5 departments / 13 roles / 3 deliverable templates / 10 task templates) scaffolds a whole company; local hybrid search (CJK bigram + synonyms + BM25) powers ⌘K.
+- 💳 **Commercial rails.** 14-day trial + plans, HTML invoice, Fernet-encrypted BYOK vault, Ed25519 license with global read-only gate.
+- 🧪 **Quality.** Suite **781 tests**, line coverage **69.8%** (the old 47.9% was a measurement bug — coverage wasn't tracking greenlet), Lighthouse first-paint gate, 60-task eval set, dependency/secret scanning and tenant matrix in the manual pre-release pipeline.
+- 🚀 **Ops.** Dockerfiles + compose, backup/restore with sha256-verified drills, and a documented cloud + local backup strategy (`docs/备份与恢复.md`).
+
+### Previous: v5.14.0
 
 *Two interfaces, one system: classic full-page navigation and the geek three-pane workbench — chosen on first entry — 2026-10-30. Full entry in [`CHANGELOG.md`](CHANGELOG.md).*
 

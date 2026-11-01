@@ -733,6 +733,9 @@ async def announce(sid: str, company_id: str = Query(...),
     gw = ModelGateway(db)
     from app.api.routes.group_chat import GroupChatMessage
 
+    # 结束只读事务：下面每个 Agent 都要跨网络调 LLM，别把事务/写锁举过调用
+    await db.commit()
+
     results = []
     for t in tasks:
         agent = await db.get(Agent, t.agent_id)
@@ -748,6 +751,9 @@ async def announce(sid: str, company_id: str = Query(...),
             f"格式要求：以「我的任务是：…」开头，100字以内，明确说清要交付什么。"},
             {"role": "user", "content":
              f"项目目标：{sess.goal}\n你的任务（第{t.seq}项）：{t.title}\n详情：{t.detail or '见标题'}"}]
+        # 短事务：LLM 调用前 commit（上面 db.get 已开新读事务，先释放），
+        # 拿到结果立即落库并 commit，再进入下一位成员——避免跨 N 次 LLM 的写事务。
+        await db.commit()
         try:
             llm = await gw.chat_with_agent_models_by_agent(agent, messages)
             text = (llm.get("content") or "").strip() or "(未发言)"
@@ -760,8 +766,8 @@ async def announce(sid: str, company_id: str = Query(...),
             scope="project", scope_id=sess.project_id or sess.id,
             agent_id=str(agent.id), agent_name=agent.name, role="agent",
             content={"text": text}))
+        await db.commit()
         results.append({"agent": agent.name, "text": text})
-    await db.commit()
     return {"announcements": results}
 
 

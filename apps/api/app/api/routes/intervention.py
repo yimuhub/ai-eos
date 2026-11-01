@@ -147,6 +147,11 @@ async def create_request(
                           requested_by_agent_id=data.requested_by_agent_id,
                           reason=data.reason or ("force" if data.force and not need else None))
     db.add(req)
+    from app.services.notification_service import notify_approval_pending
+    await notify_approval_pending(
+        db, company_id=company_id,
+        title=f"待审批：{data.action_type}",
+        body=data.reason or "有新的审批请求等待处理。")
     await db.commit()
     return {"approved": False, "auto": False, "request_id": req.id,
             "status": "PENDING"}

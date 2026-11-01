@@ -1,10 +1,14 @@
 """AI-EOS API entrypoint."""
 import secrets
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.routes import (access, agents, artifacts, assets, auth, browser_agent, group_chat, chat_groups, growth_center, doc_styles,
                             agent_chat, delivery, departments_batch, kb2, offboarding, task_dispatch,
@@ -12,8 +16,8 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             career,
                             clients, pairing, diagnostics, briefing, budgets,
                             mcp, mailboxes, worklogs,
-                            org_presets,
-                            companies, collaboration, computer_agent, context,
+                            companies, company_search, collaboration,
+                            computer_agent, context,
                             dashboard, events, health, intervention, knowledge,
                             learning, meetings, memory, messages, metrics, models_api,
                             orchestrate, performance, projects, reflection,
@@ -22,9 +26,30 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             schedules, skill_growth,
                             app_alias, skills, tasks, team_builder, training, workflows, war_room, team_generator, company_manage,
                             tokens, experts, command, org_presets, prometheus_metrics, setup,
-                            members)
+                            members, licensing, subscription, byok)
+from app.api.routes import notifications
+from app.api.routes import thread_reads
+# 收件箱挂在 /tasks 下，必须比 tasks 路由**先注册**——tasks 有 /{tid} 兜底，
+# 后注册的 /tasks/inbox 会被它当成 tid 吃掉。
+from app.api.routes import inbox as inbox_routes
+from app.api.routes import queue as queue_routes
 from app.core.config import settings
+from app.core.errors import envelope, error_code_for_status
 from app.core.logging_config import get_logger, setup_logging
+from app.core.metrics import (
+    HTTP_REQUEST_DURATION_SECONDS,
+    HTTP_REQUESTS_IN_FLIGHT,
+    HTTP_REQUESTS_TOTAL,
+)
+from app.core.request_context import (
+    REQUEST_ID_HEADER,
+    get_request_id,
+    is_valid_request_id,
+    new_request_id,
+    reset_request_id,
+    set_request_id,
+)
+from app.services import license_service
 from app.version import __version__
 
 # 尽早配置日志：保证后续所有模块（含第三方库降噪）都走统一格式，
@@ -44,6 +69,7 @@ async def lifespan(app: FastAPI):
     from app.db.session import engine
     from app.db.base import Base
     import app.models  # noqa: F401 — 确保所有模型注册到 Base.metadata
+    _ = app.models  # pyflakes 不认 noqa：显式引用一次，保留其注册副作用
     if settings.database_url.startswith("sqlite"):
         async with engine.begin() as conn:
             await conn.run_sync(lambda c: Base.metadata.create_all(c))
@@ -93,6 +119,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         # 自愈失败要让运维看得见，但不能阻止服务启动
         logger.error("[startup] 恢复卡住的会议/任务失败：%s", e, exc_info=True)
+
+    # 持久队列自愈：回收过期租约（RUNNING 但进程已不在）并把没跑完的
+    # task.execute 重新投递。幂等性来自两点而非"只启动一次"的假设：
+    # 只投递仍为 QUEUED 的条目，且真正执行前还要 CAS 领取（抢不到就退出）。
+    try:
+        from app.services import job_queue
+        _queue_recovered = await job_queue.recover_startup()
+        if any(_queue_recovered.values()):
+            logger.info("[startup] 队列自愈：%s", _queue_recovered)
+    except Exception as e:  # noqa: BLE001 — 队列自愈失败不能拖住服务
+        logger.error("[startup] 队列自愈失败（不影响启动）：%s", e, exc_info=True)
     yield
     stop_scheduler()
     try:
@@ -127,12 +164,26 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # 浏览器跨源时默认读不到自定义响应头；把 request_id 暴露出去，
+    # 前端报错弹窗才能带上可 grep 的标识交给运维。
+    expose_headers=[REQUEST_ID_HEADER],
 )
 
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"}
 # 运维端点：暴露指标/接口面，默认不给匿名公网/局域网访客看
 _METRICS_PATH = "/metrics/prometheus"
+
+
+def _request_id_for(request) -> str:
+    """取当前请求的 request_id（唯一来源：request_id 中间件 + contextvar）。
+
+    优先读 ``request.state``：请求结束后 contextvar 会被还原，而异常路径
+    下处理器仍需要同一个 id；state 存在 scope 上，不受 reset 影响。
+    中间件没跑到（极端情况）时退回 contextvar，至少不返回空串。
+    """
+    rid = (getattr(getattr(request, "state", None), "request_id", "") or "").strip()
+    return rid or get_request_id()
 
 
 def _is_loopback_client(request) -> bool:
@@ -174,28 +225,217 @@ async def guard_ops_endpoints(request, call_next):
     if request.url.path == _METRICS_PATH and not settings.debug:
         if (settings.metrics_token or "").strip():
             if not _metrics_token_ok(request):
-                return JSONResponse(status_code=401,
-                                    content={"detail": "metrics 需要有效的 METRICS_TOKEN"},
-                                    headers={"WWW-Authenticate": "Bearer"})
+                rid = _request_id_for(request)
+                return JSONResponse(
+                    status_code=401,
+                    content=envelope("metrics 需要有效的 METRICS_TOKEN",
+                                     "unauthorized", rid),
+                    headers={"WWW-Authenticate": "Bearer",
+                             REQUEST_ID_HEADER: rid})
         elif not _is_loopback_client(request):
-            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+            rid = _request_id_for(request)
+            return JSONResponse(
+                status_code=404,
+                content=envelope("Not Found", "not_found", rid),
+                headers={REQUEST_ID_HEADER: rid})
     return await call_next(request)
+
+
+# 只读模式放行：License 失效后仍要能"自救"，也要能观测健康。
+# 否则用户拿到新 License 却连 /license 上传、重新登录、重装都做不了。
+_LICENSE_READ_ONLY_PREFIXES = (
+    "/auth", "/license", "/setup", "/health", "/metrics",
+    "/docs", "/redoc", "/openapi.json",
+)
+# 文档与 schema 可能带查询串/静态子路径，额外容忍 `-` 形式。
+_LICENSE_READ_ONLY_DASH_PREFIXES = frozenset({"/docs", "/openapi.json"})
+_LICENSE_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _license_read_only_allowed(path: str) -> bool:
+    for prefix in _LICENSE_READ_ONLY_PREFIXES:
+        if path == prefix or path.startswith(prefix + "/"):
+            return True
+        if prefix in _LICENSE_READ_ONLY_DASH_PREFIXES \
+                and path.startswith(prefix + "-"):
+            return True
+    return False
+
+
+@app.middleware("http")
+async def enforce_license_read_only(request, call_next):
+    """License 过期/校验不通过时，全局拦截业务写请求（只读模式）。
+
+    WHY 放在中间件而不是逐路由依赖：写端点有上百个，逐个补依赖必然漏；
+    ASGI 层兜底保证"以后新增的写端点默认受限"。同时必须原样放行
+    /auth、/license、/setup 等恢复路径——否则用户更新 License 后
+    仍然无法登录/上传，只读模式就成了死锁。
+
+    注册顺序：在 guard_ops_endpoints 之后、request_id 之前 add，
+    因此这里返回的 403 仍然带 X-Request-ID；metrics 在最外层，
+    403 也会被计入指标。GET/HEAD/OPTIONS 一律放行（CORS 预检不能被拦）。
+    """
+    if request.method not in _LICENSE_WRITE_METHODS:
+        return await call_next(request)
+    if _license_read_only_allowed(request.url.path):
+        return await call_next(request)
+    # 放在白名单之后：普通读请求与恢复路径不承担 License 校验开销。
+    if not license_service.is_read_only():
+        return await call_next(request)
+    rid = _request_id_for(request)
+    return JSONResponse(
+        status_code=403,
+        content=envelope(
+            "License 已过期或无效，系统处于只读模式；请更新 License 后重试",
+            "license_read_only", rid),
+        headers={REQUEST_ID_HEADER: rid},
+    )
+
+
+@app.middleware("http")
+async def request_id_middleware(request, call_next):
+    """给每个请求一个可跨日志关联的 request_id。
+
+    - 客户端带了合法的 X-Request-ID（8–128 位 [A-Za-z0-9._-]）就沿用：
+      前端/网关的一次操作可以贯穿多层日志；
+    - 否则生成 uuid4 hex；
+    - 写入 contextvar 供日志 Filter 与 500 兜底读取，并回写响应头。
+
+    注意注册顺序：本中间件最后 add（Starlette 插入到用户中间件最外层），
+    所以 guard_ops_endpoints 提前返回的 401/404 同样带 X-Request-ID。
+    异常路径下 contextvar 会在 finally 里还原，兜底处理器改从
+    request.state 取同一个 id（scope 共享，不受 reset 影响）。
+    """
+    supplied = (request.headers.get(REQUEST_ID_HEADER) or "").strip()
+    rid = supplied if is_valid_request_id(supplied) else new_request_id()
+    request.state.request_id = rid
+    token = set_request_id(rid)
+    try:
+        response = await call_next(request)
+    finally:
+        reset_request_id(token)
+    response.headers[REQUEST_ID_HEADER] = rid
+    return response
+
+
+@app.middleware("http")
+async def http_metrics_middleware(request, call_next):
+    """RED 指标：Rate / Errors / Duration，外加 in-flight 并发数。
+
+    注册顺序：本中间件在 request_id 之后 add，Starlette 会把它放到用户
+    中间件的最外层。因此 guard_ops_endpoints 提前返回的 401/404、路由
+    不存在的 404、以及兜底处理器产生的 500 都会被计数——不会漏响应。
+
+    path 标签必须低基数：优先取路由模板（`/agents/{aid}`），拿不到模板
+    时统一归为 `unmatched`，绝不把真实 id 当标签。
+    """
+    method = request.method
+    status_code = 500
+    started = time.perf_counter()
+    HTTP_REQUESTS_IN_FLIGHT.inc()
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    except BaseException:
+        # 未处理异常最终由 exception_handler 变成 500；这里先按 500 记账，
+        # 再把异常原样抛回去，不改变任何错误语义。
+        status_code = 500
+        raise
+    finally:
+        route = request.scope.get("route")
+        path = getattr(route, "path", None) or "unmatched"
+        duration = time.perf_counter() - started
+        HTTP_REQUESTS_IN_FLIGHT.dec()
+        HTTP_REQUESTS_TOTAL.inc(
+            method=method, path=path, status=str(status_code))
+        HTTP_REQUEST_DURATION_SECONDS.observe(
+            duration, method=method, path=path)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_handler(request, exc: StarletteHTTPException):
+    """HTTPException 统一信封：状态码与 detail 原样保留，补 code/message/request_id。
+
+    兼容性优先级（不能倒退）：
+    * ``status_code`` 不变——前端按状态码分支；
+    * ``detail`` 原样透传（字符串/列表/对象都不改写）——现有前端读它；
+    * 保留异常自带的 headers（如 401 的 WWW-Authenticate），并追加
+      X-Request-ID，使错误响应与日志/正常响应同源可关联。
+    """
+    rid = _request_id_for(request)
+    detail = exc.detail
+    code = getattr(exc, "code", None) or error_code_for_status(
+        exc.status_code, detail)
+    extra = getattr(exc, "extra", None) or {}
+    headers = dict(exc.headers or {})
+    headers[REQUEST_ID_HEADER] = rid
+    return JSONResponse(status_code=exc.status_code,
+                        content=envelope(detail, code, rid, **extra),
+                        headers=headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(request, exc: RequestValidationError):
+    """422 参数校验：detail 保持 FastAPI 原始 errors 列表，另补统一字段。
+
+    前端与部分测试直接按 ``detail[0]["loc"]`` 定位字段，因此这里绝不把
+    detail 改写成一句话；``message`` 才是给人看的那一条。
+    """
+    rid = _request_id_for(request)
+    # errors() 可能含 bytes / ValueError 等非 JSON 原生值，必须与 FastAPI
+    # 默认处理器一样先做 jsonable 编码。
+    detail = jsonable_encoder(exc.errors())
+    return JSONResponse(
+        status_code=422,
+        content=envelope(detail, "validation_error", rid),
+        headers={REQUEST_ID_HEADER: rid},
+    )
 
 
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request, exc):
     """兜底异常处理：任何未被捕获的异常都必须进日志（含堆栈），
-    并以统一 JSON 结构返回，避免前端拿到裸 500 后无从判断。"""
-    logger.error("未处理异常 %s %s: %s", request.method, request.url.path, exc,
-                 exc_info=exc)
-    from fastapi.responses import JSONResponse
+    并以统一 JSON 结构返回，避免前端拿到裸 500 后无从判断。
+
+    同时带回 request_id（响应头 + 响应体）：用户截图里的那串标识，
+    就是日志里对应的那一次请求，排障不再靠时间戳猜。
+    """
+    rid = _request_id_for(request)
+    token = set_request_id(rid)
+    try:
+        logger.error("未处理异常 %s %s: %s", request.method, request.url.path, exc,
+                     exc_info=exc)
+    finally:
+        reset_request_id(token)
+    detail = "服务器内部错误，请查看后端日志获取详细堆栈"
     return JSONResponse(
         status_code=500,
-        content={"detail": "服务器内部错误，请查看后端日志获取详细堆栈",
-                 "error_type": type(exc).__name__},
+        headers={REQUEST_ID_HEADER: rid},
+        content=envelope(detail, "internal_error", rid,
+                         error_type=type(exc).__name__),
     )
 
-for r in (health, auth, companies, agents, agent_chat, models_api, skills, tasks, messages, kb2, delivery, group_chat, chat_groups, doc_styles, growth_center,
+
+# A3：给全部业务端点补一个 `/api/v1` 别名。
+# 前端仍走无前缀路径（历史契约不变），但外部集成方可以用稳定版本前缀接入；
+# 这里只重写 ASGI scope 的 path，不复制路由、不改变 OpenAPI 与鉴权逻辑。
+_API_V1_PREFIX = "/api/v1"
+
+
+@app.middleware("http")
+async def api_v1_alias(request, call_next):
+    path = request.scope.get("path", "")
+    if path == _API_V1_PREFIX or path.startswith(_API_V1_PREFIX + "/"):
+        stripped = path[len(_API_V1_PREFIX):] or "/"
+        request.scope["path"] = stripped
+        request.scope["raw_path"] = stripped.encode("utf-8")
+        request.scope["root_path"] = (
+            (request.scope.get("root_path") or "") + _API_V1_PREFIX)
+    return await call_next(request)
+
+
+for r in (health, auth, companies, company_search, agents, agent_chat, models_api, skills, inbox_routes, tasks, messages, kb2, delivery, group_chat, chat_groups, doc_styles, growth_center,
           assets, events, dashboard, metrics, orchestrate, projects, workflows, meetings,
           collaboration, knowledge, memory, context, artifacts, intervention,
           performance, team_builder, browser_agent, computer_agent, app_alias,
@@ -203,5 +443,6 @@ for r in (health, auth, companies, agents, agent_chat, models_api, skills, tasks
           review, factory, external_agents, sandbox, automation, governance,
           offboarding, departments_batch, task_dispatch, test_console, war_room, team_generator, company_manage, tokens, experts, command, org_presets,
           access, prometheus_metrics, clients, pairing, diagnostics, briefing,
-          budgets, mcp, mailboxes, worklogs, setup, members):
+          budgets, mcp, mailboxes, worklogs, setup, members, notifications,
+          thread_reads, licensing, queue_routes, subscription, byok):
     app.include_router(r.router)

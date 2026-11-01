@@ -1,6 +1,8 @@
 # AI-EOS 多平台客户端流水线（V5.1）
 # 产出：Mac(dmg+zip) / Windows(nsis+portable) / Linux(AppImage+deb) / Android(发布版 APK)
-# 触发：手动（workflow_dispatch）或 push 标签 clients-*
+# 触发：**仅手动**（workflow_dispatch）。
+# 打包是 Actions 里最贵的一类任务（macOS/Windows runner × 多架构），密集开发期不随标签
+# 自动触发。需要出安装包时到 Actions 页面手动 Run workflow 并填标签。
 name: clients
 
 on:
@@ -10,9 +12,6 @@ on:
         description: "Release 标签（留空自动生成 clients-<日期>）"
         required: false
         default: ""
-  push:
-    tags:
-      - "clients-*"
 
 concurrency:
   group: clients-${{ github.ref }}

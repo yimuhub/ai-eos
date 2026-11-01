@@ -10,8 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, get_db
 from app.core.permissions import Capability, require_company_scope
 from app.models.scheduler import (AutomationRun, AutomationSchedule,
-                                  ScheduleStatus, compute_next_run)
+                                  compute_next_run)
 from app.models.user import User
+from app.schemas.responses import (ScheduleOut, ScheduleRunOut,
+                                   ScheduleStateOut, ScheduleTickOut)
 from app.scheduler_engine import run_due_schedules
 
 router = APIRouter(prefix="/schedules", tags=["schedules"],
@@ -35,7 +37,7 @@ def _out(s: AutomationSchedule):
             "run_count": s.run_count, "attachments": s.attachments or []}
 
 
-@router.post("")
+@router.post("", response_model=ScheduleOut)
 async def create_schedule(
     data: ScheduleIn,
     company_id: str = Query(...),
@@ -71,7 +73,7 @@ async def create_schedule(
     return _out(sched)
 
 
-@router.get("")
+@router.get("", response_model=list[ScheduleOut])
 async def list_schedules(
     company_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -83,7 +85,7 @@ async def list_schedules(
     return [_out(s) for s in rows]
 
 
-@router.post("/{sid}/pause")
+@router.post("/{sid}/pause", response_model=ScheduleStateOut)
 async def pause_schedule(
     sid: str,
     db: AsyncSession = Depends(get_db),
@@ -100,7 +102,7 @@ async def pause_schedule(
     return {"id": sid, "status": "PAUSED"}
 
 
-@router.post("/{sid}/resume")
+@router.post("/{sid}/resume", response_model=ScheduleStateOut)
 async def resume_schedule(
     sid: str,
     db: AsyncSession = Depends(get_db),
@@ -118,7 +120,7 @@ async def resume_schedule(
     return {"id": sid, "status": "ACTIVE"}
 
 
-@router.delete("/{sid}")
+@router.delete("/{sid}", response_model=ScheduleStateOut)
 async def archive_schedule(
     sid: str,
     db: AsyncSession = Depends(get_db),
@@ -135,13 +137,20 @@ async def archive_schedule(
     return {"id": sid, "status": "ARCHIVED"}
 
 
-@router.get("/{sid}/runs")
+@router.get("/{sid}/runs", response_model=list[ScheduleRunOut])
 async def list_runs(
     sid: str,
     limit: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # 运行历史只带 sid（没有 company_id 可挂 router 级门禁），
+    # 必须按 schedule → 公司反查归属，否则知道 sid 就能读别家调度记录。
+    from app.api.deps import assert_company_owned
+    sched = await db.get(AutomationSchedule, sid)
+    if not sched:
+        raise HTTPException(404, "not found")
+    await assert_company_owned(db, user.id, sched.company_id)
     q = await db.execute(select(AutomationRun).where(
         AutomationRun.schedule_id == sid).order_by(
         AutomationRun.started_at.desc()).limit(limit))
@@ -153,7 +162,7 @@ async def list_runs(
             for r in runs]
 
 
-@router.post("/tick")
+@router.post("/tick", response_model=ScheduleTickOut)
 async def tick(
     company_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -165,7 +174,7 @@ async def tick(
     到期任务。现在要求显式传 company_id 并校验 OWNER，扫描也限定在该公司，
     返回本次真正抢占到的数量（并发调用时只有一个能看到非零值）。
     """
-    from app.core.permissions import Capability, ensure_capability
+    from app.core.permissions import ensure_capability
     await ensure_capability(db, user.id, company_id, Capability.ADMIN)
     n = await run_due_schedules(db, company_id=company_id)
     return {"executed": n}

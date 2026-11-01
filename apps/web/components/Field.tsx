@@ -18,7 +18,13 @@
 // </Field>
 // ```
 
-import type { ReactNode } from "react";
+import {
+  cloneElement,
+  isValidElement,
+  useId,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 
 export type FieldProps = {
   /** 字段名。替代 placeholder 承担"说明这一栏是什么"的职责 */
@@ -37,6 +43,14 @@ export type FieldProps = {
   className?: string;
 };
 
+/** 只给原生表单控件补 ARIA；div 包裹层（个别调用方用它做 flex 布局）不能挂 aria-invalid */
+const FORM_CONTROLS = new Set(["input", "select", "textarea"]);
+
+type ControlA11yProps = {
+  "aria-describedby"?: string;
+  "aria-invalid"?: boolean | "true" | "false";
+};
+
 export default function Field({
   label,
   required,
@@ -46,8 +60,31 @@ export default function Field({
   children,
   className = "",
 }: FieldProps) {
-  const errId = htmlFor ? `${htmlFor}-error` : undefined;
-  const hintId = htmlFor ? `${htmlFor}-hint` : undefined;
+  // 没传 htmlFor 时仍要能关联错误：用 useId 生成本地 id（只用于 aria-describedby，
+  // 不给 label 加 for，避免"标签指向了不存在的控件"）。冒号在 id 里合法但选择器要转义，去掉。
+  const autoId = useId().replace(/:/g, "");
+  const baseId = htmlFor || `field-${autoId}`;
+  const errId = `${baseId}-error`;
+  const hintId = `${baseId}-hint`;
+  const describedBy = error ? errId : hint ? hintId : undefined;
+
+  const controlElement =
+    isValidElement<ControlA11yProps>(children) &&
+    typeof children.type === "string" &&
+    FORM_CONTROLS.has(children.type)
+      ? (children as ReactElement<ControlA11yProps>)
+      : null;
+
+  // 把错误/说明挂到控件上：读屏用户聚焦输入框时能直接听到"哪里错了"，
+  // 而不是只能靠 role=alert 的一次性播报（离开页面重进就再也听不到）。
+  // 若调用方自己传了 aria-describedby，合并而不是覆盖。
+  const control = controlElement
+    ? cloneElement(controlElement, {
+        "aria-describedby":
+          [controlElement.props["aria-describedby"], describedBy].filter(Boolean).join(" ") || undefined,
+        "aria-invalid": error ? true : controlElement.props["aria-invalid"],
+      })
+    : children;
 
   return (
     <div className={className}>
@@ -62,7 +99,7 @@ export default function Field({
       </label>
 
       {/* 错误优先于说明展示：出错时用户更需要知道哪里错了，而不是格式要求 */}
-      <div aria-live="polite">{children}</div>
+      <div aria-live="polite">{control}</div>
 
       {error ? (
         <p id={errId} role="alert" className="text-[11px] mt-1 flex items-start gap-1" style={{ color: "var(--danger)" }}>

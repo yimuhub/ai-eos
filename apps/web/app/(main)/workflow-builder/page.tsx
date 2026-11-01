@@ -1,6 +1,7 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { useResource } from "@/lib/useResource";
 import { notify } from "@/components/Toast";
 import type { Company } from "@/lib/types";
 
@@ -29,7 +30,12 @@ export default function WorkflowBuilderPage() {
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [agents, setAgents] = useState<Agent[]>([]);
+  // Agent 下拉候选：账号级列表，交给统一数据层（缓存 + 回窗重取）
+  const { data: agentData } = useResource<Agent[]>(
+    "agents:all",
+    () => api.get<Agent[]>("/agents"),
+  );
+  const agents = useMemo<Agent[]>(() => agentData ?? [], [agentData]);
   const [wfName, setName] = useState("新工作流");
   const [savedId, setSavedId] = useState<string | null>(null);
   const [runStatus, setRunStatus] = useState<string>("");
@@ -37,8 +43,6 @@ export default function WorkflowBuilderPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);  // 工作流运行轮询句柄
   const linkRef = useRef<{ from: string; x: number; y: number } | null>(null);
   const [linkPreview, setLinkPreview] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
-
-  useEffect(() => { api.get("/agents").then(setAgents).catch(() => {}); }, []);
 
   function addNode(type: string) {
     const key = `n${Date.now().toString(36)}${Math.floor(Math.random() * 100)}`;

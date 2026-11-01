@@ -3,6 +3,352 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的组织方式。
 完整的工程质量改造记录见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
 
+## [5.15.0] 从审查到九分：契约、交付、多端与安全收口 — 2026-11-01
+
+> 来源：五视角审查（[审查报告](docs/审查报告_AI-EOS_2026-10-31.md)）与
+> [达到 9 分的升级报告](docs/升级报告_AI-EOS_达到9分_2026-10-31.md) 的 30 天冲刺项。
+> 一次性发布：后端契约与响应模型、交付单闭环、移动端/PWA/Web Push、多端已读、
+> 套餐/BYOK/账单、安全运营与部署脚本。
+> 全量门禁：**781 passed**、e2e 38/38、408 条路径、后端行覆盖 **69.8%**。
+> 自本版起 CI 默认**不随 push 自动运行**（节省 Actions 额度），发布前手动触发
+> `ci` / `security`；客户端安装包仅在需要时手动触发 `clients`。
+
+### 🛡 统一错误信封与响应模型（A3 续）
+
+- 所有错误响应补齐稳定信封 `{detail, code, message, request_id}`：`detail` 与状态码保持原样，
+  新增 `code`（400/401/403/404/405/409/422/429/500 映射，只读模式保留 `license_read_only`）、
+  `message` 与 `request_id`；422 的 errors 列表结构不变。
+- 新增 `app/core/errors.py`（`ApiError` 可选携带 code/extra）与 `app/schemas/` 响应模型；
+  订阅、BYOK、公司检索、收件箱、队列、交付物、消息等端点补 `response_model`。
+- 核心业务路由（员工/任务/项目/交付/评审/调度/技能/学习/绩效/反思）补到 **81/90 = 90%**，
+  共 113 个模型类（`app/schemas/responses.py`，字段逐个对照真实返回）；全库 113/471 = 24%。
+- 新增 `test_response_models.py` 棘轮：核心路由 ≥90%、全库声明数不得回退、新端点必须带模型。
+- 测试：`test_error_envelope.py` 5 项（401/404/409/422/500、detail 保留、request_id 头体一致）。
+
+### 📱 Web Push 推送（C6 续）
+
+- 新增 `push_subscriptions` 表（Alembic `0004`）：endpoint 唯一、按公司/用户级联删除。
+- `services/web_push.py`：VAPID 私钥/公钥只走环境变量，缺失时 `push_available=False` 并保持轮询；
+  endpoint 必须 HTTPS 且复用 IM webhook 的 SSRF 校验；404/410 才删除订阅。
+- 派发挂在 `after_commit` 出站队列，业务回滚不发推送；日志不回显 endpoint/密钥。
+- `/m` 增加推送开关与权限引导；`sw.js` 增加 `push` / `notificationclick`（只允许同源跳转）。
+- 测试：`test_web_push.py` + `test_notifications.py` 共 29 项。
+
+### 🔄 多端已读同步（C3）
+
+- 新增 `thread_reads` 表（Alembic `0005`）与 `GET/POST /thread-reads`：按用户 + 公司记录会话已读
+  毫秒时间戳，批量合并只增不减，未来时间戳钳到服务器时间 +5 分钟。
+- 左栏打开会话时上报，挂载 / 回前台 / 每 60s 拉取并按 max 合并；置顶/归档仍留在本机，
+  只同步「读完没读完」这一判断。
+- 测试：后端 `test_thread_reads.py` 8 项；前端 `threadReads.test.ts` 9 项 + `sessionPrefs` 新增 4 项。
+
+### ⚡ Lighthouse 首屏门禁（C7 续）
+
+- 新增 `apps/web/lighthouserc.json` 与 CI `lighthouse` job：`next start` 后对 `/login` 采样 3 次，
+  硬断言 LCP ≤1.5s、TBT ≤200ms、CLS ≤0.1、性能分 ≥90。
+- 本机实测：性能分 100、LCP 0.5–0.6s、TBT 0ms、CLS 0.005。
+
+### 🧪 评测集扩到 60 条（B6 续）
+
+- `tools/eval_tasks.seed.json` 由 10 条扩到 60 条（调研汇报 / 方案计划 / 数据分析 / 文案材料 /
+  流程清单各 12 条），全部可机检；评测器无改动。
+- 护栏加强：条数与分类精确断言、id kebab-case 与类别前缀一致、`expected` 至少 2 条规则、规则去重。
+
+### 🧹 前端数据层迁移收尾（A6 续）
+
+- logs / diagnostics / test-console / warroom / device-console / lan-share / workflow-builder /
+  projects/[id] / agents/[id] / agents/[id]/profile 迁入 `useResource`。
+- 刻意保留手写 `useEffect`：`tasks/[id]`（5s 轮询 + AbortController + summary 合并）、
+  `workspace`（流式状态机）、`command`（无请求）、`app/(main)/page`（仅 setup 探测）。
+
+### 🧪 测试补充与覆盖率口径修正（A7 续）
+
+- 新增 `test_coverage_agents/tasks/projects/models_api/war_room.py`，补齐 agents、任务、项目、
+  模型与作战室的读写/越权/非法流转用例。
+- 修正覆盖率测量口径：SQLAlchemy async 在 await 边界交给 greenlet，coverage 未配
+  `concurrency = ["greenlet", "thread"]` 会系统性丢追踪（同文件 67% vs 99%、33% vs 100%）。
+  修正后后端全量 **69.8%** 行覆盖（21822 行、缺 6584），`fail_under` 40 → 65，CI 同步。
+- 全量收集 781 项，`pytest --cov=app` 通过。
+
+### 🧾 交付单：验收、退回与意见（B2）
+
+- 交付物可关联任务（`task_id`，创建时校验同公司），列表支持按任务过滤；详情返回验收人与时间。
+- 新增 `POST /artifacts/{id}/accept`（仅 APPROVED，幂等）与 `POST /artifacts/{id}/decline`
+  （退回修改，状态回流 REJECTED 并清空验收信息）。
+- 新增交付物评论：列表 / 发表（1–4000 字）/ 删除（作者或 MANAGE）。
+- 任务页「待验收」可直接跳到交付详情并自动展开，完成「任务 → 交付 → 验收」闭环。
+- 测试：`test_deliverables.py` 6 项（任务关联、跨租户 404、验收幂等/409、退回后重提、评论 CRUD/超长、非成员 404）。
+
+### 🏭 行业包：SaaS 预设 + 一键脚手架（B1）
+
+- 新增 `content/org_presets/saas.json`：互联网/SaaS，5 部门 13 角色，3 个交付物模板 + 10 个任务模板。
+- `POST /org-presets/{pid}/scaffold` 按预设批量建交付物（含 v1 Markdown 骨架）与任务；
+  支持 `dry_run`，按名称/标题幂等，MANAGE 权限、租户校验。
+- 预设列表返回交付物与任务模板数量，安装前可预览。
+- 测试：`test_industry_pack.py` 7 项。
+
+### 🔎 公司大脑：本地混合检索（B5）
+
+- 新增 `services/semantic_search.py`：CJK bigram 分词、停用词、10 组双向同义词扩展、BM25（k1=1.5/b=0.75），
+  不依赖外部模型或密钥。
+- `GET /search` 新增 `mode=keyword|hybrid`（默认 hybrid）：关键词路径保持不变，混合模式对公司内四类资料
+  重排并返回 `score`，结果上限 20 条；未知模式 400。
+- 测试：`test_semantic_search.py` 15 项 + `test_company_search.py` 10 项。
+
+### 📥 收件箱与项目分组（C1/C2）
+
+- 任务页拆为「收件箱 / 全部任务」，默认收件箱；`/tasks/inbox` 给出进行中/待验收/完成/失败四桶计数，
+  15 秒轮询；待验收项直达交付详情。原有筛选、批量操作、模板能力保留。
+- 会话增加 `project_id`：创建时可归属项目，`PATCH /conversations/{id}` 可改归属或清空；
+  左栏新增「项目分组」开关（localStorage），未归属会话排在最后。
+- 测试：`test_conversation_projects.py` 5 项 + `workspaceGroup.test.ts` 4 项。
+
+### 🔔 IM webhook 出站（C4）
+
+- 任务完成/失败、待审批、会议纪要三类通知在站内通知之外可同步推送到飞书/钉钉/Slack/通用 webhook。
+- 支持 HMAC 签名（飞书 `timestamp\nsecret`、钉钉 query 签名、Slack 通用体），URL 校验拦截
+  localhost、私有网段、链路本地与数字主机，日志不打印查询串。
+- 投递挂在 SQLAlchemy `after_commit`（`after_rollback` 丢弃），业务事务回滚不会误发。
+- 配置只走 `AIEOS_IM_WEBHOOK_URL` / `AIEOS_IM_WEBHOOK_TYPE` / `AIEOS_IM_WEBHOOK_SECRET`。
+- 测试：`test_im_webhook.py` 26 项。
+
+### 📱 移动端 `/m` 与 PWA（C6）
+
+- 新增移动优先页面 `/m`：待验收 / 待审批 / 只读会话三页签，20 秒轮询（页面隐藏时暂停），
+  未登录给出「请先在电脑上登录」。
+- 新增 `app/manifest.ts`、`public/icon.svg`、`public/sw.js`：可安装、离线壳、导航 network-first
+  回退 `/m`，静态资源 stale-while-revalidate，**不缓存 `/api`**。
+- 根布局补 `viewport`（`viewport-fit=cover`、主题色）。
+- 测试：`mobile.test.ts` 11 项；构建 `/m` 首屏 106 KB；`/sw.js`、`/icon.svg`、`/manifest.webmanifest` 均 200。
+- Web Push/VAPID 见上文「Web Push 推送」。
+
+### ⚡ 命令面板拆包（C7）
+
+- `CommandPalette` 改为 `next/dynamic` 异步加载；打开入口收敛到 `lib/palette.ts` 的事件总线，
+  经典外壳、工作台与侧栏不再静态依赖命令面板。
+- 首屏 124.89 → 120.00 KB；全站 665.79 KB（97.9%）、单 chunk 52.40 KB，体积预算通过。
+
+### 💳 套餐/试用、HTML 账单与 BYOK（E2/E4/E8）
+
+- 订阅：`GET /subscription` 自动开 14 天试用（幂等），套餐目录 trial/pro/enterprise；
+  一次性领取、切换、取消幂等；展示态派生 `TRIAL_EXPIRED` / `PAST_DUE`。`test_subscription.py` 6 项。
+- 账单：`GET /billing/invoices/view` 输出可打印 HTML 账单（确定性发票号、动态文本转义、打印样式），
+  MANAGE 权限。`test_invoice_html.py` 4 项。
+- BYOK：`PUT/GET/DELETE /byok/{name}` + `verify`；Fernet 加密落库（HKDF-SHA256 派生），
+  列表只回名称与时间，名称/长度非法统一 400。`test_byok.py` 7 项。
+
+### 🔌 `/api/v1` 版本别名（A3 部分）
+
+- 新增 ASGI 中间件：以 `/api/v1` 开头的请求重写 path 后交给现有路由，外部集成方可用稳定前缀接入；
+  前端历史无前缀路径不变，OpenAPI 与鉴权逻辑不复制、不改变。
+- 测试：`test_api_v1_alias.py` 4 项（健康检查等价、带/不带 Token 的 `/api/v1/auth/me`、未知版本路径 404）。
+- 统一错误信封与响应模型见上文「统一错误信封与响应模型」；`response_model` 仍未覆盖全部历史端点（已知问题 17）。
+
+### 🧹 交付物验收护栏修正
+
+- `CommandPalette` 拆包后，前端「禁止原生阻塞弹窗」护栏误报 PWA 的 `BeforeInstallPromptEvent.prompt()`；
+  改为绑定后调用，保持护栏不放宽。
+
+### 🔐 安全：再收两处跨租户越权
+
+- `GET /performance/agents/{id}` 补 `assert_agent_owned`，`POST /performance/company/{id}/snapshot`
+  与 `GET .../history` 补 `assert_company_capability`（写用 OPERATE、读用 VIEW）。
+  他司资源统一 404，与「不存在」不可区分，防 id 枚举。
+- `POST /reflection/proposals/{pid}/decide` 先按提案找到所属 Agent，再校验该公司 MANAGE；
+  `apply=true` 写知识库时使用校验过的 `company_id`。此前该 router 的 `require_company_scope()`
+  在没有 `company_id` 参数时会跳过，等于从未覆盖这个端点。
+- 新增 7 项回归用例（跨租户 404 + 属主正向对照），并做过去掉守卫必红的反向验证。
+
+### 🧱 一致性：内置群聊幂等 + 配额闸门
+
+- `POST /chat-groups/preset/{pid}/ensure` 用 runtime lock（`chatgroup:{company}:{preset}`，TTL 30s）
+  串行化同一内置分组的创建；`chat_groups` 增加 `(company_id, preset_id)` 唯一约束兜底，
+  冲突时回查已有组按幂等返回。**既有数据库不会自动获得该约束**（启动只建表/补列），
+  运行时锁是兜底路径。
+- 建员工前先过与 `POST /agents` 同口径的配额闸门：超限落审批单并 409，且一个员工都不落库。
+
+### 🧵 作战室：缩短 SQLite 写事务
+
+- `announce` 申明阶段在每次 LLM 调用前后提交，不再跨模型调用持有写事务，避免长事务把
+  `database is locked` 抛给并发请求；返回结构不变。
+
+### 🧩 工作台：长任务结果必达
+
+- 切会话不再 `abort` 在途流（服务端生成完成后才落库，断流会丢整段回复）：只按会话 key
+  跳过界面渲染，后台流结束后用服务端历史补齐；离开工作台仍会中止所有在途流。
+- 会议结束后按 3s × 10 有界补拉，直到拿到纪要/摘要或取消；即使状态不是在当前页点的结束，
+  从 RUNNING 落到 COMPLETED 时也会补拉。作战室发言后 5s × 4 有界补拉（替换原先两个裸
+  `setTimeout`），运行态结束的瞬间再补几轮收回尾响应。定时器随切会话/卸载清理。
+- 自动滚动只在用户本来贴着底部时跟随（±80px），上翻读历史不被打断。
+- 左栏新增会话/员工搜索与分批显示（首屏 50 条，可继续加载），替代原来固定 14 条的截断。
+
+### 🚀 上手：安装向导可续装
+
+- 向导草稿写入 `sessionStorage`（白名单字段，不含密码 / Key），刷新或误关页面可恢复。
+- 模型已保存但连通测试失败时，允许「完成」进入系统，并在工作台显示琥珀色修复提示；
+  刷新后若检测到待安装标记与有效登录态，直接回到第 4 步继续修复。
+- 第 1 步「创建公司」按钮在未填完时点击会定位到第一个错误字段；第 1、4 步提供免 Key 演示入口。
+- 会议中心改为跟随「当前激活公司」，切换公司时清空上一家公司的会议详情与轮询。
+
+### 🔭 可观测性与 CI
+
+- 新增 `X-Request-ID`：合法客户端 id 透传，否则生成；写入日志（`[-]` 表示非请求上下文）、
+  响应头、500 响应体，并通过 CORS `expose_headers` 暴露，报错截图可直接 grep 全链路。
+- CI 后端 job 增加 `tools/e2e_smoke.py`（本地假模型 + 临时 SQLite，无密钥）。
+  Postgres job 暂缓：e2e 脚本仍写死 SQLite，需先支持 `DATABASE_URL` 覆盖。
+
+### 🔔 通知中心（站内 + 桌面）
+
+- 新增 `notifications` 表（Alembic `0002`，append-only）：任务完成/失败、待审批、会议纪要
+  三类事件落库；`GET /notifications`、未读数、单条已读、全部已读，跨租户一律 404。
+- 前端铃铛 + 未读徽标接入经典侧栏与极客工作台，30s 轮询，页面隐藏时暂停；桌面通知只在
+  用户点击授权后申请权限。IM webhook 渠道待定，未做。
+
+### 🗂 会话管理（置顶 / 归档 / 未读）
+
+- 左栏每行新增「…」菜单：置顶、归档、标记已读；筛选「全部 / 置顶 / 未读」，归档可展开。
+- 偏好写入带版本的 `localStorage`（按公司 + 用户名隔离），防抖落盘；17 项单测覆盖。
+- 「按项目分组」因会话线程没有项目字段暂未做，先用类型筛选替代。
+
+### ⌨️ 全局命令面板（⌘K）
+
+- 四组结果：页面 / 会话 / 员工 / 常用动作；支持键盘上下选择、Tab 焦点圈定、关闭后焦点归还，
+  带 `aria-live` 播报；18 项单测 + 构建通过。
+
+### 🧾 License、席位与账单
+
+- 新增 Ed25519 离线 License 校验（`cryptography`，无新依赖）：缺失 = 社区模式；签名错误/过期
+  = 只读；篡改即失效。校验结果按文件 mtime 缓存。
+- 员工创建前增加席位闸门：超出售席返回 409 并落 `license_seats` 审批单 + 通知；只读模式写操作 403。
+- `GET /license/status`；`GET /billing/usage`（员工/Token/成本/交付物聚合，按模型与按天）；
+  `GET /billing/invoices/export.csv`（12 列月度账单，`decimal` 计价）。
+- 未新增数据表，因此无 `0003` 迁移。
+
+### 🛡 安全运营与供应链
+
+- 新增 CodeQL（Python + TypeScript，security-and-quality）、Dependabot（按生态分组 minor/patch）、
+  `SECURITY.md`（P0 24h 确认 / 72h 缓解，P1 7 天，P2 下个版本）与安全响应流程文档。
+- 依赖审计先以观测态接入（`continue-on-error`），避免上游数据波动直接红掉主线。
+
+### 🧪 评测集与租户矩阵
+
+- `tools/eval_harness.py` + 10 条种子任务（5 类），规则评分可离线自测；真实模型基线待 Key。
+- 租户权限矩阵生成器：19 族 / 44 端点 / 46 攻击组合，发现并修复
+  `/automations/{id}/runs` 越权与 `/delivery/agents/{id}/folder` 坏导入两处真实缺陷。
+
+### ⚡ 性能预算
+
+- `tools/check_bundle_budget.py` 接入 CI：首屏 140 KB / 全站 680 KB / CSS 20 KB / 单 chunk 60 KB
+  （当前基线 ×1.10）。基线 118.43 / 610.52 / 12.27 / 52.40 KB（gzip）。
+
+### 🚢 部署与数据库迁移
+
+- `apps/api/migrations/`：Alembic 基线 `0001`（107 表 / 281 索引）+ `0002` 通知表，
+  `alembic check` 无 diff；`tools/db_upgrade.sh` / `db_downgrade.sh` + [数据库迁移](docs/数据库迁移.md)。
+- `deploy/Dockerfile.api` / `Dockerfile.web`、根 `docker-compose.yml`、`.dockerignore`；
+  `tools/backup.sh` / `restore.sh` / `healthcheck.sh` + [部署运行手册](docs/部署运行手册.md)。
+  备份→篡改→恢复 sha256 一致；compose 本机未验证。
+- CI 增加 Postgres 16 job 与端到端 smoke；覆盖率门槛 30 → 40（实测 47.9%）。
+
+### 🐛 修复
+
+- `GET /automations/{automation_id}/runs` 未校验归属：他司 automation id 可读到运行记录，
+  现在先 `_owned_automation` 再查询。
+- `GET /delivery/agents/{agent_id}/folder` 引用了不存在的 `agent_chat._owned`，属主访问直接 500；
+  改用 `assert_agent_owned` 并补矩阵回归用例。
+
+### 🔗 证据链（引用来源）
+
+- 私聊调用 `web_search` 后，把命中的 `{title,url,snippet}` 写入 assistant 消息 `meta.citations`，
+  并在非流式响应与流式 `done` 事件里返回同一份；前端在回复下方渲染「来源」列表，可点回原网页。
+- 只保留 http/https 链接（拒绝 `javascript:`/`data:`），按 URL 去重、最多 5 条、摘要截断 200 字；
+  没有来源时不显示空壳。9 项后端测试 + 11 项前端测试。
+
+### 🔭 SLO 与告警
+
+- 新增 [SLO 文档](docs/SLO.md)：API 可用性 99.5%、P95 延迟 <1.5s、任务成功率 ≥95%，
+  含错误预算、P1/P2 分级与 PromQL 示例。
+- 新增 `deploy/prometheus/alerts.yml`：5xx 比例、P95 延迟、任务队列积压、LLM 错误率、
+  任务失败率、in-flight 异常共 6 条告警；测试会校验引用到的指标都真实存在。
+
+### 🛡 License 只读模式全局生效
+
+- 新增 ASGI 中间件：License 过期或签名不可信时，除 `/auth`、`/license`、`/setup`、`/health`、
+  `/metrics`、文档等恢复/观测路径外，所有 `POST/PUT/PATCH/DELETE` 一律 403
+  （`code=license_read_only`），GET/HEAD/OPTIONS 不受影响。403 仍带 `X-Request-ID`。
+- 白名单保证拿到新 License 后仍能登录、重装、查看状态，不会把只读模式变成死锁。
+- `test_license_read_only_gate.py` 8 项：过期写拦截、读放行、`/auth` `/setup` 放行、
+  篡改失败关闭、有效 License 与社区模式不误伤、CORS 预检放行。
+
+### 🧪 租户矩阵扩展到 25 族 / 51 端点
+
+- 新增 schedules、mailbox、learning、growth-center、skills、reviews 六个资源族共 10 个端点。
+- 矩阵新发现并修复 4 处真实缺陷：
+  `GET /schedules/{id}/runs`（可读他司调度历史）、`PATCH /learning/learning-records/{id}`
+  （可改他司员工学习进度）、`GET /reviews/agents/{id}`（可读他司考核与评语）、
+  `PUT /skills/{id}/scope` 对他司技能返回 409（可枚举 id）→ 改 404。
+- 训练会话创建即调用 LLM，无法同步断言，登记进 `SKIPPED_SURFACES` 并写明原因。
+
+### ⚡ 前端数据层迁移（automation / meetings）
+
+- 两页从手写 `useEffect + setState` 迁到 `useResource`：缓存首屏立即渲染、切公司按新 key
+  自动重取、窗口 30 秒后回窗重取；创建/改名/启停/复制/运行/结束/发言后统一 `refresh()`。
+- 会议页把会议/部门/项目三个请求合并为一个 bundle，并用 cid 标记避免切换瞬间显示上一家的数据；
+  详情 6 秒轮询与结束后的有界补拉保持原样。
+
+### 🎭 免 Key 演示可带走交付物
+
+- 演示完成后可「下载 .md」或「复制全文」；文件名与 Markdown 由纯函数
+  `lib/demoDeliverable.ts` 生成（本地日期、路径分隔符清洗、固定演示声明），6 项单测。
+- 仍是纯前端模板，不调用模型、不写数据库；所有演示消息保留「🎭 演示」标识。
+
+### ⚡ 数据层第二批迁移与强制刷新竞态
+
+- artifacts / delivery / intervention / projects / knowledge / schedules 六页迁入 `useResource`：
+  缓存首屏、切公司跟随、回窗重取、写后 `refresh()`；各页原有筛选、弹窗、分段失败提示与
+  轮询行为保持不变。
+- 修复 `useResource` 的强制刷新竞态：`refresh()` 不再并进尚未返回的旧请求，改为发出新请求；
+  每个 key 维护请求代号，旧响应晚到时不覆写缓存、不清除新请求的在途标记、不 `setData`。
+  同时切 key 时清空上一屏的错误，避免新公司页面先显示旧公司的失败原因。
+
+### 🧾 账单对账验证
+
+- 新增 `test_billing_reconciliation.py` 4 项：`/billing/usage` 总数与按模型/按天分桶同原始
+  `TokenUsage` SQL 求和一致（边界日 00:00 / 23:59:59 与区间外行都覆盖）；CSV 汇总与用量接口
+  一致（`Decimal` 分级容差）；席位用量与 `status != DISABLED` 员工数一致（含停用前后变化）；
+  两公司用量互不串账。
+
+### ⏱ 交互延迟采样
+
+- 新增 `lib/perf.ts`（纯函数 + 会话级 200 条环形缓冲，可注入 Storage，SSR 安全）与
+  `PerfMonitor`：记录路由切换后第二帧绘制耗时与 `longtask`，诊断页展示 P50/P95/P99/max；
+  只存本会话，不上报、不采集身份信息。17 项单测。
+- 构建体积预算继续通过：首屏 123.59 / 全站 631.33 / CSS 12.50 / 单 chunk 52.40 KB。
+
+### ⏰ 任务模板 → 定时任务
+
+- 调度引擎新增 `create_task_from_template`：按调度所属公司校验模板归属，读取模板首个
+  `create_task` 步骤，创建 `TODO` 任务并写 `TaskEvent` / `EventLog`；脏优先级降级为 NORMAL，
+  非本公司/已删除的指派员工自动清空，缺少创建人时回退公司 owner。
+- 自动化页对 `trigger_config.kind=TASK_TEMPLATE` 的行显示「📋 模板」徽标与「⏰ 定时」：
+  可选「每隔 N 分钟」或「每天 HH:MM」，直接创建 `POST /schedules`。
+  非模板规则行为不变。后端 7 项测试覆盖创建、跨租户拒绝、缺失/非模板、字段清洗与触发校验。
+- 调度仍是至少一次语义（120s 抢占租约），执行超过租约时可能重复建任务；任务与事件里带
+  `template_id` / `schedule_id` 便于对账。
+
+### ⚡ 数据层第三批迁移
+
+- companies / experts / governance / memory / organization / reflection / token-stats / factory
+  八页迁入 `useResource`：账号级与公司级 key 分开，写操作后 `refresh()` 或按前缀 `invalidate`；
+  组织变更同时失效 `agents:`，专家雇佣/组队同时失效 `factory:`。
+- `useResource` 覆盖页数达到 25；全站 JS gzip 641.06 KB（预算 680 KB，用量 94.3%），
+  后续页面迁移需同步关注拆包。
+
+### 📐 原型（待确认，未改代码）
+
+- `apps/web/public/prototype/inbox-deliverable.html`：任务收件箱 / 交付单 / 导航收敛（42 → 12）
+  三合一静态原型，供确认信息架构后再落代码。
+
 ## [5.14.0] 界面双模式：经典固定左栏 / 极客三栏工作台 — 2026-10-30
 
 ### 🎛 首次选择 + 随时切换

@@ -1,8 +1,8 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, describeError } from "@/lib/api";
-import type { Company } from "@/lib/types";
+import { invalidate, useActiveCompanyId, useResource } from "@/lib/useResource";
 import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
 
 type Blueprint = {
@@ -14,7 +14,13 @@ type Blueprint = {
                         created_at?: string; blueprint?: Blueprint };
 
 export default function FactoryPage() {
-  const [jobs, setJobs] = useState<FactoryJob[]>([]);
+  // 激活公司可订阅：切公司后工厂任务自动跟着换
+  const cid = useActiveCompanyId();
+  const { data: jobData, error: loadError, loading, refresh: refreshJobs } = useResource<FactoryJob[]>(
+    cid ? `factory:jobs:${cid}` : null,
+    () => api.get<FactoryJob[]>(`/factory/jobs?company_id=${cid}`),
+  );
+  const jobs = useMemo<FactoryJob[]>(() => jobData ?? [], [jobData]);
   const [goal, setGoal] = useState("");
   const [blueprintAttachments, setBlueprintAttachments] = useState<Attachment[]>([]); // 📎 蓝图参考附件
   const [busy, setBusy] = useState(false);
@@ -25,20 +31,6 @@ export default function FactoryPage() {
   const [reviewNotes, setReviewNotes] = useState("");
   const [testAnswers, setTestAnswers] = useState<Record<number, string>>({});
   const [asking, setAsking] = useState<number | null>(null);
-  const [cid, setCid] = useState("");
-
-  const load = useCallback(async () => {
-    try {
-      const cs = await api.get<Company[]>("/companies");
-      const c = cs[0]?.id;
-      if (c) {
-        setCid(c);
-        api.get(`/factory/jobs?company_id=${c}`).then(setJobs).catch(() => {});
-      }
-    } catch {}
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
 
   async function createBlueprint() {
     if (!goal || !cid) return;
@@ -50,7 +42,7 @@ export default function FactoryPage() {
         attachments: blueprintAttachments.length ? blueprintAttachments : undefined, // 📎
       });
       setMsg("✅ 蓝图已生成，请查看详情后批准创建");
-      api.get(`/factory/jobs?company_id=${cid}`).then(setJobs).catch(() => {});
+      refreshJobs();
       setGoal("");
       setBlueprintAttachments([]);
       void d;
@@ -64,7 +56,8 @@ export default function FactoryPage() {
     try {
       await api.post(`/factory/jobs/${jobId}/approve`);
       setMsg("✅ 已批准，开始创建");
-      api.get(`/factory/jobs?company_id=${cid}`).then(setJobs).catch(() => {});
+      invalidate("agents:"); // 批准会建出员工，员工名录缓存需失效
+      refreshJobs();
     } catch (e: any) {
       setMsg(e.message || String(e));
     }
@@ -174,7 +167,12 @@ export default function FactoryPage() {
           </div>
           );
         })}
-        {!jobs.length && <p className="text-sm text-[var(--muted)]">暂无工厂任务</p>}
+        {!loading && !jobs.length && <p className="text-sm text-[var(--muted)]">暂无工厂任务</p>}
+        {loadError && (
+          <p className="text-sm text-red-300">加载工厂任务失败：{loadError}
+            <button onClick={() => refreshJobs()} className="ml-2 underline">重试</button>
+          </p>
+        )}
       </div>
     {/* 批准前蓝图确认弹窗 */}
       {confirmJob && (() => {
@@ -318,7 +316,7 @@ export default function FactoryPage() {
                         await api.post(`/factory/jobs/${reviewOpen}/review-training`,
                           { approve: false, notes: reviewNotes || "验收未通过，需重新培训" });
                         setMsg("❌ 已驳回，员工保持禁用状态（培训记忆已清除）");
-                        setReviewOpen(null); await load();
+                        setReviewOpen(null); invalidate("agents:"); refreshJobs();
                       } catch (e) {
                         setMsg(`❌ ${describeError(e, "驳回失败")}`);
                       }
@@ -331,7 +329,7 @@ export default function FactoryPage() {
                         await api.post(`/factory/jobs/${reviewOpen}/review-training`,
                           { approve: true, notes: reviewNotes });
                         setMsg("🎉 验收通过！员工已正式上岗（ACTIVE）");
-                        setReviewOpen(null); await load();
+                        setReviewOpen(null); invalidate("agents:"); refreshJobs();
                       } catch (e) {
                         setMsg(`❌ ${describeError(e, "验收失败")}`);
                       }

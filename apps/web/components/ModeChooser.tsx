@@ -1,6 +1,7 @@
 "use client";
 
-// 首次进入系统时必须二选一，之后随时可以从 ⌘K 或侧栏底部再打开。
+// 界面模式切换弹窗。默认经典模式，只在用户显式打开时出现（侧边栏 / ⌘K），
+// 不再在首次进入时强制二选一。
 
 import { useCallback, useEffect, useState } from "react";
 import { useSwitchMode, useUIMode, type UIMode } from "@/lib/ui-mode";
@@ -15,7 +16,6 @@ export function openModeChooser() {
 export default function ModeChooser() {
   const mode = useUIMode();
   const switchMode = useSwitchMode();
-  const forced = mode === null;
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
@@ -25,33 +25,29 @@ export default function ModeChooser() {
     };
   }, []);
 
+  // 显式打开后才允许 Esc 关闭；默认不再有"强制选择"状态。
   useEffect(() => {
-    if (forced) setOpen(true);
-  }, [forced]);
-
-  // 强制选择时 Esc 不生效——没有模式就没有界面可回退
-  useEffect(() => {
-    if (!open || forced) return;
+    if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, forced]);
+  }, [open]);
 
   const choose = useCallback((m: UIMode) => {
     switchMode(m);
     setOpen(false);
   }, [switchMode]);
 
-  if (!open && !forced) return null;
+  if (!open) return null;
 
   return (
     <div
       className="fixed inset-0 z-[9999] flex items-center justify-center px-4"
       style={{ background: "rgba(4,4,8,0.72)", backdropFilter: "blur(4px)" }}
       onMouseDown={(e) => {
-        if (!forced && e.target === e.currentTarget) setOpen(false);
+        if (e.target === e.currentTarget) setOpen(false);
       }}
     >
       <div
@@ -61,9 +57,9 @@ export default function ModeChooser() {
         className="w-full max-w-2xl rounded-2xl border shadow-2xl p-6 animate-fade-up"
         style={{ background: "linear-gradient(180deg, #16161f, #101018)", borderColor: "var(--border)" }}
       >
-        <h2 id="mode-title" className="text-base font-semibold">选择界面模式</h2>
+        <h2 id="mode-title" className="text-base font-semibold">切换界面模式</h2>
         <p className="text-xs mt-1.5" style={{ color: "var(--muted)" }}>
-          两种模式功能完全相同，只是使用方式不同。之后可以在 ⌘K 或侧边栏底部随时切换。
+          默认使用经典模式；两种模式功能完全相同，只是使用方式不同。之后可以在 ⌘K 或侧边栏底部随时切换。
         </p>
 
         <div className="grid gap-3 mt-5 sm:grid-cols-2">
@@ -101,7 +97,6 @@ export default function ModeChooser() {
             <div className="flex items-center gap-2 mt-3">
               <span className="text-sm font-medium">极客模式</span>
               {mode === "geek" && <Badge>当前</Badge>}
-              {mode === null && <Badge>推荐</Badge>}
             </div>
             <p className="text-[11px] mt-1.5 leading-relaxed" style={{ color: "var(--muted)" }}>
               左中右三栏对话。功能页面开在右栏标签里，聊天不中断，开多少页都留在同一张屏上。
@@ -109,18 +104,16 @@ export default function ModeChooser() {
           </button>
         </div>
 
-        {!forced && (
-          <div className="flex justify-end mt-5">
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              className="text-xs px-3 py-1.5 rounded-lg hover:bg-white/[0.06]"
-              style={{ color: "var(--muted)", border: "1px solid var(--border)" }}
-            >
-              取消
-            </button>
-          </div>
-        )}
+        <div className="flex justify-end mt-5">
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="text-xs px-3 py-1.5 rounded-lg hover:bg-white/[0.06]"
+            style={{ color: "var(--muted)", border: "1px solid var(--border)" }}
+          >
+            取消
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -3,8 +3,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { api, describeError } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
-import type { Company } from "@/lib/types";
 
 /* ============================================================
    项目中心 v2：多维分类 · 卡片视图 · 进度可视化 · 生命周期操作
@@ -41,12 +41,11 @@ const AVATAR_GRADS = ["#6366f1,#8b5cf6", "#22d3ee,#3b82f6", "#f59e0b,#ef4444", "
 
 type Dim = "executor" | "department" | "status" | "none";
 
+type DeptGroup = { dept_id: string; dept_name: string; agents: { id: string; name: string }[] };
+
 export default function ProjectsPage() {
   const router = useRouter();
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [depts, setDepts] = useState<Dept[]>([]);
-  const [progressMap, setProgressMap] = useState<Record<string, Progress>>({});
+  const cid = useActiveCompanyId();
   const [msg, setMsg] = useState("");
 
   // 多维筛选
@@ -58,7 +57,6 @@ export default function ProjectsPage() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
-  const [deptGroups, setDeptGroups] = useState<{ dept_id: string; dept_name: string; agents: { id: string; name: string }[] }[]>([]);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [deptOpen, setDeptOpen] = useState<Set<string>>(new Set());
   const [projAttach, setProjAttach] = useState<Attachment[]>([]);
@@ -67,31 +65,51 @@ export default function ProjectsPage() {
   const [batchSel, setBatchSel] = useState<Set<string>>(new Set());
   const [batchDeleting, setBatchDeleting] = useState(false);
 
-  const load = useCallback(async () => {
-    const cs = await api.get<Company[]>("/companies");
-    if (!cs.length) return;
-    const cid = cs[0].id;
-    const ps: Project[] = await api.get(`/projects?company_id=${cid}`);
-    setProjects(ps);
-    setAgents(await api.get(`/agents?company_id=${cid}`));
-    try { setDepts(await api.get(`/companies/${cid}/departments`)); } catch {}
-    try {
-      const ov = await api.get(`/growth-center/departments-overview?company_id=${cid}`);
-      setDeptGroups((ov.departments || []).map((d: any) => ({
-        dept_id: d.dept_id, dept_name: d.dept_name,
-        agents: (d.agents || []).map((a: any) => ({ id: a.id, name: a.name })),
-      })));
-    } catch {}
-    // 并发拉进度
-    const entries = await Promise.all(ps.map(async (p) => {
-      try {
-        return [p.id, await api.get(`/projects/${p.id}/progress`)] as const;
-      } catch { return [p.id, null] as const; }
-    }));
-    setProgressMap(Object.fromEntries(entries.filter(([, v]) => v)));
-  }, []);
+  /* ---------- 数据加载 ----------
+   * 统一数据层：项目/员工/部门/进度一次并发取完，缓存首屏，切公司自动跟随。
+   * bundle 带 cid：切公司后新数据到达前不再展示旧公司的项目。
+   */
+  const { data: bundle, refresh } = useResource(
+    cid ? `projects:${cid}` : null,
+    async () => {
+      const [ps, ags, depts, deptOv] = await Promise.all([
+        api.get<Project[]>(`/projects?company_id=${cid}`),
+        api.get<Agent[]>(`/agents?company_id=${cid}`),
+        // 部门与部门概览只用于"新建项目选人"，缺失不阻塞主流程
+        api.get<Dept[]>(`/companies/${cid}/departments`).catch(() => [] as Dept[]),
+        api.get<{ departments?: { dept_id: string; dept_name: string; agents?: { id: string; name: string }[] }[] }>(
+          `/growth-center/departments-overview?company_id=${cid}`).catch(() => null),
+      ]);
+      // 并发拉进度；单个项目失败就当作没有进度
+      const entries = await Promise.all((ps || []).map(async (p) => {
+        try {
+          return [p.id, await api.get<Progress>(`/projects/${p.id}/progress`)] as const;
+        } catch { return [p.id, null] as const; }
+      }));
+      const progressMap: Record<string, Progress> = {};
+      for (const [id, prog] of entries) if (prog) progressMap[id] = prog;
+      return {
+        cid: cid as string,
+        projects: Array.isArray(ps) ? ps : [],
+        agents: Array.isArray(ags) ? ags : [],
+        depts: depts || [],
+        deptGroups: (deptOv?.departments || []).map((d) => ({
+          dept_id: d.dept_id, dept_name: d.dept_name,
+          agents: (d.agents || []).map((a) => ({ id: a.id, name: a.name })),
+        })),
+        progressMap,
+      };
+    },
+  );
+  const active = bundle && bundle.cid === cid ? bundle : null;
+  const projects = useMemo<Project[]>(() => active?.projects ?? [], [active]);
+  const agents = useMemo<Agent[]>(() => active?.agents ?? [], [active]);
+  const depts = useMemo<Dept[]>(() => active?.depts ?? [], [active]);
+  const progressMap = useMemo<Record<string, Progress>>(() => active?.progressMap ?? {}, [active]);
+  const deptGroups = useMemo<DeptGroup[]>(() => active?.deptGroups ?? [], [active]);
 
-  useEffect(() => { load(); }, [load]);
+  /** 项目数据变了 → 重取本页 */
+  const load = useCallback(async () => { await refresh(); }, [refresh]);
 
   /* ---------- 筛选维度选项 ---------- */
   const dimOptions = useMemo(() => {
@@ -193,10 +211,9 @@ export default function ProjectsPage() {
   };
 
   async function createProject() {
-    if (!form.name.trim()) return;
+    if (!cid || !form.name.trim()) return;
     try {
-      const cs = await api.get<Company[]>("/companies");
-      const created = await api.post(`/projects?company_id=${cs[0].id}`, {
+      const created = await api.post(`/projects?company_id=${cid}`, {
         name: form.name.trim(),
         description: form.description || null,
         manager_agent_id: form.manager_agent_id || null,

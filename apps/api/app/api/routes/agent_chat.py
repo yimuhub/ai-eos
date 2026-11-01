@@ -191,6 +191,77 @@ async def _save_msg(db: AsyncSession, agent: Agent, role: str,
     return msg
 
 
+# ---------------- 证据链：把搜索结果变成可点回的来源 ----------------
+
+MAX_CITATIONS = 5
+CITATION_SNIPPET_CHARS = 200
+
+
+def _clean_cite_text(value: object, limit: int) -> str:
+    """来源文本统一压成一行再截断，避免把整段网页正文塞进 meta。"""
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:limit]
+
+
+def _extract_citations(result_data: object) -> list[dict]:
+    """从 web_search 的工具结果里提取来源（title / url / snippet）。
+
+    web_search 的结果字段是 ``title/href/body``（部分后端是 ``url``），
+    但落到 meta 时统一成前端好渲染的 ``{title, url, snippet}``：
+    * 非 dict、没有 results 列表 → 空；
+    * 无标题或无链接的条目丢弃（点不回来源的引用没有意义）；
+    * snippet 依次取 body / snippet / content，截断 200 字；
+    * 按 url 去重，最多 5 条。
+    """
+    if not isinstance(result_data, dict):
+        return []
+    results = result_data.get("results")
+    if not isinstance(results, list):
+        return []
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        title = _clean_cite_text(item.get("title"), 200)
+        url = str(item.get("url") or item.get("href") or "").strip()
+        if not title or not url or url in seen:
+            continue
+        snippet = ""
+        for key in ("body", "snippet", "content"):
+            snippet = _clean_cite_text(item.get(key), CITATION_SNIPPET_CHARS)
+            if snippet:
+                break
+        seen.add(url)
+        out.append({"title": title, "url": url, "snippet": snippet})
+        if len(out) >= MAX_CITATIONS:
+            break
+    return out
+
+
+def _tool_payload(res: object) -> object:
+    """工具返回值可能包一层 {"result": ...}，取出真正的结果体。"""
+    if isinstance(res, dict) and isinstance(res.get("result"), dict):
+        return res["result"]
+    return res
+
+
+def _merge_citations(collected: list[dict], result_data: object) -> None:
+    """把一次工具调用的来源并入总表：按 url 去重，总量封顶 5 条。"""
+    if len(collected) >= MAX_CITATIONS:
+        return
+    seen = {c["url"] for c in collected}
+    for cite in _extract_citations(result_data):
+        if cite["url"] in seen:
+            continue
+        seen.add(cite["url"])
+        collected.append(cite)
+        if len(collected) >= MAX_CITATIONS:
+            return
+
+
 # ---------------- 普通/流式两个入口共用的逻辑 ----------------
 
 DOC_OPEN = "[GENERATE_DOC]"
@@ -415,6 +486,8 @@ async def boss_chat(aid: str, data: ChatIn,
     # 提到函数开头显式初始化：原代码用 locals().get("_actions") 做惰性判断，
     # 依赖 CPython 局部变量字典的行为，既脆弱又难读。
     actions: list[dict] = []
+    # 证据链：本轮 web_search 命中的来源，随回复一起落库并回传前端
+    citations: list[dict] = []
 
     await _save_msg(db, a, "boss", text)
 
@@ -423,7 +496,8 @@ async def boss_chat(aid: str, data: ChatIn,
     if short:
         await _save_msg(db, a, "agent", short["reply"], short["meta"])
         await db.commit()
-        return {"reply": short["reply"], "actions": short["actions"]}
+        return {"reply": short["reply"], "actions": short["actions"],
+                "citations": []}
 
     # ---------- 普通问答：记忆 + 知识库 + LLM ----------
     messages = await _build_qa_messages(db, a, text)
@@ -487,6 +561,7 @@ async def boss_chat(aid: str, data: ChatIn,
                     hits = result_data.get("results") or []
                     search_summary = [f"• {h.get('title','')}: {h.get('body','')[:120]}"
                                       for h in hits[:5] if h.get('title')]
+                    _merge_citations(citations, result_data)
             except Exception as e:
                 tool_results.append({"tool_call_id": tc.get("id"), "role": "tool",
                                      "tool_call_id": tc.get("id"), "content": f"error: {e}"})
@@ -509,6 +584,8 @@ async def boss_chat(aid: str, data: ChatIn,
                         res2 = await execute_skill_safe(
                             db, tc["function"]["name"], args2,
                             company_id=str(a.company_id), agent_id=str(a.id))
+                        if tc["function"]["name"] == "web_search":
+                            _merge_citations(citations, _tool_payload(res2))
                         messages.append({"role": "assistant", "content": "", "tool_calls": [tc]})
                         messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                          "content": str(res2)})
@@ -534,6 +611,8 @@ async def boss_chat(aid: str, data: ChatIn,
                         res2 = await execute_skill_safe(
                             db, tc["function"]["name"], args2,
                             company_id=str(a.company_id), agent_id=str(a.id))
+                        if tc["function"]["name"] == "web_search":
+                            _merge_citations(citations, _tool_payload(res2))
                         messages.append({"role": "user",
                                          "content": f"[搜索结果] {str(res2)[:1500]}"})
                     except Exception as tool_err:
@@ -560,7 +639,9 @@ async def boss_chat(aid: str, data: ChatIn,
 
     # 落库与展示都只留正文：标记块是给系统看的
     final_reply = visible_reply(final_reply) or "(无回复)"
-    await _save_msg(db, a, "agent", final_reply)
+    # 证据链随回复落库，/chat/history 的 meta 里即可回放同一份来源
+    await _save_msg(db, a, "agent", final_reply,
+                    {"citations": citations} if citations else None)
 
     # 省 token 记忆：每 6 轮压缩一次近期对话为单条摘要记忆
     try:
@@ -589,7 +670,7 @@ async def boss_chat(aid: str, data: ChatIn,
     _usage_scope.__exit__(None, None, None)
     await db.commit()
     return {"reply": final_reply, "file": doc_file, "doc_error": doc_error,
-            "actions": actions}
+            "actions": actions, "citations": citations}
 
 
 # ---------------- 流式聊天（SSE） ----------------
@@ -681,7 +762,7 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str):
                 # 短路径本来就是秒回，也按流式帧发，前端只有一套逻辑
                 yield _sse({"type": "delta", "text": short["reply"]})
                 yield _sse({"type": "done", "reply": short["reply"],
-                            "actions": short["actions"]})
+                            "actions": short["actions"], "citations": []})
                 return
 
             yield _sse({"type": "status", "text": "正在检索记忆与知识库…"})
@@ -690,6 +771,8 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str):
             gw = ModelGateway(db)
             flt = DocMarkerFilter()
             actions: list[dict] = []
+            # 与 done 帧、落库 meta 共用同一份来源（只存 title/url/snippet）
+            citations: list[dict] = []
 
             with usage_context(agent=a, scenario="CHAT", user_id=user_id):
                 tool_calls = None
@@ -740,6 +823,8 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str):
                                 res = await execute_skill_safe(
                                     db, fname, targs, company_id=company_id,
                                     agent_id=agent_id)
+                                if fname == "web_search":
+                                    _merge_citations(citations, _tool_payload(res))
                             body = str((res.get("result")
                                         if isinstance(res, dict) else None) or res)
                         except Exception as tool_err:
@@ -771,10 +856,12 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str):
                 yield _sse({"type": "delta", "text": tail})
             doc_file, doc_error = await _materialize_docs(db, a, flt.raw)
             reply = visible_reply(flt.raw) or "（这次没有生成内容，请再说一次或换个问法）"
-            await _save_msg(db, a, "agent", reply)
+            await _save_msg(db, a, "agent", reply,
+                            {"citations": citations} if citations else None)
             await db.commit()
             yield _sse({"type": "done", "reply": reply, "file": doc_file,
-                        "doc_error": doc_error, "actions": actions})
+                        "doc_error": doc_error, "actions": actions,
+                        "citations": citations})
         except Exception as exc:
             logger.warning("流式聊天失败 agent=%s: %s", agent_id, exc, exc_info=True)
             try:

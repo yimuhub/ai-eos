@@ -186,6 +186,15 @@ export default function ConfirmHost() {
   const danger = o.danger !== false; // 默认按危险处理：漏配的代价是"太谨慎"，而不是"删错了"
 
   const accent = danger ? "var(--danger)" : "var(--accent)";
+  // 描述可能来自 description、bullets，或两者兼有：只指向真实存在的节点，
+  // 否则读屏会拿到一个空引用（旧实现只写死 confirm-desc，只有 bullets 时读不到任何后果）。
+  const describedBy =
+    [
+      o.description ? "confirm-desc" : null,
+      o.bullets?.length ? "confirm-bullets" : null,
+    ]
+      .filter(Boolean)
+      .join(" ") || undefined;
 
   return (
     <div
@@ -201,7 +210,7 @@ export default function ConfirmHost() {
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="confirm-title"
-        aria-describedby={o.description || o.bullets?.length ? "confirm-desc" : undefined}
+        aria-describedby={describedBy}
         className="w-full max-w-md rounded-2xl border p-5 shadow-2xl animate-fade-up"
         style={{
           background: "linear-gradient(180deg, #16161f, #101018)",
@@ -233,6 +242,7 @@ export default function ConfirmHost() {
 
         {!!o.bullets?.length && (
           <ul
+            id="confirm-bullets"
             className="mt-3.5 space-y-1.5 rounded-lg p-3 text-xs leading-5"
             style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--border)" }}
           >

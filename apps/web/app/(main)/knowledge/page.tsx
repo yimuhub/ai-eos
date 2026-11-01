@@ -1,10 +1,10 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, describeError } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
 import { createPortal } from "react-dom";
 import { notify } from "@/components/Toast";
-import type { Company } from "@/lib/types";
 
 /* ============================================================
    知识库中心 v2：全局公用库 + Agent 私人库（P4）
@@ -17,7 +17,7 @@ type Doc = {
   original_name?: string | null; skill_template?: string | null;
   created_at: string;
 };
-type AgentRow = { id: string; name: string };
+type AgentRow = { id: string; name: string; memory_config?: { cost_mode?: string } | null };
 type Tpl = { key: string; name: string; icon: string; doc_count: number };
 
 const AVATAR_GRADS = ["#6366f1,#8b5cf6", "#22d3ee,#3b82f6", "#f59e0b,#ef4444", "#10b981,#14b8a6", "#ec4899,#f43f5e"];
@@ -29,13 +29,9 @@ const COST_MODES = [
 ];
 
 export default function KnowledgePage() {
-  const [cid, setCid] = useState("");
+  const cid = useActiveCompanyId();
   const [tab, setTab] = useState<"global" | "private">("global");
-  const [globalDocs, setGlobalDocs] = useState<Doc[]>([]);
-  const [agents, setAgents] = useState<AgentRow[]>([]);
   const [selAgent, setSelAgent] = useState("");
-  const [privateDocs, setPrivateDocs] = useState<Doc[]>([]);
-  const [templates, setTemplates] = useState<Tpl[]>([]);
   const [search, setSearch] = useState("");
 
   // 新建文档
@@ -54,33 +50,52 @@ export default function KnowledgePage() {
   const [costMode, setCostMode] = useState<string>("balanced");
   const [cfgSaved, setCfgSaved] = useState(false);
 
-  const load = useCallback(async () => {
-    const cs = await api.get<Company[]>("/companies");
-    if (!cs.length) return;
-    setCid(cs[0].id);
-    api.get(`/kb2/global/documents?company_id=${cs[0].id}`).then(setGlobalDocs).catch(() => {});
-    api.get("/agents").then((as: AgentRow[]) => {
-      setAgents(as);
-      setSelAgent((prev) => prev || as[0]?.id || "");
-    }).catch(() => {});
-    api.get("/kb2/templates").then(setTemplates).catch(() => {});
-  }, []);
+  /* ---------- 全局库 / Agent 列表 / 模板：一次并发取完 ----------
+   * 单个接口失败只让对应区块为空，不阻塞其余内容（与原实现一致）。
+   * bundle 带 cid：切公司后新数据到达前不展示旧公司的文档。
+   */
+  const { data: bundle, refresh } = useResource(
+    cid ? `knowledge:${cid}` : null,
+    async () => {
+      const [docs, ags, tpls] = await Promise.all([
+        api.get<Doc[]>(`/kb2/global/documents?company_id=${cid}`).catch(() => [] as Doc[]),
+        api.get<AgentRow[]>("/agents").catch(() => [] as AgentRow[]),
+        api.get<Tpl[]>("/kb2/templates").catch(() => [] as Tpl[]),
+      ]);
+      return {
+        cid: cid as string,
+        globalDocs: Array.isArray(docs) ? docs : [],
+        agents: Array.isArray(ags) ? ags : [],
+        templates: Array.isArray(tpls) ? tpls : [],
+      };
+    },
+  );
+  const active = bundle && bundle.cid === cid ? bundle : null;
+  const globalDocs = useMemo<Doc[]>(() => active?.globalDocs ?? [], [active]);
+  const agents = useMemo<AgentRow[]>(() => active?.agents ?? [], [active]);
+  const templates = useMemo<Tpl[]>(() => active?.templates ?? [], [active]);
 
-  const loadPrivate = useCallback(async () => {
-    if (!selAgent) return;
-    try {
-      const docs = await api.get(`/kb2/agents/${selAgent}/documents`);
-      setPrivateDocs(Array.isArray(docs) ? docs : []);
-    } catch { setPrivateDocs([]); }
-    try {
-      const ags = await api.get("/agents");
-      const cur = (ags as any[]).find((a) => a.id === selAgent);
-      if (cur?.memory_config?.cost_mode) setCostMode(cur.memory_config.cost_mode);
-    } catch {}
-  }, [selAgent]);
+  // 默认选中第一位 Agent（原实现也是拿到列表后回填）
+  useEffect(() => {
+    if (!selAgent && agents.length) setSelAgent(agents[0].id);
+  }, [agents, selAgent]);
 
-  useEffect(() => { load(); }, [load]);
-  useEffect(() => { loadPrivate(); }, [loadPrivate]);
+  // 成本模式取自该 Agent 的 memory_config（原实现每次读私人库时都会回读）
+  useEffect(() => {
+    const cur = agents.find((a) => a.id === selAgent);
+    const mode = cur?.memory_config?.cost_mode;
+    if (mode) setCostMode(mode);
+  }, [agents, selAgent]);
+
+  // Agent 私人库：按选中的 Agent 单独一个资源（key 带 cid，切公司不串库）
+  const { data: privateData, refresh: loadPrivate } = useResource(
+    cid && selAgent ? `knowledge:${cid}:private:${selAgent}` : null,
+    async () => {
+      const docs = await api.get<Doc[]>(`/kb2/agents/${selAgent}/documents`);
+      return Array.isArray(docs) ? docs : [];
+    },
+  );
+  const privateDocs = privateData ?? [];
 
   const curDocs = tab === "global" ? globalDocs : privateDocs;
   const filtered = useMemoList(curDocs, search);
@@ -89,10 +104,10 @@ export default function KnowledgePage() {
   async function createDoc() {
     if (!form.title.trim()) return;
     if (tab === "global") {
+      if (!cid) return;
       await api.post(`/kb2/global/documents?company_id=${cid}`,
         { ...form });
-      const docs = await api.get(`/kb2/global/documents?company_id=${cid}`);
-      setGlobalDocs(docs);
+      await refresh();
     } else if (selAgent) {
       await api.post(`/kb2/agents/${selAgent}/documents`, { ...form });
       await loadPrivate();
@@ -110,7 +125,7 @@ export default function KnowledgePage() {
     }))) return;
     await api.del(`/kb2/documents/${id}`);
     if (tab === "global") {
-      setGlobalDocs((prev) => prev.filter((d) => d.id !== id));
+      await refresh();
     } else {
       await loadPrivate();
     }

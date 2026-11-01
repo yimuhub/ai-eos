@@ -111,21 +111,26 @@ export default function ToastHost() {
   return (
     <div
       className="fixed top-4 right-4 z-[9999] flex flex-col gap-2 pointer-events-none"
+      role="status"
       aria-live="polite"
-      aria-atomic="false"
+      aria-atomic="true"
     >
       {items.map((t) => {
         const s = STYLES[t.kind];
         return (
           <div
             key={t.id}
-            role={t.kind === "error" ? "alert" : "status"}
+            // 非错误的播报交给外层 role="status" 容器（避免嵌套两个 polite live region
+            // 导致同一条提示被念两遍）；错误用 alert 抢在礼貌队列之前播报。
+            role={t.kind === "error" ? "alert" : undefined}
+            aria-atomic={t.kind === "error" ? "true" : undefined}
             className="pointer-events-auto max-w-[420px] rounded-xl border px-3.5 py-2.5 text-sm shadow-lg backdrop-blur-md flex items-start gap-2.5 animate-fade-up"
             style={{ borderColor: s.border, background: s.bg, color: "var(--foreground)" }}
           >
             <span aria-hidden className="shrink-0 leading-5">{s.icon}</span>
             <span className="flex-1 whitespace-pre-wrap break-words leading-5">{t.message}</span>
             <button
+              type="button"
               onClick={() => remove(t.id)}
               aria-label="关闭提示"
               className="shrink-0 text-xs opacity-50 hover:opacity-100 transition-opacity"

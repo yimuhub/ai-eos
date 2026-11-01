@@ -1,50 +1,68 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { api } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
 import { notify } from "@/components/Toast";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
 
 type Mem = { id: string; type: string; content: string; importance: number; access_count: number; created_at: string };
+type Agent = { id: string; name: string };
 
 export default function MemoryPage() {
-  const [agents, setAgents] = useState<Agent[]>([]);
+  // 激活公司来自可订阅的 useActiveCompanyId：切公司后记忆列表自动跟随，
+  // 不再用一次性的 `/companies → cs[0]` 快照。
+  const cid = useActiveCompanyId();
   const [agentId, setAgentId] = useState("");
-  const [mems, setMems] = useState<Mem[]>([]);
+  // 输入框与"已生效的查询词"分开：输入不触发请求，点「召回」才重取。
+  const [query, setQuery] = useState("");
+  const [appliedQuery, setAppliedQuery] = useState("");
   const [type, setType] = useState("EPISODIC");
   const [content, setContent] = useState("");
   const [memAttach, setMemAttach] = useState<Attachment[]>([]);
   const [importance, setImportance] = useState("0.7");
-  const [query, setQuery] = useState("");
   const [msg, setMsg] = useState("");
-  type Agent = { id: string; name: string };
 
-  useEffect(() => { api.get("/agents").then(setAgents).catch(() => {}); }, []);
-  const cid = async () => (await api.get("/companies"))[0]?.id;
+  // 员工列表：接口仍是 /agents（不额外加过滤），key 带上 cid 只用于
+  // "切公司时重取 + 与其它页面的 agents: 缓存互不串味"。
+  const { data: agentData } = useResource<Agent[]>(
+    cid ? `memory:agents:${cid}` : null,
+    () => api.get<Agent[]>("/agents"),
+  );
+  const agents = useMemo<Agent[]>(() => agentData ?? [], [agentData]);
 
-  const load = async (aid = agentId, q = query) => {
-    if (!aid) return;
-    const c = await cid();
-    // 查询串用 URLSearchParams 拼：既不用在模板里嵌三元（契约扫描看不懂），
-    // 也顺手解决了"内容含 & 或中文时查询串被截断/编码错"的老问题。
-    const qs = new URLSearchParams({ company_id: c ?? "", agent_id: aid });
-    if (q) qs.set("q", q);
-    const r = await api.get<{ memories: Mem[] }>(`/memory/recall?${qs}`);
-    setMems(r.memories);
-  };
+  // 记忆召回：cid + 员工 + 已生效查询词共同决定内容
+  const { data: memData, error: memError, loading, refresh: refreshMems } = useResource<Mem[]>(
+    cid && agentId ? `memory:recall:${cid}:${agentId}:${appliedQuery}` : null,
+    async () => {
+      // 查询串用 URLSearchParams 拼：既不用在模板里嵌三元（契约扫描看不懂），
+      // 也顺手解决了"内容含 & 或中文时查询串被截断/编码错"的老问题。
+      const qs = new URLSearchParams({ company_id: cid ?? "", agent_id: agentId });
+      if (appliedQuery) qs.set("q", appliedQuery);
+      const r = await api.get<{ memories: Mem[] }>(`/memory/recall?${qs}`);
+      return r.memories || [];
+    },
+  );
+  const mems = useMemo<Mem[]>(() => memData ?? [], [memData]);
+
+  function recall() {
+    // 查询词变了 → 换 key（effect 自动重取）；没变 → 强制重取一次
+    if (query !== appliedQuery) setAppliedQuery(query);
+    else refreshMems();
+  }
 
   const remember = async () => {
-    const c = await cid();
+    if (!cid) return;
     try {
-      const r = await api.post(`/memory/remember?company_id=${c}`,
+      const r = await api.post(`/memory/remember?company_id=${cid}`,
         { agent_id: agentId, memory_type: type, content, importance: Number(importance) });
       setMsg(r.stored ? "已记住" : "重要度太低，被过滤");
-      setContent(""); load();
+      setContent(""); refreshMems();
     } catch (e) { setMsg(String(e)); }
   };
 
   const forget = async (id: string) => {
-    const c = await cid();
+    if (!cid) return;
     // 原实现点一下"忘记"就直接删，没有任何确认和失败反馈。
     // 记忆是员工的经验积累，误删等于让它重犯同一个错。
     if (!(await confirmAction({
@@ -53,12 +71,12 @@ export default function MemoryPage() {
       confirmText: "忘记",
     }))) return;
     try {
-      await api.del(`/memory/${agentId}/${id}?company_id=${c}`);
+      await api.del(`/memory/${agentId}/${id}?company_id=${cid}`);
       notify("success", "已忘记该条记忆");
     } catch (e) {
       notify("error", `删除失败：${(e as Error).message || e}`);
     }
-    load();
+    refreshMems();
   };
 
   return (
@@ -67,7 +85,7 @@ export default function MemoryPage() {
 
       <div className="mb-4 flex gap-2 flex-wrap">
         {agents.map((a) => (
-          <button key={a.id} onClick={() => { setAgentId(a.id); setTimeout(() => load(a.id), 0); }}
+          <button key={a.id} onClick={() => setAgentId(a.id)}
             className={`px-3 py-1.5 rounded border text-sm ${agentId === a.id ? "bg-blue-600 text-white" : "card text-[var(--foreground)]"}`}>
             {a.name}
           </button>
@@ -95,7 +113,7 @@ export default function MemoryPage() {
           <div className="flex gap-2 mb-4">
             <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="按关键词召回…"
               className="flex-1 bg-white/[0.04] border border-[var(--border)] rounded px-2 py-1 text-sm" />
-            <button onClick={() => load()} className="px-4 py-1 bg-white/[0.04] text-white rounded text-sm">召回</button>
+            <button onClick={recall} className="px-4 py-1 bg-white/[0.04] text-white rounded text-sm">召回</button>
           </div>
 
           <div className="space-y-2">
@@ -109,9 +127,14 @@ export default function MemoryPage() {
                 <button onClick={() => forget(m.id)} className="px-2 py-1 bg-red-900/40 text-red-300 rounded text-xs">遗忘</button>
               </div>
             ))}
-            {!mems.length && agentId && <p className="text-[var(--muted)] text-sm">无记忆记录</p>}
+            {!loading && !mems.length && agentId && <p className="text-[var(--muted)] text-sm">无记忆记录</p>}
           </div>
         </>
+      )}
+      {memError && (
+        <p className="mt-3 text-sm text-red-300">❌ 召回失败：{memError}
+          <button onClick={() => refreshMems()} className="ml-2 underline">重试</button>
+        </p>
       )}
       {msg && <p className="mt-3 text-sm text-green-700">{msg}</p>}
     </div>

@@ -1,10 +1,10 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { api, describeError, setActiveCompanyId } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
-import { notify } from "@/components/Toast";
 import TeamGenModal from "@/components/TeamGenModal";
 
 /* ============================================================
@@ -24,9 +24,20 @@ const AVATAR_GRADS = ["#6366f1,#8b5cf6", "#22d3ee,#3b82f6", "#f59e0b,#ef4444",
 
 export default function CompanyManagePage() {
   const router = useRouter();
+  // 激活公司：可订阅 —— 顶栏切公司 / 本页切换后，「使用中」标记自动跟上，
+  // 不再是一次性读 localStorage 的快照。
+  const activeCid = useActiveCompanyId();
   const [mounted, setMounted] = useState(false);
-  const [rows, setRows] = useState<CompanyRow[]>([]);
-  const [activeCid, setActiveCidState] = useState("");
+  // 公司列表是"账号下全部公司"，本身不按公司过滤，因此 key 不带 cid：
+  // 带上 cid 只会在切公司时白白重拉一份完全相同的数据。
+  const { data, error, loading, refresh } = useResource<CompanyRow[]>(
+    "company-manage:list",
+    async () => {
+      const d = await api.get<{ companies?: CompanyRow[] }>("/company-manage/list");
+      return d.companies || [];
+    },
+  );
+  const rows = data ?? [];
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   // 批量删除
@@ -37,18 +48,6 @@ export default function CompanyManagePage() {
   const [showTeamGen, setShowTeamGen] = useState(false);
 
   useEffect(() => { setMounted(true); }, []);
-
-  const load = useCallback(async () => {
-    try {
-      const d = await api.get<{ companies?: CompanyRow[] }>("/company-manage/list");
-      setRows(d.companies || []);
-    } catch (e) { setMsg(`❌ ${describeError(e, "加载公司列表失败")}`); }
-    if (typeof window !== "undefined") {
-      setActiveCidState(localStorage.getItem("aieos_active_cid") || "");
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
 
   async function del(cid: string) {
     setBusy(true);
@@ -61,7 +60,7 @@ export default function CompanyManagePage() {
         const next = rows.find((x) => x.id !== cid);
         if (next) setActiveCompanyId(next.id);
       }
-      await load();
+      refresh();
     } catch (e) { setMsg(`❌ ${describeError(e, "删除公司失败")}`); }
     setConfirmTarget(null);
     setBusy(false);
@@ -90,7 +89,7 @@ export default function CompanyManagePage() {
         "/company-manage/batch-delete", { company_ids: Array.from(batchSel) });
       setMsg(`🗑 已彻底删除 ${d.deleted_count} 家公司${d.failed?.length ? `，失败 ${d.failed.length}` : ""}`);
       setShowBatch(false); setBatchSel(new Set());
-      await load();
+      refresh();
     } catch (e) { setMsg(`❌ ${describeError(e, "批量删除失败")}`); }
     setBusy(false);
   }
@@ -131,10 +130,10 @@ export default function CompanyManagePage() {
         </div>
       </div>
 
-      {msg && (
+      {(msg || error) && (
         <div className="mb-4 px-4 py-2 rounded-lg text-sm"
           style={{ background: "rgba(99,102,241,0.1)", color: "#a5b4fc", border: "1px solid rgba(99,102,241,0.25)" }}>
-          {msg}
+          {msg || `❌ 加载公司列表失败：${error}`}
         </div>
       )}
 
@@ -222,7 +221,7 @@ export default function CompanyManagePage() {
         })}
       </div>
 
-      {!rows.length && (
+      {!loading && !rows.length && (
         <div className="card card-static text-center py-16 space-y-2">
           <p className="text-sm">还没有公司</p>
           <p className="text-xs" style={{ color: "var(--muted)" }}>
@@ -319,7 +318,7 @@ export default function CompanyManagePage() {
       <TeamGenModal open={showTeamGen} onClose={() => setShowTeamGen(false)}
         onCreated={async (name) => {
           setMsg(`🎉 新团队「${name}」已创建`);
-          await load();
+          refresh();
         }} />
     </div>
   );

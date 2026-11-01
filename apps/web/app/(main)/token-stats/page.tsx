@@ -1,6 +1,7 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { api } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
 
 type Pricing = {
@@ -44,45 +45,78 @@ function fmtCost(c: number): string {
 
 type Tab = "dashboard" | "pricing" | "budget" | "logs";
 
+type StatsBundle = {
+  summary: Summary | null;
+  byAgent: StatRow[]; byDept: StatRow[]; byCompany: StatRow[];
+  byProject: StatRow[]; byTask: StatRow[]; byScenario: StatRow[];
+};
+type ScopeOpt = { id: string; name: string };
+
+// 模块级空数组：`?? []` 每次渲染都是新引用，会让下游 useMemo 依赖每帧失效
+const EMPTY_ROWS: StatRow[] = [];
+const EMPTY_SCOPES: ScopeOpt[] = [];
+const EMPTY_PRICINGS: Pricing[] = [];
+const EMPTY_MODELS: ModelRow[] = [];
+const EMPTY_LOGS: UsageLog[] = [];
+const EMPTY_BUDGETS: any[] = [];
+
 export default function TokenAdminPage() {
   const [tab, setTab] = useState<Tab>("dashboard");
   const [days, setDays] = useState(30);
 
-  // 数据
-  const [summary, setSummary] = useState<Summary | null>(null);
-  const [byAgent, setByAgent] = useState<StatRow[]>([]);
-  const [byDept, setByDept] = useState<StatRow[]>([]);
-  const [byCompany, setByCompany] = useState<StatRow[]>([]);
-  const [byProject, setByProject] = useState<StatRow[]>([]);
-  const [byTask, setByTask] = useState<StatRow[]>([]);
-  const [byScenario, setByScenario] = useState<StatRow[]>([]);
-  const [logs, setLogs] = useState<UsageLog[]>([]);
-  const [pricings, setPricings] = useState<Pricing[]>([]);
-  const [models, setModels] = useState<ModelRow[]>([]);
+  // 激活公司可订阅：切公司 → 统计/流水/预算/范围选项全部自动换到新公司
+  const cid = useActiveCompanyId();
+  // undefined = 还没确认好激活公司。此时先别请求，否则会先按"无公司"打一轮、
+  // cid 一到又重打一轮（首屏闪一次 0 数据）。
+  const companyReady = cid !== undefined;
 
-  // V5.5 P0：预算上限
-  const [budgets, setBudgets] = useState<any[]>([]);
-  const [bform, setBform] = useState({
-    scope_type: "company", scope_id: "", limit_tokens: 0, limit_cost: 0, period: "day",
-  });
-  // V5.5 A4：部门级预算选项
-  const [departments, setDepartments] = useState<{ id: string; name: string }[]>([]);
-  // V5.5 A4：员工级预算选项
-  const [agents, setAgents] = useState<{ id: string; name: string }[]>([]);
+  /* ---------- 数据（统一交给 useResource：去重、缓存、聚焦重取） ---------- */
+  // 统计看板：7 个口径一次并发拉回，失败的那一项退回空值（与原来的
+  // allSettled 逐项兜底一致，不会因为一个口径挂了整页空白）
+  const { data: stats, refresh: refreshStats } = useResource<StatsBundle>(
+    companyReady ? `tokens:stats:${cid ?? "none"}:${days}` : null,
+    async () => {
+      const [s, a, d, co, p, t, sc] = await Promise.allSettled([
+        api.get<Summary>(`/tokens/stats/summary?days=${days}`),
+        cid ? api.get<StatRow[]>(`/tokens/stats/by-agent?company_id=${cid}&days=${days}`) : Promise.resolve([]),
+        cid ? api.get<StatRow[]>(`/tokens/stats/by-department?company_id=${cid}&days=${days}`) : Promise.resolve([]),
+        api.get<StatRow[]>(`/tokens/stats/by-company?days=${days}`),
+        cid ? api.get<StatRow[]>(`/tokens/stats/by-project?company_id=${cid}&days=${days}`) : Promise.resolve([]),
+        cid ? api.get<StatRow[]>(`/tokens/stats/by-task?company_id=${cid}&days=${days}`) : Promise.resolve([]),
+        cid ? api.get<StatRow[]>(`/tokens/stats/by-scenario?company_id=${cid}&days=${days}`) : Promise.resolve([]),
+      ]);
+      const pick = (r: PromiseSettledResult<StatRow[]>) => (r.status === "fulfilled" ? r.value : []);
+      return {
+        summary: s.status === "fulfilled" ? s.value : null,
+        byAgent: pick(a), byDept: pick(d), byCompany: pick(co),
+        byProject: pick(p), byTask: pick(t), byScenario: pick(sc),
+      };
+    },
+  );
+  const summary = stats?.summary ?? null;
+  const byAgent = stats?.byAgent ?? EMPTY_ROWS;
+  const byDept = stats?.byDept ?? EMPTY_ROWS;
+  const byCompany = stats?.byCompany ?? EMPTY_ROWS;
+  const byProject = stats?.byProject ?? EMPTY_ROWS;
+  const byTask = stats?.byTask ?? EMPTY_ROWS;
+  const byScenario = stats?.byScenario ?? EMPTY_ROWS;
 
-  const loadDepartments = useCallback(async () => {
-    const cs = await api.get("/companies").catch(() => []);
-    const cid = cs[0]?.id;
-    if (!cid) return;
-    try {
-      const r = await api.get(`/companies/${cid}/departments`);
-      setDepartments(Array.isArray(r) ? r : (r?.departments || []));
-      const ra = await api.get<{ id: string; name: string }[]>(
-        `/agents?company_id=${cid}`).catch(() => []);
-      setAgents(Array.isArray(ra) ? ra : []);
-    } catch { /* 静默 */ }
-  }, []);
-  useEffect(() => { loadDepartments(); }, [loadDepartments]);
+  // 范围选项（预算表单的部门/员工下拉）
+  const { data: scopeOpts } = useResource<{ departments: ScopeOpt[]; agents: ScopeOpt[] }>(
+    cid ? `tokens:scope:${cid}` : null,
+    async () => {
+      const [r, ra] = await Promise.all([
+        api.get<ScopeOpt[]>(`/companies/${cid}/departments`).catch(() => [] as ScopeOpt[]),
+        api.get<ScopeOpt[]>(`/agents?company_id=${cid}`).catch(() => [] as ScopeOpt[]),
+      ]);
+      return {
+        departments: Array.isArray(r) ? r : ((r as any)?.departments || []),
+        agents: Array.isArray(ra) ? ra : [],
+      };
+    },
+  );
+  const departments = scopeOpts?.departments ?? EMPTY_SCOPES;
+  const agents = scopeOpts?.agents ?? EMPTY_SCOPES;
 
   const [msg, setMsg] = useState("");
   const [msgType, setMsgType] = useState<"ok" | "err">("ok");
@@ -99,72 +133,45 @@ export default function TokenAdminPage() {
   });
   const [editingId, setEditingId] = useState<string | null>(null);
 
-  const loadStats = useCallback(async () => {
-    try {
-      const cs = await api.get("/companies").catch(() => []);
-      const cid = cs[0]?.id;
-      const [s, a, d, co, p, t, sc] = await Promise.allSettled([
-        api.get(`/tokens/stats/summary?days=${days}`),
-        cid ? api.get(`/tokens/stats/by-agent?company_id=${cid}&days=${days}`) : Promise.resolve([]),
-        cid ? api.get(`/tokens/stats/by-department?company_id=${cid}&days=${days}`) : Promise.resolve([]),
-        api.get(`/tokens/stats/by-company?days=${days}`),
-        cid ? api.get(`/tokens/stats/by-project?company_id=${cid}&days=${days}`) : Promise.resolve([]),
-        cid ? api.get(`/tokens/stats/by-task?company_id=${cid}&days=${days}`) : Promise.resolve([]),
-        cid ? api.get(`/tokens/stats/by-scenario?company_id=${cid}&days=${days}`) : Promise.resolve([]),
-      ]);
-      if (s.status === "fulfilled") setSummary(s.value);
-      if (a.status === "fulfilled") setByAgent(a.value);
-      if (d.status === "fulfilled") setByDept(d.value);
-      if (co.status === "fulfilled") setByCompany(co.value);
-      if (p.status === "fulfilled") setByProject(p.value);
-      if (t.status === "fulfilled") setByTask(t.value);
-      if (sc.status === "fulfilled") setByScenario(sc.value);
-    } catch { /* 静默 */ }
-  }, [days]);
-
-  const loadLogs = useCallback(async () => {
-    try {
-      const cs = await api.get("/companies").catch(() => []);
-      const cid = cs[0]?.id;
-      if (!cid) return;
-      const r = await api.get(`/tokens/usage-logs?company_id=${cid}&limit=100`);
-      setLogs(Array.isArray(r) ? r : []);
-    } catch { /* 静默 */ }
-  }, []);
-
-  const loadPricing = useCallback(async () => {
-    try {
+  // 计费标准：账号级配置，与公司无关，只有切到该 Tab 才拉
+  const { data: pricingData, refresh: refreshPricing } = useResource<{ pricings: Pricing[]; models: ModelRow[] }>(
+    tab === "pricing" ? "tokens:pricing" : null,
+    async () => {
       const [p, m] = await Promise.all([
-        api.get("/tokens/pricing"),
-        api.get("/tokens/pricing/models"),
+        api.get<Pricing[]>("/tokens/pricing"),
+        api.get<ModelRow[]>("/tokens/pricing/models"),
       ]);
-      setPricings(Array.isArray(p) ? p : []);
-      setModels(Array.isArray(m) ? m : []);
-    } catch { /* 静默 */ }
-  }, []);
+      return { pricings: Array.isArray(p) ? p : [], models: Array.isArray(m) ? m : [] };
+    },
+  );
+  const pricings = pricingData?.pricings ?? EMPTY_PRICINGS;
+  const models = pricingData?.models ?? EMPTY_MODELS;
 
-  useEffect(() => { loadStats(); }, [loadStats]);
-  // ---------- V5.5 P0：预算上限 ----------
-  const loadBudgets = useCallback(async () => {
-    try {
-      const cs = await api.get("/companies").catch(() => []);
-      const cid = cs[0]?.id;
-      if (!cid) return;
-      const r = await api.get(`/token-budgets?company_id=${cid}`);
-      setBudgets(Array.isArray(r?.budgets) ? r.budgets : []);
-    } catch { /* 静默 */ }
-  }, []);
+  // 用量流水：只在 Tab 激活时拉，与原来的"切 Tab 才请求"一致
+  const { data: logData, refresh: refreshLogs } = useResource<UsageLog[]>(
+    tab === "logs" && cid ? `tokens:logs:${cid}` : null,
+    async () => {
+      const r = await api.get<UsageLog[]>(`/tokens/usage-logs?company_id=${cid}&limit=100`);
+      return Array.isArray(r) ? r : [];
+    },
+  );
+  const logs = logData ?? EMPTY_LOGS;
 
-  useEffect(() => {
-    if (tab === "pricing") loadPricing();
-    if (tab === "budget") loadBudgets();
-    if (tab === "logs") loadLogs();
-  }, [tab, loadPricing, loadLogs, loadBudgets]);
+  // V5.5 P0：预算上限
+  const [bform, setBform] = useState({
+    scope_type: "company", scope_id: "", limit_tokens: 0, limit_cost: 0, period: "day",
+  });
+  const { data: budgetData, refresh: refreshBudgets } = useResource<any[]>(
+    tab === "budget" && cid ? `tokens:budgets:${cid}` : null,
+    async () => {
+      const r = await api.get<{ budgets?: any[] }>(`/token-budgets?company_id=${cid}`);
+      return Array.isArray(r?.budgets) ? r.budgets : [];
+    },
+  );
+  const budgets = budgetData ?? EMPTY_BUDGETS;
 
   async function saveBudget() {
     try {
-      const cs = await api.get("/companies").catch(() => []);
-      const cid = cs[0]?.id;
       if (!cid) return flash("还没有公司，无法设预算", "err");
       if (!bform.limit_tokens && !bform.limit_cost) return flash("请至少填一个上限", "err");
       const payload: Record<string, unknown> = { ...bform };
@@ -176,14 +183,13 @@ export default function TokenAdminPage() {
       await api.post(`/token-budgets?company_id=${cid}`, payload);
       flash("✅ 预算上限已生效：到顶自动暂停（不加价惩罚）");
       setBform({ scope_type: "company", scope_id: "", limit_tokens: 0, limit_cost: 0, period: "day" });
-      loadBudgets();
+      refreshBudgets();
     } catch (e: any) { flash(e.message || String(e), "err"); }
   }
 
   async function toggleBudget(b: any) {
     try {
-      const cs = await api.get("/companies").catch(() => []);
-      const cid = cs[0]?.id;
+      if (!cid) return;
       const res = await api.put(`/token-budgets/${b.id}?company_id=${cid}`,
         { enabled: !b.paused, paused: false });
       // V5.6.1 tripped→resume：恢复预算时后端自动续跑挂起执行
@@ -191,17 +197,16 @@ export default function TokenAdminPage() {
       flash(b.paused
         ? `✅ 已恢复执行${resumed.length ? `，${resumed.length} 个挂起任务自动续跑` : ""}`
         : "⏸ 已暂停该预算（LLM 调用将被拦截）");
-      loadBudgets();
+      refreshBudgets();
     } catch (e: any) { flash(e.message || String(e), "err"); }
   }
 
   async function deleteBudget(b: any) {
     try {
-      const cs = await api.get("/companies").catch(() => []);
-      const cid = cs[0]?.id;
+      if (!cid) return;
       await api.del(`/token-budgets/${b.id}?company_id=${cid}`);
       flash("已删除预算上限");
-      loadBudgets();
+      refreshBudgets();
     } catch (e: any) { flash(e.message || String(e), "err"); }
   }
 
@@ -212,7 +217,7 @@ export default function TokenAdminPage() {
       flash("✅ 计费标准已保存，即刻生效（新调用按新单价计算）");
       setEditingId(null);
       setPf({ model_id: "", billing_mode: "USAGE", input_price_per_m: 0, output_price_per_m: 0, monthly_fee: 0, overage_input_per_m: 0, overage_output_per_m: 0, included_tokens_per_month: 0 });
-      loadPricing(); loadStats();
+      refreshPricing(); refreshStats();
     } catch (e: any) { flash(e.message || String(e), "err"); }
   }
 
@@ -233,7 +238,7 @@ export default function TokenAdminPage() {
       description: "删除后该模型将回落到默认计费标准，已产生的历史用量记录不受影响。",
       confirmText: "删除",
     }))) return;
-    try { await api.del(`/tokens/pricing/${p.id}`); flash("已删除"); loadPricing(); }
+    try { await api.del(`/tokens/pricing/${p.id}`); flash("已删除"); refreshPricing(); }
     catch (e: any) { flash(e.message || String(e), "err"); }
   }
 
@@ -663,7 +668,7 @@ export default function TokenAdminPage() {
         <div className="card p-5">
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-semibold text-[var(--foreground)]">📜 最近 100 条调用流水</h3>
-            <button onClick={loadLogs} className="text-xs text-[var(--muted-foreground)] hover:text-[var(--accent)]">⟳ 刷新</button>
+            <button onClick={() => refreshLogs()} className="text-xs text-[var(--muted-foreground)] hover:text-[var(--accent)]">⟳ 刷新</button>
           </div>
           {logs.length ? (
             <div className="overflow-x-auto">

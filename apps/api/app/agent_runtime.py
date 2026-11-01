@@ -524,8 +524,15 @@ async def resume_execution(db: AsyncSession, execution: AgentExecution) -> Agent
                          execution_id, task_id, exc, exc_info=True)
             await session.rollback()
             t2 = await session.get(Task, task_id)
+            failed_now = False
             if t2 and t2.status == TS.RUNNING:
                 t2.status = TS.FAILED
+                failed_now = True
+            if failed_now:
+                from app.services.notification_service import notify_task_terminal
+                await notify_task_terminal(
+                    session, t2, "FAILED",
+                    error=f"{type(exc).__name__}: {exc}")
             try:
                 await log_event(session, "task.failed", "task", task_id,
                                 "system", None,

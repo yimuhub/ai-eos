@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { api, describeError } from "@/lib/api";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
 import { confirmAction } from "@/components/ConfirmDialog";
-import type { Company } from "@/lib/types";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 
 /* ============================================================
    成长中心：按部门聚合成长档案 + 员工档案弹窗 + 学习计划
@@ -32,9 +32,36 @@ type Plan = {
 };
 
 export default function GrowthCenterPage() {
-  const [cid, setCid] = useState("");
+  // 激活公司可订阅：切公司后档案与计划自动跟随，不再用 `/companies → cs[0]` 快照。
+  const cid = useActiveCompanyId() ?? "";
   const [mounted, setMounted] = useState(false);
-  const [depts, setDepts] = useState<DeptGroup[]>([]);
+  // 部门档案与学习计划互不依赖：两个 key 独立缓存/重取，
+  // 计划慢或失败不会拖住（或清空）部门档案，与原实现的两段独立请求一致。
+  const {
+    data: deptBundle, error: loadError, refresh: refreshDepts,
+  } = useResource(
+    cid ? `growth-center:${cid}` : null,
+    async () => {
+      const d = await api.get<{ departments?: DeptGroup[] }>(
+        `/growth-center/departments-overview?company_id=${cid}`);
+      return { cid, depts: d.departments || [] };
+    },
+  );
+  const { data: planBundle, refresh: refreshPlans } = useResource(
+    cid ? `growth-center:plans:${cid}` : null,
+    async () => {
+      const plans = await api.get<Plan[]>(`/growth-center/plans?company_id=${cid}`);
+      return { cid, plans: plans || [] };
+    },
+  );
+  // 切公司时旧 bundle 先不渲染，避免档案/计划短暂显示上一家公司的数据。
+  const depts = deptBundle && deptBundle.cid === cid ? deptBundle.depts : [];
+  const plans = planBundle && planBundle.cid === cid ? planBundle.plans : [];
+  /** 写操作后档案与计划一起重取（沿用原 load 的语义） */
+  const load = useCallback(() => {
+    refreshDepts();
+    refreshPlans();
+  }, [refreshDepts, refreshPlans]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [pinnedDepts, setPinnedDepts] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
@@ -53,8 +80,7 @@ export default function GrowthCenterPage() {
   const [detail, setDetail] = useState<{ agent: AgentSummary; profile: Profile } | null>(null);
   const [detailData, setDetailData] = useState<any>(null);
   const [openSection, setOpenSection] = useState<string | null>(null);
-  // 学习计划
-  const [plans, setPlans] = useState<Plan[]>([]);
+  // 学习计划表单
   const [planPanel, setPlanPanel] = useState(false);
   const [planTitle, setPlanTitle] = useState("");
   const [planSkills, setPlanSkills] = useState("");
@@ -67,18 +93,8 @@ export default function GrowthCenterPage() {
 
   useEffect(() => { setMounted(true); }, []);
 
-  const load = useCallback(async () => {
-    try {
-      const cs = await api.get<Company[]>("/companies");
-      if (!cs.length) return;
-      setCid(cs[0].id);
-      const d = await api.get(`/growth-center/departments-overview?company_id=${cs[0].id}`);
-      setDepts(d.departments || []);
-      api.get(`/growth-center/plans?company_id=${cs[0].id}`).then(setPlans).catch(() => {});
-    } catch (e: any) { setMsg(String(e)); }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
+  // 加载失败时沿用原来的顶部提示条（错误文案由数据层归一化）。
+  useEffect(() => { if (loadError) setMsg(loadError); }, [loadError]);
 
   async function openDetail(a: AgentSummary) {
     const profile = await api.get(`/learning/agents/${a.id}/profile`).catch(() => null);

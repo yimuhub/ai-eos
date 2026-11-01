@@ -1,13 +1,14 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import dynamic from "next/dynamic";
 import ToastHost from "@/components/Toast";
 import ConfirmHost from "@/components/ConfirmDialog";
-import CommandPalette from "@/components/CommandPalette";
 import GlobalShortcuts from "@/components/GlobalShortcuts";
 import UpdateBanner from "@/components/UpdateBanner";
 import ClassicLayout from "@/components/ClassicLayout";
 import ModeChooser from "@/components/ModeChooser";
+import FirstRunTour from "@/components/FirstRunTour";
 import { api, ApiError, getToken } from "@/lib/api";
 import { isEmbedded } from "@/lib/apps";
 import { useUIMode } from "@/lib/ui-mode";
@@ -15,13 +16,34 @@ import { useUIMode } from "@/lib/ui-mode";
 /**
  * 登录态守卫 + 双模式外壳。
  *
- *   classic：左侧固定菜单 + 整页导航，每个功能是一个完整页面（v5.12 之前的形态）；
+ *   classic（默认）：左侧固定菜单 + 整页导航，每个功能是一个完整页面；
  *   geek：`/workspace` 单外壳，功能页开在右栏标签里，对话不中断。
  *
- * 首次进入必须二选一（ModeChooser），选择存在 localStorage，之后可随时切换。
+ * 首次进入不再强制二选一：没有存储选择时直接按 classic 渲染。
+ * ModeChooser 只在用户显式触发 openModeChooser() 时弹出，不阻塞界面。
  * 内嵌页面（iframe）永远剥掉外壳，两种模式下都一样。
  */
 const DESKTOP_TITLEBAR = 34;
+
+/**
+ * ⌘K 命令面板按需加载。
+ *
+ * 面板要检索页面/会话/员工并带一整套键盘与焦点逻辑，是主界面里最大的一块
+ * 交互代码。它只在用户唤起时才产出 UI，所以没必要占首屏预算：
+ * 用 `next/dynamic` 打成独立 chunk，首屏 HTML 与首屏 JS 都不再包含它。
+ *
+ * `ssr: false`：面板依赖 window / localStorage，服务端渲染没有意义；
+ * 也避免把它的模块图带进 layout 的首次渲染。`loading: () => null`：
+ * 加载完成前不渲染任何东西，不留占位闪烁。
+ *
+ * 注意：dynamic() 在组件首次渲染（水合后）才发起 import，因此 chunk 会在
+ * 页面可交互后异步下载，而不是在首屏请求链里；入口事件（lib/palette）若在
+ * 下载完成前触发会丢失，但此时用户尚未水合完成，点击/按键都还不可能发生。
+ */
+const CommandPalette = dynamic(() => import("@/components/CommandPalette"), {
+  ssr: false,
+  loading: () => null,
+});
 
 export default function MainLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -142,24 +164,6 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
     );
   }
 
-  // 还没有选择过模式：先让用户二选一，任何页面都先不渲染
-  if (mode === null) {
-    return (
-      <>
-        {hosts}
-        <div className="h-screen flex flex-col items-center justify-center gap-3"
-          style={{ paddingTop: desktop ? DESKTOP_TITLEBAR : 0 }}>
-          <div className="w-10 h-10 rounded-xl flex items-center justify-center text-white font-bold"
-            style={{ background: "linear-gradient(135deg,#6366f1,#22d3ee)" }}>
-            ⚡
-          </div>
-          <p className="text-xs" style={{ color: "var(--muted)" }}>先选择一种界面模式</p>
-        </div>
-        <ModeChooser />
-      </>
-    );
-  }
-
   const chrome = (
     <>
       {hosts}
@@ -176,6 +180,9 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
         <div className="h-screen overflow-hidden" style={{ paddingTop: desktop ? DESKTOP_TITLEBAR : 0 }}>
           <ClassicLayout>{children}</ClassicLayout>
         </div>
+        {/* 首次进入的 3 步引导：右下角卡片，不遮罩、不阻断操作 */}
+        <FirstRunTour />
+        {/* 只在用户显式切换模式时弹出，默认不强制 */}
         <ModeChooser />
       </>
     );

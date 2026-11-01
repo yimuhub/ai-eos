@@ -1,8 +1,8 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, describeError, downloadURL, fetchBlobURL } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { notify } from "@/components/Toast";
-import type { Company } from "@/lib/types";
 
 /* ============================================================
    交付中心：Agent 专属交付文件夹
@@ -23,6 +23,12 @@ type Group = {
   key: string; name: string; is_project: boolean;
   file_count: number; total_size: number; files: FileRow[];
 };
+type DeliveryBundle = {
+  cid: string;
+  view: "agent" | "project" | "task";
+  folders: Folder[];
+  groups: Group[];
+};
 
 const AVATAR_GRADS = ["#6366f1,#8b5cf6", "#22d3ee,#3b82f6", "#f59e0b,#ef4444", "#10b981,#14b8a6", "#ec4899,#f43f5e"];
 
@@ -42,41 +48,43 @@ const fileIcon = (name: string, mime?: string | null) => {
 };
 
 export default function DeliveryCenterPage() {
-  const [cid, setCid] = useState("");
+  const cid = useActiveCompanyId();
   const [view, setView] = useState<"agent" | "project" | "task">("agent");
-  const [folders, setFolders] = useState<Folder[]>([]);
-  const [groups, setGroups] = useState<Group[]>([]);
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState("");
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setErr("");
-    try {
-      const cs = await api.get<Company[]>("/companies");
-      if (!cs.length) { setLoading(false); return; }  // 早退也必须复位 loading，否则骨架屏永远转
-      setCid(cs[0].id);
+  /* 统一数据层：key 里带 view，切视图/切公司都自动重取；
+   * bundle 带 cid，保证新公司列表到达前不会继续展示旧公司的文件。
+   */
+  const { data: bundle, error, loading: fetching, refresh } = useResource(
+    cid ? `delivery:${cid}:${view}` : null,
+    async (): Promise<DeliveryBundle> => {
       if (view === "agent") {
-        const r = await api.get(`/delivery/by-agent?company_id=${cs[0].id}`);
-        setFolders(r.folders || []);
-      } else if (view === "task") {
-        const r = await api.get(`/delivery/by-task?company_id=${cs[0].id}`);
-        setGroups(r.groups || []);
-      } else {
-        const r = await api.get(`/delivery/by-project?company_id=${cs[0].id}`);
-        setGroups(r.groups || []);
+        const r = await api.get<{ folders?: Folder[] }>(`/delivery/by-agent?company_id=${cid}`);
+        return { cid: cid as string, view, folders: r.folders || [], groups: [] };
       }
-    } catch (e) {
-      // 原实现把 /companies 放在 try 之外：一旦失败，loading 永远为 true，
-      // 整页停在骨架屏（用户以为网慢，其实已经报错）。
-      setErr(describeError(e, "交付文件加载失败"));
-    }
-    setLoading(false);
-  }, [view]);
+      const url = view === "task" ? "by-task" : "by-project";
+      const r = await api.get<{ groups?: Group[] }>(`/delivery/${url}?company_id=${cid}`);
+      return { cid: cid as string, view, folders: [], groups: r.groups || [] };
+    },
+  );
+  const active = bundle && bundle.cid === cid ? bundle : null;
 
-  useEffect(() => { load(); }, [load]);
+  // 项目视图里要显示文件属于哪位 Agent：原实现保留"按 Agent"视图加载过的
+  // 那份快照，这里同样保留（按 cid 记，切公司后不串用）。
+  const agentFolders = useRef<{ cid: string; rows: Folder[] } | null>(null);
+  useEffect(() => {
+    if (active?.view === "agent") agentFolders.current = { cid: active.cid, rows: active.folders };
+  }, [active]);
+
+  const folders = active?.view === "agent"
+    ? active.folders
+    : agentFolders.current && agentFolders.current.cid === cid ? agentFolders.current.rows : [];
+  const groups = active && active.view !== "agent" ? active.groups : [];
+
+  const err = active ? "" : error ?? "";
+  // 有缓存时不出骨架屏；没数据且还没拿到结果（或切了 cid 尚未重取）才算加载中
+  const loading = !active && (cid === undefined || fetching || (!!cid && !err));
 
   async function download(id: string, name: string) {
     try {
@@ -131,7 +139,7 @@ export default function DeliveryCenterPage() {
       {!loading && err && (
         <div className="card card-static p-8 text-center space-y-3">
           <p className="text-sm" style={{ color: "#fca5a5" }}>❌ {err}</p>
-          <button className="btn-primary !py-1.5 !px-4 text-xs" onClick={() => load()}>重试</button>
+          <button className="btn-primary !py-1.5 !px-4 text-xs" onClick={() => refresh()}>重试</button>
         </div>
       )}
 

@@ -189,6 +189,11 @@ async def execute_action(
             reason=f"高危本机操作 {data.action_type}: "
                    f"{json.dumps(data.params, ensure_ascii=False)[:200]}")
         db.add(req)
+        from app.services.notification_service import notify_approval_pending
+        await notify_approval_pending(
+            db, company_id=company_id,
+            title=f"待审批：高危本机操作 {data.action_type}",
+            body=req.reason)
         await db.commit()
         return {"status": "awaiting_approval", "approval_request_id": req.id,
                 "message": "该操作为高危动作，已生成审批单。在「干预中心」批准后自动执行，"

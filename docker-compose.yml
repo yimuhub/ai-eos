@@ -1,0 +1,88 @@
+# AI-EOS 单机 Docker Compose（SQLite + FastAPI + Next.js）
+#
+# 适用：一台机器、SQLite 单文件库、数据挂载在 ./apps/api/data。
+# PostgreSQL/Redis 版本见仓库原有 docker/docker-compose.yml。
+#
+# 首次使用：
+#   1) cp .env.example apps/api/.env    # 已有可跳过；填 JWT_SECRET / 模型 Key
+#   2) docker compose build
+#   3) docker compose up -d
+#   4) ./tools/healthcheck.sh
+#
+# 约定：
+# - compose 文件里不写任何真实密钥：JWT_SECRET / METRICS_TOKEN 等一律来自
+#   apps/api/.env（不存在时回退根目录 .env.example 的空模板）。
+#   env_file 的 required:false 需要 Docker Compose v2.24+；旧版本请先创建 apps/api/.env。
+# - 宿主机端口沿用单机脚本：API 127.0.0.1:8001 → 容器 8000，Web 127.0.0.1:3000。
+# - 浏览器访问 http://localhost:3000；API 地址由构建参数 NEXT_PUBLIC_API_URL 决定。
+# - DATABASE_URL 在本文件内固定指向容器 /data，避免 .env 里的相对路径落到 /app/data。
+
+name: ai-eos
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.api
+    image: aieos-api:local
+    restart: unless-stopped
+    env_file:
+      # 先读模板（提供默认值），再由真实 .env 覆盖；两个文件都不存在也不报错。
+      - path: ./.env.example
+        required: false
+      - path: ./apps/api/.env
+        required: false
+    environment:
+      # 不在这里写 AIEOS_ENV / DEBUG / JWT_SECRET：让 apps/api/.env 成为唯一事实来源。
+      DATABASE_URL: sqlite+aiosqlite:////data/aieos.db
+      AIEOS_LOG_DIR: /var/log/aieos
+      STORAGE_DIR: /app/storage
+      AIEOS_JWT_SECRET_FILE: /data/jwt_secret.key
+    ports:
+      - "127.0.0.1:${AIEOS_API_PORT:-8001}:8000"
+    volumes:
+      - ./apps/api/data:/data
+      - api-logs:/var/log/aieos
+      - api-storage:/app/storage
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+      args:
+        # 浏览器直连后端用的地址；局域网/域名部署时改成可被浏览器访问的 API 地址后重新 build。
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8001}
+    image: aieos-web:local
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8001}
+    ports:
+      - "127.0.0.1:${AIEOS_WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  api-logs:
+  api-storage:

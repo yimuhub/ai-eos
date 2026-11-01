@@ -120,6 +120,9 @@ class WorkflowRuntime:
                 await transition_task(self.db, task, TaskStatus.FAILED)
             except Exception:
                 task.status = TaskStatus.FAILED
+                from app.services.notification_service import notify_task_terminal
+                await notify_task_terminal(self.db, task, "FAILED",
+                                           error="工作流节点执行失败")
             raise
 
     def exec_input_company(self) -> str:

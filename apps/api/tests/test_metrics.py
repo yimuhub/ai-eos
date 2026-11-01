@@ -14,7 +14,10 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import uuid
 
+import httpx
 import pytest
 
 pytestmark = pytest.mark.asyncio
@@ -162,3 +165,143 @@ async def test_dashboard_returns_404_not_200_with_error_body(client, tenants):
     r = await client.get(f"/dashboard/{tenants.bob_co['id']}",
                          headers=tenants.alice["headers"])
     assert r.status_code == 404, f"期望 404，实际 {r.status_code} {r.text}"
+
+
+# ---------------------------------------------------------------------------
+# Prometheus RED / LLM / 任务队列指标
+# ---------------------------------------------------------------------------
+
+async def _scrape(client) -> str:
+    r = await client.get("/metrics/prometheus")
+    assert r.status_code == 200, r.text
+    assert "text/plain" in r.headers.get("content-type", "")
+    return r.text
+
+
+async def test_http_requests_total_counts_health_200(client):
+    """GET /health 之后，抓取文本里必须有 status="200" 的样本。"""
+    assert (await client.get("/health")).status_code == 200
+    text = await _scrape(client)
+
+    assert "# TYPE aieos_http_requests_total counter" in text
+    assert ('aieos_http_requests_total{method="GET",path="/health",'
+            'status="200"}') in text
+    # 原有 4 个探针指标必须保留（扩展而不是替换）。
+    for legacy in ("aieos_up", "aieos_process_start_time_seconds",
+                   "aieos_db_up", "aieos_db_probe_duration_seconds"):
+        assert legacy in text
+
+
+async def test_unknown_route_is_unmatched_not_high_cardinality(client):
+    """未匹配路由必须归一到 unmatched，不能把随机 id 变成标签值。"""
+    random_id = uuid.uuid4().hex
+    r = await client.get(f"/definitely-not-a-route-{random_id}")
+    assert r.status_code == 404
+
+    text = await _scrape(client)
+    assert random_id not in text, "真实路径被当成标签值，基数会无界增长"
+    assert 'aieos_http_requests_total{method="GET",path="unmatched",' \
+           'status="404"}' in text
+
+
+async def test_http_duration_histogram_count_increments(client):
+    """直方图 _count 必须随请求递增，而不是只有 bucket 没有总数。"""
+    pattern = re.compile(
+        r'aieos_http_request_duration_seconds_count'
+        r'\{method="GET",path="/health"\} (\d+)')
+
+    await client.get("/health")
+    first = pattern.search(await _scrape(client))
+    assert first is not None, "直方图 _count 样本缺失"
+
+    await client.get("/health")
+    second = pattern.search(await _scrape(client))
+    assert second is not None
+    assert int(second.group(1)) == int(first.group(1)) + 1
+
+
+async def test_task_queue_depth_is_exposed(client):
+    """任务队列深度在空闲时也应暴露 0，而不是等第一单任务才出现。"""
+    text = await _scrape(client)
+    assert 'aieos_task_queue_depth{kind="pending"}' in text
+    assert 'aieos_task_queue_depth{kind="running"}' in text
+
+
+async def test_metrics_rejects_non_loopback_without_token(monkeypatch):
+    """鉴权行为保持不变：未配 token 且非回环来源 → 404。"""
+    from app.core.config import settings
+    from app.main import app as asgi_app
+
+    monkeypatch.setattr(settings, "debug", False)
+    monkeypatch.setattr(settings, "metrics_token", "")
+
+    transport = httpx.ASGITransport(
+        app=asgi_app, client=("203.0.113.9", 45678))
+    async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver") as remote:
+        r = await remote.get("/metrics/prometheus")
+    assert r.status_code == 404, f"非回环来源不应拿到指标：{r.status_code}"
+
+
+async def test_metrics_requires_token_when_configured(monkeypatch):
+    """配了 METRICS_TOKEN 时，非回环来源不带 token 必须 401。"""
+    from app.core.config import settings
+    from app.main import app as asgi_app
+
+    monkeypatch.setattr(settings, "debug", False)
+    monkeypatch.setattr(settings, "metrics_token", "test-metrics-token")
+
+    transport = httpx.ASGITransport(
+        app=asgi_app, client=("203.0.113.9", 45678))
+    async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver") as remote:
+        denied = await remote.get("/metrics/prometheus")
+        allowed = await remote.get(
+            "/metrics/prometheus",
+            headers={"Authorization": "Bearer test-metrics-token"})
+
+    assert denied.status_code == 401
+    assert "www-authenticate" in {k.lower() for k in denied.headers}
+    assert allowed.status_code == 200
+    assert "aieos_http_requests_total" in allowed.text
+
+
+async def test_prometheus_label_values_are_escaped():
+    """标签值里的引号、反斜杠、换行必须转义，否则会破坏抓取文本。"""
+    from app.core import metrics
+
+    counter = metrics.Counter(
+        "aieos_test_escape_total", "escape probe", ("label",))
+    counter.inc(1, label='a"b\\c\nd')
+
+    text = metrics.render_prometheus([counter])
+    assert 'aieos_test_escape_total{label="a\\"b\\\\c\\nd"} 1' in text
+    # 原始换行若未转义，会多切出一行，导致样本被解析器丢弃。
+    assert text.count("aieos_test_escape_total{") == 1
+
+
+async def test_llm_metrics_record_success_tokens_and_errors():
+    """LLM 埋点：成功记 tokens，失败也计入 error，且不改变调用结果。"""
+    from types import SimpleNamespace
+
+    from app.core import metrics
+    from app.model_gateway import _observe_llm_call
+
+    row = SimpleNamespace(
+        provider_type=SimpleNamespace(value="openai_compat"),
+        model_id="fake-model",
+        name="假模型",
+    )
+    _observe_llm_call(row, "success", 0.12,
+                      {"prompt_tokens": 11, "completion_tokens": 7})
+    _observe_llm_call(row, "error", 0.03)
+
+    text = metrics.render_prometheus()
+    assert ('aieos_llm_requests_total{provider="openai_compat",'
+            'model="fake-model",outcome="success"}') in text
+    assert ('aieos_llm_requests_total{provider="openai_compat",'
+            'model="fake-model",outcome="error"}') in text
+    assert ('aieos_llm_tokens_total{provider="openai_compat",'
+            'model="fake-model",kind="input"}') in text
+    assert ('aieos_llm_tokens_total{provider="openai_compat",'
+            'model="fake-model",kind="output"}') in text

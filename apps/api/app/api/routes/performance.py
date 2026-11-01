@@ -3,15 +3,20 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import (assert_agent_owned, assert_company_capability,
+                          get_current_user, get_db)
+from app.core.permissions import Capability
 from app.models.performance import PerformanceSnapshot
 from app.performance_engine import compute_agent_metrics, snapshot_company
 from app.models.user import User
+from app.schemas.responses import (AgentMetricsOut, HrOverviewOut,
+                                   PerformanceHistoryItemOut, SnapshotOut)
 
 router = APIRouter(prefix="/performance", tags=["performance"])
 
 
-@router.get("/company/{company_id}/hr-overview")
+@router.get("/company/{company_id}/hr-overview",
+            response_model=HrOverviewOut)
 async def hr_overview(company_id: str, db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
     """V5.5 C1：公司 HR 看板——编制 / 成本 / 产出 / 考核分 四象限。"""
@@ -106,7 +111,7 @@ async def hr_overview(company_id: str, db: AsyncSession = Depends(get_db),
     }
 
 
-@router.get("/agents/{agent_id}")
+@router.get("/agents/{agent_id}", response_model=AgentMetricsOut)
 async def agent_performance(
     agent_id: str,
     since: str | None = Query(None),
@@ -115,29 +120,39 @@ async def agent_performance(
 ):
     """单 Agent 实时绩效（从真实执行数据计算）。"""
     from datetime import datetime
+    # 归属校验：按 agent 反查其公司，再要求调用者在该公司有角色（全部角色都含
+    # VIEW）。不存在与跨租户同为 404，避免用 id 枚举他人员工。
+    await assert_agent_owned(db, user.id, agent_id)
     since_dt = datetime.fromisoformat(since) if since else None
     metrics = await compute_agent_metrics(db, agent_id, since_dt)
     return metrics
 
 
-@router.post("/company/{company_id}/snapshot")
+@router.post("/company/{company_id}/snapshot",
+             response_model=SnapshotOut)
 async def take_snapshot(
     company_id: str,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """对公司全体 Agent 做绩效快照并返回排行榜。"""
+    # 快照会写入公司数据，按写操作收口：OPERATE 与建项目/下任务同级。
+    await assert_company_capability(db, user.id, company_id, Capability.OPERATE)
     results = await snapshot_company(db, company_id)
     return {"ranked": results}
 
 
-@router.get("/company/{company_id}/history")
+@router.get("/company/{company_id}/history",
+            response_model=list[PerformanceHistoryItemOut])
 async def snapshot_history(
     company_id: str,
     limit: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """公司绩效快照历史。"""
+    # 只读历史：VIEW 即可；跨租户 404，不泄露该公司是否有快照。
+    await assert_company_capability(db, user.id, company_id, Capability.VIEW)
     q = await db.execute(select(PerformanceSnapshot).where(
         PerformanceSnapshot.company_id == company_id).order_by(
         PerformanceSnapshot.created_at.desc()).limit(limit))

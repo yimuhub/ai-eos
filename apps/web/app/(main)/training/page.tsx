@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { api, ApiError, getCompanies } from "@/lib/api";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { api, ApiError } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { notify } from "@/components/Toast";
 import { confirmAction } from "@/components/ConfirmDialog";
 import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
@@ -68,10 +69,25 @@ const CHANGE_TYPE_ZH: Record<string, string> = {
 };
 
 export default function TrainingPage() {
-  const [cid, setCid] = useState<string>("");
-  const [agents, setAgents] = useState<Agent[]>([]);
+  // 激活公司可订阅：切公司后员工列表与会话自动跟随，不再用 `/companies → cs[0]` 快照。
+  const cid = useActiveCompanyId();
+  const { data: people, error: agentsError } = useResource(
+    cid ? `training:agents:${cid}` : null,
+    async () => ({ cid, agents: (await api.get<Agent[]>("/agents")) || [] }),
+  );
+  // 切公司时旧 bundle 先不渲染，避免下拉短暂显示上一家公司的员工。
+  const agents = useMemo<Agent[]>(
+    () => (people && people.cid === cid ? people.agents : []),
+    [people, cid],
+  );
+
   const [agentId, setAgentId] = useState<string>("");
-  const [sessions, setSessions] = useState<Session[]>([]);
+  const { data: sessionData, error: sessionsError, refresh: refreshSessions } = useResource<Session[]>(
+    agentId ? `training:sessions:${agentId}` : null,
+    () => api.get<Session[]>(`/training/sessions?agent_id=${agentId}`),
+  );
+  const sessions = useMemo<Session[]>(() => sessionData ?? [], [sessionData]);
+
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -80,50 +96,24 @@ export default function TrainingPage() {
   const [trainType, setTrainType] = useState("CONVERSATION");
   const [trainAttachments, setTrainAttachments] = useState<Attachment[]>([]); // 📎 训练参考材料
 
-  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [deciding, setDeciding] = useState(false);
 
-  // ---------- 初始化：公司 → Agent 列表 ----------
+  // ---------- 初始化：默认选中第一位员工；员工列表变化时修正选择 ----------
   useEffect(() => {
-    (async () => {
-      try {
-        const cs = await getCompanies<any>();
-        const c = cs?.[0]?.id;
-        if (!c) {
-          setLoading(false);
-          return;
-        }
-        setCid(c);
-        const list = await api.get<Agent[]>("/agents");
-        setAgents(list || []);
-        if (list?.length) setAgentId(list[0].id);
-      } catch (e) {
-        notify("error", describe(e, "加载公司/员工列表失败"));
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, []);
+    if (agents.length && !agents.some((a) => a.id === agentId)) setAgentId(agents[0].id);
+    else if (!agents.length && agentId) setAgentId("");
+  }, [agents, agentId]);
 
-  const loadSessions = useCallback(async (aid: string) => {
-    if (!aid) {
-      setSessions([]);
-      return;
-    }
-    try {
-      setSessions(await api.get<Session[]>(`/training/sessions?agent_id=${aid}`));
-    } catch (e) {
-      notify("error", describe(e, "加载训练会话失败"));
-      setSessions([]);
-    }
-  }, []);
+  // 保留原来的错误提示：列表加载失败时弹 toast、内容区留空。
+  useEffect(() => { if (agentsError) notify("error", agentsError); }, [agentsError]);
+  useEffect(() => { if (sessionsError) notify("error", sessionsError); }, [sessionsError]);
 
+  // 切换员工时清空详情与选中项（会话由 useResource 按 agentId 自动重取）。
   useEffect(() => {
     setSelected(null);
     setDetail(null);
-    loadSessions(agentId);
-  }, [agentId, loadSessions]);
+  }, [agentId]);
 
   const openSession = useCallback(async (sid: string) => {
     setSelected(sid);
@@ -152,7 +142,7 @@ export default function TrainingPage() {
       setTitle("");
       setContent("");
       setTrainAttachments([]);
-      await loadSessions(agentId);
+      refreshSessions();
       if (r?.id) await openSession(r.id);
     } catch (e) {
       notify("error", describe(e, "发起训练失败"));
@@ -175,7 +165,7 @@ export default function TrainingPage() {
           ? `已批准并生效${r?.applied_count != null ? `（应用 ${r.applied_count} 项变更）` : ""}`
           : "已拒绝该次训练",
       );
-      await loadSessions(agentId);
+      refreshSessions();
       await openSession(selected);
     } catch (e) {
       notify("error", describe(e, action === "approve" ? "批准失败" : "拒绝失败"));
@@ -211,7 +201,7 @@ export default function TrainingPage() {
         </p>
       </div>
 
-      {!cid && !loading && (
+      {cid === null && (
         <div className="card card-static text-sm" style={{ color: "var(--muted)" }}>
           你还没有创建 AI 公司，请先到「公司管理」创建后再来训练员工。
         </div>

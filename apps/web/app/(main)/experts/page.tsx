@@ -1,7 +1,8 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, describeError } from "@/lib/api";
+import { invalidate, useResource } from "@/lib/useResource";
 import AttachmentPicker from "@/components/AttachmentPicker";
 import type { Attachment } from "@/components/AttachmentPicker";
 
@@ -76,8 +77,16 @@ const SECTION_ACCENT: Record<string, string> = {
 };
 
 export default function ExpertsPage() {
-  const [list, setList] = useState<Expert[]>([]);
-  const [depts, setDepts] = useState<DeptRow[]>([]);
+  // 专家库是账号级目录（与当前公司无关），接口本身不带 company_id，
+  // 因此 key 不带 cid——带上只会在切公司时重拉同一份数据。
+  // 两个接口互不依赖：并发发出、各自缓存、各自重取。
+  const { data: expertData, error: loadError, loading, refresh: refreshExperts } =
+    useResource<Expert[]>("experts:list", () => api.get<Expert[]>("/experts"));
+  const { data: deptData, refresh: refreshDepts } =
+    useResource<DeptRow[]>("experts:departments", () => api.get<DeptRow[]>("/experts/departments"));
+
+  const list = useMemo<Expert[]>(() => expertData ?? [], [expertData]);
+  const depts = useMemo<DeptRow[]>(() => deptData ?? [], [deptData]);
   const [dept, setDept] = useState("all");
   const [q, setQ] = useState("");
   const [importing, setImporting] = useState(false);
@@ -108,18 +117,11 @@ export default function ExpertsPage() {
   const [manualBusy, setManualBusy] = useState(false);
   const [manualForm, setManualForm] = useState<Record<string, string>>({});
 
-  const load = useCallback(async () => {
-    try {
-      const [e, d] = await Promise.all([
-        api.get("/experts"),
-        api.get("/experts/departments"),
-      ]);
-      setList(e as Expert[]);
-      setDepts(d as DeptRow[]);
-    } catch { /* ignore */ }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
+  // 专家库变了（导入 / 复制 / 编辑 / 新建 / 雇佣计数）→ 列表与部门计数一起重取
+  const reload = useCallback(() => {
+    refreshExperts();
+    refreshDepts();
+  }, [refreshExperts, refreshDepts]);
 
   const filtered = useMemo(() => {
     let out = list;
@@ -139,7 +141,7 @@ export default function ExpertsPage() {
     try {
       const r = await api.post("/experts/import-original") as any;
       setMsg(`✅ 专家库已就位：新增 ${r.created} / 更新 ${r.updated}，下架旧上游 ${r.disabled_legacy} 个`);
-      await load();
+      reload();
     } catch (e) { setMsg("❌ " + describeError(e)); }
     setImporting(false);
   };
@@ -161,6 +163,7 @@ export default function ExpertsPage() {
     try {
       const r = await api.post("/experts/team", { goal: teamGoal }) as any;
       setTeamRes(r.jobs || []);
+      invalidate("factory:"); // 新蓝图要出现在工厂列表里
       setMsg(`✅ 已创建 ${r.team_size} 份团队蓝图，去工厂页审查批准`);
     } catch (e) { setMsg("❌ " + describeError(e)); }
     setTeamBusy(false);
@@ -171,8 +174,9 @@ export default function ExpertsPage() {
     try {
       const r = await api.post(`/experts/${id}/to-blueprint`) as any;
       setMsg(`✅ 蓝图已创建（${r.job_id.slice(0, 8)}），请到「Agent 工厂」审查批准后上岗`);
+      invalidate("factory:"); // 新蓝图要出现在工厂列表里
       setDetail(null);
-      load();
+      reload();
     } catch (e) { setMsg("❌ " + describeError(e)); }
     setHiring(false);
   };
@@ -184,7 +188,7 @@ export default function ExpertsPage() {
     try {
       const r = await api.post(`/experts/${detail.id}/copy`) as any;
       setMsg(`✅ 已复制为「${r.name}」，可继续编辑`);
-      await load();
+      reload();
       setDetail({ ...detail, id: r.id, name: r.name });
     } catch (e) { setMsg("❌ " + describeError(e)); }
     setCopying(false);
@@ -213,7 +217,7 @@ export default function ExpertsPage() {
       await api.put(`/experts/${editing}`, payload);
       setMsg("✅ 专家已更新");
       setEditing(null); setDetail(null);
-      load();
+      reload();
     } catch (e) { setMsg("❌ " + describeError(e)); }
     setEditingBusy(false);
   };
@@ -234,7 +238,7 @@ export default function ExpertsPage() {
       await api.post("/experts/manual", payload);
       setMsg("✅ 新专家已创建");
       setShowManual(false); setAttachments([]);
-      load();
+      reload();
     } catch (e) { setMsg("❌ " + describeError(e)); }
     setManualBusy(false);
   };
@@ -313,6 +317,12 @@ export default function ExpertsPage() {
       </div>
 
       {msg && <div className="mb-4 text-sm text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-2">{msg}</div>}
+      {loadError && (
+        <div className="mb-4 text-sm text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg p-2">
+          ❌ 加载专家库失败：{loadError}
+          <button onClick={() => reload()} className="btn-ghost !py-0.5 text-xs ml-2">重试</button>
+        </div>
+      )}
 
       {/* 部门筛选 */}
       <div className="flex gap-1.5 mb-4 flex-wrap">
@@ -360,7 +370,7 @@ export default function ExpertsPage() {
           </button>
         ))}
       </div>
-      {list.length === 0 && (
+      {!loading && list.length === 0 && (
         <div className="text-center py-16 text-[var(--muted)] text-sm border border-dashed border-[var(--border)] rounded-lg">
           专家库为空 — 点右上角「导入专家库」载入 265 位专家
         </div>

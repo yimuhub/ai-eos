@@ -5,13 +5,16 @@ from sqlalchemy import select, func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import assert_agent_owned, get_current_user, get_db
-from app.core.permissions import Capability, require_company_scope
+from app.core.permissions import (Capability, ensure_capability,
+                                  require_company_scope)
 from app.models.agent import Agent
 from app.models.company import Department
-from app.models.reflection import (AgentExperience, AgentReflection,
-                                   ExperienceLesson, ImprovementProposal,
-                                   ReflectionTrigger)
+from app.models.reflection import (AgentReflection, ExperienceLesson,
+                                   ImprovementProposal, ReflectionTrigger)
 from app.models.user import User
+from app.schemas.responses import (AgentsOverviewOut, LessonDeletedOut,
+                                   LessonOut, ProposalDecisionOut,
+                                   ReflectionOut)
 from app.reflection_engine import record_experience, reflect
 
 router = APIRouter(prefix="/reflection", tags=["reflection"],
@@ -67,7 +70,7 @@ async def create_experience(
     return result
 
 
-@router.get("/agents/{agent_id}/lessons")
+@router.get("/agents/{agent_id}/lessons", response_model=list[LessonOut])
 async def lessons(
     agent_id: str,
     limit: int = Query(30, ge=1, le=100),
@@ -83,7 +86,8 @@ async def lessons(
              "created_at": l.created_at.isoformat()} for l in q.scalars().all()]
 
 
-@router.delete("/agents/{agent_id}/lessons/{lesson_id}")
+@router.delete("/agents/{agent_id}/lessons/{lesson_id}",
+               response_model=LessonDeletedOut)
 async def delete_lesson(
     agent_id: str,
     lesson_id: str,
@@ -111,7 +115,8 @@ async def delete_lesson(
     return {"ok": True, "deleted_id": lesson_id}
 
 
-@router.get("/agents/{agent_id}/reflections")
+@router.get("/agents/{agent_id}/reflections",
+            response_model=list[ReflectionOut])
 async def reflections(
     agent_id: str,
     limit: int = Query(30, ge=1, le=100),
@@ -142,7 +147,8 @@ class DecideIn(BaseModel):
     apply: bool = False   # approve 时是否直接应用（写入档案/知识库）
 
 
-@router.post("/proposals/{pid}/decide")
+@router.post("/proposals/{pid}/decide",
+             response_model=ProposalDecisionOut)
 async def decide_proposal(
     pid: str,
     data: DecideIn,
@@ -154,6 +160,14 @@ async def decide_proposal(
     prop = await db.get(ImprovementProposal, pid)
     if not prop:
         raise HTTPException(404, "not found")
+    # router 级 require_company_scope 在无 company_id 时跳过，而本端点只带 pid，
+    # 因此必须在这里按提案 → Agent → 公司反查归属。Agent 缺失也不放行：
+    # 无法确定租户归属时就当作提案不存在。
+    agent = await db.get(Agent, prop.agent_id)
+    if not agent:
+        raise HTTPException(404, "not found")
+    # 审批会写知识库/学习档案（apply=true 时），按 MANAGE 收口；跨租户 404。
+    await ensure_capability(db, user.id, agent.company_id, Capability.MANAGE)
     if prop.status != "PROPOSED":
         raise HTTPException(409, f"status={prop.status}")
     if data.decision not in ("approve", "reject"):
@@ -172,7 +186,7 @@ async def decide_proposal(
             from app.knowledge_engine import ingest_document
             from app.models.knowledge import KBDocument
             doc = KBDocument(id=__import__("uuid").uuid4().__str__(),
-                             company_id=(await db.get(Agent, prop.agent_id)).company_id,
+                             company_id=agent.company_id,
                              title=f"[改进]{prop.title}",
                              source_type="text", content=content)
             db.add(doc)
@@ -190,17 +204,15 @@ async def decide_proposal(
     return {"id": pid, "status": prop.status, "applied": applied}
 
 
-@router.get("/agents-overview")
+@router.get("/agents-overview", response_model=AgentsOverviewOut)
 async def agents_overview(
     company_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """按部门聚合所有员工的教训数。"""
-    from app.models.skill import AgentSkill
     agents = (await db.execute(select(Agent).where(Agent.company_id == company_id))).scalars().all()
     depts = (await db.execute(select(Department).where(Department.company_id == company_id))).scalars().all()
-    dept_map = {d.id: d.name for d in depts}
     # 按 agent 统计教训数（从 agent_lessons 或 reflection 表）
     try:
         from app.models.reflection import ExperienceLesson
@@ -210,15 +222,6 @@ async def agents_overview(
         lesson_count = {a_: c for a_, c in lr}
     except Exception:
         lesson_count = {}
-    # 按 agent 统计复盘轮次
-    try:
-        from app.models.reflection import ReflectionTrigger
-        rr = (await db.execute(
-            select(ReflectionTrigger.agent_id, sa_func.count()).group_by(ReflectionTrigger.agent_id)
-        )).all()
-        reflection_count = {a_: c for a_, c in rr}
-    except Exception:
-        reflection_count = {}
     # 按部门聚合
     from collections import defaultdict
     dept_agents: dict[str, list] = defaultdict(list)
@@ -229,7 +232,6 @@ async def agents_overview(
             "lesson_count": lesson_count.get(a.id, 0),
         })
     # 按部门 id 保留顺序
-    dept_order = {d.id: d.name for d in depts}
     out = []
     for d in depts:
         ags = dept_agents.get(str(d.id), [])

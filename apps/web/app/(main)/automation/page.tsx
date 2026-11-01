@@ -1,8 +1,9 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
-import { api } from "@/lib/api";
-import type { Company } from "@/lib/types";
+import { useMemo, useState } from "react";
+import { api, describeError } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
+import { notify } from "@/components/Toast";
 
 type TriggerType = "TIME" | "EVENT" | "FILE" | "PROJECT" | "TASK" | "AGENT" | "WEBHOOK" | "HUMAN" | "MANUAL";
 type Mode = "TEST" | "SIMULATION" | "PRODUCTION";
@@ -10,6 +11,8 @@ type Status = "DRAFT" | "ENABLED" | "PAUSED" | "ARCHIVED";
 
 type Automation = {
   id: string; name: string; trigger_type: TriggerType;
+  /** 任务模板复用自动化定义：kind=TASK_TEMPLATE 时列表显示 📋 徽标 */
+  trigger_config?: { kind?: string; [key: string]: unknown };
   steps_count: number; mode: Mode; status: Status;
 };
 type RunRecord = {
@@ -42,8 +45,8 @@ const RUN_STATUS_BADGE = (s: string) =>
   s === "ABORTED" ? "bg-white/10 text-[var(--muted)]" : "bg-white/5 text-[var(--muted)]";
 
 export default function AutomationsPage() {
-  const [cid, setCid] = useState("");
-  const [list, setList] = useState<Automation[]>([]);
+  // 公司上下文统一由数据层提供：切公司自动跟随，不再一次性取 cs[0]
+  const cid = useActiveCompanyId();
   const [filter, setFilter] = useState<Status | "ALL">("ALL");
   const [expanded, setExpanded] = useState<string | null>(null);
   const [runHistory, setRunHistory] = useState<Record<string, RunRecord[]>>({});
@@ -57,18 +60,22 @@ export default function AutomationsPage() {
   const [maxRuns, setMaxRuns] = useState("10");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
 
-  useEffect(() => {
-    api.get<Company[]>("/companies").then((cs) => {
-      const c = cs[0]?.id;
-      if (c) setCid(c);
-    });
-  }, []);
+  // 任务模板 → 定时任务（「⏰ 定时」内联表单）
+  const [schedFor, setSchedFor] = useState<string | null>(null);
+  const [schedMode, setSchedMode] = useState<"interval" | "daily">("interval");
+  const [schedMinutes, setSchedMinutes] = useState("30");
+  const [schedTime, setSchedTime] = useState("09:00");
+  const [schedBusy, setSchedBusy] = useState(false);
 
-  const reload = () => {
-    if (!cid) return;
-    api.get(`/automations?company_id=${cid}`).then(setList).catch(() => {});
-  };
-  useEffect(reload, [cid]);
+  /**
+   * 主列表交给统一数据层：缓存首屏立即渲染、切公司自动重取、
+   * 30 秒后回窗自动刷新。key 传 null（还没确定公司）时不发请求。
+   */
+  const { data, refresh: reload } = useResource<Automation[]>(
+    cid ? `automations:${cid}` : null,
+    () => api.get<Automation[]>(`/automations?company_id=${cid}`),
+  );
+  const list = useMemo<Automation[]>(() => data ?? [], [data]);
 
   const filtered = useMemo(
     () => filter === "ALL" ? list : list.filter(a => a.status === filter),
@@ -79,7 +86,7 @@ export default function AutomationsPage() {
   const statusFilters: (Status | "ALL")[] = ["ALL", "DRAFT", "ENABLED", "PAUSED", "ARCHIVED"];
 
   const create = async () => {
-    if (!name) return;
+    if (!name || !cid) return;
     try {
       const parsed = steps.trim()
         ? steps.split("\n").map(l => {
@@ -111,7 +118,57 @@ export default function AutomationsPage() {
       const r = await api.post(`/automations/${a.id}/run`) as any;
       setMsg(`▶ 已触发执行，状态: ${r.status}`);
       if (a.id) loadRuns(a.id);
+      reload();
     } catch (e) { setMsg(String(e)); }
+  };
+
+  /** 复制定义（副本强制 TEST + 暂停，不带走运行历史） */
+  const cloneAutomation = async (a: Automation) => {
+    try {
+      const r = await api.post<{ id: string; name: string }>(
+        `/automations/${a.id}/clone`);
+      notify("success", `已复制为「${r.name}」（测试模式 · 已暂停）`);
+      reload();
+    } catch (e) {
+      notify("error", describeError(e, "复制失败"));
+    }
+  };
+
+  const isTemplate = (a: Automation) => a.trigger_config?.kind === "TASK_TEMPLATE";
+
+  const openScheduler = (a: Automation) => {
+    if (schedFor === a.id) { setSchedFor(null); return; }
+    setSchedFor(a.id);
+    setSchedMode("interval");
+    setSchedMinutes("30");
+    setSchedTime("09:00");
+  };
+
+  /** 从任务模板创建真实定时任务（后端 action: create_task_from_template）。 */
+  const createTemplateSchedule = async (a: Automation) => {
+    if (!cid) return;
+    const base = {
+      name: `定时：${a.name}`,
+      action_type: "create_task_from_template",
+      action_params: { template_id: a.id },
+    };
+    const payload = schedMode === "interval"
+      ? {
+          ...base, trigger_type: "interval",
+          // 界面上限 1 分钟；API 要求 >=10 秒，统一按整分钟发送
+          seconds: Math.round(Math.max(1, Number(schedMinutes) || 30) * 60),
+        }
+      : { ...base, trigger_type: "daily", time: schedTime || "09:00" };
+    setSchedBusy(true);
+    try {
+      await api.post(`/schedules?company_id=${cid}`, payload);
+      notify("success", `已创建${payload.name}`);
+      setSchedFor(null);
+    } catch (e) {
+      notify("error", describeError(e, "创建定时任务失败"));
+    } finally {
+      setSchedBusy(false);
+    }
   };
 
   const loadRuns = async (aid: string) => {
@@ -189,6 +246,12 @@ export default function AutomationsPage() {
                   <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
                     {TRIGGER_LABELS[a.trigger_type]}
                   </span>
+                  {isTemplate(a) && (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-500/30"
+                      title="由已完成任务沉淀的任务模板">
+                      📋 模板
+                    </span>
+                  )}
                   <span className="text-xs px-2 py-0.5 rounded-full bg-white/5 text-[var(--muted)] border border-[var(--border)]">
                     {MODE_LABELS[a.mode]} · {a.steps_count} 步
                   </span>
@@ -199,12 +262,21 @@ export default function AutomationsPage() {
                 </button>
               </div>
               <div className="flex gap-2 shrink-0">
-                {a.status !== "ARCHIVED" && (
+                {isTemplate(a) ? (
+                  <button onClick={() => openScheduler(a)} title="用此模板创建定时任务"
+                    className="px-2 py-1 rounded text-xs border border-sky-500/30 text-sky-300 hover:bg-sky-500/20">
+                    ⏰ 定时
+                  </button>
+                ) : a.status !== "ARCHIVED" && (
                   <button onClick={() => runOnce(a)} title="立即执行一次"
                     className="px-2 py-1 rounded text-xs border border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/20">
                     ▶ 执行
                   </button>
                 )}
+                <button onClick={() => cloneAutomation(a)} title="复制定义（测试模式、默认暂停，不复制运行历史）"
+                  className="px-2 py-1 rounded text-xs border border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/20">
+                  ⧉ 复制
+                </button>
                 {a.status === "ENABLED" && (
                   <button onClick={() => updateStatus(a, "pause")}
                     className="px-2 py-1 rounded text-xs border border-amber-500/30 text-amber-300 hover:bg-amber-500/20">
@@ -225,6 +297,40 @@ export default function AutomationsPage() {
                 )}
               </div>
             </div>
+
+            {/* 任务模板 → 定时任务：内联表单，不引入弹窗依赖 */}
+            {isTemplate(a) && schedFor === a.id && (
+              <div className="mt-3 pt-3 border-t border-[var(--border)] flex flex-wrap items-center gap-2 text-xs">
+                <span className="text-sky-300">⏰ 定时创建任务</span>
+                <select value={schedMode} onChange={e => setSchedMode(e.target.value as "interval" | "daily")}
+                  className="input-glow w-36">
+                  <option value="interval">每隔 N 分钟</option>
+                  <option value="daily">每天 HH:MM</option>
+                </select>
+                {schedMode === "interval" ? (
+                  <label className="flex items-center gap-1">
+                    每隔
+                    <input type="number" min={1} value={schedMinutes}
+                      onChange={e => setSchedMinutes(e.target.value)}
+                      className="input-glow w-20" />
+                    分钟
+                  </label>
+                ) : (
+                  <input type="time" value={schedTime}
+                    onChange={e => setSchedTime(e.target.value)}
+                    className="input-glow w-32" />
+                )}
+                <button onClick={() => createTemplateSchedule(a)} disabled={schedBusy}
+                  className="btn-primary disabled:opacity-40">
+                  {schedBusy ? "创建中..." : "创建定时任务"}
+                </button>
+                <button onClick={() => setSchedFor(null)} disabled={schedBusy}
+                  className="px-2 py-1 rounded border border-[var(--border)] text-[var(--muted)] hover:text-white">
+                  取消
+                </button>
+                <span className="text-[var(--muted)]">到点自动从模板生成一条待办任务</span>
+              </div>
+            )}
 
             {/* 执行历史展开区 */}
             {expanded === a.id && (

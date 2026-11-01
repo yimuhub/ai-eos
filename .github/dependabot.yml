@@ -1,0 +1,114 @@
+# AI-EOS 依赖更新（Dependabot）
+#
+# 三个生态，各自锁定到真实存在依赖清单的目录：
+#   pip            -> /apps/api        （pyproject.toml + uv.lock）
+#   npm            -> /apps/web        （package.json + package-lock.json）
+#   github-actions -> /                （.github/workflows/*.yml）
+#
+# 约束：Dependabot 要求 (package-ecosystem, directory, target-branch) 唯一，
+# 同一目录写两条 entry 会被判为重复配置。因此每个生态只保留一条，用
+# groups 把 minor/patch 按运行时/开发依赖分组；major 不匹配任何 group，
+# 自然逐个建 PR，评审时按 breaking change 单独看。
+#
+# 不自动合并：本文件不含 auto-merge；所有 PR 必须等 ci.yml / security.yml
+# 全绿后人工合并。安全更新（security updates）由仓库 Settings 单独开关，
+# 与本文件的版本更新分组互不影响。
+
+version: 2
+
+updates:
+  # =========================================================================
+  # pip / 后端
+  # =========================================================================
+  - package-ecosystem: pip
+    directory: /apps/api
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - backend
+    commit-message:
+      prefix: "deps(api)"
+      include: scope
+    groups:
+      # 运行时依赖：minor/patch 合并成一个 PR，降低评审次数；
+      # major 不在 update-types 里，会单独成 PR。
+      python-production:
+        patterns:
+          - "*"
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+      # 开发依赖（pytest / pyflakes / coverage 等）单独一组，不阻塞上线。
+      python-development:
+        patterns:
+          - "*"
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+
+  # =========================================================================
+  # npm / 前端
+  # =========================================================================
+  - package-ecosystem: npm
+    directory: /apps/web
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - frontend
+    commit-message:
+      prefix: "deps(web)"
+      include: scope
+    groups:
+      npm-production:
+        patterns:
+          - "*"
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+      npm-development:
+        patterns:
+          - "*"
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+
+  # =========================================================================
+  # github-actions / 流水线自身
+  # =========================================================================
+  # action 的 major 是运行时大版本（v3 -> v4），必须逐个过；
+  # 这里只把 minor/patch 合并，major 自动单独成 PR。
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "deps(actions)"
+      include: scope
+    groups:
+      github-actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

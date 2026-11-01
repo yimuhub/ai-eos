@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.background_jobs as background_jobs
 from app.core.logging_config import get_logger
+from app.models.queue_item import QueueItemStatus
 from app.models.task import Task, TaskPriority, TaskStatus
 from app.task_engine import IllegalTransition, transition
 
@@ -47,7 +48,22 @@ async def start_task(db: AsyncSession, task: Task, actor_type: str = "system",
 
     # 懒导入：路由模块在应用启动时已加载，这里只为避免 import 环
     from app.api.routes.tasks import _run_in_background
-    submitted = _run_in_background(task.id, task.assigned_agent_id)
+    from app.services import job_queue
+
+    item, created = await job_queue.enqueue_detailed(
+        db, kind=job_queue.TASK_EXEC_KIND, company_id=task.company_id,
+        dedupe_key=job_queue.task_dedupe_key(task.id),
+        payload={"task_id": task.id, "agent_id": task.assigned_agent_id},
+        max_attempts=1)
+    # 先提交队列行：后台线程用独立 engine，读不到未提交的数据
+    await db.commit()
+    if not created and item.status == QueueItemStatus.RUNNING:
+        logger.info("任务已在执行中，跳过重复投递 task=%s item=%s",
+                    task.id, item.id)
+        return {"started": True, "reason": "already_running"}
+
+    submitted = _run_in_background(task.id, task.assigned_agent_id,
+                                   queue_item_id=item.id)
     if submitted is background_jobs.QUEUE_FULL:
         # worker 全忙：回退状态，下一次扫描再启动（不丢任务、不假运行）
         await db.execute(
@@ -55,6 +71,7 @@ async def start_task(db: AsyncSession, task: Task, actor_type: str = "system",
             .where(Task.id == task.id, Task.status == TaskStatus.RUNNING)
             .values(status=TaskStatus.TODO, auto_start=True)
             .execution_options(synchronize_session=False))
+        await job_queue.cancel(db, item.id)
         await db.commit()
         logger.info("任务排队已满，退回待办等待下一拍 task=%s", task.id)
         return {"started": False, "reason": "queue_full"}

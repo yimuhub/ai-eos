@@ -7,7 +7,9 @@ import { api, describeError } from "@/lib/api";
 import { SHORTCUT_EVENTS, onShortcut } from "@/lib/shortcuts";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
+import { notify } from "@/components/Toast";
 import { TASK_STATUS_ZH, zh } from "@/lib/i18n";
+import { timeAgo } from "@/lib/workspace";
 import type { Agent, Task as TaskEntity } from "@/lib/types";
 
 /* ============================================================
@@ -44,6 +46,37 @@ const PRIORITY_META: Record<string, { label: string; cls: string }> = {
 
 const AVATAR_GRADS = ["#6366f1,#8b5cf6", "#22d3ee,#3b82f6", "#f59e0b,#ef4444", "#10b981,#14b8a6", "#ec4899,#f43f5e"];
 
+/* ---------- C1 任务收件箱 ---------- */
+type InboxItem = {
+  id: string;
+  task_id: string;
+  title: string;
+  status: string;
+  agent_id: string | null;
+  agent_name: string | null;
+  updated_at: string | null;
+  artifact_id: string | null;
+  artifact_status: string | null;
+};
+type InboxBucket = "in_progress" | "awaiting_acceptance" | "completed" | "failed";
+type InboxData = {
+  counts: Record<InboxBucket, number>;
+  in_progress: InboxItem[];
+  awaiting_acceptance: InboxItem[];
+  completed: InboxItem[];
+  failed: InboxItem[];
+};
+const INBOX_BUCKETS: { key: InboxBucket; label: string; empty: string }[] = [
+  { key: "in_progress", label: "进行中", empty: "现在没有进行中的任务" },
+  { key: "awaiting_acceptance", label: "待验收", empty: "现在没有待验收的交付物" },
+  { key: "completed", label: "已完成", empty: "还没有已完成的任务" },
+  { key: "failed", label: "失败", empty: "没有失败的任务" },
+];
+const EMPTY_INBOX: InboxData = {
+  counts: { in_progress: 0, awaiting_acceptance: 0, completed: 0, failed: 0 },
+  in_progress: [], awaiting_acceptance: [], completed: [], failed: [],
+};
+
 type Dim = "status" | "priority" | "executor" | "none";
 
 export default function TasksPage() {
@@ -58,6 +91,14 @@ export default function TasksPage() {
   const searchComposing = useRef(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [msg, setMsg] = useState("");
+  // C1 收件箱：默认进来先看"现在该我处理什么"，全部任务仍是同一页面的一级视图
+  const [view, setView] = useState<"inbox" | "all">("inbox");
+  const [bucket, setBucket] = useState<InboxBucket>("awaiting_acceptance");
+  const [inbox, setInbox] = useState<InboxData | null>(null);
+  const [inboxError, setInboxError] = useState("");
+  const [inboxLoading, setInboxLoading] = useState(true);
+  // 手动重试计数：自增即重新拉取（不改动 15s 轮询的节奏）
+  const [inboxRetry, setInboxRetry] = useState(0);
   // 键盘导航高亮位（j/k 移动，空格多选，回车打开）
   const [kbIndex, setKbIndex] = useState(0);
 
@@ -118,6 +159,35 @@ export default function TasksPage() {
 
   /** 任务变了 → 重取本页（同时让首页指挥中心的同类数据失效） */
   const load = useCallback(async () => { await refresh(); }, [refresh]);
+
+  /* ---------- C1 收件箱：15s 静默刷新 ----------
+   * 只在收件箱视图下轮询；切换视图 / 换公司 / 卸载都会清掉定时器。
+   * 静默 = 不置 loading、不清旧数据，失败才提示，避免列表每 15 秒闪一次。
+   */
+  useEffect(() => {
+    if (view !== "inbox") return;
+    if (!cid) { setInboxLoading(false); return; }
+    let alive = true;
+    const pull = async (silent: boolean) => {
+      if (!silent) setInboxLoading(true);
+      try {
+        const data = await api.get<InboxData>(`/tasks/inbox?company_id=${cid}`);
+        if (!alive) return;
+        setInbox(data);
+        setInboxError("");
+      } catch (e) {
+        if (alive) setInboxError(describeError(e, "收件箱加载失败"));
+      } finally {
+        if (alive && !silent) setInboxLoading(false);
+      }
+    };
+    void pull(false);
+    const timer = setInterval(() => { void pull(true); }, 15_000);
+    return () => { alive = false; clearInterval(timer); };
+  }, [view, cid, inboxRetry]);
+
+  const inboxData = inbox ?? EMPTY_INBOX;
+  const inboxItems = inboxData[bucket];
 
   /* ---------- 筛选 ---------- */
   const dimOptions = useMemo(() => {
@@ -232,6 +302,19 @@ export default function TasksPage() {
     setCreating(false);
   }
 
+  /** 已完成任务 → 可复用模板（automation_definitions, TEST/PAUSED） */
+  async function saveAsTemplate(t: Task) {
+    setBusyId(t.id);
+    try {
+      const data = await api.post<{ id: string; name: string }>(
+        `/tasks/${t.id}/save-as-template`);
+      notify("success", `已存为模板「${data.name}」，可在自动化页复用`);
+    } catch (e) {
+      notify("error", describeError(e, "存为模板失败"));
+    }
+    setBusyId(null);
+  }
+
   /** 删除任务（彻底清除）——弹确认框 */
   function requestDelete(t: Task) {
     setConfirmTarget({ t });
@@ -289,18 +372,18 @@ export default function TasksPage() {
       onShortcut(SHORTCUT_EVENTS.newTask, () => setShowCreate(true)),
       onShortcut(SHORTCUT_EVENTS.focusSearch, () => searchRef.current?.focus()),
       onShortcut(SHORTCUT_EVENTS.move, ({ dir }: { dir: 1 | -1 }) =>
-        setKbIndex((i) => clampIdx(i + dir))),
+        setKbIndex((i) => (view === "all" ? clampIdx(i + dir) : i))),
       onShortcut(SHORTCUT_EVENTS.toggleSelect, () => {
         const t = filtered[clampIdx(kbIndex)];
-        if (showBatchDelete && t) toggleBatchSel(t.id);
+        if (view === "all" && showBatchDelete && t) toggleBatchSel(t.id);
       }),
       onShortcut(SHORTCUT_EVENTS.openItem, () => {
         const t = filtered[clampIdx(kbIndex)];
-        if (t && !showBatchDelete) router.push(`/tasks/${t.id}`);
+        if (view === "all" && t && !showBatchDelete) router.push(`/tasks/${t.id}`);
       }),
     ];
     return () => offs.forEach((off) => off());
-  }, [filtered, kbIndex, showBatchDelete, router]);
+  }, [filtered, kbIndex, showBatchDelete, router, view]);
 
   // 筛选条件变了，高亮位归零，避免停在一个不存在的位置
   useEffect(() => { setKbIndex(0); }, [search, dim, dimValue]);
@@ -332,9 +415,32 @@ export default function TasksPage() {
               共 {tasks.length} 个任务 · 多维分类 · 批量管理
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <button onClick={() => { setShowBatchDelete(true); setBatchSel(new Set()); }}
-              className="btn-ghost">🗑 批量删除</button>
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* 收件箱 / 全部任务：同一页面切换，不新增一级导航 */}
+            <div className="flex items-center rounded-xl p-0.5"
+              style={{ background: "rgba(255,255,255,0.05)", border: "1px solid var(--border)" }}>
+              {([["inbox", "收件箱"], ["all", "全部任务"]] as const).map(([v, label]) => {
+                const on = view === v;
+                return (
+                  <button key={v} type="button" data-view={v}
+                    onClick={() => setView(v)}
+                    className={`px-3 py-1 rounded-[10px] text-xs transition-colors ${
+                      on ? "bg-indigo-500/25 text-indigo-100 font-medium" : ""}`}
+                    style={on ? {} : { color: "var(--muted)" }}>
+                    {label}
+                    {v === "inbox" && inboxData.counts.awaiting_acceptance > 0 && (
+                      <span className="ml-1 text-[10px] px-1.5 py-px rounded-full bg-amber-500/25 text-amber-200 tabular-nums">
+                        {inboxData.counts.awaiting_acceptance}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+            {view === "all" && (
+              <button onClick={() => { setShowBatchDelete(true); setBatchSel(new Set()); }}
+                className="btn-ghost">🗑 批量删除</button>
+            )}
             <button onClick={() => setShowCreate(!showCreate)} className="btn-primary">
               ＋ 新建任务
             </button>
@@ -356,6 +462,7 @@ export default function TasksPage() {
 
       {msg && <p className="mb-3 text-sm text-indigo-300">{msg}</p>}
 
+      {view === "all" && (<>
       {/* 多维筛选栏 */}
       <div className="card card-static mb-5 flex items-center gap-3 flex-wrap !py-3">
         <span className="text-xs font-medium shrink-0">分类维度：</span>
@@ -512,6 +619,14 @@ export default function TasksPage() {
                     className={`flex-1 text-[11px] py-1.5 rounded-lg transition-colors ${
                       canStop ? "hover:bg-orange-500/12 text-orange-300" : "opacity-30 cursor-not-allowed text-[var(--muted)]"}`}
                     style={{ border: "1px solid var(--border)" }}>⏹ 停止</button>
+                  {t.status === "COMPLETED" && (
+                    <button onClick={() => saveAsTemplate(t)} disabled={isBusy}
+                      title="把这次成功的任务存为可复用模板（测试模式、默认暂停）"
+                      className="flex-1 text-[11px] py-1.5 rounded-lg text-indigo-300 hover:bg-indigo-500/12 transition-colors disabled:opacity-40"
+                      style={{ border: "1px solid rgba(99,102,241,0.35)" }}>
+                      {isBusy ? "保存中…" : "📋 存为模板"}
+                    </button>
+                  )}
                   <button onClick={() => requestDelete(t)}
                     className="flex-1 text-[11px] py-1.5 rounded-lg text-red-400/90 hover:bg-red-500/12 transition-colors"
                     style={{ border: "1px solid rgba(248,113,113,0.25)" }}>🗑 删除</button>
@@ -533,6 +648,98 @@ export default function TasksPage() {
           </div>
         )}
       </div>
+      </>)}
+
+      {/* C1 收件箱：按"我该处理什么"分桶，计数常驻 */}
+      {view === "inbox" && (
+        <div>
+          <div className="card card-static mb-4 flex items-center gap-1.5 flex-wrap !py-3">
+            {INBOX_BUCKETS.map((b) => {
+              const on = bucket === b.key;
+              const n = inboxData.counts[b.key] ?? 0;
+              return (
+                <button key={b.key} type="button" data-inbox-bucket={b.key}
+                  onClick={() => setBucket(b.key)}
+                  className={`px-3 py-1 rounded-full text-xs transition-all border ${
+                    on ? "border-indigo-500 bg-indigo-500/15 text-indigo-200 font-medium"
+                       : "hover:bg-white/[0.04]"}`}
+                  style={on ? {} : { borderColor: "var(--border)", color: "var(--muted)" }}>
+                  {b.label}
+                  <span className={`ml-1.5 tabular-nums ${n ? "" : "opacity-50"}`}>{n}</span>
+                </button>
+              );
+            })}
+            <button type="button" onClick={() => setInboxRetry((n) => n + 1)}
+              className="ml-auto text-[11px] px-2.5 py-1 rounded-lg hover:bg-white/[0.06] transition-colors"
+              style={{ border: "1px solid var(--border)", color: "var(--muted)" }}>
+              ↻ 刷新
+            </button>
+          </div>
+
+          {inboxError && (
+            <div className="card card-static text-center py-10 space-y-3">
+              <p className="text-sm" style={{ color: "#fca5a5" }}>❌ {inboxError}</p>
+              <button className="btn-primary !py-1.5 !px-4 text-xs"
+                onClick={() => setInboxRetry((n) => n + 1)}>重试</button>
+            </div>
+          )}
+
+          {!inboxError && inboxLoading && !inbox && (
+            <div className="card card-static text-center py-12 text-sm" style={{ color: "var(--muted)" }}>
+              收件箱加载中…
+            </div>
+          )}
+
+          {!inboxError && inbox && (
+            <div className="space-y-2">
+              {inboxItems.map((item) => {
+                const st = STATUS_STYLE[item.status] || STATUS_STYLE.TODO;
+                return (
+                  <div key={item.id} data-inbox-item={item.id}
+                    role="button" tabIndex={0}
+                    onClick={() => router.push(`/tasks/${item.task_id || item.id}`)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        router.push(`/tasks/${item.task_id || item.id}`);
+                      }
+                    }}
+                    className="card cursor-pointer flex items-center gap-3 flex-wrap !py-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="font-semibold text-sm truncate">{item.title}</p>
+                      <div className="mt-1 flex items-center gap-2 flex-wrap text-[11px]"
+                        style={{ color: "var(--muted)" }}>
+                        <span className="inline-flex items-center gap-1">
+                          <span className={`w-1.5 h-1.5 rounded-full ${st.dot}`} />
+                          <span className={st.cls}>{st.label}</span>
+                        </span>
+                        <span>👤 {item.agent_name || "未分配"}</span>
+                        <span>· 更新于 {timeAgo(item.updated_at) || "—"}</span>
+                      </div>
+                    </div>
+                    {bucket === "awaiting_acceptance" && item.artifact_id && (
+                      <button type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          router.push(`/artifacts?open=${item.artifact_id}`);
+                        }}
+                        className="text-[11px] px-3 py-1.5 rounded-lg font-medium text-emerald-200 hover:bg-emerald-500/15 transition-colors shrink-0"
+                        style={{ border: "1px solid rgba(16,185,129,0.4)" }}>
+                        去验收 →
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+              {!inboxItems.length && (
+                <div className="card card-static text-center py-12 text-sm" style={{ color: "var(--muted)" }}>
+                  {INBOX_BUCKETS.find((b) => b.key === bucket)?.empty}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 新建任务弹窗（仿项目中心新建项目） */}
       {mounted && showCreate && createPortal(

@@ -2,6 +2,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, describeError, isCancelled, streamPost } from "@/lib/api";
 import { notify } from "@/components/Toast";
+import NotificationBell from "@/components/NotificationBell";
+import CitationList from "@/components/CitationList";
+import {
+  citationsFromEvent, citationsFromMeta, type Citation,
+} from "@/lib/citations";
 import {
   clock, meetingMeta, sessionMeta, taskMeta,
   type GroupMsg, type MeetingDetail, type WsAgent, type WsChatGroup, type WsMeeting, type WsMode, type WsMsg,
@@ -16,6 +21,14 @@ import {
  */
 
 type Skill = { id: string; name: string; description?: string | null; source_label?: string };
+
+/** 单聊消息：历史 meta 与流式 done 都归一到 citations 上，渲染只用这一份。 */
+type ChatMsg = WsMsg & { citations?: Citation[] };
+type HistoryMsg = WsMsg & { meta?: unknown };
+
+function fromHistory(rows: HistoryMsg[]): ChatMsg[] {
+  return rows.map((m) => ({ ...m, citations: citationsFromMeta(m.meta) }));
+}
 
 const SUGGESTIONS = [
   "把这周的任务按优先级排一版，告诉我先做什么",
@@ -95,7 +108,7 @@ export default function WorkspaceChat({
   const [ensuring, setEnsuring] = useState(false);
 
   /* ---------------- 单聊 ---------------- */
-  const [msgs, setMsgs] = useState<WsMsg[]>([]);
+  const [msgs, setMsgs] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -110,30 +123,73 @@ export default function WorkspaceChat({
   const pickerRef = useRef<HTMLDivElement>(null);
   const skillsRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // 在途流的归属：切会话时不 abort（服务端只在生成完成后落库，断流会丢回复），
+  // 只按 key 判断"这段流还该不该往界面上写"。
+  const currentKeyRef = useRef(`${view.mode}:${view.id}`);
+  currentKeyRef.current = `${view.mode}:${view.id}`;
+  // 每次切换自增：即使切走又立刻切回，同一会话的旧流也不再往重拉的历史里写
+  const viewEpochRef = useRef(0);
+  const streamKeysRef = useRef<Map<AbortController, string>>(new Map());
+  // 滚动跟随：只在用户本来就贴着底部时自动滚，上翻读历史时不打扰
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const atBottomRef = useRef(true);
+  const forceScrollRef = useRef(true);
+  // 会议/作战的「结果必达」补拉：有界定时器，切换会话或卸载时清理
+  const meetFollowRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const warFollowRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stopMeetFollow = useCallback(() => {
+    if (meetFollowRef.current) { clearInterval(meetFollowRef.current); meetFollowRef.current = null; }
+  }, []);
+  const stopWarFollow = useCallback(() => {
+    if (warFollowRef.current) { clearInterval(warFollowRef.current); warFollowRef.current = null; }
+  }, []);
+  const autoScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (!atBottomRef.current && !forceScrollRef.current) return;
+    forceScrollRef.current = false;
+    el.scrollTop = el.scrollHeight;
+  }, []);
 
   useEffect(() => {
     if (mode !== "single" || !agent) { setMsgs([]); return; }
     let alive = true;
     setLoading(true);
-    api.get<WsMsg[]>(`/agents/${agent.id}/chat/history?limit=50`)
-      .then((d) => { if (alive) setMsgs(Array.isArray(d) ? d : []); })
+    api.get<HistoryMsg[]>(`/agents/${agent.id}/chat/history?limit=50`)
+      .then((d) => { if (alive) setMsgs(Array.isArray(d) ? fromHistory(d) : []); })
       .catch(() => { if (alive) setMsgs([]); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [mode, agent]);
 
-  // 换会话 / 离开页面时掐断在途的流，避免上一轮的字落进新会话
+  // 切会话：不 abort 在途的流（服务端生成完成后才落库，断流会丢整段回复），
+  // 只复位本会话的进度；旧流的回调会因为 key 不匹配而跳过渲染。
   useEffect(() => {
-    abortRef.current?.abort();
-    setBusy(false);
+    viewEpochRef.current += 1;
+    const key = `${view.mode}:${view.id}`;
+    const pending = Array.from(streamKeysRef.current.values()).some((k) => k === key);
+    setBusy(pending);
     setStatus("");
-  }, [view.mode, view.id]);
+    // 别的会话的"等待回应"不能显示在新会话上
+    setGroupBusy(false);
+    setMeetBusy(false);
+    setWarBusy(false);
+    atBottomRef.current = true;
+    forceScrollRef.current = true;
+    // 结果补拉只服务当前会话，切走就停
+    stopMeetFollow();
+    stopWarFollow();
+  }, [view.mode, view.id, stopMeetFollow, stopWarFollow]);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  // 只有离开工作台才真正掐断所有在途流
+  useEffect(() => () => {
+    streamKeysRef.current.forEach((_, ac) => ac.abort());
+    streamKeysRef.current.clear();
+    stopMeetFollow();
+    stopWarFollow();
+  }, [stopMeetFollow, stopWarFollow]);
 
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [msgs, busy, status]);
+  useEffect(() => { autoScroll(); }, [msgs, busy, status, autoScroll]);
 
   useEffect(() => {
     function onDown(e: MouseEvent) {
@@ -164,12 +220,27 @@ export default function WorkspaceChat({
     });
   }, []);
 
+  /** 用服务端历史校正当前会话（后台流跑完后补回被跳过的增量）。 */
+  const refreshHistory = useCallback(async (agentId: string) => {
+    try {
+      const d = await api.get<HistoryMsg[]>(`/agents/${agentId}/chat/history?limit=50`);
+      if (currentKeyRef.current === `single:${agentId}`) setMsgs(Array.isArray(d) ? fromHistory(d) : []);
+    } catch {
+      /* 拉不到就等下次切回时再取，不打扰当前界面 */
+    }
+  }, []);
+
   const send = useCallback(async () => {
     const text = input.trim();
     if (mode !== "single" || !agent || busy || (!text && !files.length)) return;
     const target = agent;
+    const sendKey = currentKeyRef.current;
+    const sendEpoch = viewEpochRef.current;
     const ac = new AbortController();
     abortRef.current = ac;
+    streamKeysRef.current.set(ac, sendKey);
+    atBottomRef.current = true;
+    forceScrollRef.current = true;
     setBusy(true);
     setStatus("");
     setInput("");
@@ -178,6 +249,11 @@ export default function WorkspaceChat({
 
     let acc = "";
     let started = false;
+    // 一旦切离过这个会话，界面上的 msgs 已被重新拉取，累加器不能再往里写；
+    // 之后的增量只记在 acc 里，等 done 后用服务端历史整段补齐。
+    let detached = false;
+    const stale = () => currentKeyRef.current !== sendKey || viewEpochRef.current !== sendEpoch;
+    const live = () => !detached && !stale();
     try {
       for (const f of files) {
         const fd = new FormData();
@@ -190,15 +266,18 @@ export default function WorkspaceChat({
       }
       setFiles([]);
       if (!text) {
-        setMsgs((p) => [...p, { role: "agent", content: "附件已经进我的知识库了，接下来要我拿它们做什么？" }]);
+        if (!stale()) setMsgs((p) => [...p, { role: "agent", content: "附件已经进我的知识库了，接下来要我拿它们做什么？" }]);
         return;
       }
 
-      setMsgs((p) => [...p, { role: "agent", content: "", streaming: true }]);
+      if (!stale()) setMsgs((p) => [...p, { role: "agent", content: "", streaming: true }]);
       let serverError = "";
       await streamPost(`/agents/${target.id}/chat/stream`, { message: text }, {
         signal: ac.signal,
         onEvent: (ev) => {
+          // 关键：只跳过 UI，不中断请求——服务端要读完这轮才能落库
+          if (stale()) { detached = true; return; }
+          if (detached) return;
           if (ev.type === "delta") {
             started = true;
             acc += String(ev.text || "");
@@ -213,18 +292,21 @@ export default function WorkspaceChat({
               content: acc,
               streaming: false,
               file_name: ev.file?.file_name,
+              citations: citationsFromEvent(ev),
             }));
           } else if (ev.type === "error") {
             serverError = String(ev.message || "服务端处理失败");
           }
         },
       });
-      if (serverError) {
+      if (serverError && live()) {
         patchLast((m) => ({ ...m, content: acc || "（没有收到内容）", streaming: false }));
         setMsgs((p) => [...p, { role: "agent", content: `❌ ${serverError}` }]);
       }
     } catch (e) {
-      if (ac.signal.aborted || isCancelled(e)) {
+      if (!live()) {
+        // 旧会话已切走：错误不打扰当前界面，回复由服务端下次历史补回
+      } else if (ac.signal.aborted || isCancelled(e)) {
         // 主动停止：保留已经收到的字，并说清本轮没有落库
         patchLast((m) => ({
           ...m,
@@ -239,13 +321,23 @@ export default function WorkspaceChat({
         }));
       }
     } finally {
+      streamKeysRef.current.delete(ac);
       if (abortRef.current === ac) abortRef.current = null;
-      setBusy(false);
-      setStatus("");
+      // 用 key 而不是 epoch 判断：切走又切回同一会话时，仍要把进度收尾
+      if (currentKeyRef.current === sendKey) {
+        setBusy(false);
+        setStatus("");
+        // 后台跑完的那一段没有逐字渲染，用服务端历史把完整回复补回来
+        if (detached || acc === "") void refreshHistory(target.id);
+      }
     }
-  }, [mode, agent, busy, input, files, patchLast]);
+  }, [mode, agent, busy, input, files, patchLast, refreshHistory]);
 
-  const stop = useCallback(() => abortRef.current?.abort(), []);
+  // 只停当前会话的流：别的会话可能在后台补齐回复，误停会把它一起掐掉
+  const stop = useCallback(() => {
+    const key = currentKeyRef.current;
+    streamKeysRef.current.forEach((k, ac) => { if (k === key) ac.abort(); });
+  }, []);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey && mode === "single") {
@@ -262,12 +354,15 @@ export default function WorkspaceChat({
 
   const loadGroup = useCallback(async () => {
     if (!groupScope || !groupId || !cid) return;
+    const key = `group:${groupId}`;
     try {
       const d = await api.get<{ messages: GroupMsg[] }>(
         `/group-chat/${groupScope}/${groupId}/history?company_id=${cid}`);
+      // 慢请求回来时用户可能已经切到别的群：别把旧群的消息写进新群
+      if (currentKeyRef.current !== key) return;
       setGroupMsgs(d.messages || []);
     } catch {
-      setGroupMsgs([]);
+      if (currentKeyRef.current === key) setGroupMsgs([]);
     }
   }, [groupScope, groupId, cid]);
 
@@ -279,30 +374,35 @@ export default function WorkspaceChat({
     return () => { alive = false; };
   }, [mode, groupScope, groupId, loadGroup]);
 
-  useEffect(() => {
-    groupEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [groupMsgs, groupBusy]);
+  useEffect(() => { autoScroll(); }, [groupMsgs, groupBusy, autoScroll]);
 
   const sendGroup = useCallback(async () => {
     const text = input.trim();
     if (!groupScope || !groupId || !cid || groupBusy || !text) return;
+    const sendKey = currentKeyRef.current;
+    const sendEpoch = viewEpochRef.current;
+    const same = () => currentKeyRef.current === sendKey && viewEpochRef.current === sendEpoch;
     setGroupBusy(true);
     setInput("");
+    atBottomRef.current = true;
+    forceScrollRef.current = true;
     // 先把自己的话放上去，再等员工依次回应（接口是同步的，可能要几十秒）
     setGroupMsgs((p) => [...p, { role: "boss", text }]);
     try {
       const d = await api.post<{ replies: { agent_name: string; text: string }[] }>(
         `/group-chat/${groupScope}/${groupId}?company_id=${cid}`, { message: text });
-      setGroupMsgs((p) => [
-        ...p,
-        ...(d.replies || []).map((r) => ({ role: "agent", agent_name: r.agent_name, text: r.text })),
-      ]);
+      if (same()) {
+        setGroupMsgs((p) => [
+          ...p,
+          ...(d.replies || []).map((r) => ({ role: "agent", agent_name: r.agent_name, text: r.text })),
+        ]);
+      }
     } catch (e) {
       notify("error", describeError(e, "群聊发送失败"));
-      setGroupMsgs((p) => [...p, { role: "system", text: `❌ ${describeError(e, "群聊发送失败")}` }]);
+      if (same()) setGroupMsgs((p) => [...p, { role: "system", text: `❌ ${describeError(e, "群聊发送失败")}` }]);
     } finally {
-      setGroupBusy(false);
-      loadGroup();
+      if (same()) setGroupBusy(false);
+      if (currentKeyRef.current === sendKey) loadGroup();
     }
   }, [groupScope, groupId, cid, groupBusy, input, loadGroup]);
 
@@ -312,14 +412,31 @@ export default function WorkspaceChat({
   const [meetBusy, setMeetBusy] = useState(false);
   const meetEnd = useRef<HTMLDivElement>(null);
 
-  const loadMeeting = useCallback(async () => {
-    if (!meeting) return;
+  const loadMeeting = useCallback(async (): Promise<MeetingDetail | null> => {
+    if (!meeting) return null;
+    const key = `meeting:${meeting.id}`;
     try {
-      setMeet(await api.get<MeetingDetail>(`/meetings/${meeting.id}`));
+      const d = await api.get<MeetingDetail>(`/meetings/${meeting.id}`);
+      if (currentKeyRef.current !== key) return null;
+      setMeet(d);
+      return d;
     } catch {
-      setMeet(null);
+      if (currentKeyRef.current === key) setMeet(null);
+      return null;
     }
   }, [meeting]);
+
+  // 结束后纪要在后台生成：有界补拉（3s × 10），拿到纪要或确认取消才停
+  const startMeetFollow = useCallback(() => {
+    stopMeetFollow();
+    let tries = 0;
+    meetFollowRef.current = setInterval(async () => {
+      tries += 1;
+      const d = await loadMeeting();
+      const settled = !!d && (!!d.minutes || !!d.summary || d.status === "CANCELLED");
+      if (settled || tries >= 10) stopMeetFollow();
+    }, 3000);
+  }, [loadMeeting, stopMeetFollow]);
 
   useEffect(() => {
     if (mode !== "meeting" || !meeting) { setMeet(null); return; }
@@ -337,8 +454,19 @@ export default function WorkspaceChat({
   }, [mode, meet?.status, loadMeeting]);
 
   useEffect(() => {
-    meetEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [meet?.messages.length, meetBusy]);
+    autoScroll();
+  }, [meet?.messages.length, meet?.minutes, meet?.summary, meetBusy, autoScroll]);
+
+  // 就算不是在当前页点的「结束」，状态从 RUNNING 落到 COMPLETED 时也补拉纪要
+  const meetWasRunningRef = useRef(false);
+  useEffect(() => {
+    const running = meet?.status === "RUNNING";
+    if (meetWasRunningRef.current && !running && meet?.status === "COMPLETED"
+      && !meet.minutes && !meet.summary) {
+      startMeetFollow();
+    }
+    meetWasRunningRef.current = running;
+  }, [meet?.status, meet?.minutes, meet?.summary, startMeetFollow]);
 
   const meetingAction = useCallback(async (action: "start" | "pause" | "resume" | "end") => {
     if (!meeting || meetBusy) return;
@@ -347,12 +475,14 @@ export default function WorkspaceChat({
       await api.post(`/meetings/${meeting.id}/${action}`, {});
       if (action === "end") notify("success", "已结束，纪要在后台生成");
       await loadMeeting();
+      // 补拉只跟随当前会议：请求期间切走就不必再空转
+      if (action === "end" && currentKeyRef.current === `meeting:${meeting.id}`) startMeetFollow();
     } catch (e) {
       notify("error", describeError(e, "会议操作失败"));
     } finally {
       setMeetBusy(false);
     }
-  }, [meeting, meetBusy, loadMeeting]);
+  }, [meeting, meetBusy, loadMeeting, startMeetFollow]);
 
   const sendMeeting = useCallback(async () => {
     const text = input.trim();
@@ -378,18 +508,31 @@ export default function WorkspaceChat({
 
   const loadWar = useCallback(async () => {
     if (!session || !cid) return;
+    const key = `war:${session.id}`;
     try {
       const [d, ch] = await Promise.all([
         api.get<WarDetail>(`/war-room/${session.id}?company_id=${cid}`),
         api.get<{ messages: GroupMsg[] }>(`/war-room/sessions/${session.id}/chat?company_id=${cid}`)
           .catch(() => ({ messages: [] as GroupMsg[] })),
       ]);
+      if (currentKeyRef.current !== key) return;
       setWar(d);
       setWarChat(ch.messages || []);
     } catch {
-      setWar(null);
+      if (currentKeyRef.current === key) setWar(null);
     }
   }, [session, cid]);
+
+  // 发出指令后成员在后台回应：有界补拉（5s × 4），把完成后的尾响应也收进来
+  const startWarFollow = useCallback(() => {
+    stopWarFollow();
+    let tries = 0;
+    warFollowRef.current = setInterval(async () => {
+      tries += 1;
+      await loadWar();
+      if (tries >= 4) stopWarFollow();
+    }, 5000);
+  }, [loadWar, stopWarFollow]);
 
   useEffect(() => {
     if (mode !== "war" || !session) { setWar(null); setWarChat([]); return; }
@@ -408,27 +551,37 @@ export default function WorkspaceChat({
   }, [mode, war, loadWar]);
 
   useEffect(() => {
-    warEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [warChat.length, warBusy]);
+    autoScroll();
+  }, [warChat.length, warBusy, war?.status, autoScroll]);
+
+  // 运行态结束的那一下，最后一条回应可能还在路上：再补拉几轮
+  const warWasRunningRef = useRef(false);
+  useEffect(() => {
+    const running = !!war && ["analyzing", "announcing", "executing", "delivering"].includes(war.status);
+    if (warWasRunningRef.current && !running && war) startWarFollow();
+    warWasRunningRef.current = running;
+  }, [war?.status, war, startWarFollow]);
 
   const sendWar = useCallback(async () => {
     const text = input.trim();
     if (!session || !cid || !text || warBusy) return;
+    const sendKey = currentKeyRef.current;
     setWarBusy(true);
     setInput("");
+    atBottomRef.current = true;
+    forceScrollRef.current = true;
     setWarChat((p) => [...p, { role: "boss", text }]);
     try {
       await api.post(`/war-room/sessions/${session.id}/say?company_id=${cid}`, { text });
-      // 成员是后台回应的，先刷一次自己的话，再等两轮回应的
+      // 成员是后台回应的：先刷一次自己的话，再按 5s × 4 有界补拉
       await loadWar();
-      setTimeout(loadWar, 3000);
-      setTimeout(loadWar, 8000);
+      if (currentKeyRef.current === sendKey) startWarFollow();
     } catch (e) {
       notify("error", describeError(e, "作战室发送失败"));
     } finally {
-      setWarBusy(false);
+      if (currentKeyRef.current === sendKey) setWarBusy(false);
     }
-  }, [session, cid, input, warBusy, loadWar]);
+  }, [session, cid, input, warBusy, loadWar, startWarFollow]);
 
   /* ---------------- 发起会议 / 拉群 ---------------- */
   const startMeeting = useCallback(async () => {
@@ -617,6 +770,7 @@ export default function WorkspaceChat({
               查看轨迹
             </button>
           )}
+          <NotificationBell />
           <button type="button" onClick={onCollapseOut} title={outHidden ? "展开右栏 ⌘J" : "收起右栏 ⌘J"}
             aria-label={outHidden ? "展开右栏" : "收起右栏"}
             className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-white/[0.06]"
@@ -655,7 +809,12 @@ export default function WorkspaceChat({
       )}
 
       {/* 消息流 */}
-      <div className="flex-1 min-h-0 overflow-y-auto ws-scroll px-4 py-4">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto ws-scroll px-4 py-4"
+        onScroll={() => {
+          const el = scrollRef.current;
+          if (!el) return;
+          atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+        }}>
         <div className="mx-auto flex max-w-[720px] flex-col gap-4">
           {mode === "single" && (
             <>
@@ -702,6 +861,7 @@ export default function WorkspaceChat({
                           📄 {m.file_name} · 已存入交付中心
                         </p>
                       )}
+                      {m.citations?.length ? <CitationList citations={m.citations} /> : null}
                     </div>
                   </div>
                 )

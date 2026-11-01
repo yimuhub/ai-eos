@@ -13,27 +13,24 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import {
+  DEMO_DELIVERABLE_MARKDOWN,
+  DEMO_TASK_TITLE,
+  demoDeliverableFileName,
+  demoDeliverableMarkdown,
+} from "@/lib/demoDeliverable";
 
 type Msg = { from: "agent" | "user"; text: string };
 type DemoStage = "idle" | "planning" | "writing" | "done";
+type CopyState = "idle" | "copied" | "failed";
 
 const DEMO_AGENT_NAME = "演示小助手";
-const DEMO_TASK_TITLE = "示例任务：为新品发布会写一条朋友圈文案";
 
 const STAGE_TEXT: Record<Exclude<DemoStage, "idle">, string> = {
   planning: "🧠 规划中…（模板：朋友圈文案三段式：钩子 → 卖点 → 行动号召）",
   writing: "✍️ 撰写中…（规则：每段不超过 2 行，结尾带话题标签）",
   done: "✅ 演示完成",
 };
-
-const DEMO_DELIVERABLE = `🎉 新品发布会 · 邀请你一起来
-
-我们把「开箱即用的数字员工团队」装进了 AI-EOS，
-3 步配置，1 分钟开工。
-
-👉 今晚 8 点，线上见！
-
-#AI_EOS #数字员工（🎭 演示模板生成，非真实模型输出）`;
 
 /** 关键词 → 模板回复。命中不了就走默认模板。 */
 function templateReply(input: string): string {
@@ -62,6 +59,7 @@ export default function DemoMode({ onClose }: { onClose: () => void }) {
   const [input, setInput] = useState("");
   const [stage, setStage] = useState<DemoStage>("idle");
   const [progress, setProgress] = useState(0);
+  const [copyState, setCopyState] = useState<CopyState>("idle");
   const endRef = useRef<HTMLDivElement>(null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
@@ -77,6 +75,7 @@ export default function DemoMode({ onClose }: { onClose: () => void }) {
 
   function startDemo() {
     if (stage !== "idle") return;
+    setCopyState("idle");
     setStage("planning");
     setProgress(15);
     later(1400, () => { setStage("writing"); setProgress(60); });
@@ -85,9 +84,41 @@ export default function DemoMode({ onClose }: { onClose: () => void }) {
       setProgress(100);
       setMsgs((prev) => [...prev, {
         from: "agent",
-        text: `任务执行完毕，交付物如下（🎭 演示模板生成）：\n\n${DEMO_DELIVERABLE}`,
+        text: `任务执行完毕，交付物如下（🎭 演示模板生成）：\n\n${DEMO_DELIVERABLE_MARKDOWN}`,
       }]);
     });
+  }
+
+  /** 纯前端下载：Blob → objectURL → 临时 <a download>，不经过后端、不写库。 */
+  function downloadDeliverable() {
+    const now = new Date();
+    const blob = new Blob([demoDeliverableMarkdown(now)], {
+      type: "text/markdown;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = demoDeliverableFileName(now);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  async function copyDeliverable() {
+    try {
+      await navigator.clipboard.writeText(demoDeliverableMarkdown(new Date()));
+      setCopyState("copied");
+      later(2000, () => setCopyState("idle"));
+    } catch {
+      setCopyState("failed");
+    }
+  }
+
+  function restartDemo() {
+    setStage("idle");
+    setProgress(0);
+    setCopyState("idle");
   }
 
   function send() {
@@ -166,10 +197,29 @@ export default function DemoMode({ onClose }: { onClose: () => void }) {
                              background: "linear-gradient(90deg,#f59e0b,#ef4444)" }} />
                 </div>
                 {stage === "done" && (
-                  <button onClick={() => { setStage("idle"); setProgress(0); }}
-                    className="btn-ghost w-full !py-1.5 text-xs mt-2">
-                    ↺ 再演示一次
-                  </button>
+                  <div className="mt-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button onClick={downloadDeliverable}
+                        className="btn-primary flex-1 !py-1.5 text-[11px] whitespace-nowrap">
+                        ⬇ 下载交付物 (.md)
+                      </button>
+                      <button onClick={copyDeliverable}
+                        className="btn-ghost flex-1 !py-1.5 text-[11px] whitespace-nowrap">
+                        📋 复制全文
+                      </button>
+                      <button onClick={restartDemo}
+                        className="btn-ghost flex-1 !py-1.5 text-[11px] whitespace-nowrap">
+                        ↺ 再演示一次
+                      </button>
+                    </div>
+                    {copyState !== "idle" && (
+                      <p className="text-[10px] mt-1.5"
+                        style={{ color: copyState === "copied" ? "#86efac" : "#fca5a5" }}
+                        role="status" aria-live="polite">
+                        {copyState === "copied" ? "已复制" : "复制失败，请手动选择文本"}
+                      </p>
+                    )}
+                  </div>
                 )}
               </div>
             )}

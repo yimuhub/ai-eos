@@ -20,6 +20,12 @@ from app.models.project import (Milestone, MilestoneStatus, Project,
                                 ProjectMember, ProjectStatus)
 from app.models.task import Task, TaskStatus
 from app.models.user import User
+from app.schemas.responses import (DetailMessageOut, LogsOut,
+                                   MilestoneOut, ProjectBatchDeleteOut,
+                                   ProjectChatOperationOut,
+                                   ProjectDeliverableOut, ProjectDetailOut,
+                                   ProjectListItemOut, ProjectOut,
+                                   ProjectProgressOut)
 from app.services.event_system import log_event
 
 logger = get_logger(__name__)
@@ -90,7 +96,7 @@ async def _project_owned(db: AsyncSession, user_id: str, pid: str,
 
 
 # ---------- Project CRUD ----------
-@router.get("/projects")
+@router.get("/projects", response_model=list[ProjectListItemOut])
 async def list_projects(company_id: str | None = None, status: str | None = None,
                         db: AsyncSession = Depends(get_db),
                         user=Depends(get_current_user)):
@@ -130,7 +136,7 @@ async def list_projects(company_id: str | None = None, status: str | None = None
     return out
 
 
-@router.post("/projects", status_code=201)
+@router.post("/projects", status_code=201, response_model=ProjectOut)
 async def create_project(data: ProjectIn, company_id: str | None = None,
                          db: AsyncSession = Depends(get_db),
                          user=Depends(get_current_user)):
@@ -150,7 +156,7 @@ async def create_project(data: ProjectIn, company_id: str | None = None,
     return {c2.key: getattr(p, c2.key) for c2 in p.__table__.columns}
 
 
-@router.get("/projects/{pid}")
+@router.get("/projects/{pid}", response_model=ProjectDetailOut)
 async def get_project(pid: str, db: AsyncSession = Depends(get_db),
                       user=Depends(get_current_user)):
     p = await _project_owned(db, user.id, pid)
@@ -183,7 +189,7 @@ async def get_project(pid: str, db: AsyncSession = Depends(get_db),
     return d
 
 
-@router.patch("/projects/{pid}")
+@router.patch("/projects/{pid}", response_model=ProjectOut)
 async def update_project(pid: str, data: dict,
                          db: AsyncSession = Depends(get_db),
                          user=Depends(get_current_user)):
@@ -250,7 +256,8 @@ async def delete_project(pid: str, db: AsyncSession = Depends(get_db),
 
 
 # ---------- Milestones ----------
-@router.post("/projects/{pid}/milestones", status_code=201)
+@router.post("/projects/{pid}/milestones", status_code=201,
+             response_model=MilestoneOut)
 async def add_milestone(pid: str, data: MilestoneIn,
                         db: AsyncSession = Depends(get_db),
                         user=Depends(get_current_user)):
@@ -262,7 +269,7 @@ async def add_milestone(pid: str, data: MilestoneIn,
     return {c.key: getattr(m, c.key) for c in m.__table__.columns}
 
 
-@router.patch("/milestones/{mid}")
+@router.patch("/milestones/{mid}", response_model=MilestoneOut)
 async def update_milestone(mid: str, data: dict,
                            db: AsyncSession = Depends(get_db),
                            user=Depends(get_current_user)):
@@ -284,7 +291,8 @@ async def update_milestone(mid: str, data: dict,
 
 
 # ---------- Team members ----------
-@router.post("/projects/{pid}/members", status_code=201)
+@router.post("/projects/{pid}/members", status_code=201,
+             response_model=DetailMessageOut)
 async def add_member(pid: str, data: MemberIn,
                      db: AsyncSession = Depends(get_db),
                      user=Depends(get_current_user)):
@@ -427,7 +435,7 @@ async def project_lifecycle(pid: str, data: LifecycleIn,
             "at": now_iso, "detail": detail}
 
 
-@router.get("/projects/{pid}/progress")
+@router.get("/projects/{pid}/progress", response_model=ProjectProgressOut)
 async def project_progress(pid: str, db: AsyncSession = Depends(get_db),
                            user=Depends(get_current_user)):
     """项目进度：基于任务完成率计算。"""
@@ -462,7 +470,7 @@ class BatchDeleteIn(BaseModel):
     project_ids: list[str]
 
 
-@router.post("/projects/batch-delete")
+@router.post("/projects/batch-delete", response_model=ProjectBatchDeleteOut)
 async def batch_delete_projects(data: BatchDeleteIn,
                                 db: AsyncSession = Depends(get_db),
                                 user=Depends(get_current_user)):
@@ -569,7 +577,8 @@ class ChatOpIn(BaseModel):
     skill_ids: list[str] = []       # 手动附加的技能
 
 
-@router.post("/projects/{pid}/chat-operation")
+@router.post("/projects/{pid}/chat-operation",
+             response_model=ProjectChatOperationOut)
 async def project_chat_operation(pid: str, data: ChatOpIn,
                                  db: AsyncSession = Depends(get_db),
                                  user=Depends(get_current_user)):
@@ -705,7 +714,8 @@ async def project_chat_operation(pid: str, data: ChatOpIn,
     return {"reply": reply, "actions": actions}
 
 
-@router.get("/projects/{pid}/deliverables")
+@router.get("/projects/{pid}/deliverables",
+            response_model=list[ProjectDeliverableOut])
 async def project_deliverables(pid: str, db: AsyncSession = Depends(get_db),
                                user=Depends(get_current_user)):
     """项目全部交付成果（资产）列表。"""
@@ -721,7 +731,7 @@ async def project_deliverables(pid: str, db: AsyncSession = Depends(get_db),
     } for a in rows]
 
 
-@router.get("/projects/{pid}/logs")
+@router.get("/projects/{pid}/logs", response_model=LogsOut)
 async def project_logs(pid: str, db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
     """项目日志：Agent 协作消息 + 会议发言 + 事件流，按时间倒序合并。"""

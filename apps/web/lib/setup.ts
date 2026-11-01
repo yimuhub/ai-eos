@@ -188,6 +188,264 @@ export function passwordStrength(pw: string): 0 | 1 | 2 | 3 {
   return Math.min(score, 3) as 0 | 1 | 2 | 3;
 }
 
+/* ---------------- 安装草稿：可续装，但**绝不**持久化密钥 ---------------- */
+
+/**
+ * 草稿版本。key 与 payload 都带版本号：旧版本的残留草稿直接丢弃，
+ * 不做兼容迁移（安装向导的字段改动很小，迁移的复杂度不划算）。
+ */
+export const SETUP_DRAFT_VERSION = 1;
+export const SETUP_DRAFT_KEY = `aieos_setup_draft_v${SETUP_DRAFT_VERSION}`;
+
+/**
+ * 「已安装、待接模型」标记（localStorage，和 token 同生命周期）。
+ *
+ * 为什么不在草稿里：草稿在 sessionStorage（只活在这个标签页），
+ * 而"账号与公司已经建好、只差模型"是**跨标签页/跨刷新**都该保留的事实。
+ * 刷新后 `needs_setup=false`，若没有这个标记就只能把用户踢回登录页，
+ * 第 4 步的上下文（公司、员工数）就丢了。
+ */
+export const SETUP_PENDING_KEY = "aieos_setup_pending_model_v1";
+
+/** 第 4 步表单里可以回填的非敏感字段（Key 永远不进来） */
+export type SetupModelDraft = {
+  providerType: string;
+  name: string;
+  baseUrl: string;
+  modelId: string;
+};
+
+/** 组织架构结果摘要（第 4 步恢复时用来展示"会绑定多少员工"） */
+export type SetupOrgOutcome =
+  | { status: "skipped"; departments: 0; agents: 0; note: string }
+  | { status: "created"; departments: number; agents: number; presetIndustry: string }
+  | { status: "failed"; departments: 0; agents: 0; reason: string };
+
+/** 安装成功的上下文（写进「待接模型」标记） */
+export type SetupInstalledDraft = {
+  companyId: string;
+  companyName: string;
+  username: string;
+  email: string;
+  org: SetupOrgOutcome;
+};
+
+/**
+ * 草稿白名单。
+ *
+ * **明确没有** password / confirm / API Key：它们只存在于组件内存里。
+ * 序列化时逐字段重建对象（而不是把入参展开），因此调用方就算误传
+ * `{ password }` 也不会写进浏览器存储。
+ */
+export type SetupDraft = {
+  step: 1 | 2 | 3 | 4;
+  username: string;
+  email: string;
+  companyName: string;
+  description: string;
+  industry: string;
+  orgMode: "preset" | "empty";
+  scale: OrgScale;
+  presetManual: string | null;
+  model: SetupModelDraft | null;
+};
+
+const asStr = (v: unknown): string => (typeof v === "string" ? v : "");
+
+function asCount(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+function asStep(v: unknown): 1 | 2 | 3 | 4 {
+  const n = Number(v);
+  return n === 2 || n === 3 || n === 4 ? n : 1;
+}
+
+function asOrgMode(v: unknown): "preset" | "empty" {
+  return v === "empty" ? "empty" : "preset";
+}
+
+function asScale(v: unknown): OrgScale {
+  return SCALES.some((s) => s.key === v) ? (v as OrgScale) : "smb";
+}
+
+function asIndustry(v: unknown): string {
+  return INDUSTRIES.some((i) => i.key === v) ? (v as string) : INDUSTRIES[0].key;
+}
+
+function asPresetId(v: unknown): string | null {
+  return typeof v === "string" && v.trim() ? v : null;
+}
+
+function parseModel(v: unknown): SetupModelDraft | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  const model: SetupModelDraft = {
+    providerType: asStr(o.providerType),
+    name: asStr(o.name),
+    baseUrl: asStr(o.baseUrl),
+    modelId: asStr(o.modelId),
+  };
+  return model.providerType || model.name || model.baseUrl || model.modelId ? model : null;
+}
+
+function parseOrg(v: unknown): SetupOrgOutcome | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (o.status === "created") {
+    return {
+      status: "created",
+      departments: asCount(o.departments),
+      agents: asCount(o.agents),
+      presetIndustry: asStr(o.presetIndustry),
+    };
+  }
+  if (o.status === "skipped") {
+    return { status: "skipped", departments: 0, agents: 0, note: asStr(o.note) };
+  }
+  if (o.status === "failed") {
+    return { status: "failed", departments: 0, agents: 0, reason: asStr(o.reason) };
+  }
+  return null;
+}
+
+/** 草稿 → 字符串（纯函数，便于在 node 里测）。逐字段重建 = 白名单。 */
+export function serializeDraft(input: SetupDraft): string {
+  const model = input.model
+    ? {
+        providerType: asStr(input.model.providerType),
+        name: asStr(input.model.name),
+        baseUrl: asStr(input.model.baseUrl),
+        modelId: asStr(input.model.modelId),
+      }
+    : null;
+  const payload = {
+    version: SETUP_DRAFT_VERSION,
+    step: asStep(input.step),
+    username: asStr(input.username),
+    email: asStr(input.email),
+    companyName: asStr(input.companyName),
+    description: asStr(input.description),
+    industry: asIndustry(input.industry),
+    orgMode: asOrgMode(input.orgMode),
+    scale: asScale(input.scale),
+    presetManual: asPresetId(input.presetManual),
+    model: parseModel(model),
+  };
+  return JSON.stringify(payload);
+}
+
+/**
+ * 字符串 → 草稿。任何异常（非 JSON / 版本不符 / 值不合法）都返回 null，
+ * 调用方按"没有草稿"处理即可——草稿坏了绝不能把安装页搞白屏。
+ */
+export function parseDraft(raw: unknown): SetupDraft | null {
+  if (typeof raw !== "string" || !raw) return null;
+  let obj: unknown;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== "object") return null;
+  const o = obj as Record<string, unknown>;
+  if (o.version !== SETUP_DRAFT_VERSION) return null; // 版本不匹配：丢弃，不做迁移
+  return {
+    step: asStep(o.step),
+    username: asStr(o.username),
+    email: asStr(o.email),
+    companyName: asStr(o.companyName),
+    description: asStr(o.description),
+    industry: asIndustry(o.industry),
+    orgMode: asOrgMode(o.orgMode),
+    scale: asScale(o.scale),
+    presetManual: asPresetId(o.presetManual),
+    model: parseModel(o.model),
+  };
+}
+
+function session(): Storage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null; // 隐私模式可能直接抛错
+  }
+}
+
+/** 保存草稿（只在 sessionStorage；写失败不影响向导） */
+export function saveSetupDraft(draft: SetupDraft): void {
+  try {
+    session()?.setItem(SETUP_DRAFT_KEY, serializeDraft(draft));
+  } catch {
+    /* 配额满 / 被禁用：草稿只是锦上添花 */
+  }
+}
+
+export function loadSetupDraft(): SetupDraft | null {
+  try {
+    return parseDraft(session()?.getItem(SETUP_DRAFT_KEY));
+  } catch {
+    return null;
+  }
+}
+
+export function clearSetupDraft(): void {
+  try {
+    session()?.removeItem(SETUP_DRAFT_KEY);
+  } catch {
+    /* 忽略 */
+  }
+}
+
+/** 写入「已安装、待接模型」标记（不含任何密钥） */
+export function savePendingInstall(info: SetupInstalledDraft): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      SETUP_PENDING_KEY,
+      JSON.stringify({ version: SETUP_DRAFT_VERSION, ...info }),
+    );
+  } catch {
+    /* 忽略：最坏情况是刷新后回到登录页 */
+  }
+}
+
+export function loadPendingInstall(): SetupInstalledDraft | null {
+  if (typeof window === "undefined") return null;
+  let obj: unknown;
+  try {
+    const raw = window.localStorage.getItem(SETUP_PENDING_KEY);
+    if (!raw) return null;
+    obj = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== "object") return null;
+  const o = obj as Record<string, unknown>;
+  if (o.version !== SETUP_DRAFT_VERSION) return null;
+  const companyId = asStr(o.companyId);
+  const org = parseOrg(o.org);
+  if (!companyId || !org) return null;
+  return {
+    companyId,
+    companyName: asStr(o.companyName),
+    username: asStr(o.username),
+    email: asStr(o.email),
+    org,
+  };
+}
+
+export function clearPendingInstall(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(SETUP_PENDING_KEY);
+  } catch {
+    /* 忽略 */
+  }
+}
+
 /* ---------------- 错误文案：说清"下一步该做什么" ---------------- */
 
 /** 状态探测失败（GET /setup/status） */

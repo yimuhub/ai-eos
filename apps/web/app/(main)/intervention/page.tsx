@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { api, ApiError, getCompanies } from "@/lib/api";
-import type { Company } from "@/lib/types";
+import { useState } from "react";
+import { api, ApiError } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { notify } from "@/components/Toast";
 
 // ## 改造说明
@@ -47,6 +47,18 @@ type OverrideRow = {
   created_at: string;
 };
 
+type WhitelistRow = { id: string; capability: string; param_pattern: string; note: string | null };
+
+type InterventionBundle = {
+  cid: string;
+  policy: Policy;
+  reqs: Req[];
+  overrides: OverrideRow[];
+  whitelist: WhitelistRow[];
+  /** 各分区独立失败的原因：一个接口挂掉不拖垮整页 */
+  errors: string[];
+};
+
 /** 与后端 models/intervention.py 的 requires_approval() 语义保持一致 */
 const LEVELS: { v: number; name: string; desc: string }[] = [
   { v: 0, name: "L0 · 全需确认", desc: "所有动作都必须你点头才执行" },
@@ -67,60 +79,52 @@ const ACTION_LABELS: Record<string, string> = {
 };
 
 export default function InterventionPage() {
-  const [companyId, setCompanyId] = useState<string | null>(null);
-  const [reqs, setReqs] = useState<Req[]>([]);
-  const [overrides, setOverrides] = useState<OverrideRow[]>([]);
-  // V5.6.1 工具级免批白名单
-  const [whitelist, setWhitelist] = useState<{ id: string; capability: string; param_pattern: string; note: string | null }[]>([]);
-  const loadWhitelist = (cid: string) => {
-    api.get(`/intervention/whitelist?company_id=${cid}`).then((r: any) => setWhitelist(Array.isArray(r) ? r : [])).catch(() => setWhitelist([]));
-  };
-  const [policy, setPolicy] = useState<Policy>({ level: 2 });
-  const [loading, setLoading] = useState(true);
+  const cid = useActiveCompanyId();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [savingPolicy, setSavingPolicy] = useState(false);
-  const [loadError, setLoadError] = useState("");
 
-  // ---------- 读取：公司 → 策略 / 待审批 / 覆盖记录 ----------
-  const load = useCallback(async (cid: string) => {
-    setLoadError("");
-    const [policyRes, reqRes, ovRes] = await Promise.allSettled([
-      api.get<Policy>(`/intervention/policy?company_id=${cid}`),
-      api.get<Req[]>(`/intervention/requests?company_id=${cid}&status=PENDING`),
-      api.get<OverrideRow[]>(`/intervention/overrides?company_id=${cid}`),
-    ]);
+  // ---------- 读取：公司 → 策略 / 待审批 / 覆盖记录 / 免批白名单 ----------
+  // 一个 bundle 一次并发取完；各接口独立失败（allSettled 语义保留），
+  // 失败原因集中回传给页面，不让单个接口拖垮整页。
+  const { data: bundle, error, refresh } = useResource(
+    cid ? `intervention:${cid}` : null,
+    async (): Promise<InterventionBundle> => {
+      const [policyRes, reqRes, ovRes, wlRes] = await Promise.allSettled([
+        api.get<Policy>(`/intervention/policy?company_id=${cid}`),
+        api.get<Req[]>(`/intervention/requests?company_id=${cid}&status=PENDING`),
+        api.get<OverrideRow[]>(`/intervention/overrides?company_id=${cid}`),
+        api.get<WhitelistRow[]>(`/intervention/whitelist?company_id=${cid}`),
+      ]);
+      const errors: string[] = [];
 
-    if (policyRes.status === "fulfilled") {
-      setPolicy(policyRes.value);
-    } else {
-      // 单独失败不应让整页变成空白：保留默认值并把原因说出来
-      setPolicy({ level: 2, is_default: true });
-      setLoadError(describe(policyRes.reason, "读取自动化等级失败"));
-    }
-
-    if (reqRes.status === "fulfilled") setReqs(reqRes.value || []);
-    else setLoadError(describe(reqRes.reason, "读取待审批请求失败"));
-
-    if (ovRes.status === "fulfilled") setOverrides(ovRes.value || []);
-    loadWhitelist(cid);
-  }, [loadWhitelist]);
-
-  useEffect(() => {
-    (async () => {
-      setLoading(true);
-      try {
-        const cs = await getCompanies<Company>();
-        const cid = cs?.[0]?.id || null;
-        setCompanyId(cid);
-        if (cid) await load(cid);
-        else setLoadError("你还没有创建 AI 公司，请先到「公司管理」创建。");
-      } catch (e) {
-        setLoadError(describe(e, "读取公司信息失败"));
-      } finally {
-        setLoading(false);
+      let policy: Policy = { level: 2, is_default: true };
+      if (policyRes.status === "fulfilled") {
+        policy = policyRes.value;
+      } else {
+        errors.push(describe(policyRes.reason, "读取自动化等级失败"));
       }
-    })();
-  }, [load]);
+
+      let reqs: Req[] = [];
+      if (reqRes.status === "fulfilled") reqs = reqRes.value || [];
+      else errors.push(describe(reqRes.reason, "读取待审批请求失败"));
+
+      const overrides = ovRes.status === "fulfilled" ? ovRes.value || [] : [];
+      const whitelist = wlRes.status === "fulfilled" && Array.isArray(wlRes.value) ? wlRes.value : [];
+
+      return { cid: cid as string, policy, reqs, overrides, whitelist, errors };
+    },
+  );
+
+  // 切公司后旧 bundle 不再可用：等新公司的数据回来再渲染
+  const active = bundle && bundle.cid === cid ? bundle : null;
+  const policy: Policy = active?.policy ?? { level: 2 };
+  const reqs = active?.reqs ?? [];
+  const overrides = active?.overrides ?? [];
+  const whitelist = active?.whitelist ?? [];
+  const loading = cid === undefined || (cid !== null && !active && !error);
+  const loadError = cid === null
+    ? "你还没有创建 AI 公司，请先到「公司管理」创建。"
+    : [error, ...(active?.errors ?? [])].filter(Boolean).join("；");
 
   // ---------- 审批：成功以响应为准，不再无条件报喜 ----------
   // V5.6.1：批准时可勾"始终允许"（always_allow）→ 后端写免批白名单，防审批疲劳
@@ -139,13 +143,8 @@ export default function InterventionPage() {
       } else {
         notify("success", decision === "approve" ? "已批准，Agent 将继续执行" : "已拒绝");
       }
-      // 用后端返回的真实状态回填，避免本地乐观更新与后端不一致
-      setReqs((prev) =>
-        prev.map((r) => (r.id === id ? { ...r, status: res?.status || r.status } : r)),
-      );
-      // 已决策的不再属于待办列表
-      setReqs((prev) => prev.filter((r) => r.id !== id));
-      if (companyId) await load(companyId);
+      // 已决策的请求离开待办列表 → 整页重取（含白名单：始终允许会写进去）
+      await refresh();
     } catch (e) {
       notify("error", describe(e, "审批失败"));
     } finally {
@@ -155,15 +154,15 @@ export default function InterventionPage() {
 
   // ---------- 策略：真正写回后端并回读确认 ----------
   async function saveLevel(level: number) {
-    if (!companyId) return;
+    if (!cid) return;
     setSavingPolicy(true);
     try {
-      const res = await api.put<Policy>(`/intervention/policy?company_id=${companyId}`, {
+      await api.put<Policy>(`/intervention/policy?company_id=${cid}`, {
         level,
         project_id: null,
       });
-      setPolicy(res || { level });
       notify("success", `自动化等级已设为 ${LEVELS.find((l) => l.v === level)?.name || `L${level}`}`);
+      await refresh(); // 回读：以服务端返回为准
     } catch (e) {
       notify("error", describe(e, "保存自动化等级失败"));
     } finally {
@@ -175,48 +174,33 @@ export default function InterventionPage() {
   const ccEnabled = (policy.approval_actions || []).includes("computer_command");
   // ---------- V5.5 A3：外部 Agent 外发审批门开关 ----------
   const extEnabled = (policy.approval_actions || []).includes("external_agent");
-  async function toggleExt(enabled: boolean) {
-    if (!companyId) return;
+  async function toggleGate(action: "external_agent" | "computer_command", enabled: boolean) {
+    if (!cid) return;
     setSavingPolicy(true);
     try {
       const actions = new Set(policy.approval_actions || []);
-      if (enabled) actions.add("external_agent"); else actions.delete("external_agent");
-      const res = await api.put<Policy>(`/intervention/policy?company_id=${companyId}`, {
+      if (enabled) actions.add(action); else actions.delete(action);
+      await api.put<Policy>(`/intervention/policy?company_id=${cid}`, {
         level: policy.level ?? 2,
         project_id: null,
         approval_actions: Array.from(actions),
       });
-      setPolicy(res || policy);
-      notify("success", enabled
-        ? "已开启：外部 Agent 外发执行需你批准后才执行"
-        : "已关闭外部 Agent 外发审批门");
+      notify("success", action === "external_agent"
+        ? (enabled
+          ? "已开启：外部 Agent 外发执行需你批准后才执行"
+          : "已关闭外部 Agent 外发审批门")
+        : (enabled
+          ? "已开启：高危本机操作（shell/写文件/启动应用）需你批准后才执行"
+          : "已关闭高危操作审批门"));
+      await refresh();
     } catch (e) {
-      notify("error", describe(e, "保存外发审批门开关失败"));
+      notify("error", describe(e, action === "external_agent" ? "保存外发审批门开关失败" : "保存审批门开关失败"));
     } finally {
       setSavingPolicy(false);
     }
   }
-  async function toggleCc(enabled: boolean) {
-    if (!companyId) return;
-    setSavingPolicy(true);
-    try {
-      const actions = new Set(policy.approval_actions || []);
-      if (enabled) actions.add("computer_command"); else actions.delete("computer_command");
-      const res = await api.put<Policy>(`/intervention/policy?company_id=${companyId}`, {
-        level: policy.level ?? 2,
-        project_id: null,
-        approval_actions: Array.from(actions),
-      });
-      setPolicy(res || policy);
-      notify("success", enabled
-        ? "已开启：高危本机操作（shell/写文件/启动应用）需你批准后才执行"
-        : "已关闭高危操作审批门");
-    } catch (e) {
-      notify("error", describe(e, "保存审批门开关失败"));
-    } finally {
-      setSavingPolicy(false);
-    }
-  }
+  const toggleExt = (enabled: boolean) => toggleGate("external_agent", enabled);
+  const toggleCc = (enabled: boolean) => toggleGate("computer_command", enabled);
 
   const current = LEVELS.find((l) => l.v === policy.level);
 
@@ -230,9 +214,9 @@ export default function InterventionPage() {
           </p>
         </div>
         <button
-          onClick={() => companyId && load(companyId)}
+          onClick={() => cid && refresh()}
           className="btn-ghost text-xs"
-          disabled={!companyId || loading}
+          disabled={!cid || loading}
         >
           {loading ? "加载中…" : "刷新"}
         </button>
@@ -340,7 +324,7 @@ export default function InterventionPage() {
                 <button
                   key={l.v}
                   onClick={() => saveLevel(l.v)}
-                  disabled={!companyId || savingPolicy}
+                  disabled={!cid || savingPolicy}
                   className="w-full text-left rounded-xl px-3 py-2.5 border transition-all disabled:opacity-50"
                   style={{
                     borderColor: active ? "var(--accent)" : "var(--border)",
@@ -384,7 +368,7 @@ export default function InterventionPage() {
             </div>
             <button
               onClick={() => toggleCc(!ccEnabled)}
-              disabled={!companyId || savingPolicy}
+              disabled={!cid || savingPolicy}
               className="px-3 py-1.5 rounded-lg text-xs font-medium text-white disabled:opacity-40"
               style={{ background: ccEnabled ? "#b91c1c" : "#15803d" }}>
               {ccEnabled ? "关闭" : "开启"}
@@ -414,7 +398,7 @@ export default function InterventionPage() {
             </div>
             <button
               onClick={() => toggleExt(!extEnabled)}
-              disabled={!companyId || savingPolicy}
+              disabled={!cid || savingPolicy}
               className="px-3 py-1.5 rounded-lg text-xs font-medium text-white disabled:opacity-40"
               style={{ background: extEnabled ? "#b91c1c" : "#15803d" }}>
               {extEnabled ? "关闭" : "开启"}
@@ -445,10 +429,10 @@ export default function InterventionPage() {
                 <span className="ml-auto" />
                 <button
                   onClick={async () => {
-                    if (!companyId) return;
+                    if (!cid) return;
                     try {
-                      await api.del(`/intervention/whitelist/${w.id}?company_id=${companyId}`);
-                      loadWhitelist(companyId);
+                      await api.del(`/intervention/whitelist/${w.id}?company_id=${cid}`);
+                      await refresh();
                       notify("success", "已撤销，同类操作恢复拦截");
                     } catch (e) { notify("error", describe(e, "撤销失败")); }
                   }}

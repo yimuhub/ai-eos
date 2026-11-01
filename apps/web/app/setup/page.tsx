@@ -33,6 +33,7 @@ import {
   ApiError,
   clearToken,
   describeError,
+  getToken,
   setActiveCompanyId,
   setRefreshToken,
   setToken,
@@ -40,23 +41,33 @@ import {
 } from "@/lib/api";
 import { V, runRules } from "@/lib/validate";
 import Field from "@/components/Field";
+import DemoMode from "@/components/DemoMode";
 import {
   FALLBACK_PRESET_ID,
   INDUSTRIES,
   SCALES,
+  clearPendingInstall,
+  clearSetupDraft,
   departmentSubset,
   industryLabel,
+  loadPendingInstall,
+  loadSetupDraft,
   matchPresetId,
   passwordStrength,
   presetErrorMessage,
   presetPool,
   previewCounts,
+  savePendingInstall,
+  saveSetupDraft,
   setupErrorMessage,
   setupStatusErrorMessage,
   type ApplyResult,
   type OrgScale,
   type PresetDetail,
   type PresetSummary,
+  type SetupDraft,
+  type SetupInstalledDraft,
+  type SetupOrgOutcome,
   type SetupResult,
   type SetupStatus,
 } from "@/lib/setup";
@@ -71,10 +82,8 @@ const PRESET_OPTS: RequestOptions = {
 type Step = 1 | 2 | 3 | 4;
 type FieldKey = "username" | "email" | "password" | "confirm";
 
-type OrgOutcome =
-  | { status: "skipped"; departments: 0; agents: 0; note: string }
-  | { status: "created"; departments: number; agents: number; presetIndustry: string }
-  | { status: "failed"; departments: 0; agents: 0; reason: string };
+/** 组织架构结果：类型定义在 lib/setup.ts（草稿/安装标记要复用它） */
+type OrgOutcome = SetupOrgOutcome;
 
 /** 第 4 步的结果：接入成功（含测试是否通过）或用户主动跳过 */
 type ModelOutcome =
@@ -204,9 +213,24 @@ export default function SetupPage() {
       const s = await api.get<SetupStatus>("/setup/status", { silent: true, timeoutMs: 15_000 });
       if (!alive.current) return;
       if (s?.needs_setup === false) {
+        // 系统已初始化：通常是用户装完刷新了页面。
+        // 若「已安装、待接模型」标记与 token 都还在，说明第 4 步还没收尾——
+        // 此时踢回 /login 会丢掉模型上下文（用户还得自己再找一遍入口），
+        // 所以恢复安装上下文，原地停在第 4 步。
+        const pending = loadPendingInstall();
+        if (pending && getToken()) {
+          setInstalled(pending);
+          setStep(4);
+          setGate("ready");
+          return;
+        }
+        clearPendingInstall();
+        clearSetupDraft();
         router.replace("/login");
         return;
       }
+      // 仍然是未初始化状态：残留的旧标记只会让后续判断混乱，清掉
+      clearPendingInstall();
       setGate("ready");
     } catch (e) {
       if (!alive.current) return;
@@ -289,6 +313,100 @@ export default function SetupPage() {
   const [modelCreatedId, setModelCreatedId] = useState<string | null>(null);
 
   const installedAgents = installed?.org.status === "created" ? installed.org.agents : 0;
+
+  /* ---------------- 可续装：草稿恢复 / 保存（只存非敏感字段） ---------------- */
+  // 演示模式弹层（复用 components/DemoMode.tsx，不另写一套演示逻辑）
+  const [demoOpen, setDemoOpen] = useState(false);
+  // 「去修复 Key」：失败态点一下要回到表单并聚焦 Key 输入
+  const keyInputRef = useRef<HTMLInputElement>(null);
+  const [repairKeyTick, setRepairKeyTick] = useState(0);
+  // 草稿恢复完成前不要回写，否则会用初始空值把已保存的草稿覆盖掉
+  const draftHydrated = useRef(false);
+
+  useEffect(() => {
+    const d = loadSetupDraft();
+    if (d) {
+      setUsername(d.username);
+      setEmail(d.email);
+      setCompanyName(d.companyName);
+      setDescription(d.description);
+      setIndustry(d.industry);
+      setOrgMode(d.orgMode);
+      setScale(d.scale);
+      setPresetManual(d.presetManual);
+      // 第 4 步不能只凭草稿：必须同时有「待接模型」标记与登录态，由 checkStatus 决定
+      if (d.step < 4) setStep(d.step);
+      if (d.model) {
+        const m = d.model;
+        const idx = MODEL_PRESETS.findIndex(
+          (p) => p.provider_type === m.providerType && p.base_url === m.baseUrl,
+        );
+        if (idx >= 0) setModelPresetIdx(idx);
+        else setManualModel(true); // 恢复出来的地址不属于任何预置服务商 → 允许手填/改地址
+        setModelForm((f) => ({
+          ...f,
+          provider_type: m.providerType || f.provider_type,
+          name: m.name,
+          base_url: m.baseUrl,
+          model_id: m.modelId,
+        }));
+        setNameAuto(false);
+      }
+    }
+    draftHydrated.current = true;
+  }, []);
+
+  const draftSnapshot = useMemo<SetupDraft>(
+    () => ({
+      step,
+      username,
+      email,
+      companyName,
+      description,
+      industry,
+      orgMode,
+      scale,
+      presetManual,
+      model: {
+        providerType: modelForm.provider_type,
+        name: modelForm.name,
+        baseUrl: modelForm.base_url,
+        modelId: modelForm.model_id,
+      },
+    }),
+    [
+      step,
+      username,
+      email,
+      companyName,
+      description,
+      industry,
+      orgMode,
+      scale,
+      presetManual,
+      modelForm.provider_type,
+      modelForm.name,
+      modelForm.base_url,
+      modelForm.model_id,
+    ],
+  );
+
+  // 轻量 debounce：连续敲键盘不会每个按键都写一次 sessionStorage。
+  // 状态探测没通过（gate !== "ready"）就不写，避免"即将被踢回登录页"时留下残稿。
+  useEffect(() => {
+    if (!draftHydrated.current || gate !== "ready") return;
+    const t = window.setTimeout(() => saveSetupDraft(draftSnapshot), 400);
+    return () => window.clearTimeout(t);
+  }, [draftSnapshot, gate]);
+
+  // 失败态「去修复 Key」：表单重新挂载后滚动 + 聚焦 Key 输入框
+  useEffect(() => {
+    if (!repairKeyTick) return;
+    const el = keyInputRef.current;
+    if (!el) return;
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.focus();
+  }, [repairKeyTick]);
 
   /**
    * 从服务商读取可用模型列表（GET /v1/models）。
@@ -457,6 +575,9 @@ export default function SetupPage() {
 
   function finishSetup(model: ModelOutcome | null = modelOutcome) {
     if (!installed) return;
+    // 收尾后不再"待接模型"：草稿与标记都清掉，刷新/再打开只会走正常登录
+    clearSetupDraft();
+    clearPendingInstall();
     setDone({
       username: installed.username,
       email: installed.email,
@@ -464,6 +585,14 @@ export default function SetupPage() {
       org: installed.org,
       model,
     });
+  }
+
+  /** 失败态「去修复 Key」：收起结果面板，回到模型表单并聚焦 Key 输入 */
+  function goFixKey() {
+    setModelOutcome(null);
+    setModelError("");
+    setModelStage(0); // 进度清单归零，重新开始才能看到真实的每一步
+    setRepairKeyTick((n) => n + 1);
   }
 
   useEffect(() => {
@@ -711,6 +840,16 @@ export default function SetupPage() {
     setToken(res.access_token);
     if (res.refresh_token) setRefreshToken(res.refresh_token);
     setActiveCompanyId(res.company.id);
+    // 账号与公司已经落库：立刻写「已安装、待接模型」标记。
+    // 这样即使组织架构还在生成时刷新，也停在第 4 步而不是被踢回 /login。
+    // （此时组织架构尚未确定，先按"未生成"记，生成完成后再覆盖一次。）
+    savePendingInstall({
+      companyId: res.company.id,
+      companyName: res.company?.name || companyName.trim(),
+      username: res.user?.username || username.trim(),
+      email: res.user?.email || email.trim(),
+      org: { status: "skipped", departments: 0, agents: 0, note: "组织架构状态未记录" },
+    });
 
     // 账号与公司 + owner 成员在同一个事务里落库，界面上分两段呈现，
     // 让"建了什么"可见；真实失败只可能发生在 POST /setup 那一步（上面已处理）。
@@ -742,13 +881,16 @@ export default function SetupPage() {
     await sleep(600);
     if (!alive.current) return;
     // 不直接收尾：先落到第 4 步接模型。没有模型的系统进去后每个员工都"无法执行任务"。
-    setInstalled({
+    const installedInfo: SetupInstalledDraft = {
       companyId: res.company.id,
       companyName: res.company?.name || companyName.trim(),
       username: res.user?.username || username.trim(),
       email: res.user?.email || email.trim(),
       org,
-    });
+    };
+    setInstalled(installedInfo);
+    // 刷新后靠这个标记 + token 判断"已安装、待接模型"，从而停在第 4 步
+    savePendingInstall(installedInfo);
     setModelStage(0);
     setModelError("");
     setModelOutcome(null);
@@ -776,6 +918,8 @@ export default function SetupPage() {
     }
     if (!alive.current) return;
     clearToken();
+    clearSetupDraft();
+    clearPendingInstall();
     localStorage.removeItem("aieos_active_cid");
     setDone(null);
     setRebuildOpen(false);
@@ -1074,7 +1218,9 @@ export default function SetupPage() {
             ? `将创建 ${orgCounts.departments} 个部门 / ${orgCounts.agents} 位 AI`
             : "预设数据取不到时，安装仍会继续。"
           : modelOutcome?.status === "bound"
-            ? `已为 ${modelOutcome.bound}/${modelOutcome.agentCount} 位员工接上模型，点「完成，进入工作台」即可开始`
+            ? modelOutcome.testOk
+              ? `已为 ${modelOutcome.bound}/${modelOutcome.agentCount} 位员工接上模型，点「完成，进入工作台」即可开始`
+              : "模型已保存但未连通：建议先修好 Key，否则员工接任务会失败"
             : installedAgents > 0
               ? `接入后会把公司现有 ${installedAgents} 位 AI 员工一起绑定`
               : "暂时没有 AI 员工；接入后可随时在「模型配置」里绑定。";
@@ -1229,6 +1375,31 @@ export default function SetupPage() {
                     密码无法找回
                   </span>
                   （后端只存加密哈希），请当场记好。
+                </div>
+
+                {/* 免 Key 演示入口：新向导此前完全没有，小白在没有 Key 时看不到任何东西 */}
+                <div
+                  className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5 rounded-[11px] px-3.5 py-3 text-[11.5px] leading-relaxed"
+                  style={{
+                    border: "1px solid rgba(251,191,36,0.35)",
+                    background: "rgba(251,191,36,0.07)",
+                  }}
+                >
+                  <span style={{ color: "#e8d9a8" }}>
+                    <span className="font-semibold" style={{ color: "var(--warning)" }}>
+                      还没有 API Key？
+                    </span>
+                    可以先看一遍免 Key 演示（约 30 秒），了解员工怎么接任务。
+                    <span style={{ color: "var(--muted)" }}>演示数据，不代表真实能力。</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setDemoOpen(true)}
+                    className="btn-ghost shrink-0"
+                    style={{ color: "inherit" }}
+                  >
+                    🎭 先体验演示（免 Key）→
+                  </button>
                 </div>
 
                 <div className="grid md:grid-cols-2 gap-x-4 gap-y-4">
@@ -1591,7 +1762,7 @@ export default function SetupPage() {
                   <p className="text-[12px] leading-relaxed" style={{ color: "var(--muted)" }}>
                     安装流程尚未完成，请先回到第 1 步创建账号与公司。
                   </p>
-                ) : modelOutcome?.status === "bound" ? (
+                ) : modelOutcome?.status === "bound" && modelOutcome.testOk ? (
                   <div
                     className="rounded-[13px] px-4 py-4 text-[12.5px] leading-relaxed"
                     style={{
@@ -1608,12 +1779,72 @@ export default function SetupPage() {
                       · 已绑定 {modelOutcome.bound}/{modelOutcome.agentCount} 位 AI 员工
                     </p>
                     <p className="mt-1 text-[11.5px]" style={{ color: "var(--muted)" }}>
-                      {modelOutcome.testOk
-                        ? "连通测试通过，员工现在就能接任务。"
-                        : `连通测试未通过${modelOutcome.testError ? `：${modelOutcome.testError}` : ""}。模型与绑定已保存，可进入系统后在「模型配置」里调整。`}
+                      连通测试通过，员工现在就能接任务。
                     </p>
                     <p className="mt-1 text-[11px]" style={{ color: "var(--muted)" }}>
                       点右下角「完成，进入工作台」即可开始。
+                    </p>
+                  </div>
+                ) : modelOutcome?.status === "bound" ? (
+                  /* 已保存但**没连通**：不能用绿色成功态，否则用户带着坏 Key 进系统，
+                     第一个任务就失败，还以为是产品坏了。 */
+                  <div
+                    className="rounded-[13px] px-4 py-4 text-[12.5px] leading-relaxed"
+                    style={{
+                      border: "1px solid rgba(251,191,36,0.45)",
+                      background: "rgba(251,191,36,0.09)",
+                    }}
+                    role="alert"
+                  >
+                    <div className="font-semibold" style={{ color: "var(--warning)" }}>
+                      ⚠ 模型已保存，但未连通
+                    </div>
+                    <p className="mt-1.5" style={{ color: "#e8d9a8" }}>
+                      {modelOutcome.modelName}（{modelOutcome.modelIdOnProvider}）
+                      · 已绑定 {modelOutcome.bound}/{modelOutcome.agentCount} 位 AI 员工
+                    </p>
+                    <p className="mt-1.5" style={{ color: "#e8d9a8" }}>
+                      连通测试没有通过，员工现在接任务会失败。常见原因：Key 复制不完整或已失效、
+                      模型 ID 与服务商不符、需要代理网络、服务商额度用尽。
+                    </p>
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-[11.5px] underline underline-offset-2" style={{ color: "#fcd34d" }}>
+                        查看完整错误信息
+                      </summary>
+                      <p
+                        className="mt-1.5 rounded-[9px] px-2.5 py-2 text-[11px] whitespace-pre-wrap break-all"
+                        style={{
+                          background: "rgba(0,0,0,0.28)",
+                          border: "1px solid rgba(251,191,36,0.25)",
+                          color: "#e8d9a8",
+                          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                        }}
+                      >
+                        {modelOutcome.testError || "后端没有返回具体原因（可能是 Key 无效或网络不通）。"}
+                      </p>
+                    </details>
+                    <div className="mt-3 flex flex-col sm:flex-row sm:items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={goFixKey}
+                        disabled={modelBusy}
+                        className="btn-primary w-full sm:w-auto px-4 py-2 disabled:opacity-40 disabled:cursor-not-allowed"
+                        style={{ color: "inherit" }}
+                      >
+                        去修复 Key →
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => finishSetup()}
+                        disabled={modelBusy}
+                        className="btn-ghost w-full sm:w-auto"
+                        style={{ color: "inherit" }}
+                      >
+                        仍然完成，进入工作台
+                      </button>
+                    </div>
+                    <p className="mt-1.5 text-[11px]" style={{ color: "#fca5a5" }}>
+                      未连通，进入后任务会失败。
                     </p>
                   </div>
                 ) : (
@@ -1633,6 +1864,19 @@ export default function SetupPage() {
                       <br />
                       Key 只写入本机 <code>apps/api/.env</code>（权限 600），
                       <b>不上传、不入库、不回显</b>；保存后立即生效，无需重启。
+                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <button
+                          type="button"
+                          onClick={() => setDemoOpen(true)}
+                          className="btn-ghost !px-2.5 !py-1 text-[11px]"
+                          style={{ color: "inherit" }}
+                        >
+                          🎭 没有 Key？先体验免 Key 演示（约 30 秒）
+                        </button>
+                        <span className="text-[10.5px]" style={{ color: "var(--muted)" }}>
+                          演示数据，不代表真实能力
+                        </span>
+                      </div>
                     </div>
 
                     <div>
@@ -1706,6 +1950,7 @@ export default function SetupPage() {
                         <div className="relative">
                           <input
                             id="su-model-key"
+                            ref={keyInputRef}
                             type={showKey ? "text" : "password"}
                             className="input pr-14"
                             value={keyInput}
@@ -1922,13 +2167,27 @@ export default function SetupPage() {
                   onClick={() => {
                     if (step === 1) {
                       setAttempted1(true);
-                      if (step1Valid) setStep(2);
+                      if (step1Valid) {
+                        setStep(2);
+                        return;
+                      }
+                      // 按钮可点，但校验不通过时给出**全部**原因，并滚到第一个错误字段：
+                      // 之前的 disabled 按钮只会让用户看到"点不动"，不知道缺什么。
+                      setTouched({ username: true, email: true, password: true, confirm: true });
+                      const first = (["username", "email", "password", "confirm"] as FieldKey[]).find(
+                        (k) => errors[k],
+                      );
+                      const el = first
+                        ? document.getElementById(`su-${first}`)
+                        : null;
+                      el?.scrollIntoView({ block: "center", behavior: "smooth" });
+                      (el as HTMLInputElement | null)?.focus();
                       return;
                     }
                     setAttempted2(true);
                     if (!companyError) setStep(3);
                   }}
-                  disabled={step === 1 ? !step1Valid : !!companyError}
+                  disabled={submitting || (step === 2 && !!companyError)}
                   className="btn-primary w-full sm:w-auto px-5 py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
                   style={{ color: "inherit" }}
                 >
@@ -1946,38 +2205,79 @@ export default function SetupPage() {
                 </button>
               ) : (
                 <>
-                  {modelOutcome?.status !== "bound" && (
-                    <span style={{ color: "var(--muted)" }}>
+                  {modelOutcome?.status === "bound" && modelOutcome.testOk ? (
+                    <button
+                      type="button"
+                      onClick={() => finishSetup()}
+                      disabled={modelBusy}
+                      className="btn-primary w-full sm:w-auto px-5 py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={{ color: "inherit" }}
+                    >
+                      完成，进入工作台 →
+                    </button>
+                  ) : modelOutcome?.status === "bound" ? (
+                    <>
                       <button
                         type="button"
-                        onClick={() => {
-                          const skipped: ModelOutcome = { status: "skipped" };
-                          setModelOutcome(skipped);
-                          finishSetup(skipped);
-                        }}
+                        onClick={goFixKey}
                         disabled={modelBusy}
-                        className="btn-ghost w-full sm:w-auto"
+                        className="btn-primary w-full sm:w-auto px-5 py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
                         style={{ color: "inherit" }}
                       >
-                        跳过，先进入 →
+                        去修复 Key →
                       </button>
-                    </span>
+                      <span className="flex flex-col gap-0.5" style={{ color: "var(--muted)" }}>
+                        <button
+                          type="button"
+                          onClick={() => finishSetup()}
+                          disabled={modelBusy}
+                          className="btn-ghost w-full sm:w-auto"
+                          style={{ color: "inherit" }}
+                        >
+                          完成，进入工作台
+                        </button>
+                        <span className="text-[10.5px] leading-relaxed" style={{ color: "var(--warning)" }}>
+                          未连通，进入后任务会失败
+                        </span>
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span style={{ color: "var(--muted)" }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const skipped: ModelOutcome = { status: "skipped" };
+                            setModelOutcome(skipped);
+                            finishSetup(skipped);
+                          }}
+                          disabled={modelBusy}
+                          className="btn-ghost w-full sm:w-auto"
+                          style={{ color: "inherit" }}
+                        >
+                          跳过，先进入 →
+                        </button>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => finishSetup()}
+                        disabled
+                        className="btn-primary w-full sm:w-auto px-5 py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                        style={{ color: "inherit" }}
+                      >
+                        完成，进入工作台 →
+                      </button>
+                    </>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => finishSetup()}
-                    disabled={modelBusy || modelOutcome?.status !== "bound"}
-                    className="btn-primary w-full sm:w-auto px-5 py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
-                    style={{ color: "inherit" }}
-                  >
-                    完成，进入工作台 →
-                  </button>
                 </>
               )}
             </div>
           </div>
         </main>
       </div>
+
+      {/* 免 Key 演示：直接复用 components/DemoMode.tsx（与旧向导同一套逻辑） */}
+      {demoOpen && <DemoMode onClose={() => setDemoOpen(false)} />}
     </div>
   );
 }

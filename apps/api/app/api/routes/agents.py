@@ -38,7 +38,16 @@ from app.models.agent import Agent, AgentModelConfig, AgentStatus
 from app.models.company import Company, Department
 from app.models.membership import CompanyMember, DepartmentMember
 from app.models.user import User
+from app.schemas.responses import (AgentBatchAssignManagerOut,
+                                   AgentBatchCreateOut, AgentBatchDeleteOut,
+                                   AgentCardOut, AgentListItemOut,
+                                   AgentManagerOut, AgentModelBindingOut,
+                                   AgentModelConfigOut, AgentOut,
+                                   AgentSubordinateOut, AgentSwitchModelOut,
+                                   CapabilityPacksOut)
+from app.services import license_service
 from app.services.event_system import log_event
+from app.services.usage_service import count_active_agents
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -177,6 +186,50 @@ async def _department_agent_count(db: AsyncSession, company_id: str,
     return int(total or 0)
 
 
+async def _enforce_license_seats(db: AsyncSession, company: Company, user,
+                                 *, adding: int, label: str) -> None:
+    """License 席位闸门（社区模式不生效）。
+
+    与部门 Agent 配额是**两道独立闸门**：部门配额管"某个部门能招几个"，
+    License 席位管"整个公司最多几个"。两者都用审批单承接，但 action_type
+    不同（agent_quota / license_seats），审批人一眼能分清该找谁扩容。
+    """
+    limit = license_service.seat_limit()
+    if limit is None:
+        return
+    used = await count_active_agents(db, company.id)
+    if used + adding <= limit:
+        return
+
+    overage = used + adding - limit
+    from app.models.intervention import ApprovalRequest
+    req = ApprovalRequest(
+        id=str(uuid.uuid4()),
+        company_id=company.id,
+        action_type="license_seats",
+        payload={"limit": limit, "used": used, "adding": adding,
+                 "overage": overage, "requested_by_user_id": user.id,
+                 "label": label},
+        reason=(f"License 席位已用满（上限 {limit}、已用 {used}），"
+                f"{label}将超出 {overage} 个，等待管理员批准"),
+    )
+    db.add(req)
+    # 与 agent_quota 同事务：409 抛出后请求级 session 不再提交，审批单与
+    # 通知必须在 raise 之前落库。
+    from app.services.notification_service import notify_approval_pending
+    await notify_approval_pending(
+        db, company_id=company.id,
+        title="待审批：License 席位不足",
+        body=(f"上限 {limit}、已用 {used}，本次超出 {overage} 个；"
+              f"批准后才会创建。如需扩容请联系发行方更新 License。"))
+    await db.commit()
+    raise HTTPException(
+        409,
+        detail=(f"License 席位不足：上限 {limit}、已用 {used}，"
+                f"本次超出 {overage} 个。超额创建审批已提交"
+                f"（审批单 {req.id}），请等待管理员批准。"))
+
+
 async def _enforce_agent_quota(db: AsyncSession, company: Company, user,
                                department_id: str | None, *, adding: int = 1,
                                label: str = "Agent") -> None:
@@ -184,38 +237,56 @@ async def _enforce_agent_quota(db: AsyncSession, company: Company, user,
 
     并发口径刻意只做一次 COUNT：配额是"软上限 + 人工审批"，用分布式锁
     去保证严格不超卖，代价远大于收益；多算一个的后果只是多一张审批单。
+
+    顺序：License 只读（过期/不可信）→ 现有部门配额 → License 席位。
+    社区模式（无 License）时后两步里席位闸门直接跳过，行为与改造前一致。
     """
+    state = license_service.get_state()
+    if state.read_only:
+        raise HTTPException(
+            403,
+            "License 已过期，当前为只读模式"
+            if state.status == "expired"
+            else "License 校验未通过，当前为只读模式")
+
     quota = await _resolve_agent_quota(db, company, user.id, department_id)
-    if quota is None:
-        return
-    current = await _department_agent_count(db, company.id, department_id)
-    if current + adding <= quota:
-        return
+    if quota is not None:
+        current = await _department_agent_count(db, company.id, department_id)
+        if current + adding > quota:
+            overage = current + adding - quota
+            from app.models.intervention import ApprovalRequest
+            req = ApprovalRequest(
+                id=str(uuid.uuid4()),
+                company_id=company.id,
+                action_type="agent_quota",
+                payload={"department_id": department_id, "adding": adding,
+                         "quota": quota, "current_count": current,
+                         "overage": overage, "requested_by_user_id": user.id,
+                         "label": label},
+                reason=(f"部门 Agent 配额已满（上限 {quota}、现有 {current}），"
+                        f"{label}将超出 {overage} 个，等待管理员批准"),
+            )
+            db.add(req)
+            # 审批单与通知同事务提交：409 抛出后请求级 session 不再提交，
+            # 所以必须在 commit 之前把通知也 add 进去。
+            from app.services.notification_service import notify_approval_pending
+            await notify_approval_pending(
+                db, company_id=company.id,
+                title=f"待审批：{label}超出 Agent 配额",
+                body=(f"上限 {quota}、现有 {current}，本次超出 {overage} 个；"
+                      f"批准后才会创建。"))
+            # 先落审批单：409 抛出后请求级 session 不再提交，审批记录必须已经存在
+            await db.commit()
+            raise HTTPException(
+                409,
+                detail=(f"部门 Agent 配额已满：上限 {quota}、现有 {current}，"
+                        f"本次超出 {overage} 个。超额创建审批已提交"
+                        f"（审批单 {req.id}），请等待管理员批准。"))
 
-    overage = current + adding - quota
-    from app.models.intervention import ApprovalRequest
-    req = ApprovalRequest(
-        id=str(uuid.uuid4()),
-        company_id=company.id,
-        action_type="agent_quota",
-        payload={"department_id": department_id, "adding": adding,
-                 "quota": quota, "current_count": current,
-                 "overage": overage, "requested_by_user_id": user.id,
-                 "label": label},
-        reason=(f"部门 Agent 配额已满（上限 {quota}、现有 {current}），"
-                f"{label}将超出 {overage} 个，等待管理员批准"),
-    )
-    db.add(req)
-    # 先落审批单：409 抛出后请求级 session 不再提交，审批记录必须已经存在
-    await db.commit()
-    raise HTTPException(
-        409,
-        detail=(f"部门 Agent 配额已满：上限 {quota}、现有 {current}，"
-                f"本次超出 {overage} 个。超额创建审批已提交"
-                f"（审批单 {req.id}），请等待管理员批准。"))
+    await _enforce_license_seats(db, company, user, adding=adding, label=label)
 
 
-@router.get("")
+@router.get("", response_model=list[AgentListItemOut])
 async def list_agents(company_id: str | None = None, department_id: str | None = None,
                       status: str | None = None,
                       db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
@@ -258,7 +329,7 @@ async def list_agents(company_id: str | None = None, department_id: str | None =
     return out
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=AgentOut)
 async def create_agent(data: AgentIn, db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
     """创建 Agent：写归属（created_by_user_id）+ 可见性 + 配额闸门。
@@ -340,7 +411,8 @@ async def create_agent(data: AgentIn, db: AsyncSession = Depends(get_db),
     return agent
 
 
-@router.get("/capability-packs")
+@router.get("/capability-packs", response_model=CapabilityPacksOut,
+            response_model_exclude_none=True)
 async def list_capability_packs(user=Depends(get_current_user)):
     """能力包 + 底座元数据（前端创建表单从这里拉取）。"""
     from app.capability_packs import AGENT_BACKENDS, CAPABILITY_PACKS
@@ -350,7 +422,7 @@ async def list_capability_packs(user=Depends(get_current_user)):
     }
 
 
-@router.get("/{aid}")
+@router.get("/{aid}", response_model=AgentOut)
 async def get_agent(aid: str, db: AsyncSession = Depends(get_db),
                     user=Depends(get_current_user)):
     a = await _load_agent(db, aid)
@@ -358,7 +430,7 @@ async def get_agent(aid: str, db: AsyncSession = Depends(get_db),
     return a
 
 
-@router.get("/{aid}/card")
+@router.get("/{aid}/card", response_model=AgentCardOut)
 async def agent_card(aid: str, db: AsyncSession = Depends(get_db),
                     user=Depends(get_current_user)):
     """V5.8 ⑨ Agent Card（学 A2A 协议）：员工工牌 JSON。
@@ -424,7 +496,7 @@ async def agent_card(aid: str, db: AsyncSession = Depends(get_db),
     }
 
 
-@router.patch("/{aid}")
+@router.patch("/{aid}", response_model=AgentOut)
 async def update_agent(aid: str, data: dict, db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
     a = await _load_agent(db, aid)
@@ -483,7 +555,7 @@ class BatchDeleteIn(BaseModel):
     agent_ids: list[str]
 
 
-@router.post("/batch-delete")
+@router.post("/batch-delete", response_model=AgentBatchDeleteOut)
 async def batch_delete_agents(data: BatchDeleteIn,
                               db: AsyncSession = Depends(get_db),
                               user=Depends(get_current_user)):
@@ -602,7 +674,8 @@ async def reflect_agent(aid: str, db: AsyncSession = Depends(get_db),
     return r
 
 
-@router.post("/batch-create", status_code=201)
+@router.post("/batch-create", status_code=201,
+             response_model=AgentBatchCreateOut)
 async def batch_create_agents(data: BatchCreateIn,
                               db: AsyncSession = Depends(get_db),
                               user=Depends(get_current_user)):
@@ -703,7 +776,7 @@ class SetManagerIn(BaseModel):
     manager_agent_id: str | None  # None 表示清除上级
 
 
-@router.put("/{aid}/manager")
+@router.put("/{aid}/manager", response_model=AgentManagerOut)
 async def set_manager(aid: str, data: SetManagerIn,
                       db: AsyncSession = Depends(get_db),
                       user=Depends(get_current_user)):
@@ -734,7 +807,7 @@ async def set_manager(aid: str, data: SetManagerIn,
     return {"id": aid, "manager_agent_id": a.manager_agent_id}
 
 
-@router.get("/{aid}/subordinates")
+@router.get("/{aid}/subordinates", response_model=list[AgentSubordinateOut])
 async def list_subordinates(aid: str, db: AsyncSession = Depends(get_db),
                             user=Depends(get_current_user)):
     """获取某 Agent 的全部直接下属。"""
@@ -749,7 +822,8 @@ class BatchAssignManagerIn(BaseModel):
     assignments: list[dict]  # [{agent_id, manager_agent_id|null}]
 
 
-@router.post("/batch-assign-manager")
+@router.post("/batch-assign-manager",
+             response_model=AgentBatchAssignManagerOut)
 async def batch_assign_manager(data: BatchAssignManagerIn,
                                db: AsyncSession = Depends(get_db),
                                user=Depends(get_current_user)):
@@ -786,7 +860,8 @@ async def batch_assign_manager(data: BatchAssignManagerIn,
     return {"updated": ok, "failed": failed}
 
 
-@router.post("/{aid}/models", status_code=201)
+@router.post("/{aid}/models", status_code=201,
+             response_model=AgentModelConfigOut)
 async def bind_model(aid: str, data: ModelBindingIn,
                      db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     a = await _load_agent(db, aid)
@@ -802,7 +877,8 @@ class SwitchModelIn(BaseModel):
     model_id: str  # 新的模型 ID
 
 
-@router.put("/{aid}/switch-model", status_code=200)
+@router.put("/{aid}/switch-model", status_code=200,
+            response_model=AgentSwitchModelOut)
 async def switch_model(aid: str, data: SwitchModelIn,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
@@ -827,7 +903,7 @@ async def switch_model(aid: str, data: SwitchModelIn,
     return {"role": new_binding.role, "model_id": new_binding.model_id}
 
 
-@router.get("/{aid}/models")
+@router.get("/{aid}/models", response_model=list[AgentModelBindingOut])
 async def list_models_for_agent(aid: str, db: AsyncSession = Depends(get_db),
                                 user=Depends(get_current_user)):
     a = await _load_agent(db, aid)

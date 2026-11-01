@@ -10,6 +10,7 @@ import OnboardingWizard from "@/components/OnboardingWizard";
 import { notify } from "@/components/Toast";
 import { TASK_STATUS_ZH, EVENT_TYPE_ZH, zh } from "@/lib/i18n";
 import { confirmAction } from "@/components/ConfirmDialog";
+import { starterTasks, type StarterTask } from "@/lib/starterTasks";
 
 /* ============================================================
    指挥中心 v2：KPI 概览 · 新建任务弹窗（同任务中心）·
@@ -371,6 +372,26 @@ export default function DashboardPage() {
     { k: "error", label: "异常", accent: "#f87171" },
   ];
 
+  /* ---------- 首任务引导 ----------
+     dash 为 null 说明 bootstrap 还没回来：此时不渲染，避免加载中闪现。
+     任务计数要覆盖全部状态（含 PLANNING/WAITING/CANCELLED 等），
+     所以累加 tasks 里所有数值字段，只过滤掉 active/recently_completed 数组。 */
+  const taskCount = dash
+    ? Object.values(dash.tasks || {}).reduce(
+        (n, v) => n + (typeof v === "number" ? v : 0), 0)
+    : 0;
+  const isFirstTask = !!company && !!dash && !onboarding && !bootError && taskCount === 0;
+  const noAgents = allAgentIds.length === 0;
+
+  function startFromStarter(t: StarterTask) {
+    setNtForm({
+      title: t.title,
+      description: `${t.description}\n\n预期产出：${t.deliverable}`,
+      priority: "NORMAL",
+    });
+    setShowCreate(true);
+  }
+
   return (
     <div className="p-6 space-y-6 max-w-[1400px] mx-auto animate-fade-up">
       {/* ===== 冷启动：没有公司时给出可执行的引导，而不是空白页 ===== */}
@@ -437,6 +458,41 @@ export default function DashboardPage() {
           <button onClick={() => setShowCreate(true)} className="btn-primary">＋ 下达任务</button>
         </div>
       </div>
+
+      {/* ===== 首任务引导：有公司但还没有任务时，给一个能立刻执行的下一步 ===== */}
+      {isFirstTask && (
+        <div className="card card-static">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <div>
+              <h2 className="font-semibold text-sm">🚀 从第一件事开始</h2>
+              <p className="text-xs mt-0.5" style={{ color: "var(--muted)" }}>
+                选一条示例，标题和详情会自动填入「下达任务」，你可以再改。
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+            {starterTasks().map((t) => (
+              <button key={t.id} type="button" onClick={() => startFromStarter(t)}
+                className="text-left rounded-xl p-3 transition-all hover:border-indigo-400/60 hover:bg-white/[0.04]"
+                style={{ background: "var(--surface-2)", border: "1px solid var(--border)" }}>
+                <span className="text-sm font-medium block">{t.title}</span>
+                <span className="text-xs mt-1 leading-relaxed block" style={{ color: "var(--muted)" }}>
+                  {t.description}
+                </span>
+                <span className="text-[11px] mt-2 block" style={{ color: "#22d3ee" }}>
+                  预期产出：{t.deliverable}
+                </span>
+                <span className="text-[11px] mt-2 inline-block" style={{ color: "#a5b4fc" }}>一键填入 →</span>
+              </button>
+            ))}
+          </div>
+          {noAgents && (
+            <p className="text-xs mt-3" style={{ color: "var(--muted)" }}>
+              还没有 AI 员工？先点右上角「创建新团队」。
+            </p>
+          )}
+        </div>
+      )}
 
       {msg && (
         <div className="px-4 py-2 rounded-lg text-sm"

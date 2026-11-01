@@ -1,10 +1,10 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, ApiError } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { notify } from "@/components/Toast";
 import { confirmAction } from "@/components/ConfirmDialog";
-import type { Company } from "@/lib/types";
 
 /** 把任意异常转成一句可读的原因，避免界面出现 "[object Object]" */
 function describe(e: unknown, fallback: string): string {
@@ -31,9 +31,19 @@ type Reflections = { id: string; agent_id: string; agent_name: string; reflectio
 
 export default function ReflectionCenterPage() {
   const [mounted, setMounted] = useState(false);
-  const [cid, setCid] = useState("");
+  // 激活公司可订阅：切公司后复盘档案自动换取新公司，不再用 `/companies → cs[0]` 快照
+  const cid = useActiveCompanyId();
   const [msg, setMsg] = useState("");
-  const [depts, setDepts] = useState<DeptGroup[]>([]);
+  const { data: overview, error: loadError, loading, refresh: refreshOverview } =
+    useResource<DeptGroup[]>(
+      cid ? `reflection:overview:${cid}` : null,
+      async () => {
+        const d = await api.get<{ departments?: DeptGroup[] }>(
+          `/reflection/agents-overview?company_id=${cid}`);
+        return d.departments || [];
+      },
+    );
+  const depts = useMemo<DeptGroup[]>(() => overview ?? [], [overview]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [pinnedDepts, setPinnedDepts] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
@@ -63,18 +73,6 @@ export default function ReflectionCenterPage() {
 
   useEffect(() => { setMounted(true); }, []);
 
-  const load = useCallback(async () => {
-    try {
-      const cs = await api.get<Company[]>("/companies");
-      if (!cs.length) return;
-      setCid(cs[0].id);
-      const d = await api.get(`/reflection/agents-overview?company_id=${cs[0].id}`);
-      setDepts(d.departments || []);
-    } catch (e: any) { setMsg(String(e)); }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-
   async function openDetail(a: AgentSummary) {
     setDetail({ agent: a });
     setDetailData(null); setDetailLessons([]);
@@ -99,6 +97,7 @@ export default function ReflectionCenterPage() {
       });
       setMsg(`✅ 已对「${detail?.agent.name}」触发复盘`);
       setReason("");
+      refreshOverview(); // 复盘后教训计数/分组归属可能变化
       openDetail(detail!.agent); // 刷新数据
     } catch (e: any) { setMsg("❌ " + (e.message || String(e))); }
     setTriggering(false);
@@ -120,6 +119,7 @@ export default function ReflectionCenterPage() {
         setDetailData({ ...detailData, lessons: detailData.lessons.filter((l: Lesson) => l.id !== lessonId) });
       }
       notify("success", "已删除该条经验教训");
+      refreshOverview(); // 总览里的教训数同步
     } catch (e) {
       // 原实现是 `catch {}` 静默吞掉：删除失败时列表毫无变化，
       // 用户不知道是没删掉还是没生效。现在必须说明原因。
@@ -267,10 +267,10 @@ export default function ReflectionCenterPage() {
         </div>
       </div>
 
-      {msg && (
+      {(msg || loadError) && (
         <div className="mb-4 px-4 py-2 rounded-lg text-sm"
           style={{ background: "rgba(245,158,11,0.1)", color: "#fcd34d", border: "1px solid rgba(245,158,11,0.25)" }}>
-          {msg}
+          {msg || `❌ 加载复盘档案失败：${loadError}`}
         </div>
       )}
 
@@ -345,7 +345,7 @@ export default function ReflectionCenterPage() {
         );
       })}
 
-      {!depts.length && (
+      {!loading && !depts.length && (
         <div className="card card-static text-center py-16 text-sm" style={{ color: "var(--muted)" }}>
           暂无员工数据
         </div>

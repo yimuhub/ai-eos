@@ -4,13 +4,17 @@
 import { describe, expect, it } from "vitest";
 import {
   FALLBACK_PRESET_ID,
+  SETUP_DRAFT_VERSION,
   departmentSubset,
   matchPresetId,
+  parseDraft,
   passwordStrength,
   presetPool,
   previewCounts,
+  serializeDraft,
   type PresetDetail,
   type PresetSummary,
+  type SetupDraft,
 } from "./setup";
 
 const LIST: PresetSummary[] = [
@@ -124,5 +128,89 @@ describe("passwordStrength（仅装饰，规则以 validate.ts 为准）", () =>
   });
   it("再加长或加符号：3 段", () => {
     expect(passwordStrength("abcd1234!")).toBe(3);
+  });
+});
+
+const DRAFT: SetupDraft = {
+  step: 3,
+  username: "boss",
+  email: "boss@example.com",
+  companyName: "星河文化",
+  description: "内容代运营",
+  industry: "content",
+  orgMode: "preset",
+  scale: "studio",
+  presetManual: "pack_content",
+  model: {
+    providerType: "openai_compat",
+    name: "Agnes Flash",
+    baseUrl: "https://api.agnes-ai.cn/v1",
+    modelId: "agnes-2.5-flash",
+  },
+};
+
+describe("安装草稿：序列化 / 反序列化（可续装）", () => {
+  it("白名单字段完整往返", () => {
+    expect(parseDraft(serializeDraft(DRAFT))).toEqual(DRAFT);
+  });
+
+  it("只持久化白名单：误传的 password / confirm / API Key 不会进字符串", () => {
+    const leaky = {
+      ...DRAFT,
+      password: "SuperSecret123!",
+      confirm: "SuperSecret123!",
+      apiKey: "sk-live-abcdefgh12345678",
+    } as unknown as SetupDraft;
+    const raw = serializeDraft(leaky);
+    expect(raw).not.toContain("SuperSecret123!");
+    expect(raw).not.toContain("sk-live-abcdefgh12345678");
+    expect(raw).not.toContain("password");
+    expect(raw).not.toContain("apiKey");
+    expect(parseDraft(raw)).toEqual(DRAFT);
+  });
+
+  it("模型回填字段可用，但不含任何密钥字段", () => {
+    const parsed = parseDraft(serializeDraft(DRAFT));
+    expect(parsed?.model).toEqual(DRAFT.model);
+    expect(Object.keys(parsed?.model ?? {})).toEqual(["providerType", "name", "baseUrl", "modelId"]);
+  });
+
+  it("版本不匹配时丢弃", () => {
+    expect(parseDraft(JSON.stringify({ ...DRAFT, version: SETUP_DRAFT_VERSION + 1 }))).toBeNull();
+    expect(parseDraft(JSON.stringify({ ...DRAFT, version: 0 }))).toBeNull();
+    expect(parseDraft(JSON.stringify({ ...DRAFT }))).toBeNull(); // 完全没有 version
+  });
+
+  it("非 JSON / 空串 / 非对象 一律当没有草稿", () => {
+    expect(parseDraft("not json")).toBeNull();
+    expect(parseDraft("")).toBeNull();
+    expect(parseDraft(JSON.stringify([DRAFT]))).toBeNull();
+    expect(parseDraft(null)).toBeNull();
+  });
+
+  it("非法字段被纠正为安全默认值（坏草稿不会把页面搞崩）", () => {
+    const parsed = parseDraft(
+      JSON.stringify({
+        version: SETUP_DRAFT_VERSION,
+        step: 99,
+        industry: "not-an-industry",
+        scale: "huge",
+        orgMode: "weird",
+        presetManual: 123,
+        model: {},
+      }),
+    );
+    expect(parsed).toMatchObject({
+      step: 1,
+      industry: "internet",
+      scale: "smb",
+      orgMode: "preset",
+      presetManual: null,
+      model: null,
+    });
+  });
+
+  it("第 4 步的 step 能原样往返（是否真的停在 4 由页面结合登录态判定）", () => {
+    expect(parseDraft(serializeDraft({ ...DRAFT, step: 4 }))?.step).toBe(4);
   });
 });

@@ -5,11 +5,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
-from app.core.permissions import Capability, require_company_scope
+from app.core.permissions import require_company_scope
 from app.learning_engine import add_growth_event
 from app.models.learning import GrowthEventType
 from app.models.review import AgentReview, ReviewCycle, ReviewSource
 from app.models.user import User
+from app.schemas.responses import (AutoReviewOut, ReviewCycleOut,
+                                   ReviewOut, ReviewSubmittedOut)
 
 router = APIRouter(prefix="/reviews", tags=["reviews"],
                    dependencies=[Depends(require_company_scope())])
@@ -22,7 +24,8 @@ class ReviewIn(BaseModel):
     comment: str | None = None
 
 
-@router.post("/cycles", status_code=201)
+@router.post("/cycles", status_code=201,
+             response_model=ReviewCycleOut)
 async def create_cycle(
     name: str = Query(...),
     company_id: str = Query(...),
@@ -36,7 +39,8 @@ async def create_cycle(
     return {"id": c.id, "name": c.name}
 
 
-@router.post("/agents/{agent_id}", status_code=201)
+@router.post("/agents/{agent_id}", status_code=201,
+             response_model=ReviewSubmittedOut)
 async def submit_review(
     agent_id: str,
     data: ReviewIn,
@@ -79,13 +83,17 @@ async def submit_review(
     return {"id": review.id, "score": review.score}
 
 
-@router.get("/agents/{agent_id}")
+@router.get("/agents/{agent_id}", response_model=list[ReviewOut])
 async def list_reviews(
     agent_id: str,
     limit: int = Query(30, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # 考核分与评语是员工隐私：路径里没有 company_id，router 级门禁会跳过，
+    # 这里必须按 Agent 反查公司，否则知道 agent_id 就能读别家员工的考核。
+    from app.api.deps import assert_agent_owned
+    await assert_agent_owned(db, user.id, agent_id)
     q = await db.execute(select(AgentReview).where(
         AgentReview.agent_id == agent_id).order_by(
         AgentReview.created_at.desc()).limit(limit))
@@ -101,7 +109,8 @@ class AutoProposalIn(BaseModel):
     generate_training: bool = True
 
 
-@router.post("/agents/{agent_id}/auto-review")
+@router.post("/agents/{agent_id}/auto-review",
+             response_model=AutoReviewOut)
 async def auto_review(
     agent_id: str,
     db: AsyncSession = Depends(get_db),

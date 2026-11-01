@@ -1,6 +1,6 @@
 [project]
 name = "ai-eos-api"
-version = "5.14.0"
+version = "5.15.0"
 description = "AI-EOS Backend API"
 license = "BUSL-1.1"
 requires-python = ">=3.12"
@@ -28,6 +28,7 @@ dependencies = [
     "python-pptx>=1.0.2",
     "duckduckgo-search>=8.1.1",
     "ddgs>=9.15.0",
+    "pywebpush>=2.0",
 ]
 
 [dependency-groups]
@@ -52,6 +53,9 @@ dev = [
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
+# 测试函数的 loop 默认按用例隔离（SQLite 路径依赖这一行为，见 conftest 说明）。
+# Postgres job 会额外传 `-o asyncio_default_test_loop_scope=session`：
+# asyncpg 的连接池不能跨事件循环复用，见 .github/workflows/ci.yml 的 postgres job。
 addopts = "-q --strict-markers"
 markers = [
     "requires_llm: 需要真实模型密钥才能运行的端到端用例（无密钥时自动跳过）",
@@ -65,10 +69,15 @@ filterwarnings = [
 # ---------------------------------------------------------------------------
 # 覆盖率
 #
-# CI（.github/workflows/ci.yml）用：
-#   pytest --cov=app/api/routes --cov=app/core --cov-report=term-missing \
-#          --cov-fail-under=<见下面的 fail_under>
-# 阈值按"实测值向下取整到 5 的倍数"设定，只允许往上调。
+# CI（.github/workflows/ci.yml 的 backend job）用：
+#   pytest --cov=app --cov-report=term-missing --cov-fail-under=<与下面同步>
+# 统计范围是整个 app 包（不再只是 routes + core）。
+#
+# 阈值来历（2026-11-01 实测）：`pytest --cov=app` 为 **69.8%**（21822 行，
+# 缺 6584）。此前的 46%~48% 是测量口径错误：SQLAlchemy async 在 await 边界
+# 交给 greenlet，不配 concurrency 会系统性丢追踪（同文件 67% vs 99%）。
+# fail_under 取 **65**：比实测低约 5 个点，覆盖后台任务线程带来的时序抖动，
+# 不会造成假红。调阈值前必须先本地跑一遍实测，且只能往上调。
 # 不要把 --cov 塞进 addopts：单跑一个测试文件时覆盖率天然很低，
 # 会让人误以为代码坏了；覆盖率是整套件的门禁，不是单文件的。
 # ---------------------------------------------------------------------------
@@ -78,7 +87,11 @@ omit = [
     "app/__init__.py",
     "*/__pycache__/*",
 ]
+# SQLAlchemy async 在 await 边界把控制权交给 greenlet，默认 tracer 会跟丢：
+# 同一条路由实测 67% vs 99%、33% vs 100%。不配这项，覆盖率会被系统性低估。
+concurrency = ["greenlet", "thread"]
 
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+fail_under = 65

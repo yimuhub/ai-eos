@@ -65,6 +65,91 @@ async def execute_action(db: AsyncSession, sched: AutomationSchedule) -> dict:
         return {"agents": len(results),
                 "top": results[0]["agent_name"] if results else None}
 
+    if sched.action_type == "create_task_from_template":
+        """从「任务模板」（automation_definitions kind=TASK_TEMPLATE）建任务。
+
+        模板与调度必须同公司——模板 id 可能来自请求体，绝不能借调度
+        把别家公司的模板内容复制成本公司的任务（跨租户泄露 + 伪造来源）。
+        指派员工不属于本公司时**清空指派**而不是让整条调度失败：
+        模板可能来自公司重组前，留存任务比丢掉这一次执行更有价值。
+        """
+        from app.models.agent import Agent
+        from app.models.automation import AutomationDefinition
+        from app.models.company import Company
+        from app.models.task import (Task, TaskEventType, TaskPriority,
+                                     TaskStatus)
+        from app.services.event_system import log_event
+        from app.task_engine import add_task_event
+
+        template_id = params.get("template_id")
+        if not template_id:
+            raise ValueError("template_id required")
+
+        defn = await db.get(AutomationDefinition, template_id)
+        if (defn is None
+                or (defn.trigger_config or {}).get("kind") != "TASK_TEMPLATE"
+                or defn.company_id != sched.company_id):
+            # 三种情况统一报同一句：不向调用方区分「不存在」与「别家的」
+            raise ValueError(f"task template not found: {template_id}")
+
+        step = next((s for s in (defn.steps or [])
+                     if isinstance(s, dict) and s.get("type") == "create_task"),
+                    None)
+        if step is None:
+            raise ValueError(f"template has no create_task step: {template_id}")
+        tparams = step.get("params") or {}
+
+        title = (tparams.get("title") or defn.name or "任务模板").strip() or "任务模板"
+        raw_priority = tparams.get("priority") or TaskPriority.NORMAL.value
+        try:
+            priority = TaskPriority(str(raw_priority).upper())
+        except ValueError:
+            # 模板是用户可编辑的 JSON：脏优先级只降级，不让调度整轮失败
+            log.warning("模板 %s 的 priority=%r 非法，按 NORMAL 处理",
+                        template_id, raw_priority)
+            priority = TaskPriority.NORMAL
+
+        assigned_agent_id = tparams.get("assigned_agent_id") or None
+        if assigned_agent_id:
+            agent = await db.get(Agent, assigned_agent_id)
+            if agent is None or agent.company_id != sched.company_id:
+                log.warning("模板 %s 指派的员工 %s 不属于公司 %s，已清空",
+                            template_id, assigned_agent_id, sched.company_id)
+                assigned_agent_id = None
+
+        # tasks.created_by 是非空外键：无创建人的调度回退到公司 owner，
+        # 保证历史/脚本创建的调度也能按时产出任务。
+        created_by = sched.created_by
+        if not created_by:
+            company = await db.get(Company, sched.company_id)
+            created_by = company.owner_id if company else None
+        if not created_by:
+            raise ValueError(f"cannot resolve created_by for schedule {sched.id}")
+
+        task = Task(
+            company_id=sched.company_id, title=title[:500],
+            status=TaskStatus.TODO, priority=priority,
+            created_by=created_by)
+        if "description" in tparams and tparams["description"] is not None:
+            task.description = tparams["description"]
+        if tparams.get("project_id"):
+            task.project_id = tparams["project_id"]
+        if assigned_agent_id:
+            task.assigned_agent_id = assigned_agent_id
+        db.add(task)
+        await db.flush()
+
+        await add_task_event(db, task.id, TaskEventType.CREATED, "system",
+                             sched.created_by, {"title": task.title,
+                                                "template_id": template_id})
+        await log_event(db, "task.created_from_template", "task", task.id,
+                        "system", sched.created_by,
+                        {"title": task.title, "template_id": template_id,
+                         "schedule_id": sched.id},
+                        company_id=sched.company_id)
+        await db.commit()
+        return {"task_id": task.id, "template_id": template_id}
+
     if sched.action_type == "daily_briefing":
         # V5.5 A1：CEO 简报推送——生成简报全文写进事件流，
         # 老板打开 App 首页/事件流即可看到"总经理的早间汇报"
@@ -218,6 +303,6 @@ def start_scheduler():
 
 
 def stop_scheduler():
-    global _loop_task
+    # 只读取模块级 _loop_task，无需 global 声明（pyflakes 会报未使用）
     if _loop_task and not _loop_task.done():
         _loop_task.cancel()

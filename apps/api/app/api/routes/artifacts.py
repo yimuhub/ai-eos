@@ -8,16 +8,24 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (assert_company_capability, assert_company_owned,
                           get_current_user, get_db)
 from app.core.logging_config import get_logger
 from app.core.permissions import Capability
-from app.models.artifact import (ALLOWED_TRANSITIONS, Artifact, ArtifactStatus,
-                                 ArtifactVersion, can_transition)
+from app.models.artifact import (Artifact, ArtifactStatus, ArtifactVersion,
+                                 can_transition)
+from app.models.deliverable import DeliverableComment
+from app.models.task import Task
 from app.models.user import User
+from app.schemas.responses import (
+    ArtifactAcceptOut,
+    ArtifactCommentDeletedOut,
+    ArtifactCommentOut,
+    ArtifactDeclineOut,
+)
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
 logger = get_logger(__name__)
@@ -28,6 +36,17 @@ class ArtifactCreate(BaseModel):
     artifact_type: str = "document"
     content: str = ""
     project_id: str | None = None
+    # B2：交付物可以挂到某个任务下，收件箱/交付单由此把"任务完成"与
+    # "成果被验收"串成同一条链路。
+    task_id: str | None = None
+
+
+class DeclineIn(BaseModel):
+    comment: str | None = None
+
+
+class CommentIn(BaseModel):
+    body: str
 
 
 class VersionSubmit(BaseModel):
@@ -51,10 +70,16 @@ async def create_artifact(
 ):
     """创建成果并写入 v1 草稿。"""
     await assert_company_capability(db, user.id, company_id, Capability.OPERATE)
+    if data.task_id:
+        # 只能挂本公司的任务；跨公司按"不存在"处理，避免用 404/403 的差异
+        # 探测别人公司有哪些任务 id。
+        task = await db.get(Task, data.task_id)
+        if not task or task.company_id != company_id:
+            raise HTTPException(404, "Task not found")
     art = Artifact(id=str(uuid.uuid4()), company_id=company_id,
                    project_id=data.project_id, name=data.name,
                    artifact_type=data.artifact_type, current_version=1,
-                   created_by=user.id)
+                   created_by=user.id, task_id=data.task_id)
     db.add(art)
     v1 = ArtifactVersion(id=str(uuid.uuid4()), artifact_id=art.id, version=1,
                          content=data.content, change_note="初始版本",
@@ -62,13 +87,14 @@ async def create_artifact(
     db.add(v1)
     await db.commit()
     return {"id": art.id, "name": art.name, "status": art.status.value,
-            "current_version": 1}
+            "current_version": 1, "task_id": art.task_id}
 
 
 @router.get("")
 async def list_artifacts(
     company_id: str = Query(...),
     project_id: str | None = Query(None),
+    task_id: str | None = Query(None),
     status: ArtifactStatus | None = Query(None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -78,12 +104,15 @@ async def list_artifacts(
     q = select(Artifact).where(Artifact.company_id == company_id)
     if project_id:
         q = q.where(Artifact.project_id == project_id)
+    if task_id:
+        q = q.where(Artifact.task_id == task_id)
     if status:
         q = q.where(Artifact.status == status)
     rows = (await db.execute(q.order_by(Artifact.created_at.desc()))).scalars().all()
     return [{"id": a.id, "name": a.name, "type": a.artifact_type,
              "status": a.status.value, "version": a.current_version,
-             "project_id": a.project_id} for a in rows]
+             "project_id": a.project_id, "task_id": a.task_id,
+             "accepted_at": a.accepted_at} for a in rows]
 
 
 @router.get("/{artifact_id}")
@@ -97,9 +126,14 @@ async def get_artifact(
         ArtifactVersion.artifact_id == artifact_id).order_by(
         ArtifactVersion.version.desc()))
     versions = vq.scalars().all()
+    comment_count = (await db.execute(
+        select(func.count()).select_from(DeliverableComment).where(
+            DeliverableComment.artifact_id == artifact_id))).scalar_one()
     return {
         "id": art.id, "name": art.name, "type": art.artifact_type,
         "status": art.status.value, "current_version": art.current_version,
+        "task_id": art.task_id, "accepted_by": art.accepted_by,
+        "accepted_at": art.accepted_at, "comment_count": comment_count,
         "versions": [{
             "version": v.version, "status": v.status.value,
             "change_note": v.change_note,
@@ -230,6 +264,147 @@ async def review_artifact(
             "reviewer": data.reviewer_agent_id or user.id}
 
 
+@router.post("/{artifact_id}/accept", response_model=ArtifactAcceptOut)
+async def accept_artifact(
+    artifact_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """B2 验收：只有 APPROVED 的交付物能被老板确认接收。
+
+    验收是"我收到了、这事结了"的业务事实，因此幂等：重复点击返回
+    already=true，而不是 409 —— 前端超时重试不该被当成错误。
+    """
+    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)
+    if art.accepted_at is not None:
+        return {"id": artifact_id, "already": True,
+                "status": art.status.value,
+                "accepted_by": art.accepted_by,
+                "accepted_at": art.accepted_at}
+    if art.status != ArtifactStatus.APPROVED:
+        raise HTTPException(
+            409, f"只有审核通过（APPROVED）的交付物可以验收，当前：{art.status.value}")
+
+    art.accepted_by = user.id
+    art.accepted_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    if art.created_by and art.created_by != user.id:
+        # 与业务同事务（notify 不 commit）：验收事实与通知要么都落库，要么都不落。
+        from app.services.notification_service import notify
+        await notify(
+            db, user_id=art.created_by, company_id=art.company_id,
+            type="artifact.accepted",
+            title=f"交付物已验收：{art.name}",
+            body="老板已确认接收该交付物，无需再跟进。",
+            link="/artifacts")
+    await db.commit()
+    return {"id": artifact_id, "already": False, "status": art.status.value,
+            "accepted_by": art.accepted_by, "accepted_at": art.accepted_at}
+
+
+@router.post("/{artifact_id}/decline", response_model=ArtifactDeclineOut)
+async def decline_artifact(
+    artifact_id: str,
+    data: DeclineIn | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """B2 验收退回：APPROVED 的成果被老板退回返工。
+
+    与审核驳回区分：这里不是"没过审"，而是"验收时发现不对"。因此状态
+    同样落到 REJECTED（可重新提交），但必须清空验收痕迹，并把退回意见
+    同时写进当前版本与交付评论，返工的人在两处都能看到原因。
+    """
+    comment = (data.comment or "").strip() if data and data.comment else ""
+    if data and data.comment is not None and not (1 <= len(comment) <= 2000):
+        raise HTTPException(400, "comment 长度需为 1-2000 字")
+
+    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)
+    if art.status != ArtifactStatus.APPROVED:
+        raise HTTPException(
+            409, f"只有审核通过（APPROVED）的交付物可以验收退回，当前：{art.status.value}")
+
+    vq = await db.execute(select(ArtifactVersion).where(
+        ArtifactVersion.artifact_id == artifact_id,
+        ArtifactVersion.version == art.current_version))
+    cur_v = vq.scalars().first()
+    if cur_v:
+        cur_v.status = ArtifactStatus.REJECTED
+        cur_v.reviewed_by = user.id
+        cur_v.review_comment = comment or None
+
+    art.status = ArtifactStatus.REJECTED
+    art.accepted_by = None
+    art.accepted_at = None
+    db.add(DeliverableComment(
+        company_id=art.company_id, artifact_id=artifact_id,
+        author_type="user", author_id=user.id,
+        body=comment or "验收退回：请返工后重新提交"))
+    await db.commit()
+    return {"id": artifact_id, "status": art.status.value,
+            "comment": comment or None}
+
+
+@router.get("/{artifact_id}/comments", response_model=list[ArtifactCommentOut])
+async def list_comments(
+    artifact_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """B2 交付评论：按时间正序，像聊天记录一样从旧到新读。"""
+    await _owned_artifact(artifact_id, db, user)
+    rows = (await db.execute(
+        select(DeliverableComment).where(
+            DeliverableComment.artifact_id == artifact_id)
+        .order_by(DeliverableComment.created_at.asc(),
+                  DeliverableComment.id.asc()))).scalars().all()
+    return [{"id": c.id, "artifact_id": c.artifact_id,
+             "author_type": c.author_type, "author_id": c.author_id,
+             "body": c.body, "created_at": c.created_at} for c in rows]
+
+
+@router.post("/{artifact_id}/comments", response_model=ArtifactCommentOut)
+async def add_comment(
+    artifact_id: str,
+    data: CommentIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """B2 交付评论：当前用户（user）发言；company_id 从成果反查，不信请求参数。"""
+    body = data.body.strip()
+    if not (1 <= len(body) <= 4000):
+        raise HTTPException(400, "body 长度需为 1-4000 字")
+    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)
+    row = DeliverableComment(
+        company_id=art.company_id, artifact_id=artifact_id,
+        author_type="user", author_id=user.id, body=body)
+    db.add(row)
+    await db.commit()
+    return {"id": row.id, "artifact_id": artifact_id,
+            "author_type": row.author_type, "author_id": row.author_id,
+            "body": row.body, "created_at": row.created_at}
+
+
+@router.delete("/{artifact_id}/comments/{comment_id}",
+               response_model=ArtifactCommentDeletedOut)
+async def delete_comment(
+    artifact_id: str,
+    comment_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """B2 删除评论：作者本人可删；其他人需要 MANAGE（老板/管理员）。"""
+    art = await _owned_artifact(artifact_id, db, user)
+    row = await db.get(DeliverableComment, comment_id)
+    if not row or row.artifact_id != artifact_id:
+        raise HTTPException(404, "Comment not found")
+    if row.author_id != user.id:
+        await assert_company_capability(db, user.id, art.company_id,
+                                        Capability.MANAGE)
+    await db.delete(row)
+    await db.commit()
+    return {"id": comment_id, "deleted": True}
+
+
 async def _owned_artifact(artifact_id: str, db: AsyncSession, user: User,
                           capability: Capability = Capability.VIEW) -> Artifact:
     """取成果并做门禁：公司角色需具备 capability，否则 404（不泄露存在性）。"""
@@ -308,6 +483,11 @@ async def publish_artifact(
             payload={"artifact_id": artifact_id, "awaiting_execution": True},
             reason=f"交付物「{art.name}」申请正式发布（已审核通过）")
         db.add(req)
+        from app.services.notification_service import notify_approval_pending
+        await notify_approval_pending(
+            db, company_id=art.company_id,
+            title=f"待审批：发布交付物「{art.name}」",
+            body="交付物申请正式发布，需要二次确认。")
         await db.commit()
         return {"status": "pending_approval", "approval_id": req.id,
                 "message": "发布需老板二次确认（交付流水线三分离）"}
@@ -333,7 +513,6 @@ async def decide_publish(
     user: User = Depends(get_current_user),
 ):
     """C2：发布审批单 approve 后自动标记 published_at。"""
-    import uuid as _uuid
     from sqlalchemy import text
     from app.models.intervention import ApprovalRequest
     art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)

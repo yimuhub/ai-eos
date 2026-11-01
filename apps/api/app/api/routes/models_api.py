@@ -260,6 +260,32 @@ class ModelIn(BaseModel):
     company_id: str | None = None
 
 
+def _test_failed(model_row: Model) -> bool:
+    """连通性测试是否**明确失败**。没有测过（缺字段）不算失败。"""
+    return (model_row.config or {}).get("last_test_ok") is False
+
+
+def _last_test_at(model_row: Model) -> str | None:
+    value = (model_row.config or {}).get("last_test_at")
+    return value if isinstance(value, str) else None
+
+
+def _record_test_result(m: Model, ok: bool, error: str | None) -> None:
+    """把测试结果写回 Model.config，供 diagnostics 判断"能不能开工"。
+
+    只存布尔 / 时间 / 截断后的原因：错误原文里可能回显 base_url 甚至密钥片段，
+    不整段落库。
+    """
+    from datetime import datetime, timezone
+
+    config = dict(m.config or {})
+    config["last_test_ok"] = bool(ok)
+    config["last_test_at"] = datetime.now(timezone.utc).isoformat()
+    config["last_test_error"] = (str(error)[:200] if error else None)
+    # JSON 列不会原地感知可变对象，必须整体重新赋值
+    m.config = config
+
+
 @router.get("/diagnostics")
 async def diagnostics(db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
@@ -281,30 +307,47 @@ async def diagnostics(db: AsyncSession = Depends(get_db),
     for ptype, env_name in PROVIDER_ENV_VARS.items():
         configured = [m for m in rows
                       if m.provider_type.value == ptype]
-        ready_of_type = [m for m in configured if key_available(m)]
+        key_ready = [m for m in configured if key_available(m)]
+        ready_of_type = [m for m in key_ready if not _test_failed(m)]
+        tested_at = [t for t in (_last_test_at(m) for m in configured) if t]
         providers.append({
             "provider_type": ptype,
             "default_env_var": env_name,
             # 该 provider 下"至少有一个模型能取到密钥"即为就绪。
             # 只看默认环境变量会误报：用户在模型配置里填了自定义变量名
             # （api_key_env）时，系统其实可用，界面却显示"缺密钥"。
-            "key_present": bool(ready_of_type),
+            "key_present": bool(key_ready),
+            # models_ready 只数"密钥就位且连通性测试没失败"的模型：
+            # 测过但失败 = 已知不可用，不能再算就绪
             "models_ready": len(ready_of_type),
             "model_count": len(configured),
+            "last_test_ok": (True if any(not _test_failed(m) for m in key_ready)
+                             else False if key_ready else None),
+            "last_test_at": max(tested_at) if tested_at else None,
         })
 
     # 是否存在"至少一个模型 + 该模型的密钥已就位"的组合
-    ready_models = [m.id for m in rows if key_available(m)]
+    ready_models = [m.id for m in rows if key_available(m) and not _test_failed(m)]
+    # 密钥有、但连通性测试明确失败：这不是"缺配置"，是"配了但不通"，
+    # 提示必须区分开，否则用户会去反复重填一个本来正确的密钥。
+    connectivity_failed = [m for m in rows
+                           if key_available(m) and _test_failed(m)]
 
     missing_hint = ""
     if not rows:
         missing_hint = "还没有配置任何模型。请添加一个模型（推荐 OpenAI 兼容地址）。"
     elif not ready_models:
-        names = "、".join(
-            sorted({m.api_key_env or PROVIDER_ENV_VARS.get(m.provider_type.value, "")
-                    for m in rows} - {""}))
-        missing_hint = (f"模型已登记但缺少密钥。请在「模型配置」页填写 API Key"
-                        f"（保存为 {names}，立即生效，无需重启后端）。")
+        if connectivity_failed:
+            err = (connectivity_failed[0].config or {}).get("last_test_error") or ""
+            missing_hint = ("模型连通性测试失败"
+                            + (f"：{err}" if err else "")
+                            + "。请检查 base_url、密钥与网络后重新测试。")
+        else:
+            names = "、".join(
+                sorted({m.api_key_env or PROVIDER_ENV_VARS.get(m.provider_type.value, "")
+                        for m in rows} - {""}))
+            missing_hint = (f"模型已登记但缺少密钥。请在「模型配置」页填写 API Key"
+                            f"（保存为 {names}，立即生效，无需重启后端）。")
 
     return {
         "model_count": len(rows),
@@ -462,9 +505,15 @@ async def test_model(mid: str, db: AsyncSession = Depends(get_db),
         # 却看不到回复，用户会误以为模型坏了。
         result = await provider.chat([{"role": "user", "content": "回复 OK 两个字母即可"}],
                                      config={"max_tokens": 64})
-        return {"status": "ok", "reply": result["content"][:100], "raw_model": result.get("raw_model")}
     except Exception as e:
+        # 结果必须落库：只返回给当前这一次请求，diagnostics 仍然认为
+        # "有模型有密钥 = 就绪"，用户重启后又会掉进同一个坑。
+        _record_test_result(m, False, f"{type(e).__name__}: {e}")
+        await db.commit()
         return {"status": "error", "error": str(e)[:500]}
+    _record_test_result(m, True, None)
+    await db.commit()
+    return {"status": "ok", "reply": result["content"][:100], "raw_model": result.get("raw_model")}
 
 
 class BindAgentsIn(BaseModel):

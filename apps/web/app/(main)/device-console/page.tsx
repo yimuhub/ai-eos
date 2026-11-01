@@ -1,7 +1,7 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
+import { useState } from "react";
 import { api, describeError } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import AppAliasSection from "@/components/AppAliasSection";
 
 /* ============================================================
@@ -45,14 +45,15 @@ const ACTIONS: { type: string; label: string; icon: string }[] = [
 ];
 
 export default function DeviceConsolePage() {
-  const [cid, setCid] = useState("");
-  const [perms, setPerms] = useState<Perms>({});
+  // 激活公司：可订阅 —— 顶栏切公司后权限/审计自动换数据
+  const cid = useActiveCompanyId();
+  // 契约扫描器无法解析模板里的三元表达式；先落成普通变量
+  const cidParam = cid ?? "";
   const [action, setAction] = useState("screenshot");
   const [paramsText, setParamsText] = useState("{}");
   const [result, setResult] = useState<ExecResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
-  const [logs, setLogs] = useState<LogRow[]>([]);
   const [screenshotUrl, setScreenshotUrl] = useState<string | null>(null);
 
   // 浏览器抓取
@@ -61,34 +62,31 @@ export default function DeviceConsolePage() {
   const [fetchResult, setFetchResult] = useState<BrowserFetchResult | null>(null);
   const [fetchBusy, setFetchBusy] = useState(false);
 
-  const load = useCallback(async () => {
-    const cs = await api.get<{ id: string }[]>("/companies");
-    if (!cs.length) return;
-    const companyId = cs[0].id;
-    setCid(companyId);
-    // 权限与日志是两个独立数据，并发取；各自失败不影响另一个
-    const [permRes, logRes] = await Promise.allSettled([
-      api.get<Perms>(`/computer-agent/permissions?company_id=${companyId}`),
-      api.get<LogRow[]>(`/computer-agent/logs?company_id=${companyId}&limit=30`),
-    ]);
-    if (permRes.status === "fulfilled") setPerms(permRes.value);
-    if (logRes.status === "fulfilled") setLogs(logRes.value);
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
+  // 权限与日志是两个独立资源：各自缓存/失败互不影响（与原 Promise.allSettled 语义一致）
+  const { data: permData, refresh: refreshPerms } = useResource<Perms>(
+    cid ? `device-console:perms:${cid}` : null,
+    () => api.get<Perms>(`/computer-agent/permissions?company_id=${cid}`),
+  );
+  const perms = permData ?? {};
+  const { data: logData, refresh: refreshLogs } = useResource<LogRow[]>(
+    cid ? `device-console:logs:${cid}` : null,
+    () => api.get<LogRow[]>(`/computer-agent/logs?company_id=${cid}&limit=30`),
+  );
+  const logs = logData ?? [];
+  const reload = () => { refreshPerms(); refreshLogs(); };
 
   async function grant(cap: string) {
     try {
       // 原来不看返回就重新加载：授权失败时按钮看起来"点了没反应"
-      await api.post(`/computer-agent/grant?capability=${cap}&company_id=${cid}`);
-      await load();
+      await api.post(`/computer-agent/grant?capability=${cap}&company_id=${cidParam}`);
+      reload();
     } catch (e) { setMsg(`❌ ${describeError(e, "授权失败")}`); }
   }
 
   async function revoke(cap: string) {
     try {
-      await api.post(`/computer-agent/revoke?capability=${cap}&company_id=${cid}`);
-      await load();
+      await api.post(`/computer-agent/revoke?capability=${cap}&company_id=${cidParam}`);
+      reload();
     } catch (e) { setMsg(`❌ ${describeError(e, "撤销失败")}`); }
   }
 
@@ -99,17 +97,17 @@ export default function DeviceConsolePage() {
     try { params = JSON.parse(paramsText || "{}"); }
     catch { setMsg("❌ 参数不是合法 JSON"); setBusy(false); return; }
     try {
-      const data = await api.post<ExecResult>(`/computer-agent/execute?company_id=${cid}`,
+      const data = await api.post<ExecResult>(`/computer-agent/execute?company_id=${cidParam}`,
         { action_type: action, params });
       setResult(data);
       if (action === "screenshot" && data.result?.ok) {
         // 拉取最新截屏 base64
         const imgData = await api.get<{ image_base64?: string }>(
-          `/computer-agent/screenshots/latest?company_id=${cid}`).catch(() => null);
+          `/computer-agent/screenshots/latest?company_id=${cidParam}`).catch(() => null);
         if (imgData?.image_base64) setScreenshotUrl(imgData.image_base64);
       }
       setMsg(`✅ 执行完成（${data.mode}）`);
-      await load();
+      reload();
     } catch (e) { setMsg(`❌ ${describeError(e, "执行失败")}`); }
     setBusy(false);
   }
@@ -118,7 +116,7 @@ export default function DeviceConsolePage() {
     if (fetchBusy) return;
     setFetchBusy(true); setFetchResult(null);
     try {
-      setFetchResult(await api.post(`/browser-agent/fetch?company_id=${cid}`,
+      setFetchResult(await api.post(`/browser-agent/fetch?company_id=${cidParam}`,
         { url, render: renderJs ? "js" : null }));
     } catch (e) { setFetchResult({ error: describeError(e, "抓取失败") }); }
     setFetchBusy(false);
@@ -252,7 +250,7 @@ export default function DeviceConsolePage() {
 
         {/* 右栏：权限 + 审计日志 */}
         <div className="space-y-5 min-w-0">
-          <AppAliasSection cid={cid} />
+          <AppAliasSection cid={cid ?? ""} />
 
           {/* 权限管理 */}
           <div className="card card-static">

@@ -1,19 +1,22 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { api } from "@/lib/api";
+import { useResource } from "@/lib/useResource";
 import { EVENT_TYPE_ZH, zh } from "@/lib/i18n";
 
 type Ev = { id: string; event_type: string; actor_type: string | null; entity_id: string | null; payload: any; created_at: string };
 
 export default function LogsPage() {
-  const [events, setEvents] = useState<Ev[]>([]);
   const [typeFilter, setTypeFilter] = useState("");
 
-  const load = useCallback(async () => {
-    const q = `/events?limit=200${typeFilter ? `&event_type=${typeFilter}` : ""}`;
-    setEvents(await api.get(q));
-  }, [typeFilter]);
-  useEffect(() => { load(); }, [load]);
+  // 事件流交给统一数据层：过滤条件即 key，切筛选走缓存/重取，
+  // 挂载与回窗不再各自手写 reload。
+  const { data } = useResource<Ev[]>(
+    `logs:events:${typeFilter}`,
+    () => api.get<Ev[]>(
+      `/events?limit=200${typeFilter ? `&event_type=${typeFilter}` : ""}`),
+  );
+  const events = useMemo<Ev[]>(() => data ?? [], [data]);
 
   return (
     <div className="p-6 max-w-[1400px] mx-auto animate-fade-up">

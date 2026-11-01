@@ -1,9 +1,9 @@
 "use client";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, describeError } from "@/lib/api";
+import { invalidate, useActiveCompanyId, useResource } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
-import type { Company } from "@/lib/types";
 import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
 
 /* ============================================================
@@ -33,10 +33,41 @@ function gradOf(seed: string) {
 }
 
 export default function OrganizationPage() {
-  const [depts, setDepts] = useState<Dept[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [allSkills, setAllSkills] = useState<SkillRow[]>([]);
-  const [kbDocs, setKbDocs] = useState<KbDoc[]>([]);
+  // 激活公司可订阅：切公司后部门/员工自动重取（原实现只取 `/companies` 的首家，
+  // 切了公司这一页仍显示旧公司的组织架构）。
+  const cid = useActiveCompanyId();
+
+  // 部门树是页面的主列表；员工用于卡片上的"部门员工"与统计。
+  // 两个接口互不依赖 → 并发加载、各自缓存。
+  const { data: deptData, error: loadError, loading, refresh: refreshDepts } = useResource<Dept[]>(
+    cid ? `org:depts:${cid}` : null,
+    () => api.get<Dept[]>(`/companies/${cid}/departments`),
+  );
+  const { data: agentData, refresh: refreshAgents } = useResource<Agent[]>(
+    cid ? `org:agents:${cid}` : null,
+    () => api.get<Agent[]>(`/agents?company_id=${cid}`),
+  );
+  // 以下是"编辑弹窗的候选项"，与列表同属本页公司上下文，失败不阻塞主界面
+  const { data: skillData } = useResource<SkillRow[]>(
+    cid ? `org:skills:${cid}` : null,
+    () => api.get<SkillRow[]>("/skills"),
+  );
+  const { data: kbData } = useResource<KbDoc[]>(
+    cid ? `org:kbdocs:${cid}` : null,
+    () => api.get<KbDoc[]>(`/knowledge/documents?company_id=${cid}`),
+  );
+  // 行业组织形态预设：账号级目录，与公司无关
+  const { data: presetData } = useResource<PresetRow[]>(
+    "org:presets",
+    () => api.get<PresetRow[]>("/org-presets"),
+  );
+
+  const depts = useMemo<Dept[]>(() => deptData ?? [], [deptData]);
+  const agents = useMemo<Agent[]>(() => agentData ?? [], [agentData]);
+  const allSkills = useMemo<SkillRow[]>(() => skillData ?? [], [skillData]);
+  const kbDocs = useMemo<KbDoc[]>(() => kbData ?? [], [kbData]);
+  const presets = useMemo<PresetRow[]>(() => presetData ?? [], [presetData]);
+
   const [msg, setMsg] = useState("");
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
@@ -61,17 +92,10 @@ export default function OrganizationPage() {
   type PresetDetail = { id: string; industry: string; emoji: string;
     departments: { name: string; desc: string; agents: { name: string; role: string; expert_slug: string }[] }[] };
   const [showPresets, setShowPresets] = useState(false);
-  const [presets, setPresets] = useState<PresetRow[]>([]);
   const [presetDetail, setPresetDetail] = useState<PresetDetail | null>(null);
   const [presetChecked, setPresetChecked] = useState<Set<string>>(new Set());
   const [presetApplying, setPresetApplying] = useState(false);
   const [presetDry, setPresetDry] = useState<{ departments: number; agents: number; note: string } | null>(null);
-  const cidRef = useRef<string>("");  // 当前公司 id（load 里赋值，供预设引入用）
-
-  const loadPresets = useCallback(async () => {
-    try { setPresets(await api.get<PresetRow[]>("/org-presets")); } catch {}
-  }, []);
-  useEffect(() => { loadPresets(); }, [loadPresets]);
 
   async function previewPreset(p: PresetRow) {
     setShowPresets(false);
@@ -84,45 +108,34 @@ export default function OrganizationPage() {
       // 立即 dry_run 预览
       const r = await api.post<{ created_departments: number; created_agents: number; skipped_agents: number; note: string }>(
         `/org-presets/${p.id}/apply`,
-        { company_id: firstCompanyId(), departments: d.departments.map((x) => x.name), dry_run: true } as any,
+        { company_id: cid, departments: d.departments.map((x) => x.name), dry_run: true } as any,
       ) as any;
       setPresetDry({ departments: r.created_departments, agents: r.created_agents, note: `将建 ${r.created_departments} 部门 / ${r.created_agents} 员工，跳过已存在 ${r.skipped_agents} 个` });
     } catch (e) { setMsg(`❌ ${describeError(e, "加载预设失败")}`); }
   }
 
   async function applyPreset() {
-    if (!presetDetail) return;
+    if (!presetDetail || !cid) return;
     setPresetApplying(true); setMsg("");
     try {
       const r = await api.post<{ created_departments: number; created_agents: number; skipped_agents: number; skipped_departments: number }>(
         `/org-presets/${presetDetail.id}/apply`,
-        { company_id: firstCompanyId(), departments: Array.from(presetChecked) } as any,
+        { company_id: cid, departments: Array.from(presetChecked) } as any,
       ) as any;
       setMsg(`✅ 已引入「${presetDetail.industry}」：${r.created_departments} 部门 / ${r.created_agents} 员工（跳过 ${r.skipped_departments} 部门 / ${r.skipped_agents} 员工）`);
       setPresetDetail(null);
-      await load();
+      await reloadOrg();
     } catch (e) { setMsg(`❌ ${describeError(e, "引入失败")}`); }
     setPresetApplying(false);
   }
 
-  function firstCompanyId(): string {
-    // 组织架构页以公司首个 cid 为准（load 里赋值到 cidRef）
-    return cidRef.current;
+  /** 组织结构变化 → 部门树 + 员工归属一起重取（两者互相引用），
+   *  并让引用了员工/部门的页面（如员工名录）下次进入时重新拉取 */
+  async function reloadOrg() {
+    invalidate("agents:");
+    refreshDepts();
+    refreshAgents();
   }
-
-  const load = useCallback(async () => {
-    const cs = await api.get<Company[]>("/companies");
-    if (!cs.length) return;
-    const cid = cs[0].id;
-    cidRef.current = cid;
-    const ds: Dept[] = await api.get(`/companies/${cid}/departments`);
-    setDepts(ds);
-    setAgents(await api.get(`/agents?company_id=${cid}`));
-    try { setAllSkills(await api.get("/skills")); } catch {}
-    try { setKbDocs(await api.get(`/knowledge/documents?company_id=${cid}`)); } catch {}
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
 
   /* 置顶在前 → sort_order 升序（后端已排）*/
   const tree = useMemo(() => {
@@ -162,8 +175,8 @@ export default function OrganizationPage() {
     if (!editForm.name.trim()) return;
     try {
       if (editing?.id === "__new__") {
-        const cs = await api.get<Company[]>("/companies");
-        await api.post(`/departments?cid=${cs[0].id}`, {
+        if (!cid) return setMsg("❌ 还没有激活公司");
+        await api.post(`/departments?cid=${cid}`, {
           name: editForm.name.trim(),
           description: editForm.description || null,
           parent_department_id: editForm.parent_department_id || null,
@@ -183,7 +196,7 @@ export default function OrganizationPage() {
         setMsg(`✅ 部门「${editForm.name}」已更新`);
       }
       setEditing(null);
-      await load();
+      await reloadOrg();
     } catch (e) { setMsg(`❌ ${describeError(e, "操作失败")}`); }
   }
 
@@ -201,7 +214,7 @@ export default function OrganizationPage() {
     try {
       const r = await api.post("/departments/batch-delete", { department_ids: [d.id], mode: "promote" });
       setMsg(r.deleted_count ? `✅ 已删除「${d.name}」` : "❌ 删除失败");
-      await load();
+      await reloadOrg();
     } catch (e) { setMsg(`❌ ${describeError(e, "操作失败")}`); }
   }
 
@@ -211,17 +224,17 @@ export default function OrganizationPage() {
       return { name, description: description || undefined };
     }).filter((i) => i.name);
     if (!items.length) return;
+    if (!cid) return setMsg("❌ 还没有激活公司");
     try {
-      const cs = await api.get<Company[]>("/companies");
       const r = await api.post("/departments/batch-create", {
-        company_id: cs[0].id,
+        company_id: cid,
         parent_department_id: batchParent || undefined,
         departments: items,
       });
       setMsg(`✅ 批量创建 ${r.created_count} 个部门`);
       setShowBatchAdd(false);
       setBatchText("");
-      await load();
+      await reloadOrg();
     } catch (e) { setMsg(`❌ ${describeError(e, "操作失败")}`); }
   }
 
@@ -234,7 +247,7 @@ export default function OrganizationPage() {
       });
       setMsg(`✅ 已删除 ${r.deleted_count} 个部门${r.failed.length ? `，失败 ${r.failed.length}` : ""}`);
       setShowBatchDelete(false); setSelected(new Set());
-      await load();
+      await reloadOrg();
     } catch (e) { setMsg(`❌ ${describeError(e, "操作失败")}`); }
     setDeleting(false);
   }
@@ -245,7 +258,7 @@ export default function OrganizationPage() {
     try {
       await api.put(`/departments/${d.id}/pin`, { pinned: !d.pinned });
       setMsg(d.pinned ? `「${d.name}」已取消置顶` : `📌 「${d.name}」已置顶`);
-      await load();
+      await reloadOrg();
     } catch (e) { setMsg(`❌ ${describeError(e, "置顶失败")}`); }
   }
 
@@ -270,7 +283,7 @@ export default function OrganizationPage() {
       setSortMode(false);
       setOrderDraft(null);
       setMsg("✅ 排序已保存");
-      await load();
+      await reloadOrg();
     } catch (e) { setMsg(`❌ ${describeError(e, "保存排序失败")}`); }
   }
 
@@ -323,6 +336,13 @@ export default function OrganizationPage() {
         </p>
       )}
       {msg && <p className="mb-3 text-sm text-indigo-300">{msg}</p>}
+      {loadError && (
+        <div className="mb-3 flex items-center gap-2.5 px-4 py-3 rounded-xl text-sm"
+          style={{ background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.3)", color: "#fca5a5" }}>
+          <span className="flex-1">加载组织架构失败：{loadError}</span>
+          <button onClick={() => reloadOrg()} className="btn-ghost !py-1 text-xs">重试</button>
+        </div>
+      )}
 
       {/* V5.0 行业组织形态预设：选行业 → 预览部门树 → 一键引入（自动配专家） */}
       {showPresets && (
@@ -574,7 +594,7 @@ export default function OrganizationPage() {
           );
         })}
 
-        {!tree.roots.length && (
+        {!loading && !tree.roots.length && (
           <div className="card card-static text-center py-20 animate-fade-up col-span-full">
             <div className="text-4xl mb-3 opacity-40">🏗</div>
             <p className="text-sm" style={{ color: "var(--muted)" }}>
@@ -779,7 +799,7 @@ export default function OrganizationPage() {
                   }))) return;
                   await api.del(`/departments/${editing.id}`).catch((e) => setMsg(`❌ ${describeError(e, "删除失败")}`));
                   setEditing(null);
-                  await load();
+                  await reloadOrg();
                 }}
                   className="text-xs py-1.5 px-3 rounded-lg text-red-400/80 hover:text-red-300 hover:bg-red-400/10 transition-colors"
                   style={{ border: "1px solid rgba(248,113,113,0.3)" }}>

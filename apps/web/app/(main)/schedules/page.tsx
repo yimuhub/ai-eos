@@ -1,16 +1,15 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, describeError } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { notify } from "@/components/Toast";
-import type { Company } from "@/lib/types";
 import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
 
 type Schedule = { id: string; name: string; trigger_type: string; action_type: string;
   status: string; next_run_at?: string; last_run_at?: string; run_count: number };
 
 export default function SchedulesPage() {
-  const [cid, setCid] = useState("");
-  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const cid = useActiveCompanyId();
   const [name, setName] = useState("");
   const [trigger, setTrigger] = useState("interval");
   const [seconds, setSeconds] = useState("3600");
@@ -18,46 +17,28 @@ export default function SchedulesPage() {
   const [actionType, setActionType] = useState("snapshot_performance");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [msg, setMsg] = useState("");
-  const [loading, setLoading] = useState(true);
 
-  // reload 必须在 effect 之前用 useCallback 定义：
-  // 原实现把 reload 写在 effect 之后，effect 首次执行时闭包捕获的是
-  // 尚未初始化的引用，且 lint 无法校验依赖 → 加载失败时页面静默空白。
-  const reload = useCallback(async (c?: string) => {
-    const target = c ?? cid;
-    if (!target) return;
-    try {
-      setSchedules(await api.get(`/schedules?company_id=${target}`));
-    } catch (e) {
-      notify("error", describeError(e, "加载调度失败"));
-    }
-  }, [cid]);
+  // 调度列表交给统一数据层：缓存首屏、切公司自动重取
+  // bundle 带 cid：新公司的数据回来之前，不继续展示旧公司的调度
+  const { data, error, refresh } = useResource(
+    cid ? `schedules:${cid}` : null,
+    async () => {
+      const rows = await api.get<Schedule[]>(`/schedules?company_id=${cid}`);
+      return { cid: cid as string, rows: Array.isArray(rows) ? rows : [] };
+    },
+  );
+  const active = data && data.cid === cid ? data : null;
+  const schedules = useMemo<Schedule[]>(() => active?.rows ?? [], [active]);
+  const loading = cid === undefined || (cid !== null && !active && !error);
 
+  // 加载失败沿用原来的 Toast 提示（页面不再静默空白）
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const cs = await api.get<Company[]>("/companies");
-        const c = cs[0]?.id;
-        if (cancelled) return;
-        if (!c) {
-          // 没有公司就没有调度可谈，要明确告诉用户，而不是给一个空列表
-          setMsg("还没有 AI 公司，请先在指挥中心创建团队");
-          return;
-        }
-        setCid(c);
-        await reload(c);
-      } catch (e) {
-        notify("error", describeError(e, "加载公司列表失败"));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [reload]);
+    if (error) notify("error", error || "加载调度失败");
+  }, [error]);
 
   const create = async () => {
     if (!name.trim()) { setMsg("请先填写调度名称"); return; }
+    if (!cid) return;
     try {
       const body: any = { name, trigger_type: trigger,
         action_type: actionType };
@@ -65,14 +46,15 @@ export default function SchedulesPage() {
       else body.time = dailyTime;
       if (attachments.length) body.attachments = attachments;
       await api.post(`/schedules?company_id=${cid}`, body);
-      setName(""); setAttachments([]); setMsg("调度已创建"); reload();
+      setName(""); setAttachments([]); setMsg("调度已创建");
+      await refresh();
     } catch (e) { setMsg(`创建失败：${describeError(e)}`); }
   };
   const toggle = async (s: Schedule) => {
     try {
       if (s.status === "ACTIVE") await api.post(`/schedules/${s.id}/pause`);
       else await api.post(`/schedules/${s.id}/resume`);
-      await reload();
+      await refresh();
       notify("success", s.status === "ACTIVE" ? "已暂停" : "已恢复");
     } catch (e) {
       // 原实现没有 catch：失败会变成未处理的 Promise 拒绝，界面毫无反馈
@@ -141,7 +123,10 @@ export default function SchedulesPage() {
         ))}
         {!loading && !schedules.length && (
           <p className="text-[var(--muted)] text-sm">
-            {msg || "暂无调度任务——在上方填写名称并创建第一个定时任务"}
+            {msg || (cid === null
+              // 没有公司就没有调度可谈，要明确告诉用户，而不是给一个空列表
+              ? "还没有 AI 公司，请先在指挥中心创建团队"
+              : "暂无调度任务——在上方填写名称并创建第一个定时任务")}
           </p>
         )}
       </div>

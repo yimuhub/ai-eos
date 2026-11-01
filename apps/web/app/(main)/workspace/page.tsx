@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { api, clearToken, describeError, getActiveCompanyId } from "@/lib/api";
 import { notify } from "@/components/Toast";
 import { confirmAction } from "@/components/ConfirmDialog";
-import { openCommandPalette, pushRecentPage } from "@/components/CommandPalette";
+import { openCommandPalette, pushRecentPage } from "@/lib/palette";
 import { navFor, openApp, registerAppOpener, stripEmbed, type AppTab } from "@/lib/apps";
 import { useUIMode, readUIMode } from "@/lib/ui-mode";
 import Splitter from "@/components/workspace/Splitter";
@@ -12,6 +12,7 @@ import WorkspaceChat from "@/components/workspace/WorkspaceChat";
 import WorkspacePanel from "@/components/workspace/WorkspacePanel";
 import WorkspaceSidebar from "@/components/workspace/WorkspaceSidebar";
 import GroupEditor from "@/components/workspace/GroupEditor";
+import NotificationBell from "@/components/NotificationBell";
 import type { OutTab } from "@/components/workspace/WorkspaceOutput";
 import type { WsAgent, WsChatGroup, WsMeeting, WsMode, WsProject, WsSession, WsView } from "@/lib/workspace";
 
@@ -931,9 +932,10 @@ function NewChat({ agents, picking, onPick, onCancel }: {
       <div className="flex items-center gap-2.5 px-4 shrink-0" style={{ height: 52, borderBottom: "1px solid var(--border)" }}>
         <h1 className="text-sm font-semibold">{picking ? "新对话" : "开始工作"}</h1>
         <p className="text-[10px]" style={{ color: "var(--muted)" }}>选一个员工，直接在中间下指令</p>
+        <NotificationBell className="ml-auto" />
         {picking && (
           <button type="button" onClick={onCancel}
-            className="ml-auto text-[11px] px-2.5 py-1.5 rounded-lg hover:bg-white/[0.06]"
+            className="text-[11px] px-2.5 py-1.5 rounded-lg hover:bg-white/[0.06]"
             style={{ color: "var(--muted)", border: "1px solid var(--border)" }}>
             取消
           </button>

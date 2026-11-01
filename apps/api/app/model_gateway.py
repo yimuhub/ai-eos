@@ -20,6 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import contextvars
 
 from app.core.logging_config import get_logger
+from app.core.metrics import (
+    LLM_DURATION_SECONDS,
+    LLM_REQUESTS_TOTAL,
+    LLM_TOKENS_TOTAL,
+)
 from app.db.session import AsyncSessionLocal
 from app.models.agent import Model, ModelProviderType
 from app.models.budget import TokenBudget
@@ -695,6 +700,46 @@ def _resolve_api_key(model_row: Model) -> str:
     return settings.resolved_api_key(model_row.api_key_env, provider_name)
 
 
+def _metric_labels(model_row: Model) -> tuple[str, str]:
+    """LLM 指标的标签：provider + 模型名（低基数，不用每次请求的 id）。"""
+    raw_provider = getattr(model_row, "provider_type", "")
+    provider = str(getattr(raw_provider, "value", raw_provider) or "unknown")
+    provider = provider.rsplit(".", 1)[-1][:40] or "unknown"
+    model = str(getattr(model_row, "model_id", None)
+                or getattr(model_row, "name", None) or "unknown")[:100]
+    return provider, model or "unknown"
+
+
+def _observe_llm_call(model_row: Model, outcome: str, duration_s: float,
+                      usage: dict | None = None) -> None:
+    """记录一次 LLM 调用（成功/失败都记）。
+
+    指标本身绝不能影响调用语义：这里只捕获"指标计算/写入"的异常并留日志，
+    不捕获、不吞掉调用方的业务异常。
+    """
+    try:
+        provider, model = _metric_labels(model_row)
+        LLM_REQUESTS_TOTAL.inc(provider=provider, model=model, outcome=outcome)
+        LLM_DURATION_SECONDS.observe(
+            max(0.0, float(duration_s)), provider=provider, model=model)
+        payload = usage or {}
+        # OpenAI 兼容接口用 prompt/completion_tokens；部分自建网关用
+        # input/output_tokens。两种都认，拿不到就记 0（不凭空造数）。
+        input_tokens = int(payload.get("prompt_tokens")
+                           or payload.get("input_tokens") or 0)
+        output_tokens = int(payload.get("completion_tokens")
+                            or payload.get("output_tokens") or 0)
+        if input_tokens > 0:
+            LLM_TOKENS_TOTAL.inc(input_tokens, provider=provider,
+                                 model=model, kind="input")
+        if output_tokens > 0:
+            LLM_TOKENS_TOTAL.inc(output_tokens, provider=provider,
+                                 model=model, kind="output")
+    except Exception as metric_err:  # 指标失败不影响模型调用
+        logger.warning("LLM 指标记录失败 model=%s: %s",
+                       getattr(model_row, "name", "?"), metric_err)
+
+
 class ModelGateway:
     """Single entry point: resolve agent model binding -> provider -> chat()."""
 
@@ -856,6 +901,7 @@ class ModelGateway:
                                row.name, mid, row.provider_type)
                 continue
             t0 = time.time()
+            metric_t0 = time.perf_counter()
             try:
                 result = await provider.chat(messages, tools=tools, config=config)
                 result["used_model_id"] = mid
@@ -871,6 +917,9 @@ class ModelGateway:
                     # 属于财务口径问题，必须留痕而不是静默丢弃
                     logger.error("Token 用量落库失败 model=%s mid=%s: %s",
                                  row.name, mid, usage_err, exc_info=True)
+                _observe_llm_call(row, "success",
+                                  time.perf_counter() - metric_t0,
+                                  result.get("usage"))
                 return result
             except NotImplementedError as e:
                 last_error = e
@@ -878,6 +927,8 @@ class ModelGateway:
                 failures.append(f"{row.name}：{err_summary}")
                 logger.warning("模型 %s(%s) 调用失败：%s", row.name, mid, err_summary)
                 _note_failure(mid)
+                _observe_llm_call(row, "error",
+                                  time.perf_counter() - metric_t0)
                 continue
             except Exception as e:  # failover to next model
                 last_error = e
@@ -886,6 +937,8 @@ class ModelGateway:
                 logger.warning("模型 %s(%s) 调用失败：%s",
                                row.name, mid, err_summary)
                 _note_failure(mid)
+                _observe_llm_call(row, "error",
+                                  time.perf_counter() - metric_t0)
                 # 失败调用也进 token 流水（success=False），metrics 成功率
                 # 口径 = success 为真 / 总数
                 try:
@@ -960,6 +1013,7 @@ class ModelGateway:
                 failures.append(f"{row.name}：未知 provider 类型 {row.provider_type}")
                 continue
             t0 = time.time()
+            metric_t0 = time.perf_counter()
             emitted = False
             final: dict = {}
             try:
@@ -974,12 +1028,16 @@ class ModelGateway:
                     # 已经推给用户了：不能重放，直接上抛让调用方报错
                     logger.error("模型 %s(%s) 流式中途失败，已输出部分内容不重试：%s",
                                  row.name, mid, e)
+                    _observe_llm_call(row, "error",
+                                      time.perf_counter() - metric_t0)
                     raise
                 last_summary = f"{type(e).__name__}: {e}"
                 failures.append(f"{row.name}：{last_summary}")
                 logger.warning("模型 %s(%s) 流式调用失败：%s",
                                row.name, mid, last_summary)
                 _note_failure(mid)
+                _observe_llm_call(row, "error",
+                                  time.perf_counter() - metric_t0)
                 try:
                     await record_token_usage(
                         self.db, {}, model_row=row, ctx=ctx,
@@ -1001,6 +1059,9 @@ class ModelGateway:
             except Exception as usage_err:
                 logger.error("流式调用计量落库失败 model=%s mid=%s: %s",
                              row.name, mid, usage_err, exc_info=True)
+            _observe_llm_call(row, "success",
+                              time.perf_counter() - metric_t0,
+                              final.get("usage"))
             yield {"type": "done", "usage": final.get("usage") or {},
                    "tool_calls": final.get("tool_calls"),
                    "model": row.name, "used_model_id": mid}

@@ -1,0 +1,132 @@
+# AI-EOS SLO 告警规则（Prometheus rule file）
+#
+# 用法（自建 Prometheus）：
+#   rule_files:
+#     - /etc/prometheus/rules/aieos/alerts.yml
+#
+# 只引用 apps/api/app/core/metrics.py 中真实注册的指标与标签：
+#   aieos_http_requests_total{method,path,status}
+#   aieos_http_request_duration_seconds{method,path}
+#   aieos_http_requests_in_flight
+#   aieos_llm_requests_total{provider,model,outcome}
+#   aieos_llm_duration_seconds{provider,model}
+#   aieos_llm_tokens_total{provider,model,kind}
+#   aieos_task_queue_depth{kind}
+#   aieos_task_duration_seconds{kind,outcome}
+#
+# 直方图派生序列（_bucket/_count）由上述直方图自动生成。
+# 严重级别：P1 = 立即处理（值班/电话）；P2 = 工作时间处理（工单）。
+groups:
+  - name: aieos-slo
+    interval: 30s
+    rules:
+      # SLI-1 API 可用性：5xx 比例 2% 以上持续 10 分钟，按 30 天 99.5%
+      # 目标折算已是 4 倍燃烧率，必须立即介入。
+      - alert: AieosApiHigh5xxRate
+        expr: |
+          (
+            sum(rate(aieos_http_requests_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(aieos_http_requests_total[5m])), 0.001)
+          ) > 0.02
+        for: 10m
+        labels:
+          severity: P1
+          slo: api-availability
+        annotations:
+          summary: "API 5xx 比例超过 2%（持续 10 分钟）"
+          description: >-
+            最近 5 分钟 5xx 占比超过 2%，正在快速消耗 30 天可用性错误预算
+            （目标 99.5%）。先看 /metrics/prometheus 里 status="5xx" 的
+            path 分布与后端日志，再决定回滚或摘流量。
+
+      # SLI-2 API 延迟：P95 超过 1.5s 持续 10 分钟。抓取端点本身不参与
+      # 判定，避免监控流量拉高业务延迟分位数。
+      - alert: AieosApiLatencyP95High
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(aieos_http_request_duration_seconds_bucket{path!="/metrics/prometheus"}[5m])
+            )
+          ) > 1.5
+        for: 10m
+        labels:
+          severity: P2
+          slo: api-latency
+        annotations:
+          summary: "API P95 延迟超过 1.5s（持续 10 分钟）"
+          description: >-
+            全局 P95 已超过 1.5s 的 SLO 阈值。按 path 标签拆分定位慢路由；
+            若集中在 LLM 相关路由，继续看 aieos_llm_duration_seconds
+            的 provider/model 分位。
+
+      # 任务队列积压：队列有界（上限 ≈ worker 数 - 1，默认 8 个 worker），
+      # pending 超过 3 且持续 10 分钟说明消费能力不足或 worker 卡住。
+      - alert: AieosTaskQueueBacklog
+        expr: |
+          aieos_task_queue_depth{kind="pending"} > 3
+        for: 10m
+        labels:
+          severity: P2
+          slo: task-throughput
+        annotations:
+          summary: "后台任务队列积压（pending > 3，持续 10 分钟）"
+          description: >-
+            pending 队列深度持续大于 3。检查 aieos_task_queue_depth{kind="running"}
+            是否长期贴住 worker 上限、是否有长任务超时；队列满时提交会被
+            拒绝（本仓库暂无拒绝计数指标，见 docs/SLO.md 缺口）。
+
+      # LLM 错误率：单次调用失败会记 outcome="error"（失败后可能切下一个
+      # 模型），因此阈值取 20%，避免正常 failover 频繁误报。
+      - alert: AieosLlmHighErrorRate
+        expr: |
+          (
+            sum(rate(aieos_llm_requests_total{outcome="error"}[5m]))
+            /
+            clamp_min(sum(rate(aieos_llm_requests_total[5m])), 0.001)
+          ) > 0.2
+        for: 15m
+        labels:
+          severity: P2
+          slo: llm-reliability
+        annotations:
+          summary: "LLM 调用错误率超过 20%（持续 15 分钟）"
+          description: >-
+            provider/model 维度的错误占比过高。优先检查最高错误率的
+            provider（凭据、配额、上游 5xx/超时），必要时在模型配置里
+            禁用该模型，让网关切到备用模型。
+
+      # 任务成功率：只统计经 background_jobs 提交的 job outcome。
+      # 30 分钟窗口错误率 > 10% 意味着 7 天 95% 目标在快速燃烧。
+      - alert: AieosTaskFailureRateHigh
+        expr: |
+          (
+            sum(rate(aieos_task_duration_seconds_count{outcome="error"}[30m]))
+            /
+            clamp_min(sum(rate(aieos_task_duration_seconds_count[30m])), 0.001)
+          ) > 0.1
+        for: 15m
+        labels:
+          severity: P1
+          slo: task-success
+        annotations:
+          summary: "后台任务失败率超过 10%（30 分钟窗口）"
+          description: >-
+            任务 outcome="error" 占比超过 10%，7 天 95% 成功率目标将被击穿。
+            按 kind 标签定位 task/meeting/workflow 哪类失败，再查
+            aieos_llm_requests_total{outcome="error"} 是否同源。
+
+      # 并发饱和：in-flight 长时间高位通常先于延迟/5xx 恶化，作为预警。
+      - alert: AieosHttpInFlightSaturated
+        expr: |
+          aieos_http_requests_in_flight > 64
+        for: 10m
+        labels:
+          severity: P2
+          slo: api-capacity
+        annotations:
+          summary: "HTTP 在途请求持续超过 64"
+          description: >-
+            in-flight 持续高位，事件循环或下游（DB/LLM）出现排队。
+            结合 P95 延迟与 5xx 比例判断是否需要扩容或限流。

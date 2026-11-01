@@ -23,6 +23,9 @@ class Conversation(TimestampMixin, Base):
 
     company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     task_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True,
+        index=True)
     title: Mapped[str | None] = mapped_column(String(300))
     participants: Mapped[list | None] = mapped_column(JSON, default=list)  # [agent ids]
 

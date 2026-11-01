@@ -4,7 +4,8 @@
 //   classic = v5.12 之前的「左侧固定菜单 + 整页导航」，一页一件事；
 //   geek    = v5.13 的「/workspace 单外壳 + 右栏标签」，对话不中断。
 //
-// 选择存在 localStorage；没有选择时由 ModeChooser 强制二选一。
+// 默认是 classic：没有存储过选择（以及 SSR 首帧）一律按经典模式处理，
+// 不再强制二选一；想用三栏极客模式的人可以随时从侧边栏 / ⌘K 切过去。
 // 用 useSyncExternalStore 订阅，切换后所有挂着的组件（外壳、侧栏、⌘K）立即对齐。
 
 import { useCallback, useSyncExternalStore } from "react";
@@ -12,16 +13,20 @@ import { useRouter } from "next/navigation";
 
 export type UIMode = "classic" | "geek";
 
+/** 未选择时的默认形态。SSR 与首帧也用它，避免"先空一帧再选"的闪烁。 */
+export const DEFAULT_UI_MODE: UIMode = "classic";
+
 const MODE_KEY = "aieos_ui_mode";
 const EVENT = "aieos:ui-mode";
 
-export function readUIMode(): UIMode | null {
-  if (typeof window === "undefined") return null;
+/** 当前模式。未存储 / 存储损坏 / SSR 一律回退到 classic。 */
+export function readUIMode(): UIMode {
+  if (typeof window === "undefined") return DEFAULT_UI_MODE;
   try {
     const v = localStorage.getItem(MODE_KEY);
-    return v === "classic" || v === "geek" ? v : null;
+    return v === "classic" || v === "geek" ? v : DEFAULT_UI_MODE;
   } catch {
-    return null;
+    return DEFAULT_UI_MODE;
   }
 }
 
@@ -44,9 +49,9 @@ function subscribe(onChange: () => void) {
   };
 }
 
-/** 当前模式；尚未选择时为 null（SSR 也是 null）。 */
-export function useUIMode(): UIMode | null {
-  return useSyncExternalStore(subscribe, readUIMode, () => null);
+/** 当前模式；未选择时就是默认的 classic（SSR 也是 classic）。 */
+export function useUIMode(): UIMode {
+  return useSyncExternalStore(subscribe, readUIMode, () => DEFAULT_UI_MODE);
 }
 
 /**

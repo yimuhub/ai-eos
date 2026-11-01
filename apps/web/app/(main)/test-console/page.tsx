@@ -1,7 +1,8 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, ApiError } from "@/lib/api";
+import { useResource } from "@/lib/useResource";
 
 /* ============================================================
    全功能测试台（开发/测试辅助工具）
@@ -11,28 +12,28 @@ import { api, ApiError } from "@/lib/api";
 type FnItem = { name: string; desc: string; route: string | null; api: string | null };
 type Module = { module: string; items: FnItem[] };
 type Meta = { enabled: boolean; modules: Module[]; stats: { modules: number; functions: number } };
+/** 404 与"加载中"必须分开：前者是"功能未开放"，后者才是骨架屏 */
+type MetaBundle = { meta: Meta | null; notFound: boolean };
 
 export default function TestConsolePage() {
   const router = useRouter();
-  const [meta, setMeta] = useState<Meta | null>(null);
-  const [notFound, setNotFound] = useState(false);
   const [search, setSearch] = useState("");
   const [moduleFilter, setModuleFilter] = useState("全部");
 
-  const load = useCallback(async () => {
+  // 这个页面依赖"接口是否存在"来决定是否显示（生产环境后端会返回 404）。
+  // 走统一 api 层后 404 是 ApiError.isNotFound —— 比手工比 r.status 更明确，
+  // 而且不会再因为"忘了带鉴权头"而把 401 误判成 404。
+  // 404 收敛成 bundle 里的 notFound 标记；401 继续上抛，由全局层跳登录。
+  const { data } = useResource<MetaBundle>("test-console:meta", async () => {
     try {
-      // 这个页面依赖"接口是否存在"来决定是否显示（生产环境后端会返回 404）。
-      // 走统一 api 层后 404 是 ApiError.isNotFound —— 比手工比 r.status 更明确，
-      // 而且不会再因为"忘了带鉴权头"而把 401 误判成 404。
-      setMeta(await api.get<Meta>("/test-console/meta"));
-      setNotFound(false);
+      return { meta: await api.get<Meta>("/test-console/meta"), notFound: false };
     } catch (e) {
-      if (e instanceof ApiError && e.isAuth) return; // 401 由全局层跳登录，此处不误报"未启用"
-      setNotFound(true);
+      if (e instanceof ApiError && e.isAuth) throw e;
+      return { meta: null, notFound: true };
     }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
+  });
+  const meta = data?.meta ?? null;
+  const notFound = data?.notFound ?? false;
 
   const moduleNames = useMemo(
     () => (meta ? ["全部", ...meta.modules.map((m) => m.module)] : ["全部"]),

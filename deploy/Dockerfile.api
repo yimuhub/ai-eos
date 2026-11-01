@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1
+# AI-EOS 后端镜像（FastAPI + SQLite 单机版）
+#
+# 设计要点：
+# - 两阶段：builder 用 uv 按 uv.lock 装依赖，runtime 只带 venv + 源码；
+# - 非 root 运行（uid/gid 10001），/data、/var/log/aieos、/app/storage 可写；
+# - 不把 apps/api/.env、data/、logs/ 打进镜像（见仓库根 .dockerignore）；
+# - 容器内端口 8000（宿主机 compose 映射到 8001，与单机脚本一致）；
+# - HEALTHCHECK 用 Python 标准库打 /health，不额外装 curl。
+
+FROM python:3.12-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
+
+WORKDIR /build
+
+# uv 仅用于构建阶段；依赖版本由 apps/api/uv.lock 锁定
+RUN pip install --no-cache-dir uv
+
+COPY apps/api/pyproject.toml apps/api/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/opt/venv/bin:${PATH}" \
+    DATABASE_URL="sqlite+aiosqlite:////data/aieos.db" \
+    AIEOS_LOG_DIR="/var/log/aieos" \
+    STORAGE_DIR="/app/storage" \
+    AIEOS_JWT_SECRET_FILE="/data/jwt_secret.key"
+
+WORKDIR /app
+
+# 非 root 用户；固定 uid/gid 便于宿主机目录授权
+RUN groupadd --system --gid 10001 aieos \
+    && useradd --system --uid 10001 --gid aieos \
+       --home-dir /app --shell /usr/sbin/nologin aieos
+
+COPY --from=builder /opt/venv /opt/venv
+
+# 只拷运行必需文件，避免 .env / data / tests 混入镜像
+COPY --chown=aieos:aieos apps/api/app ./app
+COPY --chown=aieos:aieos apps/api/alembic ./alembic
+COPY --chown=aieos:aieos apps/api/alembic.ini ./alembic.ini
+COPY --chown=aieos:aieos apps/api/pyproject.toml ./pyproject.toml
+COPY --chown=aieos:aieos content ./content
+COPY --chown=aieos:aieos vendor ./vendor
+
+RUN mkdir -p /data /var/log/aieos /app/storage \
+    && chown -R aieos:aieos /data /var/log/aieos /app/storage
+
+USER aieos
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)"]
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

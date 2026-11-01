@@ -85,6 +85,73 @@ async def test_diagnostics_missing_key_gives_actionable_hint(client, make_user,
         f"提示未指明需要配置的变量名：{d['hint']!r}"
 
 
+async def test_failed_connectivity_test_marks_model_not_ready(client, make_user,
+                                                              monkeypatch):
+    """连通性测试失败必须落到 Model.config，并让自检判为"未就绪"。
+
+    回归守卫（KNOWN_ISSUES #16）：测试结果过去只返回给当次请求，
+    自检仍然只看"有模型 + 有密钥 = 就绪"，用户重启后又掉进同一个坑。
+    """
+    monkeypatch.setenv(MODEL_ID_ENV, "not-a-real-key")
+    user = await make_user()
+    model_id = await _create_model(client, user, api_key_env=MODEL_ID_ENV)
+
+    # base_url 指向必然拒绝连接的本地端口 → 测试必然失败
+    r = await client.post(f"/models/{model_id}/test", headers=user["headers"])
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "error", r.text
+
+    r = await client.get("/models/diagnostics", headers=user["headers"])
+    d = r.json()
+    assert d["ready"] is False, f"测过且失败，不能再报就绪：{d}"
+    assert model_id not in d["usable_model_ids"]
+    assert "连通" in (d["hint"] or ""), f"提示未说明是连通性问题：{d['hint']!r}"
+    openai = [p for p in d["providers"] if p["provider_type"] == "openai_compat"][0]
+    assert openai["models_ready"] == 0
+    assert openai["last_test_ok"] is False
+    assert openai["last_test_at"], "测试时间未回传，前端无法展示'上次何时测的'"
+
+
+async def test_successful_connectivity_test_keeps_model_ready(client, make_user,
+                                                              monkeypatch):
+    """测试成功 + 密钥就位 → 自检就绪；"从没测过"同样保持就绪（向后兼容）。"""
+    from app.model_gateway import PROVIDERS
+    from app.models.agent import ModelProviderType
+
+    class _FakeProvider:
+        def __init__(self, base_url="", api_key=None, model_id=None):
+            pass
+
+        async def chat(self, messages, tools=None, config=None):
+            return {"content": "OK", "raw_model": "fake"}
+
+    monkeypatch.setitem(PROVIDERS, ModelProviderType.OPENAI_COMPAT, _FakeProvider)
+    monkeypatch.setenv(MODEL_ID_ENV, "not-a-real-key")
+    user = await make_user()
+    model_id = await _create_model(client, user, api_key_env=MODEL_ID_ENV)
+
+    r = await client.post(f"/models/{model_id}/test", headers=user["headers"])
+    assert r.json()["status"] == "ok", r.text
+
+    d = (await client.get("/models/diagnostics", headers=user["headers"])).json()
+    assert d["ready"] is True
+    assert model_id in d["usable_model_ids"]
+    assert not d["hint"]
+    openai = [p for p in d["providers"] if p["provider_type"] == "openai_compat"][0]
+    assert openai["last_test_ok"] is True
+
+
+async def test_no_test_yet_stays_ready(client, make_user, monkeypatch):
+    """从未测试过 ≠ 测试失败：老用户升级后不能突然被判定为不可用。"""
+    monkeypatch.setenv(MODEL_ID_ENV, "not-a-real-key")
+    user = await make_user()
+    model_id = await _create_model(client, user, api_key_env=MODEL_ID_ENV)
+
+    d = (await client.get("/models/diagnostics", headers=user["headers"])).json()
+    assert d["ready"] is True
+    assert model_id in d["usable_model_ids"]
+
+
 # ---------------------------------------------------------------------------
 # 2) 创建项目的 company_id（请求体与查询参数双通道）
 # ---------------------------------------------------------------------------

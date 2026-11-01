@@ -1,0 +1,177 @@
+# AI-EOS 安全运营流水线（A8）
+#
+# 三个互相独立的 job：
+#   codeql            —— GitHub 官方静态分析（security-and-quality 查询集），结果进 Security 标签页
+#   dependency-audit  —— Python / 前端依赖漏洞审计【观测态：基础设施待接入，先观测不阻断】
+#   secret-scan       —— 复用仓库已有的 tests/test_secret_scan.py（不重复实现扫描逻辑）
+#
+# 触发：**仅手动**（workflow_dispatch）。
+# 与 ci.yml 同步调整：密集开发期不随 push / PR 自动跑，避免 CodeQL 持续消耗 Actions
+# 分钟数。发布前手动跑一次；Dependabot 的依赖更新仍会照常开 PR（不耗 Actions 分钟）。
+#
+# 与 ci.yml 的分工：ci.yml 管"功能是否正确"（测试/契约/类型），本文件管"是否安全"
+# （静态分析 / 已知漏洞 / 凭据泄漏）。两者互不替代，也必须互不干扰。
+# 注意：本文件不含任何部署、发布、上传产物的步骤。
+name: security
+
+on:
+  workflow_dispatch:
+
+# 同分支新提交取消旧运行，和 ci.yml / clients.yml 保持一致。
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+# 默认最小权限：所有 job 只需读代码；写 security-events 的权限只在 codeql job 内单独提权。
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # job1：CodeQL 静态分析
+  # ---------------------------------------------------------------------------
+  # 两个语言并行，fail-fast: false —— 某一语言抽取失败不能掩盖另一语言的结果。
+  # 语言取 python 与 javascript-typescript：覆盖 apps/api（Python）与
+  # apps/web、desktop、mobile、packages 下的 TS/JS（CodeQL 会按仓库内的语言统计
+  # 自动发现源码，不依赖工作目录设置）。
+  codeql:
+    name: codeql / ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write   # 上传 SARIF 必需
+      actions: read            # 私有仓库读取 workflow 运行信息需要；公开仓库多给无副作用
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - python
+          - javascript-typescript
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 初始化 CodeQL（security-and-quality 查询集）
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # security-and-quality = security-extended + 可维护性/正确性查询，
+          # 比默认查询集更严，代价是告警更多；只作告警不设 required check，
+          # 避免历史告警一次性把流水线打红。
+          queries: security-and-quality
+
+      # 刻意不跑 autobuild：Python 与 JS/TS 都支持无构建抽取（build-mode: none），
+      # 而 autobuild 会尝试 uv sync / npm ci，把静态分析绑到网络可用性上——
+      # 装不上依赖就红，属于"基础设施噪音"而不是代码问题。
+      - name: 分析并上传 SARIF
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  # ---------------------------------------------------------------------------
+  # job2：依赖漏洞审计【观测态】
+  # ---------------------------------------------------------------------------
+  # ★ 当前是过渡态：pip-audit 的漏洞库拉取、npm registry 审计接口在内网/离线
+  #   runner 上均可能不可达。因此本 job 的审计步骤统一 continue-on-error: true，
+  #   失败只体现在日志与 job summary，**不阻断合并**，也绝不造"必红 job"。
+  # ★ 待"审计基础设施接入"后（依赖库镜像可用 / runner 出网稳定），逐项去掉
+  #   continue-on-error 即升级为真门禁；届时再把它加进分支保护的 required checks。
+  dependency-audit:
+    name: dependency-audit（观测态：审计基础设施待接入，先观测不阻断）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: 导出 Python 生产依赖清单
+        # --frozen：直接用仓库里的 uv.lock，不在 CI 里重新解析（重新解析要出网）。
+        # --no-dev：只审计随包发布的生产依赖；dev 组（pytest/pyflakes）不进运行时。
+        # 备注：uv 的该子命令参数是 `--format requirements.txt`（实测 uv 0.12.2），
+        # 不是书面材料里常见的 `requirements-txt`，写错会直接报错。
+        working-directory: apps/api
+        continue-on-error: true
+        run: >
+          uv export
+          --frozen
+          --no-dev
+          --no-hashes
+          --no-emit-project
+          --format requirements.txt
+          -o "$RUNNER_TEMP/requirements.audit.txt"
+
+      - name: Python 依赖审计（pip-audit，经 uvx 免安装）
+        # uvx 会临时装 pip-audit 并拉起 PyPI 漏洞数据；网络不可用即失败，
+        # 由 continue-on-error 吞掉——这正是"观测态"的含义。
+        working-directory: apps/api
+        continue-on-error: true
+        run: >
+          uvx pip-audit
+          -r "$RUNNER_TEMP/requirements.audit.txt"
+          --progress-spinner off
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: 前端依赖审计（仅生产依赖，high 及以上）
+        # npm audit 直接读 package-lock.json，不需要 npm ci（少一次网络安装）。
+        # --omit=dev：devDependencies 不进产物，先不纳入门禁以免噪音淹没真问题。
+        # --audit-level=high：medium 只影响开发体验，不阻断。
+        working-directory: apps/web
+        continue-on-error: true
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: 观测态说明（写入 job summary）
+        if: always()
+        run: |
+          {
+            echo "### 依赖审计：观测态"
+            echo ""
+            echo "- 本 job 的审计步骤均为 \`continue-on-error: true\`，失败不阻断合并；"
+            echo "- 原因：pip-audit 漏洞库 / npm registry 审计接口的可达性尚未在 runner 上验证通过；"
+            echo "- 升级路径：基础设施接入后逐项去掉 \`continue-on-error\`，并加入分支保护必过项。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # job3：仓库密钥扫描
+  # ---------------------------------------------------------------------------
+  # 不新写扫描器：仓库已有 apps/api/tests/test_secret_scan.py，它扫的是
+  # `git ls-files`（只扫被跟踪文件），带白名单与"白名单陈旧"反向校验，
+  # 且失败信息会打码——直接在 CI 里复用同一份断言，本地与线上口径才一致。
+  #
+  # 为什么不是纯 grep：真实凭据可能出现在文档示例、脚本默认值、前端 fixture、
+  # docker-compose 环境块；这类问题代码评审容易漏，只有机械扫描能稳定拦住。
+  secret-scan:
+    name: secret-scan（仓库密钥扫描）
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - name: 检出代码
+        # 默认 fetch-depth: 1 即可：扫描用 git ls-files（读索引/工作区），
+        # 不需要历史提交。
+        uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: 安装后端依赖（pytest 与 dev 组）
+        run: uv sync
+
+      - name: 仓库密钥扫描（复用 tests/test_secret_scan.py）
+        # 命令与本地、ci.yml 一致；从 apps/api 执行（pyproject testpaths=["tests"]）。
+        run: uv run pytest tests/test_secret_scan.py -q

@@ -75,7 +75,9 @@ body {
     border: 1px solid var(--border);
     color: var(--foreground);
   }
-  .input::placeholder { color: #55555f; }
+  /* placeholder 不是正文，但 #55555f 在 --surface-2 上仅约 2.5:1，近乎不可读。
+     提到 #6f6f7d（约 3.7:1）仍低于 --muted（约 5.4:1），层级保留：正文 > 说明 > 占位。 */
+  .input::placeholder { color: #6f6f7d; }
   .input:focus {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
@@ -94,6 +96,17 @@ body {
     background-clip: text;
     color: transparent;
   }
+}
+
+/* ---------- 键盘焦点环 ----------
+   只在键盘/读屏导航时出现（:focus-visible），鼠标点击不显示，避免"点一下多个圈"。
+   对比度：#c7d2fe 在 #09090f 上约 11:1，满足 WCAG 2.2 非文本对比度（≥3:1）；
+   用 outline 而非 box-shadow，确保 Windows 高对比度模式下依然可见。
+   必须放在组件层之后：.input 里 @apply 的 outline-none 与这里同权重，
+   靠源码顺序（后者胜）才能保证输入框也有焦点环。 */
+:where(a, button, input, select, textarea, summary, [role="button"], [tabindex]:not([tabindex="-1"])):focus-visible {
+  outline: 2px solid #c7d2fe;
+  outline-offset: 2px;
 }
 
 /* ---------- 滚动条 ---------- */
@@ -131,12 +144,20 @@ body {
   100% { background-position: 0 50%; }
 }
 
-/* 尊重用户的"减少动效"偏好 —— 前庭功能敏感的用户会被持续动画影响 */
+/* 尊重用户的"减少动效"偏好 —— 前庭功能敏感的用户会被持续动画影响。
+   除了关掉动画，还要关掉平滑滚动：一次长距离 scrollIntoView 的惯性滚动
+   同样会让人眩晕。 */
 @media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
   .skeleton { animation: none; }
   .animate-fade-up { animation: none; }
   .pulse-dot { animation: none; }
-  * { transition-duration: 0.01ms !important; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* ---------- 桌面壳：无边框窗口的拖拽区 ---------- */

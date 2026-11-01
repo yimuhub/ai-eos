@@ -17,6 +17,10 @@ from app.models.company import Company
 from app.models.membership import CompanyMember
 from app.models.skill import AgentSkill, SkillStatus, Skill as SkillRow
 from app.models.user import User
+from app.schemas.responses import (CustomSkillOut, SkillImportOut,
+                                   SkillInstallOut, SkillMarketInstallOut,
+                                   SkillMarketSearchOut, SkillOut,
+                                   SkillPreviewOut, SkillScopeOut)
 
 logger = get_logger(__name__)
 
@@ -52,7 +56,7 @@ def _accessible_company_ids(user_id: str):
         or_(Company.id.in_(owned), Company.id.in_(member)))
 
 
-@router.get("")
+@router.get("", response_model=list[SkillOut])
 async def list_skills(company_id: str = Query(None),
                       db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     await ensure_skills_seeded(db)
@@ -84,7 +88,8 @@ class CustomSkillIn(BaseModel):
     instruction: str | None = None  # 技能方法论/执行步骤（长期总结）
 
 
-@router.post("/custom", status_code=201)
+@router.post("/custom", status_code=201,
+             response_model=CustomSkillOut)
 async def create_custom_skill(data: CustomSkillIn,
                               company_id: str = Query(...),
                               db: AsyncSession = Depends(get_db),
@@ -131,7 +136,8 @@ def security_scan(text: str) -> dict:
             "level": "pass" if not hits else ("high" if len(hits) >= 3 else "warn")}
 
 
-@router.post("/import", status_code=201)
+@router.post("/import", status_code=201,
+             response_model=SkillImportOut)
 async def import_skill(data: ImportIn, company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
@@ -170,7 +176,7 @@ MARKET_REPOS = [
 ]
 
 
-@router.get("/market/search")
+@router.get("/market/search", response_model=SkillMarketSearchOut)
 async def market_search(q: str = "", limit: int = Query(20, le=50)):
     """搜索公开 skill 市场上的技能（GitHub 公开仓库目录）。
 
@@ -230,7 +236,7 @@ async def _fetch_raw_skill(raw_url: str) -> str:
         return resp.content.decode("utf-8", errors="replace")
 
 
-@router.post("/market/fetch-preview")
+@router.post("/market/fetch-preview", response_model=SkillPreviewOut)
 async def market_fetch_preview(data: dict,
                                user=Depends(get_current_user)):
     """拉取市场 skill 的 SKILL.md 内容做导入前预览 + 安全审核。
@@ -251,7 +257,8 @@ async def market_fetch_preview(data: dict,
     return {"content": content[:8000], "security_scan": scan}
 
 
-@router.post("/market/install-from-market")
+@router.post("/market/install-from-market",
+             response_model=SkillMarketInstallOut)
 async def install_from_market(data: dict, company_id: str = Query(...),
                               db: AsyncSession = Depends(get_db),
                               user=Depends(get_current_user)):
@@ -291,7 +298,7 @@ async def install_from_market(data: dict, company_id: str = Query(...),
     return {"id": row.id, "slug": slug, "name": body_name, "security_scan": scan}
 
 
-@router.patch("/{skill_id}/scope")
+@router.patch("/{skill_id}/scope", response_model=SkillScopeOut)
 async def set_scope(skill_id: str, scope: str = Query(...),
                     company_id: str = Query(...),
                     db: AsyncSession = Depends(get_db),
@@ -309,10 +316,14 @@ async def set_scope(skill_id: str, scope: str = Query(...),
     row = await db.get(SkillRow, skill_id)
     if not row:
         raise HTTPException(404)
-    if row.company_id != company_id:
+    if row.company_id is None:
         # 内置技能（company_id 为空）是全局共享的，不能由某一家公司改公共/私有
         raise HTTPException(
-            409, "系统内置技能或其它公司的技能不支持修改公共/私有属性")
+            409, "系统内置技能不支持修改公共/私有属性")
+    if row.company_id != company_id:
+        # 别家公司的技能按「不存在」处理：409 会告诉调用方这个 id 真实存在，
+        # 可被用来枚举他人的技能 id（与全系统 404 约定不一致）。
+        raise HTTPException(404)
     row.scope = scope
     await db.commit()
     return {"ok": True, "slug": row.slug, "scope": row.scope}
@@ -338,7 +349,8 @@ async def _agent_owned(db: AsyncSession, user_id: str, agent_id: str) -> Agent:
     return a
 
 
-@router.post("/{skill_slug}/install", status_code=201)
+@router.post("/{skill_slug}/install", status_code=201,
+             response_model=SkillInstallOut)
 async def install_skill(skill_slug: str, data: InstallIn,
                         db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     await ensure_skills_seeded(db)
@@ -357,7 +369,8 @@ async def install_skill(skill_slug: str, data: InstallIn,
     return {"detail": "installed"}
 
 
-@router.post("/{skill_slug}/uninstall", status_code=200)
+@router.post("/{skill_slug}/uninstall", status_code=200,
+             response_model=SkillInstallOut)
 async def uninstall_skill(skill_slug: str, data: InstallIn,
                           db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     await _agent_owned(db, user.id, data.agent_id)

@@ -1,17 +1,72 @@
+# Docker 构建上下文排除清单
+# 目标：镜像里绝不出现 .env、真实数据库、日志、上传件、依赖缓存和桌面/移动端产物。
+# 注意：deploy/Dockerfile.api 仍需要 apps/api/{app,alembic,pyproject.toml,uv.lock}，
+#       不要在这里排除 apps/api 整个目录。
+
 .git
 .gitignore
-README.md
+.github
+
+# 密钥与本地配置（但保留模板，文档/排障可能引用）
 .env
 .env.*
-*.db
-*.db-shm
-*.db-wal
-*.sqlite*
+!.env.example
+apps/api/.env
+apps/web/.env.local
+apps/web/.env.*.local
+*.pem
+*.key
+!packaging/mac-signing/*.cert
+
+# 运行时数据 / 日志 / 上传件
 data/
 logs/
 storage/
-node_modules
-.next
-__pycache__
+apps/api/data/
+apps/api/logs/
+apps/api/storage/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Python 缓存与虚拟环境
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+**/.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# 前端依赖与构建产物
+node_modules/
+**/node_modules/
+.next/
+**/.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+
+# 桌面 / 移动端 / 交付包（体积大且与容器无关）
+# 注意：content/ 与 vendor/ 不能排除——组织预设、内置群组、专家导入在运行时要读它们。
+desktop/dist/
+mobile/android/
+客户端交付_*/
+packaging/*.zip
+packaging/*.tar.gz
+
+# 系统与备份产物
 .DS_Store
+Thumbs.db
+*.tar.gz
+*.zip
+aieos-backup-*/
+aieos-backups/

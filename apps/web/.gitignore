@@ -9,6 +9,9 @@
 # testing
 /coverage
 
+# lighthouse（C7 本地/CI 报告）
+/.lighthouseci/
+
 # next.js
 /.next/
 /out/

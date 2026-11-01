@@ -1,21 +1,23 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api } from "@/lib/api";
-import type { Company } from "@/lib/types";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 
 type Template = { key: string; name: string; builtin: boolean; departments?: number; agents?: number };
 
 export default function TemplatesPage() {
-  const [templates, setTemplates] = useState<Template[]>([]);
-  const [cid, setCid] = useState("");
+  // 模板是全局目录（接口本身按 company_id 追加自定义模板），所以 key 不带 cid：
+  // 切公司时不必重拉一份完全相同的列表。
+  const { data } = useResource<Template[]>(
+    "templates:list",
+    () => api.get<Template[]>("/governance/templates"),
+  );
+  const templates = data ?? [];
+  // 创建时作为 owner_company_id 的归属公司，跟随顶栏切换。
+  const cid = useActiveCompanyId() ?? "";
   const [companyName, setCompanyName] = useState("我的新公司");
   const [selected, setSelected] = useState("");
   const [msg, setMsg] = useState("");
-
-  useEffect(() => {
-    api.get<Company[]>("/companies").then((cs) => setCid(cs[0]?.id));
-    api.get("/governance/templates").then(setTemplates);
-  }, []);
 
   const create = async (key: string) => {
     setSelected(key); setMsg("");

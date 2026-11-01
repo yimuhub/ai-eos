@@ -1,10 +1,10 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api, describeError } from "@/lib/api";
 import { notify } from "@/components/Toast";
 import { confirmAction } from "@/components/ConfirmDialog";
-import type { Company } from "@/lib/types";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 
 /* ============================================================
    员工离职中心：多选离职员工 → 选择继承人 → 资产继承 → 执行
@@ -33,8 +33,23 @@ const AVATAR_COLORS = ["#6366f1,#8b5cf6", "#22d3ee,#3b82f6", "#f59e0b,#ef4444", 
 
 export default function OffboardingPage() {
   const router = useRouter();
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [depts, setDepts] = useState<Dept[]>([]);
+  // 激活公司可订阅：切公司后员工/部门自动跟随；不再用 `/companies → cs[0]` 快照。
+  const cid = useActiveCompanyId();
+  const { data, refresh } = useResource(
+    cid ? `agent-offboarding:${cid}` : null,
+    async () => {
+      const companyId = cid as string;
+      const [depts, agents] = await Promise.all([
+        api.get<Dept[]>(`/companies/${companyId}/departments`),
+        api.get<Agent[]>(`/agents?company_id=${companyId}`),
+      ]);
+      return { cid, depts, agents };
+    },
+  );
+  // 切公司时旧 bundle 先不渲染，避免列表短暂显示上一家公司的员工。
+  const active = data && data.cid === cid ? data : null;
+  const agents = useMemo<Agent[]>(() => active?.agents ?? [], [active]);
+  const depts = useMemo<Dept[]>(() => active?.depts ?? [], [active]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [deptFilter, setDeptFilter] = useState("");
   const [search, setSearch] = useState("");
@@ -50,16 +65,6 @@ export default function OffboardingPage() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [executing, setExecuting] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
-
-  const load = useCallback(async () => {
-    const cs = await api.get<Company[]>("/companies");
-    if (!cs.length) return;
-    const cid = cs[0].id;
-    setDepts(await api.get(`/companies/${cid}/departments`));
-    setAgents(await api.get(`/agents?company_id=${cid}`));
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
 
   const filtered = useMemo(() => {
     return agents.filter((a) => {
@@ -119,7 +124,7 @@ export default function OffboardingPage() {
       const data = await api.post<Result>("/agents/offboarding/execute", offboardingPayload());
       setResult(data);
       setPreview(null);
-      await load();
+      refresh();
     } catch (e) {
       // 这里原来抄了预演那句提示，交接执行失败时告诉用户"预演失败"——误导性极强
       notify("error", `交接执行失败：${describeError(e, "执行失败")}`);

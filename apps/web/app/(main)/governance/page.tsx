@@ -1,6 +1,7 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { api, describeError } from "@/lib/api";
+import { useResource } from "@/lib/useResource";
 
 /* ============================================================
    治理与控制：改进审批 · 能力包市场 · 企业模板 · 自治等级
@@ -35,20 +36,32 @@ const statusBadge = (s: string) => {
 };
 
 export default function GovernancePage() {
-  const [cases, setCases] = useState<Case[]>([]);
-  const [installs, setInstalls] = useState<Install[]>([]);
+  // 治理数据是账号级的（接口不带 company_id），三块面板互不依赖 →
+  // 三个独立 key 并发加载，各自缓存；写操作后只重取受影响的那一块。
+  const { data: caseData, error: caseError, refresh: refreshCases } = useResource<Case[]>(
+    "governance:cases",
+    () => api.get<Case[]>("/governance/self-improvement-cases"),
+  );
+  const { data: installData, refresh: refreshInstalls } = useResource<Install[]>(
+    "governance:packages",
+    async () => {
+      const r = await api.get<{ installations?: Install[] }>("/governance/marketplace/packages");
+      return r.installations || [];
+    },
+  );
+  const { data: templateData, error: templateError } = useResource<Template[]>(
+    "governance:templates",
+    async () => {
+      const r = await api.get<{ templates?: Template[] }>("/governance/templates");
+      return r.templates || [];
+    },
+  );
+  const cases = useMemo<Case[]>(() => caseData ?? [], [caseData]);
+  const installs = useMemo<Install[]>(() => installData ?? [], [installData]);
+  const templates = useMemo<Template[]>(() => templateData ?? [], [templateData]);
   const [pkg, setPkg] = useState({ key: "", version: "1.0.0" });
-  const [templates, setTemplates] = useState<Template[]>([]);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    api.get<Case[]>("/governance/self-improvement-cases").then(setCases).catch(() => {});
-    api.get<{ installations?: Install[] }>("/governance/marketplace/packages")
-      .then((r) => setInstalls(r.installations || [])).catch(() => {});
-    api.get<{ templates?: Template[] }>("/governance/templates")
-      .then((r) => setTemplates(r.templates || [])).catch(() => {});
-  }, []);
 
   async function approve(id: string, status: string) {
     try {
@@ -57,7 +70,7 @@ export default function GovernancePage() {
       // 改走统一 api 层后鉴权头自动注入。
       await api.put(`/governance/self-improvement-cases/${id}/${status}`);
       setMsg(`✅ ${STATUS_ZH[status] || status}`);
-      api.get<Case[]>("/governance/self-improvement-cases").then(setCases).catch(() => {});
+      refreshCases();
     } catch (e) {
       setMsg(`❌ ${describeError(e, "审批失败")}`);
     }
@@ -70,7 +83,7 @@ export default function GovernancePage() {
       await api.post("/governance/marketplace/packages", pkg);
       setMsg("✅ 能力包已发布到 Marketplace");
       setPkg({ key: "", version: "1.0.0" });
-      api.get("/governance/marketplace/packages").then((r: any) => setInstalls(r.installations || [])).catch(() => {});
+      refreshInstalls();
     } catch (e: any) { setMsg("❌ " + (e.message || String(e))); }
     setBusy(false);
   }
@@ -106,6 +119,13 @@ export default function GovernancePage() {
         <div className="mb-4 px-4 py-2 rounded-lg text-sm"
           style={{ background: "rgba(99,102,241,0.1)", color: "#a5b4fc", border: "1px solid rgba(99,102,241,0.25)" }}>
           {msg}
+        </div>
+      )}
+
+      {(caseError || templateError) && (
+        <div className="mb-4 px-4 py-2 rounded-lg text-sm"
+          style={{ background: "rgba(248,113,113,0.08)", color: "#fca5a5", border: "1px solid rgba(248,113,113,0.3)" }}>
+          ⚠️ 部分治理数据加载失败：{caseError || templateError}
         </div>
       )}
 

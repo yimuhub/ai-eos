@@ -19,22 +19,32 @@
 
 ## 安全约束
 
-* 强制使用**临时 SQLite 数据库**与**临时存储目录**，
+* 默认强制使用**临时 SQLite 数据库**与**临时存储目录**，
   绝不触碰 `apps/api/.env` 里配置的真实数据库（用户数据）。
-* 不读取、不打印任何真实密钥。
+* 显式设置 `DATABASE_URL` 时改用该库（CI 的 Postgres job 就是这么跑的）。
+  这是**明确的选择**：调用方必须给一个可丢弃的库，脚本不替你判断。
+  为防手滑，指向仓库内真实 SQLite 文件（`apps/api/data/*.db`）的 URL
+  会被直接拒绝。
+* 不读取、不打印任何真实密钥（外部库 URL 打印前会抹掉口令）。
 
 ## 用法
 
     python3 tools/e2e_smoke.py                # 跑一遍，临时目录自动清理
     python3 tools/e2e_smoke.py --keep         # 保留临时目录，便于排查
     python3 tools/e2e_smoke.py --verbose      # 同时把 API 服务端日志打到终端
+
+    # 用外部数据库（Postgres）：必须是可丢弃的库
+    DATABASE_URL=postgresql+asyncpg://u:p@127.0.0.1:5432/aieos_e2e \
+        python3 tools/e2e_smoke.py
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -54,6 +64,13 @@ DOC_TITLE = "E2E 试跑报告"
 MOCK_KEY_ENV = "E2E_MOCK_MODEL_KEY"
 STARTUP_TIMEOUT = 90.0
 TASK_TIMEOUT = 120.0
+# 外部库（CI 的 Postgres service 刚起来时可能还没接受连接）：
+# 有限重试，绝不死等——30 次 × 0.5 秒 = 最多 15 秒。
+DB_WAIT_ATTEMPTS = 30
+DB_WAIT_INTERVAL = 0.5
+
+# 匹配 scheme://user:password@ ，只用于把口令替换成 ***
+_CREDENTIAL_RE = re.compile(r"([a-zA-Z0-9+.\-]+://)([^:/@\s]+):([^@/\s]+)@")
 
 # --------------------------------------------------------------------------
 # 假模型服务（OpenAI 兼容）
@@ -257,6 +274,102 @@ def tail(path: Path, lines: int = 40) -> str:
 
 
 # --------------------------------------------------------------------------
+# 数据库目标：默认临时 SQLite；有 DATABASE_URL 时用它（CI 的 PG job）
+# --------------------------------------------------------------------------
+
+def redact_url(url: str) -> str:
+    """打印用：抹掉 URL 里的口令，避免把凭据写进 CI 日志。"""
+    return _CREDENTIAL_RE.sub(r"\1\2:***@", url)
+
+
+def normalize_async_url(url: str) -> str:
+    """把 postgres://、postgresql:// 统一成 asyncpg 驱动形式。"""
+    if url.startswith("postgresql+asyncpg://") or url.startswith("sqlite+"):
+        return url
+    if url.startswith("postgresql://"):
+        return "postgresql+asyncpg://" + url[len("postgresql://"):]
+    if url.startswith("postgres://"):
+        return "postgresql+asyncpg://" + url[len("postgres://"):]
+    return url
+
+
+def resolve_database_url(tmp: Path) -> tuple[str, bool, str]:
+    """返回 (给被测服务的 DATABASE_URL, 是否外部库, 人类可读说明)。
+
+    * 没有 `DATABASE_URL` → 临时 SQLite 文件（原行为，绝不碰真实库）。
+    * 有 `DATABASE_URL`   → 用它；但指向仓库内真实 SQLite 文件时直接拒绝。
+    """
+    real_db = (API_DIR / "data" / "aieos.db").resolve()
+
+    raw = (os.environ.get("DATABASE_URL") or "").strip()
+    if not raw:
+        db_path = tmp / "e2e.db"
+        return f"sqlite+aiosqlite:///{db_path}", False, f"临时 SQLite：{db_path}"
+
+    url = normalize_async_url(raw)
+    if url.startswith("sqlite"):
+        # 外部 SQLite 只允许放在临时目录：落到仓库 data/ 下一律拒绝
+        path_part = url.split(":///", 1)[-1].split("?", 1)[0]
+        target = Path(path_part).expanduser().resolve() if path_part else None
+        if target == real_db or (target and (API_DIR / "data") in target.parents):
+            raise SystemExit(
+                f"拒绝使用 DATABASE_URL={redact_url(url)}："
+                f"它会写入真实数据库（{real_db}）。"
+                "要用外部库请指向可丢弃的临时库，PG 用 "
+                "postgresql+asyncpg://...")
+
+    return url, True, f"外部数据库：{redact_url(url)}"
+
+
+_DB_PROBE = r"""
+import asyncio
+import sys
+
+import asyncpg
+
+dsn, attempts, interval = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+
+
+async def main() -> int:
+    last = None
+    for i in range(attempts):
+        try:
+            conn = await asyncpg.connect(dsn, timeout=3)
+            try:
+                await conn.execute("SELECT 1")
+            finally:
+                await conn.close()
+            return 0
+        except Exception as exc:  # noqa: BLE001 — 未就绪的各种原因都重试
+            last = exc
+            await asyncio.sleep(interval)
+    print(f"数据库未就绪（{type(last).__name__}: {last}）", file=sys.stderr)
+    return 1
+
+
+sys.exit(asyncio.run(main()))
+"""
+
+
+def wait_for_database(url: str) -> tuple[bool, str]:
+    """外部库就绪探测：有限重试，绝不死等。
+
+    用 venv 里的 asyncpg 真连一次（只 SELECT 1，不建表、不写数据），
+    这样 CI 的 Postgres service "端口已开但还在启动" 的阶段也能等到。
+    """
+    if url.startswith("sqlite"):
+        return True, "SQLite 无需等待"
+    dsn = url.replace("+asyncpg", "") if url.startswith("postgresql") else url
+    proc = subprocess.run(
+        [str(VENV_PY), "-c", _DB_PROBE, dsn,
+         str(DB_WAIT_ATTEMPTS), str(DB_WAIT_INTERVAL)],
+        capture_output=True, text=True, timeout=DB_WAIT_ATTEMPTS * DB_WAIT_INTERVAL + 30,
+    )
+    detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+    return proc.returncode == 0, (detail[-1] if detail else "")
+
+
+# --------------------------------------------------------------------------
 # 主流程
 # --------------------------------------------------------------------------
 
@@ -267,10 +380,22 @@ def run(keep: bool, verbose: bool) -> int:
         return 2
 
     tmp = Path(tempfile.mkdtemp(prefix="aieos_e2e_"))
-    db_path = tmp / "e2e.db"
     storage = tmp / "storage"
     storage.mkdir(parents=True, exist_ok=True)
     api_log = tmp / "api.log"
+
+    # 默认临时 SQLite；CI 的 PG job 通过 DATABASE_URL 换成外部库
+    database_url, external_db, db_label = resolve_database_url(tmp)
+
+    # 外部库可能刚被容器拉起：有限重试等它就绪（最多 15 秒），绝不死等
+    if external_db:
+        db_ready, db_detail = wait_for_database(database_url)
+        if not db_ready:
+            print(f"外部数据库在 {DB_WAIT_ATTEMPTS} 次重试内未就绪：{db_label}"
+                  + (f"\n{db_detail}" if db_detail else ""), file=sys.stderr)
+            if not keep:
+                shutil.rmtree(tmp, ignore_errors=True)
+            return 2
 
     mock_server, mock_port = start_mock_llm()
     api_port = free_port()
@@ -279,7 +404,7 @@ def run(keep: bool, verbose: bool) -> int:
     env = dict(os.environ)
     env.update({
         # —— 隔离：绝不碰真实库/真实存储 ——
-        "DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
+        "DATABASE_URL": database_url,
         "STORAGE_DIR": str(storage),
         "JWT_SECRET": secrets.token_hex(32),
         "AIEOS_ENV": "development",
@@ -309,6 +434,7 @@ def run(keep: bool, verbose: bool) -> int:
 
     print("AI-EOS 端到端主链路试跑")
     print(f"临时目录：{tmp}")
+    print(f"数据库：{db_label}")
     print(f"假模型服务：http://127.0.0.1:{mock_port}/v1   API 服务：{base}")
 
     try:
@@ -575,7 +701,6 @@ def run(keep: bool, verbose: bool) -> int:
         if keep:
             print(f"\n临时目录已保留：{tmp}")
         else:
-            import shutil
             shutil.rmtree(tmp, ignore_errors=True)
 
 

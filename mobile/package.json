@@ -1,6 +1,6 @@
 {
   "name": "ai-eos-mobile",
-  "version": "5.14.0",
+  "version": "5.15.0",
   "description": "AI-EOS 移动端（老板视角）— KPI 仪表盘 / 签字门审批 / 一句话下达 / 服务连接",
   "main": "index.js",
   "scripts": {

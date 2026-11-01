@@ -1,13 +1,13 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { useRouter } from "next/navigation";
-import { api, describeError } from "@/lib/api";
+import { api } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
 import { notify } from "@/components/Toast";
 import AgentChat from "@/components/AgentChat";
 import InfoEditPanel from "@/components/InfoEditPanel";
-import type { Company } from "@/lib/types";
 
 /* ============================================================
    Agent 详情中心：暗色主题 + 切换模型 + 批量学习技能
@@ -39,18 +39,10 @@ export default function AgentDetailPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
   const urlId = params?.id || "";
-  const [agents, setAgents] = useState<Agent[]>([]);
+  const cid = useActiveCompanyId();
   const [agentId, setAgentId] = useState<string>(urlId);
   const [tab, setTab] = useState<string>("");
   const [menu, setMenu] = useState<MenuKey>("none");
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [lessons, setLessons] = useState<Lesson[]>([]);
-  const [reflections, setReflections] = useState<any[]>([]);
-  const [reviews, setReviews] = useState<Review[]>([]);
-  const [career, setCareer] = useState<CareerRec[]>([]);
-  const [nodes, setNodes] = useState<any[]>([]);
-  const [allModels, setAllModels] = useState<ModelRow[]>([]);
   // 训练表单
   const [trTitle, setTrTitle] = useState("");
   const [trInput, setTrInput] = useState("");
@@ -60,53 +52,86 @@ export default function AgentDetailPage() {
   const [newModelId, setNewModelId] = useState("");
   const [switching, setSwitching] = useState(false);
 
-  // refreshAll / selectAgent 只调用 setState 与 api，对外部状态无依赖，
-  // 用 useCallback 固定引用后即可安全放进下方 effect 的依赖数组，
-  // 避免"依赖数组撒谎"——那会让后续改动引入真正的闭包过期问题。
-  //
-  // 注意顺序：它们必须定义在依赖它们的 useEffect **之前**。
-  // 放进依赖数组会在渲染期求值，若定义在后面就会命中 TDZ（暂时性死区）。
-  const refreshAll = useCallback((id: string) => {
-    api.get(`/learning/agents/${id}/profile`).then(setProfile).catch(() => {});
-    api.get(`/skill-growth/agents/${id}/matrix`).then(setSkills).catch(() => {});
-    api.get(`/reflection/agents/${id}/lessons`).then(setLessons).catch(() => {});
-    api.get(`/reflection/agents/${id}/reflections`).then(setReflections).catch(() => {});
-    api.get(`/reviews/agents/${id}`).then(setReviews).catch(() => {});
-    api.get(`/career/agents/${id}/timeline`).then(setCareer).catch(() => {});
-  }, []);
+  /* ---------- 数据（统一交给 useResource：去重、缓存、切公司/回窗重取） ---------- */
+  const { data: agentRows, error: agentsError } = useResource<Agent[]>(
+    "agents:all",
+    () => api.get<Agent[]>("/agents"),
+  );
+  const agents = useMemo<Agent[]>(() => agentRows ?? [], [agentRows]);
 
-  const selectAgent = useCallback((id: string) => {
-    setAgentId(id);
-    setMsg("");
-    refreshAll(id);
-    // 获取当前绑定的模型用于切换下拉
-    api.get(`/agents/${id}/models`).then((bindings: any[]) => {
-      if (bindings.length) setNewModelId(bindings[0].model_id);
-    }).catch(() => {});
-  }, [refreshAll]);
-
+  const aid = agentId || null;
+  const { data: profile, refresh: refreshProfile } = useResource<Profile>(
+    aid ? `agent:profile:${aid}` : null,
+    () => api.get<Profile>(`/learning/agents/${aid}/profile`),
+  );
+  const { data: skillRows, refresh: refreshSkills } = useResource<Skill[]>(
+    aid ? `agent:skills:${aid}` : null,
+    () => api.get<Skill[]>(`/skill-growth/agents/${aid}/matrix`),
+  );
+  const skills = useMemo<Skill[]>(() => skillRows ?? [], [skillRows]);
+  const { data: lessonRows, refresh: refreshLessons } = useResource<Lesson[]>(
+    aid ? `agent:lessons:${aid}` : null,
+    () => api.get<Lesson[]>(`/reflection/agents/${aid}/lessons`),
+  );
+  const lessons = useMemo<Lesson[]>(() => lessonRows ?? [], [lessonRows]);
+  const { data: reflectionRows, refresh: refreshReflections } = useResource<any[]>(
+    aid ? `agent:reflections:${aid}` : null,
+    () => api.get<any[]>(`/reflection/agents/${aid}/reflections`),
+  );
+  const reflections = useMemo<any[]>(() => reflectionRows ?? [], [reflectionRows]);
+  const { data: reviewRows, refresh: refreshReviews } = useResource<Review[]>(
+    aid ? `agent:reviews:${aid}` : null,
+    () => api.get<Review[]>(`/reviews/agents/${aid}`),
+  );
+  const reviews = useMemo<Review[]>(() => reviewRows ?? [], [reviewRows]);
+  const { data: careerRows, refresh: refreshCareer } = useResource<CareerRec[]>(
+    aid ? `agent:career:${aid}` : null,
+    () => api.get<CareerRec[]>(`/career/agents/${aid}/timeline`),
+  );
+  const career = useMemo<CareerRec[]>(() => careerRows ?? [], [careerRows]);
+  const { data: nodeRows } = useResource<any[]>(
+    cid ? `skill-growth:tree:${cid}` : null,
+    () => api.get<any[]>(`/skill-growth/tree?company_id=${cid}`),
+  );
+  const nodes = useMemo<any[]>(() => nodeRows ?? [], [nodeRows]);
+  const { data: modelRows } = useResource<ModelRow[]>(
+    "models:options",
+    () => api.get<ModelRow[]>("/models"),
+  );
+  const allModels = useMemo<ModelRow[]>(() => modelRows ?? [], [modelRows]);
+  // 当前绑定模型：驱动「切换驱动模型」下拉的初始值
+  const { data: bindingRows, refresh: refreshBindings } = useResource<any[]>(
+    aid ? `agent:model-bindings:${aid}` : null,
+    () => api.get<any[]>(`/agents/${aid}/models`),
+  );
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const a: Agent[] = await api.get("/agents");
-        if (cancelled) return;
-        setAgents(a);
-        // 以 URL 为准；URL 无效时才回退到第一个
-        const target = a.find((x) => x.id === urlId) ? urlId : (a[0]?.id || "");
-        if (target) selectAgent(target);
-        else notify("warning", "还没有数字员工，请先创建或生成团队");
-      } catch (e) {
-        // 原实现 catch(() => {}) 会把"加载失败"渲染成永远的空页面
-        notify("error", describeError(e, "加载员工列表失败"));
-      }
-    })();
-    api.get<Company[]>("/companies").then((cs) => {
-      if (cs[0]?.id) api.get(`/skill-growth/tree?company_id=${cs[0].id}`).then(setNodes).catch(() => {});
-    }).catch(() => {});
-    api.get("/models").then((m: ModelRow[]) => setAllModels(m)).catch(() => {});
-    return () => { cancelled = true; };
-  }, [urlId, selectAgent]);
+    if (bindingRows?.length) setNewModelId(bindingRows[0].model_id);
+  }, [bindingRows]);
+
+  // 以 URL 为准；URL 无效时才回退到第一个
+  useEffect(() => {
+    if (!agentRows) return;
+    const target = agentRows.some((x) => x.id === urlId) ? urlId : (agentRows[0]?.id || "");
+    if (target) setAgentId(target);
+    else notify("warning", "还没有数字员工，请先创建或生成团队");
+  }, [agentRows, urlId]);
+
+  // 原实现 catch(() => {}) 会把"加载失败"渲染成永远的空页面
+  useEffect(() => {
+    if (agentsError) notify("error", agentsError);
+  }, [agentsError]);
+
+  // 写操作后刷新该员工的档案类数据（原 refreshAll 的职责）
+  const refreshAll = useCallback(() => {
+    refreshProfile();
+    refreshSkills();
+    refreshLessons();
+    refreshReflections();
+    refreshReviews();
+    refreshCareer();
+    refreshBindings();
+  }, [refreshProfile, refreshSkills, refreshLessons, refreshReflections,
+      refreshReviews, refreshCareer, refreshBindings]);
 
   async function createTraining() {
     if (!trTitle || !agentId) return;
@@ -117,7 +142,7 @@ export default function AgentDetailPage() {
         { training_type: "CONVERSATION", title: trTitle, raw_input: trInput },
       );
       setMsg(`训练完成，学习点 ${s.points} 个已提取，待确认`);
-      refreshAll(agentId);
+      refreshAll();
       setTrTitle("");
       setTrInput("");
     } catch (e: any) {
@@ -134,7 +159,7 @@ export default function AgentDetailPage() {
       // → 405 Method Not Allowed，切换模型永远失败（且错误提示只有一句 HTTP 405）。
       await api.put(`/agents/${agentId}/switch-model`, { model_id: newModelId });
       setMsg(`✅ 已切换到模型: ${allModels.find((m) => m.id === newModelId)?.name || newModelId}`);
-      selectAgent(agentId);
+      refreshAll();
     } catch (e: any) {
       setMsg(`❌ ${e.message || String(e)}`);
     }
@@ -149,7 +174,7 @@ export default function AgentDetailPage() {
         evidence: [{ type: "assignment" }],
       });
       setMsg(`✅ ${nodeName} 已添加`);
-      refreshAll(agentId);
+      refreshAll();
     } catch (e: any) {
       setMsg(e.message || String(e));
     }
@@ -171,7 +196,7 @@ export default function AgentDetailPage() {
         source_type: "assignment",
       });
       setMsg(`✅ 已学习 ${result.added.length} 个技能${result.skipped.length ? `，${result.skipped.length} 个已存在或前置不满足` : ""}`);
-      refreshAll(agentId);
+      refreshAll();
     } catch (e: any) {
       setMsg(e.message || String(e));
     }

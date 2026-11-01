@@ -30,6 +30,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.core.metrics import TASK_DURATION_SECONDS, TASK_QUEUE_DEPTH
+
 log = logging.getLogger("background_jobs")
 
 DEFAULT_JOB_TIMEOUT_S = 900.0
@@ -72,6 +74,38 @@ class _QueueFull:
 
 
 QUEUE_FULL = _QueueFull()
+
+
+def _resolve_job_kind(coro_fn, kind: str | None = None) -> str:
+    """任务 kind 只允许有限集合，避免把函数名/路径当标签造成基数爆炸。"""
+    if kind:
+        return str(kind)[:40]
+    probe = (f"{getattr(coro_fn, '__module__', '')}."
+             f"{getattr(coro_fn, '__qualname__', '')}").lower()
+    for token, name in (("meeting", "meeting"),
+                        ("workflow", "workflow"),
+                        ("orchestrat", "orchestration"),
+                        ("task", "task"),
+                        ("chat", "chat")):
+        if token in probe:
+            return name
+    return "job"
+
+
+def _observe_job(kind: str, outcome: str, duration_s: float) -> None:
+    """记录任务耗时；指标失败只记日志，绝不改变任务执行结果。"""
+    try:
+        TASK_DURATION_SECONDS.observe(
+            max(0.0, float(duration_s)), kind=kind, outcome=outcome)
+    except Exception as metric_err:  # noqa: BLE001 - 指标不是业务
+        log.warning("任务指标记录失败 kind=%s: %s", kind, metric_err)
+
+
+def _queue_depth(kind: str, delta: int) -> None:
+    try:
+        TASK_QUEUE_DEPTH.inc(delta, kind=kind)
+    except Exception as metric_err:  # noqa: BLE001
+        log.warning("队列深度指标记录失败 kind=%s: %s", kind, metric_err)
 
 
 def _default_job_timeout_s() -> float:
@@ -153,14 +187,22 @@ async def _with_fresh_engine(coro_fn, timeout_s: float | None = None,
         await dispose_factory_engine(factory)
 
 
-def _run_sync(coro_fn, timeout_s=None, on_timeout=None):
+def _run_sync(coro_fn, timeout_s=None, on_timeout=None, *, kind=None):
     """在当前线程内直接跑（解释器关闭时的兜底路径）。"""
+    job_kind = _resolve_job_kind(coro_fn, kind)
+    started = time.perf_counter()
+    outcome = "error"
+    _queue_depth("running", 1)
     try:
         asyncio.run(_with_fresh_engine(coro_fn, timeout_s=timeout_s,
                                        on_timeout=on_timeout))
+        outcome = "success"
     except Exception as e:
         log.error("background job (sync fallback) failed: %s: %s",
                   type(e).__name__, e)
+    finally:
+        _queue_depth("running", -1)
+        _observe_job(job_kind, outcome, time.perf_counter() - started)
 
 
 def _on_job_done(fut) -> None:
@@ -184,50 +226,66 @@ def _on_job_done(fut) -> None:
         _job_slots.release()
 
 
-def submit_async(coro_fn, timeout_s: float | None = None, on_timeout=None):
+def submit_async(coro_fn, timeout_s: float | None = None, on_timeout=None,
+                 *, kind: str | None = None):
     """Run an async function in a worker thread with its own loop + engine.
 
     timeout_s: 超时秒数；None 则取 AIEOS_TASK_TIMEOUT_S（默认 900s）；
     会议类调用方请显式传 MEETING_TIMEOUT_S(600)。
     on_timeout: 超时回调 async (session, timeout_s)，用于先写事件告知用户再标 FAILED。
+    kind: 指标里的任务类型（task/meeting/workflow/...）；缺省按调用方模块推断。
 
     返回：
       * Future —— 已入队（调用方可以不等，但队列已满时不会静默堆积）；
       * QUEUE_FULL —— 在途任务已达上限，调用方应返回 503；
       * None —— 线程池已关闭（解释器退出中），已退化为同步执行，任务不丢。
     """
+    job_kind = _resolve_job_kind(coro_fn, kind)
     if _shutdown.is_set():
         # 解释器正在关闭：直接在当前线程跑，保证最后一轮不丢
-        _run_sync(coro_fn, timeout_s=timeout_s, on_timeout=on_timeout)
+        _run_sync(coro_fn, timeout_s=timeout_s, on_timeout=on_timeout,
+                  kind=job_kind)
         return None
     if not _job_slots.acquire(blocking=False):
         log.warning("后台任务队列已满（%d 个 worker 全部忙碌），本次提交被拒绝",
                     _JOB_WORKERS)
         return QUEUE_FULL
 
+    _queue_depth("pending", 1)
     enqueued_at = time.monotonic()
 
     def _runner():
         queue_delay = max(0.0, time.monotonic() - enqueued_at)
+        _queue_depth("pending", -1)
+        _queue_depth("running", 1)
+        started = time.perf_counter()
+        outcome = "error"
         try:
             asyncio.run(_with_fresh_engine(coro_fn, timeout_s=timeout_s,
                                            on_timeout=on_timeout,
                                            queue_delay_s=queue_delay))
+            outcome = "success"
         except BaseException:
             # 含 CancelledError/SystemExit：线程里的异常不会再冒泡到调用方，
             # 不在这里记录就等于永久丢失。
             log.exception("background job 执行失败（排队 %.1fs）", queue_delay)
             raise
+        finally:
+            _queue_depth("running", -1)
+            _observe_job(job_kind, outcome, time.perf_counter() - started)
 
     try:
         fut = _executor.submit(_runner)
     except RuntimeError:
         # cannot schedule new futures after interpreter shutdown
+        _queue_depth("pending", -1)
         _job_slots.release()
         _shutdown.set()
-        _run_sync(coro_fn, timeout_s=timeout_s, on_timeout=on_timeout)
+        _run_sync(coro_fn, timeout_s=timeout_s, on_timeout=on_timeout,
+                  kind=job_kind)
         return None
     except BaseException:
+        _queue_depth("pending", -1)
         _job_slots.release()
         raise
     fut.add_done_callback(_on_job_done)
@@ -263,7 +321,7 @@ def run_meeting_turn_now(meeting_id: str):
         result = await run_meeting_turn(session, meeting_id)
         log.info("[meeting %s] turn done: %s", meeting_id, result)
 
-    submit_async(_job, timeout_s=MEETING_TIMEOUT_S)
+    submit_async(_job, timeout_s=MEETING_TIMEOUT_S, kind="meeting")
 
 
 def recover_stuck_meetings(max_age_minutes: int = 15):
@@ -300,7 +358,7 @@ def recover_stuck_meetings(max_age_minutes: int = 15):
             log.warning("[recover] re-kick stuck meeting %s", m.id)
             schedule_kick(str(m.id))
 
-    submit_async(_job, timeout_s=MEETING_TIMEOUT_S)
+    submit_async(_job, timeout_s=MEETING_TIMEOUT_S, kind="meeting")
 
 
 def schedule_kick(meeting_id: str):
@@ -317,7 +375,7 @@ def schedule_kick(meeting_id: str):
             log.error("[meeting %s] ERROR: %s: %s",
                       meeting_id, type(e).__name__, e, exc_info=True)
 
-    submit_async(_job, timeout_s=MEETING_TIMEOUT_S)
+    submit_async(_job, timeout_s=MEETING_TIMEOUT_S, kind="meeting")
 
 
 def _stuck_task_minutes() -> int:
@@ -373,6 +431,11 @@ def recover_stuck_tasks(max_age_minutes: int | None = None):
                                           "max_age_minutes": max_age_minutes})
             except IllegalTransition:
                 t.status = TaskStatus.FAILED
+                # transition 已覆盖正常的 FAILED 路径；这里是"非法转移兜底"
+                # 分支，同样要让创建人知道（否则任务静默变成失败）。
+                from app.services.notification_service import notify_task_terminal
+                await notify_task_terminal(session, t, "FAILED",
+                                           error="任务长时间无心跳，已被系统回收")
                 await session.commit()
             await log_event(session, "task.stuck_recovered", "task", t.id,
                             "system", None,
@@ -380,4 +443,4 @@ def recover_stuck_tasks(max_age_minutes: int | None = None):
                              "max_age_minutes": max_age_minutes})
             await session.commit()
 
-    submit_async(_job)
+    submit_async(_job, kind="task")

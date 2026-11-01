@@ -13,6 +13,7 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy import text
 
 from app.core.logging_config import get_logger
+from app.core.metrics import render_prometheus
 from app.db.session import engine
 
 logger = get_logger(__name__)
@@ -55,7 +56,9 @@ async def prometheus_metrics():
         "# TYPE aieos_db_probe_timestamp_seconds gauge",
         f"aieos_db_probe_timestamp_seconds {now:.0f}",
     ]
+    # 探针指标之后追加 RED / LLM / 任务队列指标（同一份抓取响应）。
+    payload = "\n".join(lines) + "\n" + render_prometheus()
     return PlainTextResponse(
-        "\n".join(lines) + "\n",
+        payload,
         media_type="text/plain; version=0.0.4",
     )

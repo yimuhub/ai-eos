@@ -1,10 +1,10 @@
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, describeError } from "@/lib/api";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
 import { notify } from "@/components/Toast";
-import type { Company } from "@/lib/types";
 
 /* ============================================================
    AI 会议中心：部门化选人 + 自定义会议类型 + 无主题闲聊
@@ -42,10 +42,6 @@ const typeLabel = (t?: string) =>
 
 export default function MeetingsPage() {
   const [mounted, setMounted] = useState(false);
-  const [meetings, setMeetings] = useState<Meeting[]>([]);
-  const [depts, setDepts] = useState<DeptGroup[]>([]);
-  const [projects, setProjects] = useState<{id: string; name: string}[]>([]);
-  const [companyId, setCid] = useState("");
   const [detail, setDetail] = useState<Meeting | null>(null);
   const [sayText, setSayText] = useState("");
   const [meetingId, setMeetingId] = useState(""); // 当前会议 id
@@ -67,22 +63,59 @@ export default function MeetingsPage() {
 
   useEffect(() => { setMounted(true); }, []);
 
-  const loadMeetings = useCallback(async (cid: string) => {
-    const list = await api.get(`/meetings?company_id=${cid}`);
-    setMeetings(list as any);
-  }, []);
+  /* ---------- 数据加载 ----------
+   *
+   * 改造前：自己取 /companies 找激活公司，再串行取会议/部门/项目，
+   * 且每次都要手写"切公司清空旧数据"。
+   * 现在交给统一数据层：缓存首屏立即渲染、切公司自动按新 key 重取、
+   * 30 秒后回窗自动刷新；会议详情弹窗的 6 秒轮询保持原样。
+   */
+  const cid = useActiveCompanyId();
+  const { data: bundle, refresh } = useResource<{
+    cid: string;
+    meetings: Meeting[];
+    depts: DeptGroup[];
+    projects: { id: string; name: string }[];
+  }>(
+    cid ? `meetings:${cid}` : null,
+    async () => {
+      const [list, deptOv, projects] = await Promise.all([
+        // 会议列表必须有，失败要暴露出来
+        api.get<Meeting[]>(`/meetings?company_id=${cid}`),
+        // 部门分组/项目只用于「发起会议」选人，缺失不阻塞列表
+        api.get<{ departments?: DeptGroup[] }>(
+          `/growth-center/departments-overview?company_id=${cid}`,
+        ).catch(() => null),
+        api.get<{ id: string; name: string }[]>(`/projects?company_id=${cid}`)
+          .catch(() => [] as { id: string; name: string }[]),
+      ]);
+      return {
+        cid: cid as string,
+        meetings: Array.isArray(list) ? list : [],
+        depts: deptOv?.departments || [],
+        projects: Array.isArray(projects) ? projects : [],
+      };
+    },
+  );
 
+  // 缓存里的 bundle 可能还属于上一家公司（换 key 的瞬间）：
+  // 只有 cid 对上才显示，等价于原来"切公司先清空旧数据"。
+  const meetings = useMemo<Meeting[]>(
+    () => (bundle && bundle.cid === cid ? bundle.meetings : []), [bundle, cid]);
+  const depts = useMemo<DeptGroup[]>(
+    () => (bundle && bundle.cid === cid ? bundle.depts : []), [bundle, cid]);
+  const projects = useMemo<{ id: string; name: string }[]>(
+    () => (bundle && bundle.cid === cid ? bundle.projects : []), [bundle, cid]);
+  const companyId = cid ?? "";
+
+  // 切公司：旧公司的会议详情与轮询、选人结果都不能带进新公司（保持原行为）
   useEffect(() => {
-    api.get<Company[]>("/companies").then(async (cs) => {
-      if (!cs.length) return;
-      setCid(cs[0].id);
-      loadMeetings(cs[0].id);
-      // 部门分组（复用成长中心的聚合接口）
-      api.get(`/growth-center/departments-overview?company_id=${cs[0].id}`)
-        .then((d: any) => setDepts(d.departments || [])).catch(() => {});
-      api.get(`/projects?company_id=${cs[0].id}`).then((ps: any[]) => setProjects(ps)).catch(() => {});
-    }).catch(() => {});
-  }, [loadMeetings]);
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    setDetail(null);
+    setMeetingId("");
+    setPicked(new Set());
+    setProjectId("");
+  }, [cid]);
 
   /* ---------- 选人逻辑（部门为单位） ---------- */
   const deptAgentIds = (g: DeptGroup) => g.agents.map((a) => a.id);
@@ -126,6 +159,7 @@ export default function MeetingsPage() {
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
   async function create() {
+    if (!companyId) return; // 还没确定公司，不发请求
     const finalType = mtype === "__custom__" ? customType.trim() : mtype;
     if (!title || !picked.size || !finalType) {
       notify("warning", "请填写标题、选择参会人员" + (mtype === "__custom__" ? "并输入自定义类型名" : ""));
@@ -141,20 +175,22 @@ export default function MeetingsPage() {
     });
     setTitle(""); setTopic(""); setMaterial(""); setPicked(new Set()); setShowCreate(false);
     setCreateAttach([]);
-    await loadMeetings(companyId);
+    refresh(); // 新会议立刻出现在列表
     openDetail(res.id);
   }
 
   async function act(path: string) {
     try {
       await api.post(`/meetings/${detail!.id}${path}`);
+      // 状态变了 → 列表重取，别让卡片上的状态停在旧值
+      refresh();
       if (path === "/end") {
         // 结束需要后台生成纪要，轮询等待 COMPLETED
         const waitDone = async () => {
           for (let i = 0; i < 20; i++) {
             await new Promise(r => setTimeout(r, 1500));
             const d = await api.get(`/meetings/${detail!.id}`);
-            if (d.status === "COMPLETED") { setDetail(d); return; }
+            if (d.status === "COMPLETED") { setDetail(d); refresh(); return; }
           }
           openDetail(detail!.id);
         };
@@ -171,12 +207,14 @@ export default function MeetingsPage() {
     if (!sayText.trim()) return;
     await api.post(`/meetings/${detail!.id}/say`, { content: sayText });
     setSayText("");
+    refresh(); // 卡片上的发言条数跟着更新
     setTimeout(() => openDetail(detail!.id), 500);
   }
 
   async function convertItems() {
     const res: any = await api.post(`/meetings/${detail!.id}/action-items/convert`);
     notify("success", `已把 ${res.converted_task_ids.length} 条行动项转成任务`);
+    refresh(); // 行动项状态变了 → 卡片计数更新
     openDetail(detail!.id);
   }
 

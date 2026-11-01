@@ -1,17 +1,21 @@
 # AI-EOS 质量门禁流水线
 #
-# 三个彼此独立的 job，任何一个是红的都不该合并：
-#   backend  —— 后端测试套件 + 字节码编译
-#   frontend —— 前端类型检查 + 单元/契约测试
-#   contract —— 以 OpenAPI 为权威源的前后端接口契约门禁
+# 五个彼此独立的 job，任何一个是红的都不该合并：
+#   backend    —— 后端测试套件（SQLite）+ 字节码编译 + 端到端主链路
+#   postgres   —— 同一套后端测试跑在 Postgres 16 上（方言兼容性护栏）
+#   frontend   —— 前端类型检查 + 单元/契约测试 + 体积预算
+#   lighthouse —— 首屏性能硬门禁（LCP ≤1.5s、CLS ≤0.1、TBT ≤200ms、性能分 ≥90）
+#   contract   —— 以 OpenAPI 为权威源的前后端接口契约门禁
 #
-# 触发：push + pull_request；用 concurrency 取消同分支上的旧运行（照 clients.yml 风格）。
+# 触发：**仅手动**（workflow_dispatch）。
+# 本项目处于密集开发期，Actions 额度有限：每次 push 自动跑五个 job（含 next build、
+# Postgres 服务、Lighthouse 三次采样）会持续消耗分钟数，而分支上的改动通常还会继续改。
+# 约定：日常只推代码 + 写 CHANGELOG；发布前到 Actions 页面手动 Run workflow 跑一次全量门禁。
 # 注意：本流水线只做校验，**不含任何部署 / 发布 / 上传产物步骤**。
 name: ci
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -50,19 +54,133 @@ jobs:
       - name: 后端测试套件（离线、SQLite、无 Redis）
         # pyproject 已设 asyncio_mode=auto、testpaths=["tests"]，直接跑即可。
         # 需要真实模型密钥的端到端用例打了 requires_llm 标记，无密钥时自动跳过。
-        # 覆盖率门禁：只统计路由与核心层（35% 实测），阈值向下取整到 30，
-        # 只允许往上调；不要把 --cov 塞进 addopts（单跑一个文件会天然低）。
+        # 覆盖率门禁：统计整个 app 包（2026-11-01 实测 69.8%，后台任务线程的
+        # 覆盖面随调度时序有一两个点的波动）。阈值 65 留出约 5 个点余量；
+        # 上调时先本地跑一遍 `pytest --cov=app --cov-report=term` 再改，
+        # pyproject.toml 的 fail_under 与这里必须同步。
+        # 不配 concurrency=greenlet 会把 SQLAlchemy async 的覆盖率系统性低估。
+        # 不要把 --cov 塞进 addopts（单跑一个文件会天然低）。
         run: >
           uv run pytest -q
-          --cov=app/api/routes --cov=app/core
+          --cov=app
           --cov-report=term-missing
-          --cov-fail-under=30
+          --cov-fail-under=65
 
       - name: 全模块字节码编译（把语法/编码错误钉死在合并前）
         run: uv run python -m compileall -q app
 
+      - name: 端到端主链路试跑（假模型 / 临时 SQLite / 无密钥）
+        # 对应 tools/check.sh 的「端到端主链路试跑」关卡，此前只在本地跑。
+        # tools/e2e_smoke.py 自身会：起本地 OpenAI 兼容假模型、用临时 SQLite
+        # 与临时存储目录、拉起真实 uvicorn 进程跑完整链路，不需要任何密钥，
+        # 也不会触碰 apps/api/.env 里的真实库。设了 DATABASE_URL 时会改用它
+        # （下面的 postgres job 就是 PG 版本；本 job 不设，走临时 SQLite）。
+        # 注意 venv 路径：脚本默认用 apps/api/.venv/bin/python 启动服务，
+        # 上一步 uv sync 已在该路径建出 venv（working-directory=apps/api），
+        # 因此这里用 uv run 显式指向脚本，避免依赖系统 python 的包装一致性。
+        # 日志目录指到 /tmp，避免在仓库工作区留下 logs/。
+        env:
+          AIEOS_LOG_DIR: /tmp/ci_e2e_logs
+        run: uv run python ../../tools/e2e_smoke.py
+
   # ---------------------------------------------------------------------------
-  # job2：前端
+  # job2：后端 × Postgres 16（方言兼容性护栏）
+  #
+  # 为什么必须单独一个 job：SQLite 会把很多方言差异"吃掉"——JSON 列的读写、
+  # ON CONFLICT / RETURNING、批量 DELETE 语法、时间戳与时区、字符串比较规则。
+  # 这些差异只在 PG 上才会暴露，而 PG 正是生产/一键部署的形态。
+  #
+  # 与 backend job 的关系：同一套测试、同一份断言，只是换了数据库。
+  # 非 SQLite 下 conftest 会自动跳过 3 个"断言 PRAGMA / 查 sqlite_master /
+  # 直开 sqlite3 连接"的模块（见 tests/conftest.py 的 _SQLITE_ONLY_MODULES），
+  # 这些用例在 backend job 的 SQLite 上照跑，断言一个字都没改。
+  #
+  # 隔离策略：conftest 读到 AIEOS_TEST_DATABASE_URL 后，会为**每个测试进程**
+  # 新建一个 `aieos_test_<pid>_<rand>` 库，跑完 DROP；建库需要 CREATEDB 权限，
+  # 下面服务的 POSTGRES_USER 是容器超级用户，满足条件。无权限时退化为
+  # "用给定库 + 开头先 drop_all"，并打印警告。
+  #
+  # 关于 `-o asyncio_default_test_loop_scope=session`：
+  # asyncpg 的连接池绑定在创建它的**那个事件循环**上。pytest-asyncio 默认
+  # 每个测试用例一个 loop，连接池跨 loop 复用会报
+  # "got Future attached to a different loop"。aiosqlite 恰好容忍这一点，
+  # 所以 SQLite job 不需要该参数；只在 PG job 里把测试 loop 提升到 session 级。
+  # ---------------------------------------------------------------------------
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: aieos
+          POSTGRES_PASSWORD: aieos_ci_only
+          POSTGRES_DB: aieos_test
+        ports:
+          - 5432:5432
+        # 健康检查通过后再跑 step，避免测试起手就 "connection refused"
+        options: >-
+          --health-cmd "pg_isready -U aieos -d aieos_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DEBUG: "false"
+      # conftest 认这个变量（也接受非 sqlite 的 DATABASE_URL 作为退路）
+      AIEOS_TEST_DATABASE_URL: "postgresql+asyncpg://aieos:aieos_ci_only@127.0.0.1:5432/aieos_test"
+      # 同 backend：绝不能有可达的 Redis，登录限流用例依赖内存回退
+      REDIS_URL: "redis://127.0.0.1:1/0"
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: 安装后端依赖（含 asyncpg）
+        run: uv sync
+
+      - name: Postgres 预检（真连一次，别把"连不上"误读成"测试通过"）
+        run: |
+          uv run python - <<'PY'
+          import asyncio, os
+          import asyncpg
+
+          dsn = os.environ["AIEOS_TEST_DATABASE_URL"].replace("+asyncpg", "")
+
+          async def main():
+              conn = await asyncpg.connect(dsn, timeout=5)
+              try:
+                  print(await conn.fetchval("select version()"))
+              finally:
+                  await conn.close()
+
+          asyncio.run(main())
+          PY
+
+      - name: 后端测试套件（Postgres 16，同一份断言）
+        # -rs 把跳过原因打出来：非 SQLite 下 conftest 会跳过 3 个 SQLite 专属
+        # 模块，跳过原因里带"当前方言 postgresql"——这就是本 job 真的跑在 PG 上
+        # 的证据（若方言没生效，这些用例会照跑而不是显示为 skip）。
+        run: >
+          uv run pytest -q -rs
+          -o asyncio_default_test_loop_scope=session
+
+      - name: 端到端主链路试跑 × Postgres
+        # 与 backend job 同一条链路、同一批 38 项断言，只把数据库换成 PG：
+        # e2e_smoke.py 在 DATABASE_URL 存在时直接用它，不再建临时 SQLite。
+        # 脚本会先做有限重试（30 × 0.5s）等库就绪，不会无限等。
+        # 这里复用 service 自带的 aieos_test 库；pytest 用的是 conftest 另建的
+        # 一次性库，两者互不干扰。
+        env:
+          DATABASE_URL: "postgresql+asyncpg://aieos:aieos_ci_only@127.0.0.1:5432/aieos_test"
+          AIEOS_LOG_DIR: /tmp/ci_e2e_pg_logs
+        run: uv run python ../../tools/e2e_smoke.py
+
+  # ---------------------------------------------------------------------------
+  # job3：前端
   # ---------------------------------------------------------------------------
   frontend:
     runs-on: ubuntu-latest
@@ -88,8 +206,57 @@ jobs:
       - name: 前端测试（vitest run）
         run: npm run test
 
+      - name: 生产构建（体积预算的输入；同时兜住 build 期的 lint/类型错误）
+        # C7 性能预算：先产出 .next，再由下一步做体积门禁。
+        # 不做部署/上传，构建产物仅用于本 job 内校验。
+        run: npm run build
+
+      - name: 构建产物体积预算（C7）
+        # 阈值、基线与测量方法见 tools/check_bundle_budget.py 顶部常量与
+        # docs/性能预算.md。超预算退出码 1；目录/manifest 缺失退出码 2。
+        # 不要在 CI 里传 --budget-kb（那是仅本地反向验证用的临时覆盖）。
+        run: python3 ../../tools/check_bundle_budget.py --dir .next
+
   # ---------------------------------------------------------------------------
-  # job3：契约（以 FastAPI OpenAPI 为后端唯一权威来源）
+  # job4：首屏性能（C7 Lighthouse）
+  #
+  # 与 job3 分开：Lighthouse 需要真浏览器与独立端口，放在 frontend job 里会
+  # 把一次构建重复跑两遍，也让"体积超预算"和"首屏变慢"两类失败混在一起。
+  #
+  # 断言见 apps/web/lighthouserc.json（3 次取中位数）：
+  #   LCP ≤ 1500ms、CLS ≤ 0.1、TBT ≤ 200ms、性能分 ≥ 90。
+  # 本机实测（M 系列 Mac，desktop preset）：LCP 0.5–0.6s、TBT 0ms、CLS 0.005。
+  # 若 ubuntu runner 因冷启动偶发超标，先看报告里的 LCP 元素再决定是放宽
+  # 阈值还是修首屏——不要把断言改成 warn 来换绿。
+  # ---------------------------------------------------------------------------
+  lighthouse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci --no-audit --no-fund
+
+      - name: 生产构建
+        run: npm run build
+
+      - name: 首屏性能门禁（LCP ≤1.5s）
+        # @lhci/cli 按 lighthouserc.json 自己拉起 `next start -p 3100`
+        # 并在 3 次采样后断言；不安装到项目依赖里，避免给运行时锁文件增重。
+        run: npx --yes @lhci/cli@0.15.1 autorun --config=./lighthouserc.json
+
+  # ---------------------------------------------------------------------------
+  # job5：契约（以 FastAPI OpenAPI 为后端唯一权威来源）
   # ---------------------------------------------------------------------------
   contract:
     runs-on: ubuntu-latest
@@ -126,6 +293,11 @@ jobs:
     # 关于 tools/check.sh 未纳入本流水线的关卡（均为本地/重复项，故意排除）：
     #   - pyflakes「未定义名」：已由 backend 的 pytest 用例
     #     test_no_undefined_names 覆盖（dev 依赖里装了 pyflakes），不在此重复。
-    #   - 前端 tsc / ESLint：tsc 归 job2；ESLint 按本次 job2 约定未纳入（仅 tsc + npm test）。
-    #   - 端到端主链路试跑 tools/e2e_smoke.py：需拉起真实进程、占用端口、
-    #     本地假模型服务，慢且易受 runner 网络影响 → 属本地交付前关卡，CI 不跑。
+    #   - 前端 tsc / ESLint：tsc 归 job3；ESLint 按本次 job3 约定未纳入（仅 tsc + npm test）。
+    #
+    # PG job 现状：已引入（见上方 `postgres`），跑的就是同一套 pytest + e2e。
+    # 本地验证方式（有 Postgres 时）：
+    #   cd apps/api && AIEOS_TEST_DATABASE_URL=postgresql+asyncpg://u@127.0.0.1:5432/postgres \
+    #     .venv/bin/python -m pytest -q -o asyncio_default_test_loop_scope=session
+    #   DATABASE_URL=postgresql+asyncpg://u@127.0.0.1:5432/aieos_e2e \
+    #     python3 tools/e2e_smoke.py

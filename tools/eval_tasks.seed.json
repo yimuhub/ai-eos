@@ -1,0 +1,721 @@
+[
+  {
+    "id": "research-ai-office-market",
+    "title": "AI 办公助手赛道竞争格局调研",
+    "category": "调研汇报",
+    "prompt": "下周经营会要讨论明年的产品方向。请调研国内 AI 办公助手赛道的竞争格局，包括主要玩家、典型产品定位和差异化打法，并结合我们的中小企业客群给出判断。材料要能在会上直接引用。",
+    "expected": {
+      "must_include": ["结论", "风险", "建议"],
+      "min_chars": 600,
+      "min_sections": 3,
+      "citation_required": true,
+      "forbidden": ["我不确定", "作为AI", "无法提供"]
+    }
+  },
+  {
+    "id": "research-data-compliance",
+    "title": "数据合规监管动向影响评估",
+    "category": "调研汇报",
+    "prompt": "最近数据合规监管有新动向，老板要求评估对我们为中小企业提供 AI 员工服务的影响，并整理成一份可对内传阅的调研纪要，方便销售和法务引用。",
+    "expected": {
+      "must_include": ["影响", "建议"],
+      "min_chars": 500,
+      "min_sections": 3,
+      "citation_required": true,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "research-competitor-pricing",
+    "title": "竞品定价与套餐结构调研",
+    "category": "调研汇报",
+    "prompt": "老板准备调整定价。请调研国内 3 家同类 AI 员工/智能体产品的公开定价与套餐结构，说明它们按坐席、按任务量还是按模型 token 计费，套餐边界和适配客群分别是什么，并给我们 199 元/坐席/月的方案给出定价建议。",
+    "expected": {
+      "must_include": ["定价", "套餐", "建议"],
+      "min_chars": 550,
+      "min_sections": 3,
+      "citation_required": true,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "research-smb-adoption",
+    "title": "中小企业 AI 采用现状调研",
+    "category": "调研汇报",
+    "prompt": "销售团队总被客户问「同行都在用 AI 吗」。请调研中小企业 AI 应用现状，覆盖采用率、主要场景、预算区间和常见顾虑，并给出 3 条能直接用于销售异议处理的事实与话术。",
+    "expected": {
+      "must_include": ["采用率", "场景", "顾虑", "话术"],
+      "min_chars": 550,
+      "min_sections": 3,
+      "citation_required": true,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "research-xhs-competitor",
+    "title": "小红书竞品内容调研",
+    "category": "调研汇报",
+    "prompt": "运营要给「一人公司用 AI 员工」这个选题做内容。请调研小红书上同类账号的爆款笔记类型、标题套路、内容结构和评论区高频问题，总结出 5 条可复用的选题方向。",
+    "expected": {
+      "must_include": ["选题", "标题", "评论"],
+      "min_chars": 500,
+      "min_sections": 3,
+      "citation_required": true,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "research-agent-frameworks",
+    "title": "开源智能体框架选型调研",
+    "category": "调研汇报",
+    "prompt": "技术合伙人建议不再自研工作流。请对比 Dify、Coze、n8n 三个开源或低代码平台在模型接入、知识库、权限、私有化部署和成本上的差异，给出「继续自研还是迁移」的结论。",
+    "expected": {
+      "must_include": ["私有化", "知识库", "结论"],
+      "min_chars": 600,
+      "min_sections": 3,
+      "citation_required": true,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "research-customer-churn",
+    "title": "流失客户原因调研纪要",
+    "category": "调研汇报",
+    "prompt": "上季度有 11 家客户没有续费。请根据「价格贵 4 家、效果不稳定 3 家、没人用起来 2 家、换了供应商 2 家」整理一份流失原因调研纪要，区分可挽回与不可挽回，并给出挽回动作。",
+    "expected": {
+      "must_include": ["11", "价格", "挽回", "动作"],
+      "min_chars": 500,
+      "min_sections": 3,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "research-llm-api-vendor",
+    "title": "大模型 API 供应商对比调研",
+    "category": "调研汇报",
+    "prompt": "我们要给 AI 员工选主力模型。请对比 3 家主流大模型 API 在中文能力、上下文长度、价格、限流和数据合规上的差异，给出主力加备份的组合建议。",
+    "expected": {
+      "must_include": ["上下文", "价格", "合规", "建议"],
+      "min_chars": 600,
+      "min_sections": 3,
+      "citation_required": true,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "research-sea-market",
+    "title": "东南亚出海市场调研",
+    "category": "调研汇报",
+    "prompt": "公司考虑把 AI 客服产品卖到东南亚。请调研新加坡、马来西亚、印尼三国在语言、支付、数据合规和获客渠道上的差异，判断先进入哪个市场并说明理由。",
+    "expected": {
+      "must_include": ["新加坡", "马来西亚", "印尼", "合规"],
+      "min_chars": 550,
+      "min_sections": 3,
+      "citation_required": true,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "research-wechat-scrm",
+    "title": "企业微信 SCRM 工具调研",
+    "category": "调研汇报",
+    "prompt": "客户成功团队想用企业微信做续费运营。请调研企微 SCRM 工具在自动标签、群发触达、会话存档和合规风险上的能力差异，给出选型建议和上线注意事项。",
+    "expected": {
+      "must_include": ["标签", "群发", "会话存档", "选型"],
+      "min_chars": 550,
+      "min_sections": 3,
+      "citation_required": true,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "research-pricing-willingness",
+    "title": "高级版付费意愿调研设计",
+    "category": "调研汇报",
+    "prompt": "产品要推出 299 元/月的高级版。请设计一份付费意愿调研，包含问题清单、样本要求和分析方法，并基于常见定价研究结论说明怎么判断 299 元是否站得住。",
+    "expected": {
+      "must_include": ["样本", "问题", "299"],
+      "min_chars": 500,
+      "min_sections": 3,
+      "citation_required": true,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "research-ai-content-label",
+    "title": "AI 生成内容标识合规调研",
+    "category": "调研汇报",
+    "prompt": "监管要求 AI 生成内容需要标识。请调研这对我们给客户交付的文案、报告、客服话术分别意味着什么，列出必须做的标识动作和对外沟通口径。",
+    "expected": {
+      "must_include": ["标识", "文案", "报告", "客服"],
+      "min_chars": 500,
+      "min_sections": 3,
+      "citation_required": true,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "plan-ai-cs-launch",
+    "title": "电商 AI 客服助手上线推进方案",
+    "category": "方案计划",
+    "prompt": "下个月要把面向电商团队的 AI 客服助手上线，请给出一份从内测到正式发布的推进方案，讲清楚阶段目标、谁负责什么、怎么验收，以及可能卡住的地方。",
+    "expected": {
+      "must_include": ["目标", "负责人", "验收", "风险"],
+      "min_chars": 600,
+      "min_sections": 4,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "plan-model-cost-reduction",
+    "title": "模型调用成本压降执行计划",
+    "category": "方案计划",
+    "prompt": "老板要求下季度把模型调用成本压降三成。请制定一份可落地的执行计划，覆盖现状盘点、优化手段、责任分工和复盘节奏，避免只喊口号。",
+    "expected": {
+      "must_include": ["盘点", "优化", "责任", "复盘"],
+      "min_chars": 500,
+      "min_sections": 3,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "plan-xhs-account-launch",
+    "title": "小红书账号 30 天起号计划",
+    "category": "方案计划",
+    "prompt": "公司要以「一人公司 + AI 员工」为主题开一个小红书账号，30 天内做到 1000 粉。请给出起号计划，覆盖账号定位、内容排期、发布节奏、数据复盘和人力分工。",
+    "expected": {
+      "must_include": ["定位", "排期", "复盘"],
+      "min_chars": 600,
+      "min_sections": 4,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "plan-referral-growth",
+    "title": "老带新转介绍增长方案",
+    "category": "方案计划",
+    "prompt": "下季度要把老客户转介绍占比从 8% 提到 20%。请设计一套转介绍方案，写清楚激励规则、触达时机、预算上限、衡量指标和防薅羊毛措施。",
+    "expected": {
+      "must_include": ["激励", "预算", "指标"],
+      "min_chars": 600,
+      "min_sections": 4,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "plan-content-calendar",
+    "title": "四周内容日历与生产流程",
+    "category": "方案计划",
+    "prompt": "市场只有一个人，还要兼顾公众号、小红书和视频号。请给出未来四周的内容日历与生产流程，说明每周产出多少条、谁写谁审、素材从哪来、如何复用。",
+    "expected": {
+      "must_include": ["日历", "审核", "复用"],
+      "min_chars": 550,
+      "min_sections": 4,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "plan-webinar",
+    "title": "AI 员工落地实操线上说明会方案",
+    "category": "方案计划",
+    "prompt": "下周三晚 8 点要办一场「AI 员工落地实操」线上说明会，目标 200 人报名、30 人到场咨询。请给出完整方案，覆盖预热节奏、报名页要点、直播流程、现场转化动作和会后跟进。",
+    "expected": {
+      "must_include": ["预热", "报名", "流程", "跟进"],
+      "min_chars": 600,
+      "min_sections": 4,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "plan-pricing-adjustment",
+    "title": "基础版涨价与套餐调整方案",
+    "category": "方案计划",
+    "prompt": "基础版要从 99 元涨到 129 元，同时新增 299 元高级版。请给出调价方案，覆盖老客户过渡政策、对外沟通话术、销售培训要点和流失风险预案。",
+    "expected": {
+      "must_include": ["过渡", "话术", "风险"],
+      "min_chars": 550,
+      "min_sections": 4,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "plan-knowledge-migration",
+    "title": "客户知识库迁移方案",
+    "category": "方案计划",
+    "prompt": "一家 200 人客户要把旧知识库（约 3000 篇文档）迁到我们的 AI 员工里。请给出迁移方案，覆盖盘点、清洗、分批导入、抽检验收、回滚和客户配合事项。",
+    "expected": {
+      "must_include": ["盘点", "清洗", "回滚", "验收"],
+      "min_chars": 600,
+      "min_sections": 4,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "plan-qbr",
+    "title": "重点客户季度复盘会方案",
+    "category": "方案计划",
+    "prompt": "季度末要给 5 家重点客户做 QBR。请给出统一方案，包含会前数据准备、会议议程、价值回顾结构、下季度共创环节和会后跟进清单。",
+    "expected": {
+      "must_include": ["议程", "数据", "跟进"],
+      "min_chars": 550,
+      "min_sections": 4,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "plan-ops-dashboard",
+    "title": "一人公司经营看板搭建计划",
+    "category": "方案计划",
+    "prompt": "一人公司现在靠手工汇总数据。请规划一个经营看板：先定 8 个核心指标及其口径，再安排数据源接入、更新频率、权限和上线节奏，要求两周内可用。",
+    "expected": {
+      "must_include": ["指标", "口径", "数据源", "权限"],
+      "min_chars": 550,
+      "min_sections": 4,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "plan-compliance-remediation",
+    "title": "客户数据合规 30 天整改计划",
+    "category": "方案计划",
+    "prompt": "法务提示我们的客户数据使用流程有合规风险。请制定 30 天整改计划，覆盖数据清单、权限收敛、日志留存、员工培训和验收标准。",
+    "expected": {
+      "must_include": ["清单", "权限", "日志", "验收"],
+      "min_chars": 500,
+      "min_sections": 4,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "plan-first-hire",
+    "title": "首个交付岗招聘与上手计划",
+    "category": "方案计划",
+    "prompt": "业务量上来了，要招第一个交付岗（兼客户成功）。请给出岗位画像、招聘渠道、面试题、入职 30 天上手计划和考核标准。",
+    "expected": {
+      "must_include": ["岗位", "面试", "上手", "考核"],
+      "min_chars": 550,
+      "min_sections": 4,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "data-weekly-ops",
+    "title": "本周经营数据小结",
+    "category": "数据分析",
+    "prompt": "运营同事给的本周数据：新增客户 42 家，活跃客户 310 家，流失 9 家，客单价 1280 元。请写一份经营数据小结，指出值得注意的变化和下一步动作。",
+    "expected": {
+      "must_include": ["42", "310", "9", "1280", "建议"],
+      "min_chars": 400,
+      "min_sections": 2,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "data-funnel-conversion",
+    "title": "官网转化漏斗分析",
+    "category": "数据分析",
+    "prompt": "市场部反馈：本月官网访问 1.8 万次，注册 620 人，试用 180 人，付费 36 人。请做一次转化漏斗分析，指出最该优先改善的环节并说明依据。",
+    "expected": {
+      "must_include": ["620", "180", "36", "转化", "优先"],
+      "min_chars": 400,
+      "min_sections": 2,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "data-mrr-churn",
+    "title": "月度 MRR 与流失分析",
+    "category": "数据分析",
+    "prompt": "本月数据：期初 MRR 8.6 万元，新增 1.4 万元，扩容 0.6 万元，降级 0.3 万元，流失 0.9 万元。请做 MRR 变动分析，算清净增和流失率，并指出最该先处理的环节。",
+    "expected": {
+      "must_include": ["8.6", "1.4", "0.9", "流失率"],
+      "min_chars": 400,
+      "min_sections": 2,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "data-ad-roi",
+    "title": "本季度投放 ROI 分析",
+    "category": "数据分析",
+    "prompt": "本季度投放花费 60000 元，带来 1200 条线索、180 次试用、27 单成交，客单价 1980 元。请计算线索成本、试用转化率、成交转化率和 ROI，判断是否继续投放。",
+    "expected": {
+      "must_include": ["1200", "180", "27", "ROI"],
+      "min_chars": 400,
+      "min_sections": 2,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "data-xhs-funnel",
+    "title": "小红书笔记数据复盘",
+    "category": "数据分析",
+    "prompt": "上周发了 5 篇小红书笔记：曝光 12.6 万，点赞 3400，收藏 1200，评论 260，主页访问 4100，私信 38，加微信 12。请复盘哪类内容最值得加投，并给出下一篇的调整建议。",
+    "expected": {
+      "must_include": ["12.6", "3400", "38", "建议"],
+      "min_chars": 400,
+      "min_sections": 2,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "data-support-tickets",
+    "title": "客服工单数据分析",
+    "category": "数据分析",
+    "prompt": "客服本月工单 260 张：首响中位数 25 分钟，一次解决率 68%，超时工单 41 张，客户满意度 4.3 分（5 分制），其中「不会用」类占 37%。请分析问题根因和优先改进项。",
+    "expected": {
+      "must_include": ["260", "25", "41", "37"],
+      "min_chars": 400,
+      "min_sections": 2,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "data-sql-monthly-revenue",
+    "title": "月度收入 SQL 结果解读",
+    "category": "数据分析",
+    "prompt": "同事跑了一段 SQL：SELECT date_trunc('month', paid_at) AS month, sum(amount) FROM orders WHERE status='paid' GROUP BY 1 ORDER BY 1; 结果依次是 7 月 5.2 万、8 月 6.1 万、9 月 5.8 万。请解读趋势，指出 9 月回落可能的原因和需要补充验证的数据。",
+    "expected": {
+      "must_include": ["5.2", "6.1", "5.8", "验证"],
+      "min_chars": 400,
+      "min_sections": 2,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "data-cohort-retention",
+    "title": "注册 cohort 留存分析",
+    "category": "数据分析",
+    "prompt": "按注册月份看次月留存：1 月 62%、2 月 58%、3 月 66%、4 月 61%；三月留存分别是 41%、39%、44%。请分析留存走势，判断产品改动是否有效，并给出可执行的提升动作。",
+    "expected": {
+      "must_include": ["62", "41", "留存", "动作"],
+      "min_chars": 400,
+      "min_sections": 2,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "data-price-test",
+    "title": "三档定价转化对比分析",
+    "category": "数据分析",
+    "prompt": "我们把落地页价格分别测了 99 元、199 元、299 元三档，访问量各 2000 人，付费人数分别是 60、38、21。请计算各档转化率和每千次访问收入，判断哪档最优，并说明结论的局限。",
+    "expected": {
+      "must_include": ["99", "199", "299", "转化率", "局限"],
+      "min_chars": 400,
+      "min_sections": 2,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "data-channel-attribution",
+    "title": "渠道线索质量对比",
+    "category": "数据分析",
+    "prompt": "本月线索：公众号 180 条、成交 9 单；小红书 120 条、成交 3 单；知乎 60 条、成交 6 单；转介绍 25 条、成交 8 单。请对比各渠道线索质量和获客效率，给出预算调整建议。",
+    "expected": {
+      "must_include": ["180", "120", "25", "建议"],
+      "min_chars": 400,
+      "min_sections": 2,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "data-agent-usage",
+    "title": "AI 员工使用数据分析",
+    "category": "数据分析",
+    "prompt": "平台本月数据：任务 4800 个，完成 4560 个，人工返工 520 个，平均耗时 3.5 分钟，平均评分 82 分。请分析交付质量与效率，找出最值得优化的环节。",
+    "expected": {
+      "must_include": ["4800", "4560", "520", "82"],
+      "min_chars": 400,
+      "min_sections": 2,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "data-unit-cost",
+    "title": "单任务模型成本分析",
+    "category": "数据分析",
+    "prompt": "上月模型账单 4200 元，共完成 6000 个任务，其中调研类 1200 个消耗了 55% 的 token。请分析单任务成本和成本结构，给出三条降本措施并估算效果。",
+    "expected": {
+      "must_include": ["4200", "6000", "55", "降本"],
+      "min_chars": 400,
+      "min_sections": 2,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "copy-homepage-hero",
+    "title": "官网首屏产品文案",
+    "category": "文案材料",
+    "prompt": "为我们的 AI 员工产品写一段官网首屏文案，面向中小企业老板，突出省人、省时、可控三个卖点，语气专业但不浮夸。",
+    "expected": {
+      "must_include": ["省人", "省时", "可控"],
+      "min_chars": 180,
+      "forbidden": ["绝对领先", "行业第一", "100%", "包治百病", "作为AI"]
+    }
+  },
+  {
+    "id": "copy-customer-invite",
+    "title": "老客户经营复盘说明会邀请函",
+    "category": "文案材料",
+    "prompt": "给老客户写一封定向邀请函，介绍新上线的「经营复盘」功能，邀请他们参加下周三晚上的线上说明会，并把报名方式写清楚。",
+    "expected": {
+      "must_include": ["邀请", "周三", "报名", "经营复盘"],
+      "min_chars": 250,
+      "forbidden": ["作为AI", "我不确定", "绝对领先"]
+    }
+  },
+  {
+    "id": "copy-xhs-note",
+    "title": "小红书笔记：一人公司用 AI 员工",
+    "category": "文案材料",
+    "prompt": "写一篇小红书笔记，主题是「一人公司怎么用 3 个 AI 员工顶一个 5 人团队」，面向想降本的创业者。要有抓人的标题、口语化正文、具体做法和话题标签，不要夸张承诺。",
+    "expected": {
+      "must_include": ["一人公司", "AI 员工", "标签"],
+      "min_chars": 200,
+      "forbidden": ["行业第一", "绝对领先", "100%", "躺赚", "作为AI"]
+    }
+  },
+  {
+    "id": "copy-moments-update",
+    "title": "创始人朋友圈客户案例",
+    "category": "文案材料",
+    "prompt": "以创始人身份写一条朋友圈，介绍我们帮一家 12 人电商公司用 AI 员工把客服响应从 15 分钟降到 2 分钟，并附上报名体验的方式。控制在一屏内，说人话。",
+    "expected": {
+      "must_include": ["12 人", "15 分钟", "2 分钟", "体验"],
+      "min_chars": 100,
+      "forbidden": ["绝对领先", "行业第一", "作为AI", "100%"]
+    }
+  },
+  {
+    "id": "copy-cold-email",
+    "title": "外贸客户冷启动邮件",
+    "category": "文案材料",
+    "prompt": "给一家 50 人左右的外贸公司老板写一封冷启动邮件，主题行要具体，正文说明我们能帮他把询盘回复从 2 小时缩短到 10 分钟，结尾给一个低门槛的下一步。控制在 200 字内。",
+    "expected": {
+      "must_include": ["询盘", "10 分钟", "回复"],
+      "min_chars": 120,
+      "forbidden": ["尊敬的领导", "行业第一", "100%", "作为AI"]
+    }
+  },
+  {
+    "id": "copy-case-study",
+    "title": "连锁餐饮客户案例",
+    "category": "文案材料",
+    "prompt": "写一个客户案例：某连锁餐饮品牌有 18 家门店，用我们的 AI 员工做点评回复和差评预警，3 个月内回复率从 40% 提到 95%，差评响应从 1 天缩到 2 小时。按「背景—做法—结果—客户评价」组织。",
+    "expected": {
+      "must_include": ["18", "40", "95", "背景", "结果"],
+      "min_chars": 300,
+      "forbidden": ["绝对领先", "行业第一", "作为AI", "100%"]
+    }
+  },
+  {
+    "id": "copy-price-page",
+    "title": "三档套餐定价页文案",
+    "category": "文案材料",
+    "prompt": "为三档套餐写定价页文案：基础版 129 元、专业版 299 元、旗舰版 699 元。每档写清楚适合谁、包含什么、不适合谁，语气克制，不堆形容词。",
+    "expected": {
+      "must_include": ["129", "299", "699", "适合"],
+      "min_chars": 250,
+      "forbidden": ["绝对领先", "行业第一", "100%", "作为AI"]
+    }
+  },
+  {
+    "id": "copy-release-note",
+    "title": "产品版本更新公告",
+    "category": "文案材料",
+    "prompt": "写一则产品更新公告，向客户说明三件事：新增「任务模板市场」、报告支持导出 Word、修复了长文档超时问题。要说明对客户的实际影响和升级方式，语气平实。",
+    "expected": {
+      "must_include": ["任务模板", "Word", "导出", "修复"],
+      "min_chars": 250,
+      "forbidden": ["重磅", "颠覆", "史上最强", "作为AI"]
+    }
+  },
+  {
+    "id": "copy-webinar-promo",
+    "title": "直播预告文案",
+    "category": "文案材料",
+    "prompt": "写一段直播预告，用于公众号和社群转发：主题「AI 员工落地避坑指南」，时间下周四 20:00，主讲是我们交付负责人，前 100 名报名送 SOP 模板。要有明确的时间、入口和行动号召。",
+    "expected": {
+      "must_include": ["SOP", "报名", "直播"],
+      "min_chars": 180,
+      "forbidden": ["绝对领先", "行业第一", "作为AI"]
+    }
+  },
+  {
+    "id": "copy-hiring-jd",
+    "title": "AI 交付工程师招聘 JD",
+    "category": "文案材料",
+    "prompt": "写一份「AI 交付工程师」招聘 JD，面向 1–3 年经验、懂提示词和基础 SQL 的人。要写清岗位职责、必备能力、加分项、薪资范围和团队现状，避免画大饼。",
+    "expected": {
+      "must_include": ["职责", "SQL", "薪资", "加分"],
+      "min_chars": 300,
+      "forbidden": ["狼性", "996", "作为AI"]
+    }
+  },
+  {
+    "id": "copy-anniversary-letter",
+    "title": "客户合作一周年感谢信",
+    "category": "文案材料",
+    "prompt": "给合作满一年的客户写一封感谢信，回顾这一年一起完成的三件事（上线 3 个 AI 员工、月均处理 1200 个任务、响应时效提升 60%），并说明下一年我们准备怎么做得更好。",
+    "expected": {
+      "must_include": ["1200", "60", "一年"],
+      "min_chars": 250,
+      "forbidden": ["作为AI", "我不确定", "绝对领先"]
+    }
+  },
+  {
+    "id": "copy-camp-opening",
+    "title": "AI 员工实战营开营文案",
+    "category": "文案材料",
+    "prompt": "为「AI 员工 7 天实战营」写开营文案，发在微信群里。要说明这 7 天每天做什么、需要准备什么、怎么打卡、完不成怎么办，让学员看完就知道怎么开始。",
+    "expected": {
+      "must_include": ["7 天", "打卡", "准备"],
+      "min_chars": 250,
+      "forbidden": ["作为AI", "我不确定", "包治百病"]
+    }
+  },
+  {
+    "id": "checklist-client-onboarding",
+    "title": "新客户 AI 员工交付检查清单",
+    "category": "流程清单",
+    "prompt": "整理一份新客户上线 AI 员工的交付检查清单，覆盖账号开通、模型配置、知识库导入、试运行验收和交接培训，让交付同学照着做就不会漏项。",
+    "expected": {
+      "must_include": ["账号", "模型", "知识库", "验收", "培训"],
+      "min_chars": 400,
+      "min_sections": 2,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "checklist-incident-response",
+    "title": "AI 员工事实错误应急处理流程",
+    "category": "流程清单",
+    "prompt": "AI 员工给客户的报告里出现了事实错误。请写一份应急处理流程，从发现问题、控制影响、复盘原因到改进预防，明确每一步谁来做、多久内完成，形成可执行的检查清单。",
+    "expected": {
+      "must_include": ["发现", "影响", "复盘", "负责人", "时限"],
+      "min_chars": 400,
+      "min_sections": 3,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "checklist-release",
+    "title": "后端版本上线检查单",
+    "category": "流程清单",
+    "prompt": "整理一份后端版本上线检查单，覆盖上线前（测试、备份、变更评审）、上线中（发布、健康检查、回滚预案）、上线后（监控、通知、复盘）三个阶段，每项写清负责人和完成标准。",
+    "expected": {
+      "must_include": ["备份", "回滚", "监控", "负责人"],
+      "min_chars": 450,
+      "min_sections": 3,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "checklist-content-publish",
+    "title": "内容发布前检查单",
+    "category": "流程清单",
+    "prompt": "整理一份内容发布前检查单，适用于公众号、小红书和视频号。要覆盖事实核对、合规与禁用词、标题与封面、链接与二维码、发布时间和发布后 2 小时的互动动作。",
+    "expected": {
+      "must_include": ["事实", "禁用", "封面", "链接", "互动"],
+      "min_chars": 450,
+      "min_sections": 3,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "checklist-sales-demo",
+    "title": "销售演示准备清单",
+    "category": "流程清单",
+    "prompt": "销售第一次给客户演示 AI 员工，经常现场翻车。请整理一份演示前检查单，覆盖环境与账号、演示数据、网络与投屏、讲解脚本、常见提问和演示后跟进。",
+    "expected": {
+      "must_include": ["账号", "数据", "网络", "跟进"],
+      "min_chars": 400,
+      "min_sections": 3,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "checklist-backup-drill",
+    "title": "数据备份与恢复演练清单",
+    "category": "流程清单",
+    "prompt": "写一份季度数据备份与恢复演练清单，覆盖备份范围、备份频率、存储位置、恢复步骤、验证方法和演练记录归档，明确每步的责任人和时限。",
+    "expected": {
+      "must_include": ["备份", "恢复", "验证", "时限"],
+      "min_chars": 400,
+      "min_sections": 3,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "checklist-security-review",
+    "title": "账号与数据安全自查清单",
+    "category": "流程清单",
+    "prompt": "写一份月度安全自查清单，覆盖账号权限、密钥管理、日志审计、离职回收、客户数据访问和外发文件，要求每项给出检查方法和不合格处理方式。",
+    "expected": {
+      "must_include": ["权限", "密钥", "日志", "离职"],
+      "min_chars": 400,
+      "min_sections": 3,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "checklist-customer-offboarding",
+    "title": "客户退订与数据删除流程",
+    "category": "流程清单",
+    "prompt": "客户提出退订。请写一份退订处理流程清单，覆盖挽留沟通、结算与退款、账号停用、数据导出与删除、知识库清理和回访记录，明确时限和责任人。",
+    "expected": {
+      "must_include": ["挽留", "退款", "删除", "回访"],
+      "min_chars": 450,
+      "min_sections": 3,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "checklist-agent-output-qc",
+    "title": "AI 员工产出质检清单",
+    "category": "流程清单",
+    "prompt": "交付前要对 AI 员工产出的报告和文案做质检。请整理一份质检清单，覆盖事实与数字、引用来源、口径一致性、敏感信息、格式结构和客户特定要求。",
+    "expected": {
+      "must_include": ["事实", "引用", "敏感", "格式"],
+      "min_chars": 400,
+      "min_sections": 3,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "checklist-collection",
+    "title": "回款催收流程清单",
+    "category": "流程清单",
+    "prompt": "有几个客户账期到了还没付款。请写一份回款催收流程，按到期前提醒、逾期 1 天、逾期 7 天、逾期 15 天分阶段，写清沟通方式、话术要点、升级路径和停服规则。",
+    "expected": {
+      "must_include": ["到期", "逾期", "话术", "升级"],
+      "min_chars": 450,
+      "min_sections": 3,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "checklist-campaign-launch",
+    "title": "市场活动上线检查单",
+    "category": "流程清单",
+    "prompt": "下周要做一场联合直播活动。请整理活动上线检查单，覆盖物料、报名页、渠道排期、优惠配置、客服话术、数据埋点和活动后复盘。",
+    "expected": {
+      "must_include": ["物料", "报名", "渠道", "埋点"],
+      "min_chars": 450,
+      "min_sections": 3,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  },
+  {
+    "id": "checklist-model-grayscale",
+    "title": "模型切换灰度流程",
+    "category": "流程清单",
+    "prompt": "我们要把主力模型从 A 换到 B。请写一份灰度切换流程清单，覆盖评测基线、灰度比例、指标监控、异常阈值、回滚条件和客户通知。",
+    "expected": {
+      "must_include": ["基线", "灰度", "阈值", "回滚"],
+      "min_chars": 450,
+      "min_sections": 3,
+      "forbidden": ["我不确定", "作为AI"]
+    }
+  }
+]

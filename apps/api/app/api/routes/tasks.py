@@ -1,7 +1,7 @@
 """Task Center + Agent execution + Pause/Resume/Cancel + Human intervention."""
-import asyncio
-
 import json
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import and_, or_, select, update
@@ -13,13 +13,20 @@ from app.agent_runtime import pause_execution, run_agent_on_task, resume_executi
 from app.core.logging_config import get_logger
 from app.core.permissions import Capability
 from app.core.scope import build_ctx
-from app.db.session import AsyncSessionLocal, get_db
+from app.db.session import get_db
 from app.models.agent import Agent
+from app.models.automation import AutomationDefinition
 from app.models.company import Company
 from app.models.membership import CompanyMember
+from app.models.queue_item import QueueItemStatus
 from app.models.task import (AgentExecution, Intervention, Task, TaskEvent, TaskEventType,
                              TaskPriority, TaskStatus)
 from app.models.user import User
+from app.schemas.responses import (LogsOut, TaskActionOut,
+                                   TaskDetailOut, TaskExecutionOut,
+                                   TaskInterventionAddedOut, TaskOut,
+                                   TaskStartedOut, TaskSummaryOut,
+                                   TaskTakeoverOut, TaskTemplateOut)
 from app.services.event_system import log_event
 from app.task_engine import IllegalTransition, add_task_event, transition
 
@@ -73,7 +80,7 @@ async def _task_owned(db: AsyncSession, user_id: str, task_id: str,
     return t
 
 
-@router.get("")
+@router.get("", response_model=list[TaskOut])
 async def list_tasks(company_id: str | None = None, status: str | None = None,
                      agent_id: str | None = None,
                      db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
@@ -93,7 +100,7 @@ async def list_tasks(company_id: str | None = None, status: str | None = None,
     return [{c.key: getattr(t, c.key) for c in t.__table__.columns} for t in rows]
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=TaskOut)
 async def create_task(data: TaskIn, db: AsyncSession = Depends(get_db),
                       user=Depends(get_current_user)):
     # 建任务 = 日常写操作（OPERATE）：成员可以，只读不行
@@ -123,7 +130,72 @@ async def create_task(data: TaskIn, db: AsyncSession = Depends(get_db),
     return {c2.key: getattr(t, c2.key) for c2 in t.__table__.columns}
 
 
-@router.get("/{tid}")
+# 任务模板复用现有 automation_definitions 表（不再造第二套模板表）：
+# 一条模板 = mode=TEST + status=PAUSED 的自动化定义，steps 首步 create_task。
+_TASK_TEMPLATE_KIND = "TASK_TEMPLATE"
+
+
+class SaveAsTemplateIn(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+@router.post("/{tid}/save-as-template", response_model=TaskTemplateOut)
+async def save_task_as_template(tid: str, data: SaveAsTemplateIn | None = None,
+                                db: AsyncSession = Depends(get_db),
+                                user=Depends(get_current_user)):
+    """把已完成任务沉淀为可复用模板（仅 COMPLETED）。
+
+    幂等约定：同公司同名的**任务模板**重复保存时返回已有模板（200），
+    不新建第二行；若同名的是普通自动化规则则 409，避免语义混淆。
+    模板复用 AutomationDefinition（mode=TEST / status=PAUSED），
+    因此会出现在自动化页，可被克隆或改为定时触发。
+    """
+    t = await _task_owned(db, user.id, tid, Capability.OPERATE)
+    if t.status != TaskStatus.COMPLETED:
+        raise HTTPException(
+            409, f"只有已完成任务可以存为模板，当前状态：{t.status.value}")
+
+    body = data or SaveAsTemplateIn()
+    name = ((body.name or t.title or "").strip() or "任务模板")[:200]
+    desc = body.description if body.description is not None else t.description
+
+    same_name = (await db.execute(select(AutomationDefinition).where(
+        AutomationDefinition.company_id == t.company_id,
+        AutomationDefinition.name == name))).scalars().all()
+    for d in same_name:
+        if (d.trigger_config or {}).get("kind") == _TASK_TEMPLATE_KIND:
+            return {"id": d.id, "name": d.name}
+    if same_name:
+        raise HTTPException(409, f"同名自动化规则已存在：{name}")
+
+    params: dict = {"title": t.title}
+    if desc:
+        params["description"] = desc
+    if t.priority is not None:
+        params["priority"] = getattr(t.priority, "value", str(t.priority))
+    if t.project_id:
+        params["project_id"] = t.project_id
+    if t.assigned_agent_id:
+        params["assigned_agent_id"] = t.assigned_agent_id
+
+    d = AutomationDefinition(
+        id=str(uuid.uuid4()), company_id=t.company_id, name=name,
+        trigger_type="MANUAL",
+        trigger_config={"kind": _TASK_TEMPLATE_KIND,
+                        "source_task_id": t.id,
+                        "source_task_title": t.title},
+        steps=[{"seq": 1, "type": "create_task", "params": params}],
+        mode="TEST", status="PAUSED", max_runs_per_day=10,
+        attachments=[], created_by=user.id)
+    db.add(d)
+    await log_event(db, "task.saved_as_template", "task", t.id, "user", user.id,
+                    {"template_id": d.id, "name": name})
+    await db.commit()
+    return {"id": d.id, "name": d.name}
+
+
+@router.get("/{tid}", response_model=TaskDetailOut)
 async def get_task(tid: str, db: AsyncSession = Depends(get_db),
                    user=Depends(get_current_user)):
     t = await _task_owned(db, user.id, tid)
@@ -137,7 +209,6 @@ async def get_task(tid: str, db: AsyncSession = Depends(get_db),
          "output": e.output, "error": e.error,
          "tools_used": (e.metadata_json or {}).get("tools_used") or []}
         for e in execs.scalars()]
-    events = []
     from app.models.task import TaskEvent as TE
     ev_rows = await db.execute(select(TE).where(TE.task_id == tid).order_by(TE.created_at))
     d["events"] = [
@@ -151,7 +222,7 @@ async def get_task(tid: str, db: AsyncSession = Depends(get_db),
     return d
 
 
-@router.get("/{tid}/summary")
+@router.get("/{tid}/summary", response_model=TaskSummaryOut)
 async def get_task_summary(tid: str, db: AsyncSession = Depends(get_db),
                            user=Depends(get_current_user)):
     """轮询专用轻量视图：去掉 result 全文，execution 输出截断到 2KB。
@@ -195,9 +266,26 @@ async def get_task_summary(tid: str, db: AsyncSession = Depends(get_db),
     return d
 
 
-def _run_in_background(task_id: str, agent_id: str):
-    """Run agent in a worker thread with a fresh engine (asyncpg is loop-bound)."""
+# 任务执行期间队列条目的租约时长（秒）。每 30s 续租一次，
+# 因此租约 120s 足够覆盖"续租线程短暂卡住"，又能在崩溃后 2 分钟内被回收。
+TASK_JOB_LEASE_S = 120
+
+
+def _task_job_payload(task_id: str, agent_id: str) -> dict:
+    return {"task_id": task_id, "agent_id": agent_id}
+
+
+def _run_in_background(task_id: str, agent_id: str,
+                       queue_item_id: str | None = None):
+    """Run agent in a worker thread with a fresh engine (asyncpg is loop-bound).
+
+    queue_item_id 非空时，执行前先 CAS 领取队列条目：同一条目被重复投递
+    （启动自愈 + 手动重试）时只有一个 worker 能执行，不会重复计费。
+    """
+    import asyncio
+
     import app.background_jobs as background_jobs
+    from app.services import job_queue
 
     async def _on_timeout(session, timeout_s: float):
         # 超时先写事件告知用户（事件先落库，避免被回滚吞掉），再标 FAILED
@@ -215,9 +303,53 @@ def _run_in_background(task_id: str, agent_id: str):
             .execution_options(synchronize_session=False))
         if res.rowcount != 1:
             logger.info("任务超时但状态已被并发修改（未标 FAILED）task=%s", task_id)
+        else:
+            # 同事务补一条失败通知：超时也是"失败"，用户不该只在任务列表里发现
+            from app.services.notification_service import notify_task_terminal
+            t = await session.get(Task, task_id)
+            if t is not None:
+                await notify_task_terminal(
+                    session, t, "FAILED", error=f"执行超时（{timeout_s}s）")
         await session.commit()
 
+    async def _mark_queue(session, fn, *args):
+        """队列状态更新是"记账"，失败只记日志，不能掩盖任务本身的执行结果。"""
+        if not queue_item_id:
+            return
+        try:
+            await fn(session, queue_item_id, *args)
+        except Exception as q_err:  # noqa: BLE001
+            logger.error("队列条目状态更新失败 task=%s item=%s: %s",
+                         task_id, queue_item_id, q_err, exc_info=True)
+
     async def _job(session):
+        keeper = None
+        if queue_item_id:
+            # 领取失败说明这一轮已由别的 worker 开始执行：直接退出，
+            # 保证"同一条任务只跑一次"（重复执行=重复计费）。
+            claimed = await job_queue.claim_item(
+                session, queue_item_id, job_queue.WORKER_ID,
+                lease_s=TASK_JOB_LEASE_S)
+            if claimed is None:
+                logger.info("队列条目不可领取，跳过重复执行 task=%s item=%s",
+                            task_id, queue_item_id)
+                return
+            keeper = job_queue.LeaseKeeper(
+                queue_item_id, job_queue.WORKER_ID, lease_s=TASK_JOB_LEASE_S)
+            keeper.start()
+        try:
+            await _execute_task(session)
+            await _mark_queue(session, job_queue.complete)
+        except asyncio.CancelledError:
+            # 超时看门狗会取消本协程：条目必须离开 RUNNING，
+            # 否则要等租约过期才会被启动自愈回收。
+            await _mark_queue(session, job_queue.fail, "执行超时或被中断")
+            raise
+        finally:
+            if keeper is not None:
+                keeper.stop()
+
+    async def _execute_task(session):
         agent = await session.get(Agent, agent_id)
         task = await session.get(Task, task_id)
         from app.models.task import TaskStatus as TS
@@ -242,8 +374,16 @@ def _run_in_background(task_id: str, agent_id: str):
                          task_id, agent_id, exc, exc_info=True)
             await session.rollback()
             t2 = await session.get(Task, task_id)
+            failed_now = False
             if t2 and t2.status == TS.RUNNING:
                 t2.status = TS.FAILED
+                failed_now = True
+            if failed_now:
+                # 与 log_event 同事务：任务真的转成 FAILED 时才通知创建人
+                from app.services.notification_service import notify_task_terminal
+                await notify_task_terminal(
+                    session, t2, "FAILED",
+                    error=f"{type(exc).__name__}: {exc}")
             from app.models.agent import AgentStatus
             a2 = await session.get(Agent, agent_id)
             if a2 and a2.status == AgentStatus.ERROR:
@@ -261,21 +401,44 @@ def _run_in_background(task_id: str, agent_id: str):
                 await session.rollback()
                 logger.error("任务失败状态落库失败 task=%s: %s",
                              task_id, mark_err, exc_info=True)
+            await _mark_queue(session, job_queue.fail,
+                              f"{type(exc).__name__}: {exc}")
 
     # 返回投递结果：QUEUE_FULL 时调用方（task_runner）要把任务退回 TODO，
     # 否则会留下"RUNNING 但没有 worker 在跑"的僵尸行。
     return background_jobs.submit_async(_job, on_timeout=_on_timeout)
 
 
-async def _dispatch_or_revert(db: AsyncSession, task_id: str, agent_id: str) -> None:
+async def _dispatch_or_revert(db: AsyncSession, task_id: str, agent_id: str,
+                              company_id: str | None = None) -> None:
     """投递后台执行；队列满则把刚置的 RUNNING 退回 TODO 并回 503。
 
     原先用 `background.add_task(...)` 丢弃了返回值：worker 池满时任务已经是
     RUNNING 却没有任何 worker，前端只能一直转圈，用户也取消不掉预期结果。
+
+    投递前先把执行意图写进持久队列：进程重启后，没跑完的任务由启动自愈
+    重新投递，而不是永远停在 RUNNING。
     """
     import app.background_jobs as background_jobs
+    from app.services import job_queue
 
-    if _run_in_background(task_id, agent_id) is background_jobs.QUEUE_FULL:
+    item, created = await job_queue.enqueue_detailed(
+        db, kind=job_queue.TASK_EXEC_KIND, company_id=company_id,
+        dedupe_key=job_queue.task_dedupe_key(task_id),
+        payload=_task_job_payload(task_id, agent_id),
+        # 执行失败不自动重跑：同一任务重跑会重复消耗模型额度，
+        # 失败后由用户显式点「重试」决定（见 POST /tasks/{tid}/retry）。
+        max_attempts=1)
+    # 必须先提交：后台线程用独立 engine，读不到未提交的队列行
+    await db.commit()
+    if not created and item.status == QueueItemStatus.RUNNING:
+        # 已有 worker 正在跑同一条目：幂等返回，不再启动第二次执行
+        logger.info("任务已在执行中，跳过重复投递 task=%s item=%s",
+                    task_id, item.id)
+        return
+
+    submitted = _run_in_background(task_id, agent_id, queue_item_id=item.id)
+    if submitted is background_jobs.QUEUE_FULL:
         # RUNNING→TODO 不在状态机白名单里（正常流程没有"回退"语义），
         # 这是投递失败的补偿，用条件 UPDATE 而不是 transition。
         await db.execute(
@@ -283,11 +446,15 @@ async def _dispatch_or_revert(db: AsyncSession, task_id: str, agent_id: str) -> 
             .where(Task.id == task_id, Task.status == TaskStatus.RUNNING)
             .values(status=TaskStatus.TODO)
             .execution_options(synchronize_session=False))
+        # 排队条目也要撤掉：否则同键去重会让下次启动误判"已有活跃条目"，
+        # 而 auto_start 的调度循环会重新入队（下一拍再来）。
+        await job_queue.cancel(db, item.id)
         await db.commit()
         raise HTTPException(503, "后台执行队列已满，请稍后重试")
+    await db.commit()
 
 
-@router.post("/{tid}/start")
+@router.post("/{tid}/start", response_model=TaskStartedOut)
 async def start_task(tid: str,
                      db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     t = await _task_owned(db, user.id, tid, Capability.OPERATE)
@@ -302,11 +469,11 @@ async def start_task(tid: str,
         await transition(db, t, TaskStatus.RUNNING, "user", user.id)
     except IllegalTransition as e:
         raise HTTPException(409, str(e))
-    await _dispatch_or_revert(db, tid, t.assigned_agent_id)
+    await _dispatch_or_revert(db, tid, t.assigned_agent_id, t.company_id)
     return {"detail": "started", "task_id": tid}
 
 
-@router.post("/{tid}/pause")
+@router.post("/{tid}/pause", response_model=TaskActionOut)
 async def pause_task(tid: str, db: AsyncSession = Depends(get_db),
                      user=Depends(get_current_user)):
     t = await _task_owned(db, user.id, tid, Capability.OPERATE)
@@ -323,7 +490,7 @@ async def pause_task(tid: str, db: AsyncSession = Depends(get_db),
     return {"detail": "paused"}
 
 
-@router.post("/{tid}/resume")
+@router.post("/{tid}/resume", response_model=TaskActionOut)
 async def resume_task(tid: str, db: AsyncSession = Depends(get_db),
                       user=Depends(get_current_user)):
     t = await _task_owned(db, user.id, tid, Capability.OPERATE)
@@ -349,7 +516,8 @@ class InterventionIn(BaseModel):
     new_agent_id: str | None = None
 
 
-@router.post("/{tid}/takeover", status_code=201)
+@router.post("/{tid}/takeover", status_code=201,
+            response_model=TaskTakeoverOut)
 async def takeover_task(tid: str, data: InterventionIn,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
@@ -389,7 +557,7 @@ async def takeover_task(tid: str, data: InterventionIn,
             "resume_via": f"POST /tasks/{tid}/takeover/resolve"}
 
 
-@router.post("/{tid}/takeover/resolve")
+@router.post("/{tid}/takeover/resolve", response_model=TaskActionOut)
 async def resolve_takeover(tid: str, data: InterventionIn,
                           db: AsyncSession = Depends(get_db),
                           user=Depends(get_current_user)):
@@ -421,7 +589,7 @@ async def resolve_takeover(tid: str, data: InterventionIn,
     return {"detail": "接管已解除，任务从检查点恢复（含老板指令）"}
 
 
-@router.post("/{tid}/retry")
+@router.post("/{tid}/retry", response_model=TaskStartedOut)
 async def retry_task(tid: str,
                      db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     """失败任务重试：FAILED→PLANNING→RUNNING，重新提交后台执行。
@@ -441,11 +609,11 @@ async def retry_task(tid: str,
         await transition(db, t, TaskStatus.RUNNING, "user", user.id)
     except IllegalTransition as e:
         raise HTTPException(409, str(e))
-    await _dispatch_or_revert(db, tid, t.assigned_agent_id)
+    await _dispatch_or_revert(db, tid, t.assigned_agent_id, t.company_id)
     return {"detail": "retrying", "task_id": tid}
 
 
-@router.post("/{tid}/cancel")
+@router.post("/{tid}/cancel", response_model=TaskActionOut)
 async def cancel_task(tid: str, reason: str | None = None,
                       db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     t = await _task_owned(db, user.id, tid, Capability.OPERATE)
@@ -461,6 +629,11 @@ async def cancel_task(tid: str, reason: str | None = None,
     for e in q.scalars():
         e.status = "cancelled"
         e.completed_at = utcnow_iso()
+    # 还没开始的排队条目一并取消；已在跑的不动（执行中的收尾沿用原行为）
+    from app.services import job_queue
+    await job_queue.cancel_active(
+        db, kind=job_queue.TASK_EXEC_KIND,
+        dedupe_key=job_queue.task_dedupe_key(tid), company_id=t.company_id)
     await db.commit()
     return {"detail": "cancelled"}
 
@@ -469,7 +642,8 @@ async def cancel_task(tid: str, reason: str | None = None,
 # class InterventionIn moved above its first use (takeover endpoints)
 
 
-@router.post("/{tid}/interventions", status_code=201)
+@router.post("/{tid}/interventions", status_code=201,
+             response_model=TaskInterventionAddedOut)
 async def add_intervention(tid: str, data: InterventionIn,
                            db: AsyncSession = Depends(get_db),
                            user=Depends(get_current_user)):
@@ -501,7 +675,7 @@ async def add_intervention(tid: str, data: InterventionIn,
     return {"id": iv.id, "status": iv.status, "applied": applied}
 
 
-@router.get("/{tid}/executions")
+@router.get("/{tid}/executions", response_model=list[TaskExecutionOut])
 async def list_executions(tid: str, db: AsyncSession = Depends(get_db),
                           user=Depends(get_current_user)):
     await _task_owned(db, user.id, tid)
@@ -618,11 +792,11 @@ async def task_trace(tid: str, db: AsyncSession = Depends(get_db),
             "nodes": nodes, "total": total}
 
 
-@router.get("/{tid}/logs")
+@router.get("/{tid}/logs", response_model=LogsOut)
 async def task_logs(tid: str, db: AsyncSession = Depends(get_db),
                     user=Depends(get_current_user)):
     """任务日志：事件流 + 人工介入 + 执行记录摘要，按时间倒序。"""
-    t = await _task_owned(db, user.id, tid)
+    await _task_owned(db, user.id, tid)
     from app.models.task import Intervention as IV
     from app.models.task import TaskEvent as TE
 
@@ -673,7 +847,7 @@ class TaskPatchIn(BaseModel):
     description: str | None = None
 
 
-@router.patch("/{tid}")
+@router.patch("/{tid}", response_model=TaskOut)
 async def patch_task(tid: str, data: TaskPatchIn,
                      db: AsyncSession = Depends(get_db),
                      user=Depends(get_current_user)):

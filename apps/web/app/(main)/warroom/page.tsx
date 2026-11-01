@@ -1,10 +1,10 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createPortal } from "react-dom";
 import { api, describeError } from "@/lib/api";
-import type { Company } from "@/lib/types";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 
 /* 作战室总览：跨项目全部作战会话 + 右上角直接下达作战任务（自动建项目） */
 
@@ -29,9 +29,8 @@ const STATUS_ZH: Record<string, { label: string; cls: string }> = {
 export default function WarRoomHubPage() {
   const router = useRouter();
   const [mounted, setMounted] = useState(false);
-  const [cid, setCid] = useState("");
-  const [sessions, setSessions] = useState<Sess[]>([]);
-  const [agents, setAgents] = useState<{ id: string; name: string; role?: string | null }[]>([]);
+  // 激活公司：可订阅 —— 顶栏切公司后本页自动换数据，不再一次性取 cs[0]
+  const cid = useActiveCompanyId();
   const [msg, setMsg] = useState("");
   // 直接下达
   const [showKickoff, setShowKickoff] = useState(false);
@@ -49,25 +48,33 @@ export default function WarRoomHubPage() {
 
   useEffect(() => { setMounted(true); }, []);
 
-  const load = useCallback(async () => {
-    const cs = await api.get<Company[]>("/companies");
-    if (!cs.length) return;
-    setCid(cs[0].id);
-    try {
-      const d = await api.get(`/war-room/sessions?company_id=${cs[0].id}`);
-      setSessions(d.sessions || []);
-    } catch {}
-    setAgents(await api.get(`/agents?company_id=${cs[0].id}`));
-  }, []);
+  // 会话与员工列表：key 带 cid，切公司/回窗自动重取；写操作后 refresh
+  const { data: sessionData, refresh: refreshSessions } = useResource<Sess[]>(
+    cid ? `warroom:sessions:${cid}` : null,
+    async () => {
+      const d = await api.get<{ sessions?: Sess[] }>(`/war-room/sessions?company_id=${cid}`);
+      return d.sessions || [];
+    },
+  );
+  const sessions = useMemo<Sess[]>(() => sessionData ?? [], [sessionData]);
+  const { data: agentData, refresh: refreshAgents } = useResource<
+    { id: string; name: string; role?: string | null }[]
+  >(
+    cid ? `warroom:agents:${cid}` : null,
+    () => api.get<{ id: string; name: string; role?: string | null }[]>(`/agents?company_id=${cid}`),
+  );
+  const agents = useMemo(() => agentData ?? [], [agentData]);
 
-  useEffect(() => { load(); }, [load]);
+  // 作战状态会自己往前走：有在跑的会话时保持原 6s 轮询（会话 + 员工）
   useEffect(() => {
     if (!sessions.some((s) => ["analyzing", "announcing", "executing"].includes(s.status))) return;
-    const t = setInterval(load, 6000);
+    const tick = () => { refreshSessions(); refreshAgents(); };
+    const t = setInterval(tick, 6000);
     return () => clearInterval(t);
-  }, [sessions, load]);
+  }, [sessions, refreshSessions, refreshAgents]);
 
   async function lifecycle(sid: string, action: "pause" | "resume" | "stop" | "delete") {
+    if (!cid) return;
     try {
       // 走统一 api 层：会话过期/无权限的原因会被规范化成中文，
       // 而不是把后端原始 detail 直接抛到界面上。
@@ -75,12 +82,12 @@ export default function WarRoomHubPage() {
       setMsg(action === "delete" ? "🗑 已彻底删除" :
              action === "pause" ? "⏸ 已暂停（现场保留）" :
              action === "resume" ? "▶ 已恢复" : "⏹ 已停止");
-      await load();
+      refreshSessions();
     } catch (e) { setMsg(`❌ ${describeError(e, "操作失败")}`); }
   }
 
   async function batchDelete() {
-    if (!batchSel.size) return;
+    if (!batchSel.size || !cid) return;
     setDeleting(true);
     try {
       const d = await api.post<{ deleted_count: number; failed?: string[] }>(
@@ -88,7 +95,7 @@ export default function WarRoomHubPage() {
         { session_ids: Array.from(batchSel) });
       setMsg(`🗑 已彻底删除 ${d.deleted_count} 场作战${d.failed?.length ? `，失败 ${d.failed.length}` : ""}`);
       setShowBatchDelete(false); setBatchSel(new Set());
-      await load();
+      refreshSessions();
     } catch (e) { setMsg(`❌ ${describeError(e, "批量删除失败")}`); }
     setDeleting(false);
   }
@@ -100,7 +107,7 @@ export default function WarRoomHubPage() {
   }
 
   async function kickoff() {
-    if (!goal.trim() || !leaderId) return;
+    if (!goal.trim() || !leaderId || !cid) return;
     setBusy(true);
     try {
       const d = await api.post<{ project_id?: string }>("/war-room/kickoff", {
@@ -112,7 +119,7 @@ export default function WarRoomHubPage() {
       setMsg("🧠 目标已下达，新项目已自动创建，负责人正在分析拆解…");
       // 直接跳进该作战的详情页看实时进展
       if (d.project_id) router.push(`/projects/${d.project_id}/warroom`);
-      else await load();
+      else refreshSessions();
     } catch (e) { setMsg(`❌ ${describeError(e, "下达目标失败")}`); }
     setBusy(false);
   }

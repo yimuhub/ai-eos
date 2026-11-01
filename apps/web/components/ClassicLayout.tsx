@@ -10,9 +10,10 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { clearToken } from "@/lib/api";
 import { notify } from "@/components/Toast";
-import { NAV_GROUPS, isNavActive } from "@/lib/nav";
-import { openCommandPalette, pushRecentPage } from "@/components/CommandPalette";
+import { ALL_PAGES_ENTRY, SIDEBAR_GROUPS, isNavActive } from "@/lib/nav";
+import { openAllPages, openCommandPalette, pushRecentPage } from "@/lib/palette";
 import { openModeChooser } from "@/components/ModeChooser";
+import NotificationBell from "@/components/NotificationBell";
 import { registerAppNavigator } from "@/lib/apps";
 
 const COLLAPSED_KEY = "aieos_nav_collapsed";
@@ -48,7 +49,7 @@ export default function ClassicLayout({ children }: { children: React.ReactNode 
 
   const toggleGroup = useCallback((title: string) => {
     setCollapsed((prev) => {
-      const base = prev ?? Object.fromEntries(NAV_GROUPS.map((g) => [g.title, !groupHasActive(pathname, g.items)]));
+      const base = prev ?? Object.fromEntries(SIDEBAR_GROUPS.map((g) => [g.title, !groupHasActive(pathname, g.items)]));
       const next = { ...base, [title]: !base[title] };
       try {
         localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
@@ -60,7 +61,7 @@ export default function ClassicLayout({ children }: { children: React.ReactNode 
   }, [pathname]);
 
   const setAll = useCallback((value: boolean) => {
-    const next = Object.fromEntries(NAV_GROUPS.map((g) => [g.title, value]));
+    const next = Object.fromEntries(SIDEBAR_GROUPS.map((g) => [g.title, value]));
     setCollapsed(next);
     try {
       localStorage.setItem(COLLAPSED_KEY, JSON.stringify(next));
@@ -78,7 +79,7 @@ export default function ClassicLayout({ children }: { children: React.ReactNode 
     router.push("/login");
   }
 
-  const allCollapsed = collapsed !== null && NAV_GROUPS.every((g) => collapsed[g.title]);
+  const allCollapsed = collapsed !== null && SIDEBAR_GROUPS.every((g) => collapsed[g.title]);
 
   return (
     <div className="flex h-full text-gray-100">
@@ -97,6 +98,11 @@ export default function ClassicLayout({ children }: { children: React.ReactNode 
               <h1 className="text-base font-bold tracking-wide">AI-EOS</h1>
               <p className="text-[10px] mt-0.5 truncate" style={{ color: "var(--muted)" }}>人工智能企业操作系统</p>
             </div>
+            {/* 经典外壳没有独立顶栏：品牌区就是固定的"页头"，铃铛放这里最省侵入。
+                /workspace 的会话头自带铃铛，这里跳过，避免同一页面两份轮询。 */}
+            {pathname !== "/workspace" && (
+              <NotificationBell align="left" className="ml-auto" />
+            )}
           </div>
         </div>
 
@@ -128,7 +134,7 @@ export default function ClassicLayout({ children }: { children: React.ReactNode 
         </div>
 
         <nav className="flex-1 px-3 pb-3 space-y-3.5 overflow-y-auto ws-scroll">
-          {NAV_GROUPS.map((group) => {
+          {SIDEBAR_GROUPS.map((group) => {
             const active = groupHasActive(pathname, group.items);
             const isCollapsed = (collapsed === null ? !active : !!collapsed[group.title]) && !active;
             return (
@@ -178,6 +184,20 @@ export default function ClassicLayout({ children }: { children: React.ReactNode 
               </div>
             );
           })}
+
+          {/* 隐藏页面仍然可达：打开命令面板的「全部页面」，按分组浏览或直接搜索 */}
+          <button
+            type="button"
+            onClick={openAllPages}
+            title={ALL_PAGES_ENTRY.desc}
+            aria-label={`${ALL_PAGES_ENTRY.label}：${ALL_PAGES_ENTRY.desc}`}
+            className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm transition-colors duration-150 hover:text-gray-200 hover:bg-white/[0.04]"
+            style={{ color: "var(--muted)", border: "1px dashed var(--border)" }}
+          >
+            <span className="text-sm shrink-0 opacity-70" aria-hidden>{ALL_PAGES_ENTRY.icon}</span>
+            <span className="truncate">{ALL_PAGES_ENTRY.label}</span>
+            <span className="ml-auto text-[9px] px-1 py-0.5 rounded" style={{ border: "1px solid var(--border)" }}>⌘K</span>
+          </button>
         </nav>
 
         <div className="px-3 pb-3 pt-2 space-y-2" style={{ borderTop: "1px solid var(--border)" }}>

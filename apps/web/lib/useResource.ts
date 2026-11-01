@@ -80,6 +80,9 @@ interface CacheEntry {
 const cache = new Map<string, CacheEntry>();
 const inflight = new Map<string, Promise<unknown>>();
 const listeners = new Map<string, Set<() => void>>();
+// 每个 key 的请求代号：强制刷新会发出新请求，旧请求晚到时必须知道
+// "自己已经过时"，否则会把新结果覆盖回旧数据。
+const attempts = new Map<string, number>();
 
 function notify(key: string) {
   listeners.get(key)?.forEach((fn) => fn());
@@ -108,24 +111,46 @@ export function setCached<T>(key: string, data: T) {
   notify(key);
 }
 
-function load<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
+function isLatestAttempt(key: string, attempt: number) {
+  return attempts.get(key) === attempt;
+}
+
+/**
+ * 返回请求本身与它的代号。强制刷新（force）不复用旧的在途请求：
+ * 否则"挂载时的 GET 还没回来、紧接着的写操作 refresh()"会并进那次旧请求，
+ * 页面拿到的仍是写之前的快照——这就是强制刷新失效的根因。
+ */
+function load<T>(
+  key: string,
+  fetcher: () => Promise<T>,
+  force = false,
+): { promise: Promise<T>; attempt: number } {
   const existing = inflight.get(key);
-  // 并发去重：同一 key 的多个组件同时挂载时只发一次请求
-  if (existing) return existing as Promise<T>;
+  // 并发去重：同一 key 的多个组件同时挂载时只发一次请求；
+  // 强制刷新则必须另起一次，并顶掉旧的在途条目。
+  if (existing && !force) {
+    return { promise: existing as Promise<T>, attempt: attempts.get(key) ?? 0 };
+  }
+
+  const attempt = (attempts.get(key) ?? 0) + 1;
+  attempts.set(key, attempt);
 
   const p = fetcher()
     .then((data) => {
-      cache.set(key, { data, at: Date.now() });
-      inflight.delete(key);
-      notify(key);
+      // 旧请求晚到：不能写缓存（会覆盖新结果），也不能删 inflight（那是新请求的）
+      if (isLatestAttempt(key, attempt)) {
+        cache.set(key, { data, at: Date.now() });
+        inflight.delete(key);
+        notify(key);
+      }
       return data;
     })
     .catch((err) => {
-      inflight.delete(key);
+      if (isLatestAttempt(key, attempt)) inflight.delete(key);
       throw err;
     });
   inflight.set(key, p);
-  return p;
+  return { promise: p, attempt };
 }
 
 export interface ResourceOptions {
@@ -174,16 +199,23 @@ export function useResource<T>(
         return;
       }
       setLoading(true);
+      const { promise, attempt } = load(key, () => fetcherRef.current(), force);
       try {
-        const next = await load(key, () => fetcherRef.current());
+        const next = await promise;
         if (!aliveRef.current || gen !== genRef.current) return;
+        // 期间若已有更新请求发出（如写操作后的 refresh），本次结果已过时，
+        // 不能再 setData——否则旧快照会在新数据之后渲染出来。
+        if (!isLatestAttempt(key, attempt)) return;
         setData(next);
         setError(null);
       } catch (e) {
         if (!aliveRef.current || gen !== genRef.current) return;
+        if (!isLatestAttempt(key, attempt)) return;
         setError(e instanceof Error ? e.message : "加载失败");
       } finally {
-        if (aliveRef.current && gen === genRef.current) setLoading(false);
+        if (aliveRef.current && gen === genRef.current && isLatestAttempt(key, attempt)) {
+          setLoading(false);
+        }
       }
     },
     [key],
@@ -192,6 +224,9 @@ export function useResource<T>(
   useEffect(() => {
     const gen = ++genRef.current;
     aliveRef.current = true;
+    // 错误是 key 作用域的状态：切 key（换公司 / 换视图）后旧 key 的失败原因
+    // 与当前内容无关，先清掉，避免新 key 还没回来就显示上一屏的错误。
+    setError(null);
     if (!key) {
       setData(null);
       setLoading(false);

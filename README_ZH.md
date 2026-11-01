@@ -4,7 +4,7 @@
 
 **AI 企业操作系统 —— 创建一家 AI 公司，雇佣数字员工，把工作交代下去**
 
-[![阶段](https://img.shields.io/badge/version-v5.14.0-blue.svg?style=flat-square)](#-最新动态v5140)
+[![阶段](https://img.shields.io/badge/version-v5.15.0-blue.svg?style=flat-square)](#-最新动态v5150)
 [![许可证: BSL 1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12+-green.svg?style=flat-square)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688.svg?style=flat-square)](https://fastapi.tiangolo.com)
@@ -69,7 +69,7 @@ AI 聊天机器人只会回答问题——活儿最后还是落在你自己桌�
 - Capability × 角色矩阵单一事实源，路由级归属校验。*说明：*矩阵定义了 OWNER/ADMIN/MEMBER/VIEWER，但**多成员协作尚未开放**——`resolve_role` 目前只对归属者返回 OWNER，所以今天的隔离粒度是「按用户」，不是共享组织的多租户。
 
 ### 8. 🎭 给人用的上手体验
-- 三步引导向导（约 1 分钟）、**免 Key 演示模式**（先体验再配模型）、中文可操作报错、带拼音搜索的 ⌘K 命令面板。
+- 四步引导向导（建公司 → 选服务商 → 填 Key → 绑定员工，约 1 分钟）、**免 Key 演示模式**（先体验再配模型）、中文可操作报错、带拼音搜索的 ⌘K 命令面板。向导可续装：填写内容存在 `sessionStorage`，模型已保存但连通测试失败时，刷新或重进会回到第 4 步继续修复。
 - **所有功能都在同一张屏上**：`/workspace` 是唯一外壳，侧边栏 / ⌘K / 页面内跳转都以**右栏标签**打开功能页，
   对话和左栏原地不动；直接访问旧地址会自动回到工作台（标签可关闭、刷新可还原，窄屏下整屏展示）。
 
@@ -110,7 +110,7 @@ flowchart TD
     Engines --> Storage
 ```
 
-**规模（v5.14.0 源码实测）**：后端 31,893 行 / 168 文件 / 365 条路径共 420 个操作 / 104 张表 / 32 个 Alembic 迁移；前端 24,938 行 / 47 个页面路由；后端测试 **324 通过**（含 e2e 38 项）。
+**规模（v5.15.0 源码实测）**：后端 42,836 行 / 203 文件 / 408 条路径共 471 个操作 / 100 张表 / 39 个 Alembic 版本文件（历史 34 + 基线 0001–0005）；前端 39,463 行 / 51 个页面路由；后端测试 **781 项**（含 e2e 38 项）。
 
 > 两条如实说明，因为"能跑"和"验证过"不是一回事：
 > - **`alembic upgrade head` 只支持 PostgreSQL。** 历史迁移 `23e9b97bb927` 在 SQLite 上会抛
@@ -194,7 +194,20 @@ cd apps/web && npm run test          # 前端 vitest
 
 ---
 
-## 📦 最新动态：v5.14.0
+## 📦 最新动态：v5.15.0
+
+*从审查到九分：契约、交付、多端与安全收口 — 2026-11-01。完整记录见 [`CHANGELOG.md`](CHANGELOG.md)。*
+
+- 🛡 **接口契约稳定。** 所有错误统一为 `{detail, code, message, request_id}`，`/api/v1` 与原路径等价；核心业务路由（员工/任务/项目/交付/评审/调度/技能/学习/绩效/反思）的 2xx 操作 **90%** 声明了 `response_model`（113 个模型类），棘轮测试防止回退；全库 113/471。
+- 🧾 **交付闭环。** 交付物关联任务、验收/退回（幂等）、评论；任务收件箱四桶（进行中/待验收/完成/失败），「提交 → 验收」成为真实流程。
+- 📱 **多端可用。** `/m` PWA 审批、Web Push（订阅表 + VAPID + 404/410 清理）、跨设备已读同步（`thread_reads`，只增不减）。
+- 🏭 **一键建公司。** SaaS 行业包（5 部门 / 13 角色 / 3 交付物模板 / 10 任务模板）整包脚手架；本地混合检索（CJK bigram + 同义词 + BM25）驱动 ⌘K。
+- 💳 **商业化底座。** 14 天试用与套餐、可打印 HTML 账单、Fernet 加密 BYOK 密钥库、Ed25519 License + 全局只读闸门。
+- 🧪 **质量。** 后端 **781 项**、行覆盖 **69.8%**（此前的 47.9% 是测量错误——coverage 没追踪 greenlet）、Lighthouse 首屏门禁、60 条评测集、依赖/密钥扫描与租户矩阵（发布前手动流水线）。
+- 🚀 **运维。** Dockerfile + compose、带 sha256 校验演练的备份/恢复，以及「云端 + 本地」双端备份方案（[`docs/备份与恢复.md`](docs/备份与恢复.md)）。
+- ⚙️ **CI 策略调整。** 密集开发期不再随 push 自动跑 CI / 安全扫描 / 客户端打包（节省 Actions 额度），发布前在 Actions 页面手动触发；更新记录仍由提交、标签、CHANGELOG 与 Release 承担。
+
+### 上一轮：v5.14.0
 
 *两套界面、同一个系统：经典整页导航与极客三栏工作台，首次进入自己选 — 2026-10-30。完整记录见 [`CHANGELOG.md`](CHANGELOG.md)。*
 

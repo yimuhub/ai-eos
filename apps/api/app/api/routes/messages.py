@@ -10,7 +10,9 @@ from app.core.scope import agent_read_scope, build_ctx
 from app.db.session import get_db
 from app.models.agent import Agent
 from app.models.message import Conversation, Message, MessageType
+from app.models.project import Project
 from app.models.task import Task, TaskPriority, TaskStatus
+from app.schemas.responses import ConversationDetailOut, ConversationOut
 from app.services.event_system import log_event
 
 router = APIRouter(tags=["communication"])
@@ -21,6 +23,14 @@ class ConversationIn(BaseModel):
     title: str | None = None
     participants: list[str] = []  # agent ids
     task_id: str | None = None
+    project_id: str | None = None
+
+
+class ConversationPatch(BaseModel):
+    """PATCH 只改显式传入的字段：`project_id=""` 表示移出项目。"""
+
+    title: str | None = None
+    project_id: str | None = None
 
 
 class MessageIn(BaseModel):
@@ -35,6 +45,17 @@ async def _visible_agent_ids(db: AsyncSession, ctx) -> set[str]:
     rows = (await db.execute(
         select(Agent.id).where(agent_read_scope(ctx)))).scalars().all()
     return {str(x) for x in rows}
+
+
+async def _assert_project_in_company(db: AsyncSession, project_id: str,
+                                     company_id: str) -> None:
+    """项目必须存在且属于同一公司；跨公司/不存在统一 404（不泄露存在性）。"""
+    found = (await db.execute(
+        select(Project.id).where(Project.id == project_id,
+                                 Project.company_id == company_id)
+        .limit(1))).first()
+    if found is None:
+        raise HTTPException(404, "Project not found")
 
 
 async def _conv_owned(db: AsyncSession, user, conv_id: str,
@@ -52,14 +73,17 @@ async def _conv_owned(db: AsyncSession, user, conv_id: str,
     return cv
 
 
-@router.get("/conversations")
+@router.get("/conversations", response_model=list[ConversationOut])
 async def list_conversations(company_id: str,
+                             project_id: str | None = None,
                              db: AsyncSession = Depends(get_db),
                              user=Depends(get_current_user)):
     ctx = await build_ctx(db, user, company_id)
-    q = await db.execute(select(Conversation).where(
-        Conversation.company_id == company_id))
-    rows = list(q.scalars())
+    q = select(Conversation).where(
+        Conversation.company_id == company_id)
+    if project_id:
+        q = q.where(Conversation.project_id == project_id)
+    rows = list((await db.execute(q)).scalars())
     if not ctx.sees_all_agents:
         visible = await _visible_agent_ids(db, ctx)
         rows = [cv for cv in rows
@@ -67,13 +91,16 @@ async def list_conversations(company_id: str,
     return [{c.key: getattr(cv, c.key) for c in cv.__table__.columns} for cv in rows]
 
 
-@router.post("/conversations", status_code=201)
+@router.post("/conversations", status_code=201,
+             response_model=ConversationOut)
 async def create_conversation(data: ConversationIn,
                               db: AsyncSession = Depends(get_db),
                               user=Depends(get_current_user)):
     # 建会话 = 日常写操作（OPERATE）
     await assert_company_capability(db, user.id, data.company_id,
                                     Capability.OPERATE)
+    if data.project_id:
+        await _assert_project_in_company(db, data.project_id, data.company_id)
     cv = Conversation(**data.model_dump())
     db.add(cv)
     await db.commit()
@@ -81,7 +108,28 @@ async def create_conversation(data: ConversationIn,
     return {col.key: getattr(cv, col.key) for col in cv.__table__.columns}
 
 
-@router.get("/conversations/{cid}")
+@router.patch("/conversations/{cid}", response_model=ConversationOut)
+async def update_conversation(cid: str, data: ConversationPatch,
+                              db: AsyncSession = Depends(get_db),
+                              user=Depends(get_current_user)):
+    """改名 / 归属项目；`project_id=""`（或 null）表示移出项目。"""
+    cv = await _conv_owned(db, user, cid, Capability.OPERATE)
+    fields = data.model_fields_set
+    if "title" in fields:
+        cv.title = data.title
+    if "project_id" in fields:
+        pid = (data.project_id or "").strip()
+        if pid:
+            await _assert_project_in_company(db, pid, cv.company_id)
+            cv.project_id = pid
+        else:
+            cv.project_id = None
+    await db.commit()
+    await db.refresh(cv)
+    return {col.key: getattr(cv, col.key) for col in cv.__table__.columns}
+
+
+@router.get("/conversations/{cid}", response_model=ConversationDetailOut)
 async def get_conversation(cid: str, db: AsyncSession = Depends(get_db),
                            user=Depends(get_current_user)):
     cv = await _conv_owned(db, user, cid)

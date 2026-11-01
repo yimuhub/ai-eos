@@ -1,4 +1,7 @@
 """Advanced Automation API (P3-12)."""
+import copy
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -8,7 +11,7 @@ from app.automation_engine import run_automation
 from app.models.automation import AutomationDefinition, AutomationRunRecord
 from app.models.user import User
 from app.api.deps import assert_company_owned, get_current_user, get_db
-from app.core.permissions import Capability, require_company_scope
+from app.core.permissions import require_company_scope
 
 router = APIRouter(prefix="/automations", tags=["automations"],
                    dependencies=[Depends(require_company_scope())])
@@ -68,8 +71,39 @@ async def list_automations(company_id: str = Query(...),
         AutomationDefinition.company_id == company_id).order_by(
         AutomationDefinition.created_at.desc()))
     return [{"id": a.id, "name": a.name, "trigger_type": a.trigger_type,
+             # 前端据此区分「任务模板」（kind=TASK_TEMPLATE）与普通规则
+             "trigger_config": a.trigger_config or {},
              "mode": a.mode, "steps_count": len(a.steps or []),
              "status": a.status, "attachments": a.attachments or []} for a in q.scalars().all()]
+
+
+@router.post("/{aid}/clone", status_code=201)
+async def clone_automation(
+    aid: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """复制一条自动化定义。
+
+    只复制**定义**（steps / trigger / 附件），绝不复制运行记录；
+    副本强制降为 TEST 且初始 PAUSED，避免复制出一个立即生产的规则。
+    """
+    src = await _owned_automation(db, user.id, aid)
+    base = (src.name or "自动化")[:196]
+    d = AutomationDefinition(
+        id=str(uuid.uuid4()), company_id=src.company_id,
+        name=f"{base}（副本）",
+        trigger_type=src.trigger_type,
+        trigger_config=copy.deepcopy(src.trigger_config),
+        steps=copy.deepcopy(src.steps or []),
+        mode="TEST", status="PAUSED",
+        max_runs_per_day=src.max_runs_per_day,
+        attachments=copy.deepcopy(src.attachments or []),
+        created_by=user.id)
+    db.add(d)
+    await db.commit()
+    return {"id": d.id, "name": d.name, "mode": d.mode, "status": d.status,
+            "steps_count": len(d.steps or [])}
 
 
 @router.post("/{aid}/run")
@@ -189,6 +223,9 @@ async def emergency_stop(company_id: str = Query(...),
 async def run_history(aid: str, limit: int = Query(20, ge=1, le=100),
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
+    # 路径里没有 company_id，router 级 scope 会跳过；先校验定义归属，
+    # 否则知道别家 aid 就能读到其运行历史（与 /run、/stop 同一道门）。
+    await _owned_automation(db, user.id, aid)
     q = await db.execute(select(AutomationRunRecord).where(
         AutomationRunRecord.definition_id == aid).order_by(
         AutomationRunRecord.started_at.desc()).limit(limit))

@@ -1,0 +1,2578 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI-EOS 产品原型 · 任务收件箱 + 交付单</title>
+<style>
+  :root {
+    --bg: #09090f;
+    --surface: #101018;
+    --surface-2: #16161f;
+    --surface-3: #1b1b26;
+    --border: #23232e;
+    --border-soft: rgba(255, 255, 255, 0.06);
+    --fg: #f4f4f6;
+    --muted: #8b8b99;
+    --muted-2: #6b6b7a;
+    --accent: #6366f1;
+    --accent-2: #22d3ee;
+    --success: #34d399;
+    --warning: #fbbf24;
+    --danger: #f87171;
+    --grad: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+    --radius: 16px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    color: var(--fg);
+    background:
+      radial-gradient(1200px 600px at 80% -10%, rgba(99, 102, 241, 0.09), transparent 60%),
+      radial-gradient(900px 520px at -10% 110%, rgba(34, 211, 238, 0.05), transparent 60%),
+      var(--bg);
+    font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
+  }
+  button, input, select, textarea { font-family: inherit; }
+  button { color: inherit; }
+  [hidden] { display: none !important; }
+  .svg-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+  .icon { width: 16px; height: 16px; flex-shrink: 0; }
+  .text-gradient {
+    background: linear-gradient(135deg, #a5b4fc 0%, #67e8f9 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .page { max-width: 1440px; margin: 0 auto; padding: 0 28px 44px; }
+
+  /* ---------- 顶部说明条 ---------- */
+  .meta-strip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 11px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0.02em;
+  }
+  .brand { display: flex; align-items: center; gap: 8px; color: #d9dae4; font-weight: 600; white-space: nowrap; }
+  .brand-icon { width: 18px; height: 18px; color: #a5b4fc; }
+  .brand-sub { color: var(--muted-2); font-weight: 400; font-size: 10px; letter-spacing: 0.08em; }
+  .meta-center { color: #c7c8d4; text-align: center; }
+  .meta-right { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tag-ghost {
+    font-size: 9.5px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 7px;
+    white-space: nowrap;
+  }
+
+  /* ---------- 页头 ---------- */
+  .hero {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 24px;
+    flex-wrap: wrap;
+    padding: 26px 0 18px;
+  }
+  .eyebrow { font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent-2); font-weight: 600; }
+  .hero h1 { font-size: 32px; line-height: 1.18; letter-spacing: -0.025em; margin: 6px 0 8px; }
+  .hero p { margin: 0; max-width: 660px; color: var(--muted); font-size: 12.5px; line-height: 1.75; }
+  .hero-stats { display: flex; gap: 8px; }
+  .stat {
+    min-width: 92px;
+    padding: 9px 13px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.032), rgba(255, 255, 255, 0.006));
+  }
+  .stat b { display: block; font-size: 19px; font-weight: 600; letter-spacing: -0.02em; color: #e7e7ef; }
+  .stat span { display: block; margin-top: 2px; font-size: 9.5px; color: var(--muted-2); }
+  .stat.accent b { background: linear-gradient(135deg, #a5b4fc, #67e8f9); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+  /* ---------- Tabs ---------- */
+  .tabs {
+    display: flex;
+    gap: 4px;
+    padding: 5px;
+    width: fit-content;
+    max-width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: rgba(16, 16, 24, 0.82);
+    backdrop-filter: blur(10px);
+    position: sticky;
+    top: 8px;
+    z-index: 40;
+    margin-bottom: 12px;
+  }
+  .tab {
+    appearance: none;
+    border: 1px solid transparent;
+    background: transparent;
+    padding: 8px 15px;
+    border-radius: 10px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    text-align: left;
+    transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+  }
+  .tab:hover { background: rgba(255, 255, 255, 0.035); }
+  .tab:focus-visible { outline: 2px solid rgba(129, 140, 248, 0.7); outline-offset: 2px; }
+  .tab .num {
+    font-size: 9.5px;
+    color: var(--muted-2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 2px 5px;
+    letter-spacing: 0.04em;
+  }
+  .tab-text { display: block; font-size: 12.5px; color: #b9bac8; font-weight: 500; line-height: 1.25; }
+  .tab-text small { display: block; margin-top: 2px; font-size: 9.5px; color: var(--muted-2); font-weight: 400; }
+  .tab.active {
+    background: linear-gradient(180deg, rgba(99, 102, 241, 0.22), rgba(99, 102, 241, 0.07));
+    box-shadow: inset 0 0 0 1px rgba(99, 102, 241, 0.38);
+  }
+  .tab.active .num { color: #c7d2fe; border-color: rgba(99, 102, 241, 0.45); background: rgba(99, 102, 241, 0.12); }
+  .tab.active .tab-text { color: #fff; }
+  .tab.active .tab-text small { color: #a5b4fc; }
+
+  .hint-line {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    font-size: 10px;
+    color: var(--muted-2);
+    margin: 0 0 14px;
+  }
+  .hint-line span:first-child { color: #8f93c9; letter-spacing: 0.08em; }
+
+  /* ---------- 面板 ---------- */
+  .panel { display: none; animation: fade-up 0.3s ease both; }
+  .panel.active { display: block; }
+  @keyframes fade-up {
+    from { opacity: 0; transform: translateY(7px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+
+  /* ---------- 三栏外壳 ---------- */
+  .shell {
+    display: grid;
+    grid-template-columns: 216px 424px minmax(0, 1fr);
+    height: 780px;
+    min-height: 640px;
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    overflow: hidden;
+    background: rgba(13, 13, 20, 0.9);
+    box-shadow: 0 30px 90px -50px rgba(99, 102, 241, 0.45);
+  }
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+    padding: 13px 11px;
+    border-right: 1px solid var(--border);
+    background: linear-gradient(180deg, #111119, #0c0c14);
+  }
+  .company {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 9px;
+    border: 1px solid var(--border-soft);
+    border-radius: 11px;
+    background: rgba(255, 255, 255, 0.028);
+  }
+  .company-avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fff;
+    background: linear-gradient(135deg, #6366f1, #22d3ee);
+    box-shadow: 0 4px 14px -6px rgba(99, 102, 241, 0.8);
+  }
+  .company b { display: block; font-size: 11.5px; font-weight: 600; color: #e5e5ed; }
+  .company span { display: block; font-size: 9.5px; color: var(--muted-2); margin-top: 1px; }
+  .btn-new {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: 100%;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 9px;
+    background: var(--grad);
+    color: #fff;
+    font-size: 11.5px;
+    font-weight: 500;
+    cursor: pointer;
+    box-shadow: 0 4px 16px -6px rgba(99, 102, 241, 0.7);
+    transition: filter 0.18s ease, transform 0.18s ease;
+  }
+  .btn-new:hover { filter: brightness(1.1); transform: translateY(-1px); }
+  .nav-label { padding: 2px 9px 0; font-size: 9px; letter-spacing: 0.14em; color: var(--muted-2); }
+  .side-nav { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; padding-bottom: 2px; }
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 9px;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    background: transparent;
+    color: #adaebc;
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  }
+  .nav-item .icon { width: 15px; height: 15px; opacity: 0.75; }
+  .nav-item:hover { background: rgba(255, 255, 255, 0.04); color: #fff; }
+  .nav-item.active {
+    color: #fff;
+    border-color: rgba(99, 102, 241, 0.3);
+    background: linear-gradient(90deg, rgba(99, 102, 241, 0.22), rgba(99, 102, 241, 0.04));
+  }
+  .nav-item.active .icon { opacity: 1; color: #a5b4fc; }
+  .nav-item .count {
+    margin-left: auto;
+    font-size: 9px;
+    color: #67e8f9;
+    background: rgba(34, 211, 238, 0.1);
+    border: 1px solid rgba(34, 211, 238, 0.18);
+    border-radius: 999px;
+    padding: 0 5px;
+  }
+  .nav-item .chev { margin-left: auto; width: 12px; height: 12px; opacity: 0.4; }
+  .side-foot { margin-top: auto; display: flex; flex-direction: column; gap: 8px; }
+  .budget {
+    padding: 9px 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.02);
+    font-size: 10px;
+    color: var(--muted);
+  }
+  .budget-top { display: flex; justify-content: space-between; align-items: baseline; }
+  .budget-top b { font-size: 11px; color: #e2e2ea; }
+  .bar { height: 4px; border-radius: 4px; background: #23232e; margin: 6px 0 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 4px; background: linear-gradient(90deg, #6366f1, #22d3ee); }
+  .budget-sub { font-size: 9px; color: var(--muted-2); }
+  .side-note { font-size: 8.5px; color: var(--muted-2); text-align: center; letter-spacing: 0.06em; }
+
+  /* ---------- 收件箱列表 ---------- */
+  .list-pane {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-right: 1px solid var(--border);
+    background: rgba(10, 10, 16, 0.5);
+  }
+  .list-head {
+    padding: 14px 14px 10px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(17, 17, 25, 0.62);
+  }
+  .list-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+  .list-title-row h2 { margin: 0; font-size: 15.5px; letter-spacing: -0.01em; }
+  .list-sub { margin-top: 2px; font-size: 9.5px; color: var(--muted-2); }
+  .list-badge {
+    font-size: 9px;
+    color: #a5b4fc;
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    background: rgba(99, 102, 241, 0.08);
+    padding: 2px 7px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .search { position: relative; margin-top: 10px; }
+  .search > .icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: var(--muted-2); pointer-events: none; }
+  .search input {
+    width: 100%;
+    height: 35px;
+    padding: 0 74px 0 31px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: #15151e;
+    color: #ececf2;
+    font-size: 11.5px;
+    outline: none;
+    transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  }
+  .search input::placeholder { color: #55555f; }
+  .search input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.14); }
+  .search input::-webkit-search-cancel-button { display: none; }
+  .search .kbd {
+    position: absolute;
+    right: 7px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 9px;
+    color: var(--muted-2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 1px 5px;
+    background: #111119;
+    pointer-events: none;
+  }
+  .search-clear {
+    position: absolute;
+    right: 31px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #1c1c27;
+    color: var(--muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .search-clear:hover { color: #fff; border-color: rgba(99, 102, 241, 0.4); }
+  .search-clear .icon { width: 11px; height: 11px; }
+  .search-count {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 7px;
+    font-size: 9.5px;
+    color: var(--muted-2);
+  }
+  .search-count b { color: var(--accent-2); font-weight: 600; }
+  .filter-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .filters { display: flex; gap: 4px; flex-wrap: wrap; }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 10px;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+  .chip b { font-weight: 600; color: #c9cad6; font-size: 9.5px; }
+  .chip:hover { border-color: rgba(99, 102, 241, 0.35); color: #dcdde7; }
+  .chip.active { background: rgba(99, 102, 241, 0.16); border-color: rgba(99, 102, 241, 0.5); color: #dfe0ff; }
+  .chip.active b { color: #fff; }
+  .sort-select {
+    appearance: none;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: #14141d;
+    color: var(--muted);
+    font-size: 9.5px;
+    padding: 4px 20px 4px 7px;
+    outline: none;
+    cursor: pointer;
+    background-image: linear-gradient(45deg, transparent 50%, #6b6b7a 50%), linear-gradient(135deg, #6b6b7a 50%, transparent 50%);
+    background-position: calc(100% - 9px) 50%, calc(100% - 6px) 50%;
+    background-size: 3px 3px, 3px 3px;
+    background-repeat: no-repeat;
+  }
+  .sort-select:focus { border-color: var(--accent); }
+
+  .list-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 9px 20px; }
+  .group { margin-top: 6px; }
+  .group-head {
+    position: sticky;
+    top: -6px;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 8px 6px;
+    background: rgba(10, 10, 16, 0.94);
+    backdrop-filter: blur(6px);
+    font-size: 9.5px;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+  }
+  .group-head .count { margin-left: auto; letter-spacing: 0; color: var(--muted-2); font-size: 9px; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .task {
+    position: relative;
+    padding: 10px 10px 9px;
+    border: 1px solid transparent;
+    border-radius: 11px;
+    cursor: pointer;
+    transition: background 0.14s ease, border-color 0.14s ease;
+  }
+  .task:hover { background: rgba(255, 255, 255, 0.035); border-color: rgba(255, 255, 255, 0.05); }
+  .task:focus-visible { outline: 2px solid rgba(129, 140, 248, 0.6); outline-offset: -1px; }
+  .task.selected {
+    background: linear-gradient(90deg, rgba(99, 102, 241, 0.17), rgba(99, 102, 241, 0.045));
+    border-color: rgba(99, 102, 241, 0.42);
+    box-shadow: 0 8px 22px -18px rgba(99, 102, 241, 0.95);
+  }
+  .task.selected::before {
+    content: "";
+    position: absolute;
+    left: -1px;
+    top: 11px;
+    bottom: 11px;
+    width: 2px;
+    border-radius: 2px;
+    background: linear-gradient(#818cf8, #22d3ee);
+  }
+  .task-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .task-main { min-width: 0; }
+  .task-title { font-size: 12.8px; font-weight: 500; line-height: 1.45; color: #ececf2; }
+  .task-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 5px; font-size: 10px; color: var(--muted-2); }
+  .owner { display: inline-flex; align-items: center; gap: 4px; color: #a9aab8; }
+  .avatar {
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 8px;
+    font-weight: 600;
+    color: #fff;
+    flex-shrink: 0;
+  }
+  .av-0 { background: linear-gradient(135deg, #6366f1, #8b5cf6); }
+  .av-1 { background: linear-gradient(135deg, #22d3ee, #3b82f6); }
+  .av-2 { background: linear-gradient(135deg, #f59e0b, #f97316); }
+  .av-3 { background: linear-gradient(135deg, #34d399, #059669); }
+  .av-4 { background: linear-gradient(135deg, #f472b6, #a855f7); }
+  .av-5 { background: linear-gradient(135deg, #60a5fa, #22d3ee); }
+  .av-6 { background: linear-gradient(135deg, #fbbf24, #f59e0b); }
+  .av-7 { background: linear-gradient(135deg, #a78bfa, #ec4899); }
+  .pri {
+    font-size: 8.5px;
+    color: #fbbf24;
+    border: 1px solid rgba(251, 191, 36, 0.24);
+    background: rgba(251, 191, 36, 0.06);
+    padding: 0 4px;
+    border-radius: 4px;
+  }
+  .pri.low { color: #8b8b99; border-color: var(--border); background: transparent; }
+  .task-right { flex-shrink: 0; text-align: right; }
+  .cost { font-size: 10.5px; color: #d2d3dd; }
+  .time { margin-top: 2px; font-size: 9px; color: var(--muted-2); white-space: nowrap; }
+  .badge-new {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 3px;
+    padding: 1px 5px;
+    border: 1px solid rgba(34, 211, 238, 0.28);
+    border-radius: 999px;
+    background: rgba(34, 211, 238, 0.08);
+    color: #67e8f9;
+    font-size: 8.5px;
+    white-space: nowrap;
+  }
+  .badge-new i { width: 4px; height: 4px; border-radius: 50%; background: #22d3ee; animation: pulse-dot 2s ease-in-out infinite; }
+  .task.archived { opacity: 0.72; }
+  .archived-row {
+    width: 100%;
+    margin-top: 10px;
+    padding: 9px 10px;
+    border: 1px dashed var(--border);
+    border-radius: 9px;
+    background: transparent;
+    color: var(--muted-2);
+    font-size: 9.5px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+  .archived-row:hover { border-color: rgba(99, 102, 241, 0.35); color: #c7c8d4; }
+  .empty { padding: 38px 18px; text-align: center; font-size: 11px; line-height: 1.8; color: var(--muted); }
+  .empty b { display: block; margin-bottom: 4px; color: #dedee8; font-size: 12px; }
+  .empty button { margin-top: 10px; }
+
+  /* ---------- 详情 ---------- */
+  .detail {
+    min-height: 0;
+    overflow-y: auto;
+    padding: 18px 20px 24px;
+    background:
+      radial-gradient(600px 300px at 100% 0, rgba(99, 102, 241, 0.06), transparent 60%),
+      rgba(15, 15, 23, 0.6);
+  }
+  .detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+  .detail-eyebrow { font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted-2); }
+  .detail h2 { margin: 6px 0 8px; font-size: 21px; line-height: 1.35; letter-spacing: -0.018em; max-width: 540px; }
+  .badges { display: flex; gap: 5px; flex-wrap: wrap; }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 7px;
+    border: 1px solid;
+    border-radius: 999px;
+    font-size: 9.5px;
+    line-height: 1.5;
+    white-space: nowrap;
+  }
+  .badge.review { color: #fbbf24; border-color: rgba(251, 191, 36, 0.3); background: rgba(251, 191, 36, 0.08); }
+  .badge.run { color: #67e8f9; border-color: rgba(34, 211, 238, 0.3); background: rgba(34, 211, 238, 0.08); }
+  .badge.done { color: #6ee7b7; border-color: rgba(52, 211, 153, 0.28); background: rgba(52, 211, 153, 0.08); }
+  .badge.fail { color: #fca5a5; border-color: rgba(248, 113, 113, 0.3); background: rgba(248, 113, 113, 0.08); }
+  .badge.neutral { color: #b9bac8; border-color: var(--border); background: rgba(255, 255, 255, 0.02); }
+  .badge.fresh { color: #67e8f9; border-color: rgba(34, 211, 238, 0.3); background: rgba(34, 211, 238, 0.09); }
+  .badge .dot { width: 5px; height: 5px; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 7px 11px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: transparent;
+    color: #c9cad6;
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease, filter 0.15s ease;
+  }
+  .btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.04); border-color: rgba(99, 102, 241, 0.4); color: #fff; }
+  .btn:focus-visible { outline: 2px solid rgba(129, 140, 248, 0.6); outline-offset: 2px; }
+  .btn:disabled { opacity: 0.38; cursor: not-allowed; }
+  .btn .icon { width: 13px; height: 13px; }
+  .btn.primary {
+    border-color: transparent;
+    background: var(--grad);
+    color: #fff;
+    box-shadow: 0 4px 14px -6px rgba(99, 102, 241, 0.7);
+  }
+  .btn.primary:hover:not(:disabled) { filter: brightness(1.1); color: #fff; transform: translateY(-1px); }
+  .btn.danger { border-color: rgba(248, 113, 113, 0.35); color: #fca5a5; }
+  .btn.danger:hover:not(:disabled) { background: rgba(248, 113, 113, 0.1); border-color: rgba(248, 113, 113, 0.55); color: #fecaca; }
+  .btn.small { padding: 5px 9px; font-size: 10px; border-radius: 7px; }
+  .btn.wide { width: 100%; }
+
+  .meta-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 1px;
+    margin-top: 16px;
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    overflow: hidden;
+    background: var(--border);
+  }
+  .meta-cell { background: #111119; padding: 9px 10px; min-width: 0; }
+  .meta-cell span { display: block; font-size: 8.5px; letter-spacing: 0.07em; color: var(--muted-2); margin-bottom: 3px; }
+  .meta-cell b { display: block; font-size: 11px; font-weight: 500; color: #dcdde6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .next {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-top: 12px;
+    padding: 10px 12px;
+    border: 1px solid rgba(99, 102, 241, 0.26);
+    border-radius: 11px;
+    background: linear-gradient(90deg, rgba(99, 102, 241, 0.09), rgba(34, 211, 238, 0.025));
+  }
+  .next-icon {
+    width: 26px;
+    height: 26px;
+    border-radius: 8px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(99, 102, 241, 0.16);
+    color: #a5b4fc;
+  }
+  .next b { display: block; font-size: 11px; font-weight: 500; color: #e5e6ee; }
+  .next p { margin: 2px 0 0; font-size: 10px; line-height: 1.6; color: var(--muted); }
+
+  .stats3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin-top: 12px; }
+  .stat-mini {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.018);
+  }
+  .stat-mini span { display: block; font-size: 8.5px; color: var(--muted-2); }
+  .stat-mini b { display: block; margin-top: 2px; font-size: 13px; font-weight: 600; color: #e7e7ef; }
+  .stat-mini b small { font-size: 8.5px; font-weight: 400; color: var(--muted-2); margin-left: 2px; }
+
+  .section { margin-top: 18px; }
+  .section-title { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; font-size: 10px; font-weight: 600; letter-spacing: 0.1em; color: #b9bac8; }
+  .section-title .line { flex: 1; height: 1px; background: linear-gradient(90deg, var(--border), transparent); }
+  .section-title .count { letter-spacing: 0; font-weight: 400; color: var(--muted-2); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; font-size: 8.5px; }
+
+  .timeline { position: relative; padding-left: 18px; }
+  .timeline::before {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: 5px;
+    bottom: 7px;
+    width: 1px;
+    background: linear-gradient(#6366f1, #22d3ee 55%, var(--border));
+    opacity: 0.55;
+  }
+  .tl-item { position: relative; padding-bottom: 12px; }
+  .tl-item:last-child { padding-bottom: 2px; }
+  .tl-dot {
+    position: absolute;
+    left: -18px;
+    top: 4px;
+    width: 9px;
+    height: 9px;
+    border: 1.5px solid var(--accent);
+    border-radius: 50%;
+    background: #111119;
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+  }
+  .tl-item.done .tl-dot { background: var(--accent); }
+  .tl-item.current .tl-dot { background: var(--accent-2); border-color: var(--accent-2); animation: pulse-dot 2s ease-in-out infinite; }
+  .tl-item.fail .tl-dot { background: var(--danger); border-color: var(--danger); }
+  .tl-time { font-size: 8.5px; color: var(--muted-2); }
+  .tl-title { margin: 1px 0; font-size: 11px; font-weight: 500; color: #e3e3eb; }
+  .tl-desc { font-size: 10.5px; line-height: 1.6; color: var(--muted); }
+
+  .deliverable-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 11px 12px;
+    border: 1px solid rgba(129, 140, 248, 0.26);
+    border-radius: 11px;
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(34, 211, 238, 0.025));
+  }
+  .dc-icon {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(99, 102, 241, 0.18);
+    color: #c7d2fe;
+  }
+  .dc-main { flex: 1; min-width: 160px; }
+  .dc-title { font-size: 11.5px; font-weight: 500; color: #ececf2; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .dc-sub { margin-top: 2px; font-size: 9.5px; color: var(--muted); }
+  .failure-box {
+    padding: 11px 12px;
+    border: 1px solid rgba(248, 113, 113, 0.3);
+    border-radius: 11px;
+    background: rgba(248, 113, 113, 0.055);
+  }
+  .failure-box b { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: #fca5a5; }
+  .failure-box p { margin: 4px 0 0; font-size: 10px; line-height: 1.65; color: #c7a6a6; }
+  .failure-box .suggest { margin-top: 6px; color: var(--muted); }
+  .cite-list { display: flex; flex-direction: column; gap: 4px; }
+  .cite-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.018);
+    font-size: 10px;
+    color: #c2c3cf;
+    cursor: pointer;
+  }
+  .cite-row:hover { border-color: rgba(99, 102, 241, 0.35); background: rgba(99, 102, 241, 0.05); }
+  .cite-row .cite-link { margin-left: auto; font-size: 8.5px; color: #818cf8; }
+  .ev-type { font-size: 8px; padding: 1px 5px; border-radius: 4px; border: 1px solid; white-space: nowrap; }
+  .ev-type.kb { color: #a5b4fc; border-color: rgba(99, 102, 241, 0.3); background: rgba(99, 102, 241, 0.08); }
+  .ev-type.web { color: #67e8f9; border-color: rgba(34, 211, 238, 0.3); background: rgba(34, 211, 238, 0.07); }
+  .ev-type.chat { color: #d8b4fe; border-color: rgba(168, 85, 247, 0.3); background: rgba(168, 85, 247, 0.07); }
+  .ev-type.data { color: #fcd34d; border-color: rgba(251, 191, 36, 0.28); background: rgba(251, 191, 36, 0.06); }
+  .detail-foot {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 16px;
+    padding-top: 9px;
+    border-top: 1px dashed var(--border);
+    font-size: 8.5px;
+    color: var(--muted-2);
+  }
+
+  /* ---------- 交付单 ---------- */
+  .doc-grid { display: grid; grid-template-columns: minmax(0, 1fr) 344px; gap: 16px; align-items: start; }
+  .doc-card {
+    padding: 26px 28px;
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.006)), #0f0f17;
+    box-shadow: 0 26px 70px -50px rgba(99, 102, 241, 0.55);
+  }
+  .doc-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+  .doc-id { font-size: 9px; letter-spacing: 0.1em; color: var(--muted-2); text-transform: uppercase; }
+  .doc-id .sep-dot, .doc-sub .sep-dot { display: inline-block; width: 3px; height: 3px; margin: 0 6px 2px; border-radius: 50%; background: #3a3a48; }
+  .doc-head h2 { margin: 7px 0 7px; font-size: 24px; line-height: 1.32; letter-spacing: -0.022em; }
+  .doc-sub { font-size: 10.5px; color: var(--muted); }
+  .doc-head-side { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .version-chip {
+    font-size: 9px;
+    color: #a5b4fc;
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    background: rgba(99, 102, 241, 0.08);
+    border-radius: 6px;
+    padding: 2px 7px;
+    letter-spacing: 0.04em;
+  }
+  .v1-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 14px;
+    padding: 8px 10px;
+    border: 1px solid rgba(251, 191, 36, 0.3);
+    border-radius: 9px;
+    background: rgba(251, 191, 36, 0.06);
+    color: #fcd34d;
+    font-size: 10px;
+  }
+  .v1-banner .icon { width: 13px; height: 13px; }
+  .section-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 18px 0 9px; }
+  .section-head h3 { margin: 0; font-size: 11.5px; font-weight: 600; letter-spacing: 0.03em; color: #dedee8; }
+  .section-hint { font-size: 9px; color: var(--muted-2); }
+  .section-head h3 .count { margin-left: 4px; font-weight: 400; color: var(--muted-2); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; font-size: 8.5px; }
+  .why-bubble {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    max-width: 400px;
+    margin-left: auto;
+    padding: 6px 9px;
+    border: 1px dashed rgba(129, 140, 248, 0.42);
+    border-radius: 9px;
+    background: rgba(99, 102, 241, 0.08);
+    color: #b9c0ff;
+    font-size: 10px;
+    line-height: 1.55;
+  }
+  .why-num {
+    width: 17px;
+    height: 17px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 8.5px;
+    font-weight: 600;
+    color: #fff;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+  }
+  .why-bubble b { color: #e0e3ff; font-weight: 600; }
+  .spec-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .spec {
+    padding: 10px 11px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.018);
+  }
+  .spec.wide { grid-column: 1 / -1; }
+  .spec span { display: block; font-size: 8.5px; letter-spacing: 0.07em; color: var(--muted-2); margin-bottom: 4px; }
+  .spec p { margin: 0; font-size: 11.5px; line-height: 1.65; color: #d5d6e0; }
+  .preview-shell { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: #12121a; }
+  .preview-bar {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.03);
+    font-size: 9px;
+    color: var(--muted-2);
+  }
+  .win-dot { width: 5px; height: 5px; border-radius: 50%; background: #3a3a48; }
+  .preview-bar .file { margin-left: 4px; color: #b9bac8; }
+  .preview-bar .preview-right { margin-left: auto; }
+  .preview-body { padding: 16px 18px; }
+  .preview-kicker { font-size: 8.5px; letter-spacing: 0.14em; text-transform: uppercase; color: #67e8f9; }
+  .preview-body h4 { margin: 4px 0 7px; font-size: 19px; line-height: 1.4; letter-spacing: -0.015em; color: #f0f0f5; }
+  .preview-lead { margin: 0; font-size: 11px; line-height: 1.75; color: #b9bac8; }
+  .preview-list { margin: 8px 0 0; padding-left: 15px; font-size: 11px; line-height: 1.8; color: #c7c8d4; }
+  .preview-list li::marker { color: #818cf8; }
+  .preview-meta {
+    display: flex;
+    gap: 9px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+    padding-top: 7px;
+    border-top: 1px dashed var(--border);
+    font-size: 8.5px;
+    color: var(--muted-2);
+  }
+  .asset-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 0 10px 10px; }
+  .asset {
+    padding: 7px 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.02);
+    font-size: 9.5px;
+    color: #c7c8d4;
+  }
+  .asset span { display: block; margin-top: 2px; font-size: 8.5px; color: var(--muted-2); }
+  .evidence-list { display: flex; flex-direction: column; gap: 5px; }
+  .ev { border: 1px solid var(--border); border-radius: 9px; background: rgba(255, 255, 255, 0.015); overflow: hidden; }
+  .ev-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 9px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  .ev-head:hover { background: rgba(255, 255, 255, 0.025); }
+  .ev-head:focus-visible { outline: 2px solid rgba(129, 140, 248, 0.55); outline-offset: -2px; }
+  .ev-head .ev-type { margin-top: 1px; }
+  .ev-main { flex: 1; min-width: 0; }
+  .ev-main b { display: block; font-size: 11px; font-weight: 500; color: #e0e1e9; }
+  .ev-main p { margin: 2px 0 0; font-size: 10px; line-height: 1.55; color: var(--muted); }
+  .ev-open { margin-left: auto; font-size: 8.5px; color: #818cf8; white-space: nowrap; }
+  .ev-body { display: none; padding: 9px 11px; border-top: 1px dashed var(--border); background: rgba(99, 102, 241, 0.04); font-size: 10px; line-height: 1.65; color: #b9bac8; }
+  .ev.open .ev-body { display: block; }
+  .ev-body .caption { margin-bottom: 4px; font-size: 8.5px; color: var(--muted-2); }
+  .ev-body p { margin: 0 0 6px; }
+  .link-btn {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: #67e8f9;
+    font-size: 9px;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .doc-card[data-preview-version="1"] .ev[data-version="2"] { display: none; }
+
+  .acceptance {
+    padding: 12px 13px;
+    border: 1px solid rgba(251, 191, 36, 0.24);
+    border-radius: 12px;
+    background: rgba(251, 191, 36, 0.035);
+    transition: border-color 0.2s ease, background 0.2s ease;
+  }
+  .acceptance.approved { border-color: rgba(52, 211, 153, 0.32); background: rgba(52, 211, 153, 0.05); }
+  .acceptance.rejected { border-color: rgba(248, 113, 113, 0.32); background: rgba(248, 113, 113, 0.05); }
+  .acc-top { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; align-items: flex-start; }
+  .acc-title { display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 500; color: #e7e7ef; }
+  .acc-note { margin-top: 3px; font-size: 9.5px; color: var(--muted); line-height: 1.6; }
+  .acc-hint { font-size: 8.5px; color: var(--muted-2); border: 1px solid var(--border); border-radius: 5px; padding: 2px 6px; white-space: nowrap; }
+  .acceptance textarea {
+    width: 100%;
+    min-height: 66px;
+    margin-top: 9px;
+    padding: 8px 9px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #14141d;
+    color: #e8e8ef;
+    font-size: 10.5px;
+    line-height: 1.6;
+    resize: vertical;
+    outline: none;
+    transition: border-color 0.18s ease, box-shadow 0.18s ease;
+  }
+  .acceptance textarea::placeholder { color: #55555f; }
+  .acceptance textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12); }
+  .acceptance textarea:disabled { opacity: 0.6; }
+  .acc-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .acc-error { margin-top: 5px; font-size: 9px; color: #fca5a5; }
+  .linkish {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--muted-2);
+    font-size: 8.5px;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
+  .linkish:hover { color: #c7c8d4; }
+
+  .rail { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .rail-card {
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.005)), #0f0f17;
+  }
+  .rail-card h3 { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 9px; font-size: 11px; font-weight: 600; color: #dedee8; }
+  .mini-tag { font-size: 8px; font-weight: 400; color: var(--muted-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+  .version-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    width: 100%;
+    padding: 8px;
+    margin-bottom: 4px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .version-row:hover { background: rgba(255, 255, 255, 0.03); }
+  .version-row:focus-visible { outline: 2px solid rgba(129, 140, 248, 0.55); outline-offset: 1px; }
+  .version-row.active { background: rgba(99, 102, 241, 0.1); border-color: rgba(99, 102, 241, 0.3); }
+  .v-tag { font-size: 8px; color: #c7d2fe; border: 1px solid rgba(99, 102, 241, 0.32); background: rgba(99, 102, 241, 0.12); border-radius: 4px; padding: 1px 5px; white-space: nowrap; margin-top: 1px; }
+  .v-main { display: block; min-width: 0; }
+  .v-main b { display: block; font-size: 9.5px; font-weight: 500; color: #dedee8; }
+  .v-desc { display: block; margin-top: 2px; font-size: 9px; line-height: 1.5; color: var(--muted-2); }
+  .diff {
+    display: none;
+    margin-top: 8px;
+    padding: 9px;
+    border: 1px solid rgba(34, 211, 238, 0.22);
+    border-radius: 8px;
+    background: rgba(34, 211, 238, 0.035);
+    font-size: 8.5px;
+    line-height: 1.65;
+    color: #c7c8d4;
+  }
+  .diff.open { display: block; }
+  .diff-head { margin-bottom: 5px; font-size: 8.5px; color: #67e8f9; letter-spacing: 0.04em; }
+  .diff-row { display: flex; gap: 5px; padding: 1px 0; }
+  .diff-row span:first-child { flex-shrink: 0; width: 8px; font-weight: 600; }
+  .diff-row .add { color: #6ee7b7; }
+  .diff-row .del { color: #fca5a5; }
+  .diff-row .chg { color: #fcd34d; }
+  .rail .why-bubble { margin: 9px 0 0; max-width: none; }
+  .info-list { display: flex; flex-direction: column; gap: 6px; }
+  .info-row { display: flex; justify-content: space-between; gap: 10px; font-size: 9.5px; }
+  .info-row span { color: var(--muted-2); white-space: nowrap; }
+  .info-row b { font-weight: 400; color: #d5d6e0; text-align: right; }
+  .proto-card { font-size: 8.5px; line-height: 1.7; color: var(--muted-2); }
+  .proto-card b { display: block; margin-bottom: 3px; color: var(--muted); font-size: 9px; font-weight: 500; }
+
+  /* ---------- 导航对照 ---------- */
+  .compare-top { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+  .kpi {
+    position: relative;
+    overflow: hidden;
+    padding: 14px 15px;
+    border: 1px solid var(--border);
+    border-radius: 13px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.006));
+  }
+  .kpi::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px; background: linear-gradient(90deg, #6366f1, #22d3ee); opacity: 0.75; }
+  .kpi b { display: block; font-size: 20px; font-weight: 600; letter-spacing: -0.02em; color: #ececf3; }
+  .kpi span { display: block; margin-top: 3px; font-size: 9.5px; color: var(--muted-2); }
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+  .nav-col {
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.024), rgba(255, 255, 255, 0.005)), #0f0f17;
+  }
+  .nav-col.new { border-color: rgba(99, 102, 241, 0.28); box-shadow: 0 20px 60px -45px rgba(99, 102, 241, 0.8); }
+  .nav-col-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+  .nav-col-head h3 { margin: 0; font-size: 13.5px; }
+  .nav-col-head p { margin: 3px 0 0; font-size: 9.5px; color: var(--muted-2); }
+  .nav-count {
+    font-size: 8.5px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 7px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .nav-count.old { color: #fca5a5; border-color: rgba(248, 113, 113, 0.28); background: rgba(248, 113, 113, 0.05); }
+  .nav-count.new-count { color: #6ee7b7; border-color: rgba(52, 211, 153, 0.28); background: rgba(52, 211, 153, 0.05); }
+  .nav-group { margin-top: 11px; }
+  .nav-group h4 { display: flex; gap: 6px; margin: 0 0 5px; font-size: 8.5px; letter-spacing: 0.08em; color: var(--muted-2); font-weight: 400; }
+  .nav-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+  .nav-tag {
+    padding: 3px 7px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.018);
+    color: #b9bac8;
+    font-size: 10px;
+    white-space: nowrap;
+  }
+  .nav-tag.merge { border-color: rgba(251, 191, 36, 0.38); background: rgba(251, 191, 36, 0.07); color: #fcd34d; }
+  .nav-tag.merge::after { content: "并入目标"; margin-left: 5px; font-size: 7.5px; color: #fbbf24; opacity: 0.85; }
+  .nav-tag.lab { border-color: rgba(34, 211, 238, 0.26); background: rgba(34, 211, 238, 0.05); color: #a5f3fc; }
+  .nav-tag.lab::after { content: "实验室"; margin-left: 5px; font-size: 7.5px; color: #67e8f9; opacity: 0.85; }
+  .nav-tag.dim { opacity: 0.62; }
+  .col-note { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--border); font-size: 9px; line-height: 1.6; color: var(--muted-2); }
+  .merge-strip {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    flex-wrap: wrap;
+    padding: 12px 14px;
+    border: 1px solid rgba(251, 191, 36, 0.25);
+    border-radius: 12px;
+    background: linear-gradient(90deg, rgba(251, 191, 36, 0.07), rgba(99, 102, 241, 0.06));
+  }
+  .merge-src { display: flex; gap: 5px; flex-wrap: wrap; }
+  .merge-src span { padding: 3px 7px; border: 1px solid rgba(251, 191, 36, 0.3); border-radius: 5px; background: rgba(251, 191, 36, 0.06); color: #fcd34d; font-size: 9.5px; }
+  .merge-arrow { color: #818cf8; font-size: 15px; }
+  .merge-dst { font-size: 11px; font-weight: 600; color: #e5e6ee; }
+  .merge-dst small { display: block; margin-top: 1px; font-size: 8.5px; font-weight: 400; color: var(--muted-2); }
+  .merge-note { flex: 1; min-width: 220px; font-size: 9px; line-height: 1.6; color: var(--muted); }
+
+  .new-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 9px; }
+  .new-item {
+    display: flex;
+    gap: 7px;
+    padding: 7px 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.018);
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  .new-item:hover { border-color: rgba(99, 102, 241, 0.3); background: rgba(99, 102, 241, 0.04); }
+  .new-item .idx {
+    width: 16px;
+    height: 16px;
+    margin-top: 1px;
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 7.5px;
+    color: #a5b4fc;
+    flex-shrink: 0;
+  }
+  .new-item b { display: block; font-size: 10px; font-weight: 500; color: #dedee8; }
+  .new-item p { margin: 1px 0 0; font-size: 8.5px; line-height: 1.5; color: var(--muted-2); }
+  .lab-toggle {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    margin-top: 6px;
+    padding: 8px 9px;
+    border: 1px dashed rgba(34, 211, 238, 0.3);
+    border-radius: 8px;
+    background: rgba(34, 211, 238, 0.04);
+    color: #a5f3fc;
+    font-size: 9.5px;
+    cursor: pointer;
+  }
+  .lab-toggle .icon { width: 12px; height: 12px; transition: transform 0.2s ease; }
+  .lab-toggle[aria-expanded="true"] .icon { transform: rotate(180deg); }
+  .lab-toggle small { margin-left: auto; font-size: 8px; color: var(--muted-2); }
+  .lab-body { display: none; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 4px; padding: 4px; border-left: 1px dashed rgba(34, 211, 238, 0.2); margin-left: 6px; }
+  .lab-body.open { display: grid; }
+  .lab-body span { padding: 4px 6px; border: 1px solid var(--border); border-radius: 5px; background: rgba(255, 255, 255, 0.015); color: var(--muted); font-size: 8.5px; }
+
+  .decisions { margin-top: 20px; }
+  .decisions-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  .decisions h3 { margin: 0; font-size: 16px; letter-spacing: -0.01em; }
+  .decisions .sub { margin: 3px 0 0; font-size: 9.5px; color: var(--muted-2); }
+  .decision-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .decision {
+    position: relative;
+    padding: 13px;
+    border: 1px solid var(--border);
+    border-radius: 13px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.005));
+  }
+  .decision.hot { border-color: rgba(99, 102, 241, 0.32); background: linear-gradient(180deg, rgba(99, 102, 241, 0.09), rgba(255, 255, 255, 0.005)); }
+  .decision .tag {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    padding: 1px 5px;
+    border: 1px solid rgba(52, 211, 153, 0.26);
+    border-radius: 4px;
+    background: rgba(52, 211, 153, 0.06);
+    color: #6ee7b7;
+    font-size: 7.5px;
+    letter-spacing: 0.03em;
+  }
+  .decision h4 { margin: 0 0 5px; padding-right: 56px; font-size: 11.5px; line-height: 1.5; color: #e7e7ef; }
+  .decision p { margin: 0 0 7px; font-size: 9.5px; line-height: 1.65; color: var(--muted); }
+  .decision .rec { padding-top: 7px; border-top: 1px dashed var(--border); font-size: 9px; line-height: 1.6; color: #c7c8d4; }
+  .decision .rec b { color: #a5b4fc; font-weight: 500; }
+
+  .page-foot {
+    display: flex;
+    justify-content: space-between;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin-top: 26px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    font-size: 9px;
+    color: var(--muted-2);
+  }
+
+  /* ---------- Toast ---------- */
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    z-index: 100;
+    max-width: 86vw;
+    padding: 9px 15px;
+    border: 1px solid rgba(99, 102, 241, 0.42);
+    border-radius: 999px;
+    background: rgba(22, 22, 32, 0.96);
+    color: #e8e8ef;
+    font-size: 10.5px;
+    text-align: center;
+    box-shadow: 0 14px 44px rgba(0, 0, 0, 0.55);
+    opacity: 0;
+    transform: translate(-50%, 14px);
+    pointer-events: none;
+    transition: opacity 0.22s ease, transform 0.22s ease;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  /* ---------- 自适应 ---------- */
+  @media (max-width: 1280px) {
+    .shell { grid-template-columns: 200px 386px minmax(0, 1fr); }
+    .doc-grid { grid-template-columns: minmax(0, 1fr) 318px; }
+    .hero h1 { font-size: 29px; }
+  }
+  @media (max-width: 1100px) {
+    .shell { grid-template-columns: 1fr; height: auto; }
+    .sidebar { flex-direction: row; align-items: center; gap: 8px; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+    .sidebar .company, .sidebar .btn-new, .sidebar .nav-label, .sidebar .side-foot { display: none; }
+    .side-nav { flex-direction: row; overflow-x: auto; overflow-y: hidden; }
+    .nav-item { width: auto; white-space: nowrap; }
+    .nav-item .count, .nav-item .chev { margin-left: 0; }
+    .list-pane { border-right: 0; border-bottom: 1px solid var(--border); max-height: 560px; }
+    .detail { max-height: none; }
+    .doc-grid { grid-template-columns: 1fr; }
+    .rail { position: static; display: grid; grid-template-columns: 1fr 1fr; }
+    .rail .proto-card { grid-column: 1 / -1; }
+    .compare { grid-template-columns: 1fr; }
+    .compare-top, .decision-grid { grid-template-columns: 1fr; }
+    .merge-strip { grid-column: auto; }
+  }
+  @media (max-width: 760px) {
+    .page { padding: 0 14px 32px; }
+    .meta-strip { flex-wrap: wrap; gap: 4px 12px; }
+    .meta-center { order: 3; width: 100%; text-align: left; }
+    .brand-sub { display: none; }
+    .hero { padding: 20px 0 14px; }
+    .hero h1 { font-size: 25px; }
+    .hero-stats { width: 100%; }
+    .stat { flex: 1; min-width: 0; }
+    .tabs { position: static; width: 100%; overflow-x: auto; }
+    .tab { flex: 1; padding: 8px 10px; white-space: nowrap; }
+    .tab .num { display: none; }
+    .tab-text small { display: none; }
+    .list-title-row h2 { font-size: 14.5px; }
+    .detail h2 { font-size: 18px; }
+    .meta-grid { grid-template-columns: 1fr 1fr; }
+    .spec-grid { grid-template-columns: 1fr; }
+    .spec.wide { grid-column: auto; }
+    .asset-row { grid-template-columns: 1fr; }
+    .doc-card { padding: 18px 15px; }
+    .rail { grid-template-columns: 1fr; }
+    .rail .proto-card { grid-column: auto; }
+    .new-grid { grid-template-columns: 1fr; }
+    .why-bubble { margin-left: 0; max-width: none; }
+    .doc-head h2 { font-size: 21px; }
+    .preview-body h4 { font-size: 17px; }
+    .merge-note { min-width: 0; }
+    .detail-foot { font-size: 8px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+  }
+</style>
+</head>
+<body>
+<svg class="svg-defs" aria-hidden="true" focusable="false">
+  <defs>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 2.5l2.1 6.4L21 11l-6.9 2.1L12 19.5l-2.1-6.4L3 11l6.9-2.1z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M4 13h4l2 3h4l2-3h4"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 20c0-3.1 2.5-5.2 5.5-5.2s5.5 2.1 5.5 5.2"/><path d="M16 5.4a3 3 0 0 1 0 5.8M17.2 14.9c2.1.4 3.7 2.2 3.7 4.6"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 19V5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19a2 2 0 0 0 2 2h13"/><path d="M8 7h7"/></symbol>
+    <symbol id="i-package" viewBox="0 0 24 24"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></symbol>
+    <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></symbol>
+    <symbol id="i-org" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="9" y="14" width="6" height="6" rx="1"/><path d="M7 10v2h10v-2M12 12v2"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h8M16 18h4"/><circle cx="16" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="14" cy="18" r="2"/></symbol>
+    <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.7 3h10.6a2 2 0 0 0 1.7-3l-5-9V3"/><path d="M7.5 15h9"/></symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l2-6 4 12 2-6h6"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h16M14 6l6 6-6 6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m4 12 5 5L20 6"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M10 21h4"/></symbol>
+    <symbol id="i-retry" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v4h4M9 12h6M9 16h6"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2.5 20h19z"/><path d="M12 9v5M12 17.5v.5"/></symbol>
+  </defs>
+</svg>
+
+<div class="page">
+  <div class="meta-strip">
+    <div class="brand">
+      <svg class="brand-icon" aria-hidden="true"><use href="#i-spark"></use></svg>
+      AI-EOS
+      <span class="brand-sub">一人公司操作系统</span>
+    </div>
+    <div class="meta-center">AI-EOS 产品原型 · 2026-10-31 · 仅用于方向确认</div>
+    <div class="meta-right">
+      <span class="tag-ghost">原型示意</span>
+      <span class="tag-ghost">数据非真实</span>
+    </div>
+  </div>
+
+  <header class="hero">
+    <div>
+      <div class="eyebrow">Product convergence · 方向确认</div>
+      <h1>从「会话」到<span class="text-gradient">任务与交付</span></h1>
+      <p>任务收件箱接住每一个后台任务，交付单让每份产出可验收、可追溯、可返工。目标是把 42 个导航项收敛到 12 个，让「我交代的事」成为产品的主对象。</p>
+    </div>
+    <div class="hero-stats" aria-label="收敛概览">
+      <div class="stat"><b>47</b><span>现有页面</span></div>
+      <div class="stat"><b>42</b><span>导航项</span></div>
+      <div class="stat accent"><b>12</b><span>收敛目标</span></div>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="原型分区">
+    <button class="tab active" type="button" role="tab" id="tab-inbox" data-tab="inbox" aria-selected="true" aria-controls="panel-inbox">
+      <span class="num">01</span>
+      <span class="tab-text">任务收件箱<small>新首页</small></span>
+    </button>
+    <button class="tab" type="button" role="tab" id="tab-deliverable" data-tab="deliverable" aria-selected="false" aria-controls="panel-deliverable">
+      <span class="num">02</span>
+      <span class="tab-text">交付单<small>Deliverable</small></span>
+    </button>
+    <button class="tab" type="button" role="tab" id="tab-nav" data-tab="nav" aria-selected="false" aria-controls="panel-nav">
+      <span class="num">03</span>
+      <span class="tab-text">导航收敛<small>前后对照</small></span>
+    </button>
+  </nav>
+  <div class="hint-line">
+    <span>交互提示</span>
+    <span>收件箱：搜索 58 条会话 / 筛选 / 选中任务</span>
+    <span>交付单：切换 v1·v2 / 展开来源 / 验收</span>
+    <span>导航：展开实验室</span>
+  </div>
+
+  <!-- ================= 01 任务收件箱 ================= -->
+  <section class="panel active" id="panel-inbox" role="tabpanel" aria-labelledby="tab-inbox">
+    <div class="shell">
+      <aside class="sidebar" aria-label="一级导航">
+        <div class="company">
+          <div class="company-avatar">星</div>
+          <div>
+            <b>星图科技</b>
+            <span>一人公司 · 12 位 AI 员工</span>
+          </div>
+        </div>
+        <button class="btn-new" type="button" data-toast="原型示意：新建任务会先确认目标、截止与验收人">
+          <svg class="icon" aria-hidden="true"><use href="#i-spark"></use></svg>
+          新建任务
+        </button>
+        <div class="nav-label">工作</div>
+        <nav class="side-nav">
+          <button class="nav-item active" type="button" data-nav="收件箱">
+            <svg class="icon" aria-hidden="true"><use href="#i-inbox"></use></svg>
+            <span>收件箱</span>
+            <span class="count">6</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="目标">
+            <svg class="icon" aria-hidden="true"><use href="#i-target"></use></svg>
+            <span>目标</span>
+            <span class="count">4</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="AI 员工">
+            <svg class="icon" aria-hidden="true"><use href="#i-users"></use></svg>
+            <span>AI 员工</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="知识库">
+            <svg class="icon" aria-hidden="true"><use href="#i-book"></use></svg>
+            <span>知识库</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="成果">
+            <svg class="icon" aria-hidden="true"><use href="#i-package"></use></svg>
+            <span>成果</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="会议">
+            <svg class="icon" aria-hidden="true"><use href="#i-calendar"></use></svg>
+            <span>会议</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="自动化">
+            <svg class="icon" aria-hidden="true"><use href="#i-bolt"></use></svg>
+            <span>自动化</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="成本">
+            <svg class="icon" aria-hidden="true"><use href="#i-chart"></use></svg>
+            <span>成本</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="组织">
+            <svg class="icon" aria-hidden="true"><use href="#i-org"></use></svg>
+            <span>组织</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="设置">
+            <svg class="icon" aria-hidden="true"><use href="#i-sliders"></use></svg>
+            <span>设置</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="实验室">
+            <svg class="icon" aria-hidden="true"><use href="#i-flask"></use></svg>
+            <span>实验室</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="诊断">
+            <svg class="icon" aria-hidden="true"><use href="#i-pulse"></use></svg>
+            <span>诊断</span>
+          </button>
+        </nav>
+        <div class="side-foot">
+          <div class="budget">
+            <div class="budget-top"><span>本月成本</span><b>¥1,284</b></div>
+            <div class="bar"><i style="width:43%"></i></div>
+            <div class="budget-sub">预算 ¥3,000 · 已用 43%</div>
+          </div>
+          <div class="side-note">原型示意 · 数据非真实</div>
+        </div>
+      </aside>
+
+      <section class="list-pane" aria-label="收件箱列表">
+        <div class="list-head">
+          <div class="list-title-row">
+            <div>
+              <h2>任务收件箱</h2>
+              <div class="list-sub">会话只是任务的视图，切走不丢结果</div>
+            </div>
+            <span class="list-badge">58 条会话</span>
+          </div>
+          <div class="search">
+            <svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>
+            <input id="searchInput" type="search" placeholder="搜索任务、会话、交付物…" autocomplete="off" aria-label="搜索任务与会话">
+            <button class="search-clear" id="searchClear" type="button" aria-label="清空搜索" hidden>
+              <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+            </button>
+            <span class="kbd">⌘K</span>
+          </div>
+          <div class="search-count">
+            <span id="searchCount">58 条会话 · 24 条任务在收件箱</span>
+            <span>原型示意</span>
+          </div>
+          <div class="filter-row">
+            <div class="filters" role="group" aria-label="按状态筛选">
+              <button class="chip active" type="button" data-filter="all">全部 <b>24</b></button>
+              <button class="chip" type="button" data-filter="review">待验收 <b>6</b></button>
+              <button class="chip" type="button" data-filter="run">进行中 <b>8</b></button>
+              <button class="chip" type="button" data-filter="done">已完成 <b>6</b></button>
+              <button class="chip" type="button" data-filter="fail">失败 <b>4</b></button>
+            </div>
+            <select class="sort-select" id="sortSelect" aria-label="排序方式">
+              <option value="due">按截止时间</option>
+              <option value="cost">按成本</option>
+              <option value="duration">按耗时</option>
+            </select>
+          </div>
+        </div>
+        <div class="list-scroll" id="listScroll" aria-live="polite"></div>
+      </section>
+
+      <section class="detail" id="detail" aria-label="任务详情" aria-live="polite"></section>
+    </div>
+  </section>
+
+  <!-- ================= 02 交付单 ================= -->
+  <section class="panel" id="panel-deliverable" role="tabpanel" aria-labelledby="tab-deliverable">
+    <div class="doc-grid">
+      <article class="doc-card" id="docCard" data-preview-version="2">
+        <div class="doc-head">
+          <div>
+            <div class="doc-id">交付单 · D-2026-1031-004 <span class="sep-dot"></span> 关联目标 G-018 <span class="sep-dot"></span> 任务 T-1042</div>
+            <h2>Q4 新品发布内容包</h2>
+            <div class="doc-sub">提交人 林知夏 · 内容策略 <span class="sep-dot"></span> 2026-10-31 12:20 <span class="sep-dot"></span> 第 2 版 <span class="sep-dot"></span> 原型示意</div>
+          </div>
+          <div class="doc-head-side">
+            <span class="badge review" id="docStatus"><span class="dot" style="background:#fbbf24"></span>待验收</span>
+            <span class="version-chip" id="versionChip">v2</span>
+          </div>
+        </div>
+
+        <div class="v1-banner" id="v1Banner" hidden>
+          <svg class="icon" aria-hidden="true"><use href="#i-alert"></use></svg>
+          正在查看历史版本 v1，仅用于对比；验收请切回 v2。
+        </div>
+
+        <div class="section-head" style="margin-top:16px">
+          <h3>01 · 规格</h3>
+          <span class="section-hint">验收时逐条对照</span>
+          <div class="why-bubble">
+            <span class="why-num">1</span>
+            <div><b>为什么这样设计 · 可验收</b>目标、范围、格式、截止前置成四要素，验收有明确标准，不靠翻聊天记录找共识。</div>
+          </div>
+        </div>
+        <div class="spec-grid">
+          <div class="spec wide">
+            <span>目标</span>
+            <p>为 Q4 新品发布准备一套可直接投放的内容资产，覆盖发布会、官网、私域三个渠道，并确保关键数字可追溯。</p>
+          </div>
+          <div class="spec wide">
+            <span>范围</span>
+            <p>主文案 1 套、发布会串场稿 1 份、私域 7 日内容排期 1 份；视觉设计与视频不在本次范围。</p>
+          </div>
+          <div class="spec">
+            <span>格式</span>
+            <p>Markdown + 飞书文档；主文案 ≤ 1200 字；标题 ≤ 18 字；中文全角标点。</p>
+          </div>
+          <div class="spec">
+            <span>截止</span>
+            <p>2026-11-03 18:00 · 剩余 3 天 · 逾期前 24 小时提醒。</p>
+          </div>
+          <div class="spec">
+            <span>验收人</span>
+            <p>你（创始人）· 最终解释权归验收人。</p>
+          </div>
+          <div class="spec">
+            <span>关联目标</span>
+            <p>Q4 新品发布（G-018）· 目标负责人：你。</p>
+          </div>
+        </div>
+
+        <div class="section-head">
+          <h3>02 · 产出预览</h3>
+          <span class="section-hint" id="previewVersionHint">v2 · 主文案节选</span>
+        </div>
+        <div class="preview-shell">
+          <div class="preview-bar">
+            <i class="win-dot"></i><i class="win-dot"></i><i class="win-dot"></i>
+            <span class="file">主文案.md</span>
+            <span class="preview-right">只读预览 · 原型示意</span>
+          </div>
+          <div class="preview-body">
+            <div class="preview-kicker" id="pvKicker">Q4 新品发布 · Atlas 迁移助手</div>
+            <h4 id="pvTitle">把复杂留给我们，把简单交给用户</h4>
+            <p class="preview-lead" id="pvLead">Q4 新品「Atlas 迁移助手」不教用户一套新工具，而是把迁移这件事从 3 天压缩到 30 分钟。项目、权限、素材原样带走，迁移前自动快照。</p>
+            <ul class="preview-list" id="pvList">
+              <li>一键迁移：历史项目、权限、素材原样带走。</li>
+              <li>零学习成本：沿用现有操作习惯，不新增面板。</li>
+              <li>可回滚：迁移前自动快照，30 天内随时退回。</li>
+            </ul>
+            <div class="preview-meta" id="pvMeta">
+              <span>主文案 986 字</span>
+              <span>渠道：发布会 / 官网 / 私域</span>
+              <span>标题 15 字</span>
+            </div>
+          </div>
+          <div class="asset-row">
+            <div class="asset">主文案.md<span>986 字 · 已校对</span></div>
+            <div class="asset">发布会串场稿.md<span>1,240 字 · 8 分钟</span></div>
+            <div class="asset">私域 7 日排期.csv<span>7 天 × 3 渠道</span></div>
+          </div>
+        </div>
+
+        <div class="section-head">
+          <h3>03 · 证据与引用 <span class="count" id="evCount">5 条来源</span></h3>
+          <div class="why-bubble">
+            <span class="why-num">2</span>
+            <div><b>为什么这样设计 · 可追溯</b>每个关键数字都挂来源，可点回原文；没有来源的数字不允许出现在交付里。</div>
+          </div>
+        </div>
+        <div class="evidence-list">
+          <div class="ev">
+            <div class="ev-head" role="button" tabindex="0" aria-expanded="false">
+              <span class="ev-type kb">知识库</span>
+              <div class="ev-main">
+                <b>2026 Q4 产品路线图</b>
+                <p>主卖点：一键迁移、零学习成本；对外禁用「替代人工」表述。</p>
+              </div>
+              <span class="ev-open">展开</span>
+            </div>
+            <div class="ev-body">
+              <div class="caption">命中片段 · 第 3 节「对外口径」 · 知识库更新于 2026-10-24</div>
+              <p>「Atlas 迁移助手」对外只讲三件事：一键迁移、零学习成本、可回滚。不要承诺「替代人工」，避免合规风险。</p>
+              <button class="link-btn" type="button" data-source="知识库 · 2026 Q4 产品路线图">在知识库中定位（原型示意）</button>
+            </div>
+          </div>
+          <div class="ev">
+            <div class="ev-head" role="button" tabindex="0" aria-expanded="false">
+              <span class="ev-type kb">知识库</span>
+              <div class="ev-main">
+                <b>品牌语气规范 v3</b>
+                <p>标题不超过 18 字；避免感叹号与绝对化表述。</p>
+              </div>
+              <span class="ev-open">展开</span>
+            </div>
+            <div class="ev-body">
+              <div class="caption">命中片段 · 第 2 节「标题与标点」 · 知识库更新于 2026-09-18</div>
+              <p>标题 ≤ 18 字；避免感叹号与「最」「第一」等绝对化表述；数字统一带口径与时间。</p>
+              <button class="link-btn" type="button" data-source="知识库 · 品牌语气规范 v3">在知识库中定位（原型示意）</button>
+            </div>
+          </div>
+          <div class="ev" data-version="2">
+            <div class="ev-head" role="button" tabindex="0" aria-expanded="false">
+              <span class="ev-type web">网页</span>
+              <div class="ev-main">
+                <b>竞品定价页快照 · Cursor 2.0</b>
+                <p>Pro 20 美元/月，Teams 40 美元/席/月，年付 8 折。</p>
+              </div>
+              <span class="ev-open">展开</span>
+            </div>
+            <div class="ev-body">
+              <div class="caption">网页快照 · 抓取于 2026-10-30 14:12 · 已存档</div>
+              <p>Cursor 2.0 定价页：Pro 20 美元/月，Teams 40 美元/席/月，年付 8 折。页面没有「迁移」能力描述，可用于差异化对比。</p>
+              <button class="link-btn" type="button" data-source="网页快照 · Cursor 2.0 定价页">打开存档快照（原型示意）</button>
+            </div>
+          </div>
+          <div class="ev">
+            <div class="ev-head" role="button" tabindex="0" aria-expanded="false">
+              <span class="ev-type chat">会话</span>
+              <div class="ev-main">
+                <b>Q4 新品发布 kickoff</b>
+                <p>发布会定档 11 月 12 日，主视觉用深色，主文案先给创始人过。</p>
+              </div>
+              <span class="ev-open">展开</span>
+            </div>
+            <div class="ev-body">
+              <div class="caption">会话摘录 · 2026-10-28 10:12 · 已归档</div>
+              <p>老板：发布会定档 11 月 12 日，主视觉用深色。内容先给一版能直接投的，不要再堆功能清单。</p>
+              <button class="link-btn" type="button" data-source="会话 · Q4 新品发布 kickoff">回到会话原文（原型示意）</button>
+            </div>
+          </div>
+          <div class="ev" data-version="2">
+            <div class="ev-head" role="button" tabindex="0" aria-expanded="false">
+              <span class="ev-type data">数据表</span>
+              <div class="ev-main">
+                <b>内测迁移数据（42 家）</b>
+                <p>平均迁移耗时 28 分钟，P90 51 分钟，回滚全部成功。</p>
+              </div>
+              <span class="ev-open">展开</span>
+            </div>
+            <div class="ev-body">
+              <div class="caption">数据表 · 内测第 3 周汇总 · 口径：完成迁移的企业均值</div>
+              <p>42 家内测企业，平均迁移耗时 28 分钟，P90 51 分钟；回滚 42 次全部成功。样本与口径已随表存档。</p>
+              <button class="link-btn" type="button" data-source="数据表 · 内测迁移数据（42 家）">查看数据表（原型示意）</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="section-head">
+          <h3>04 · 验收</h3>
+          <span class="section-hint">你的决定会直接回传员工</span>
+        </div>
+        <div class="acceptance" id="accBox">
+          <div class="acc-top">
+            <div>
+              <div class="acc-title">对照规格逐条验收 <span class="badge review" id="accBadge"><span class="dot" style="background:#fbbf24"></span>待验收</span></div>
+              <div class="acc-note" id="accBanner">等待你验收 · 规格与来源已就绪。通过则归档；打回则带着意见返工。</div>
+            </div>
+            <span class="acc-hint" id="accHint">当前查看 v2 · 可验收</span>
+          </div>
+          <textarea id="accComment" placeholder="验收意见（打回时必填）：例如「第 3 条回滚能力需要补充内测证据」"></textarea>
+          <div class="acc-error" id="accError" role="alert"></div>
+          <div class="acc-actions">
+            <button class="btn primary" type="button" id="btnApprove">
+              <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>通过验收
+            </button>
+            <button class="btn danger" type="button" id="btnReject">
+              <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>打回修改
+            </button>
+            <button class="linkish" type="button" id="btnUndo" hidden>撤销验收结果（仅原型演示）</button>
+          </div>
+        </div>
+      </article>
+
+      <aside class="rail" aria-label="交付单侧栏">
+        <div class="rail-card">
+          <h3>版本历史 <span class="mini-tag">只增不改</span></h3>
+          <button class="version-row active" type="button" data-version-row="2" aria-pressed="true">
+            <span class="v-tag">v2</span>
+            <span class="v-main">
+              <b>当前版本 · 2026-10-31 12:20</b>
+              <span class="v-desc">林知夏 · 补充定价对比与内测数据，按品牌规范改写标题</span>
+            </span>
+          </button>
+          <button class="version-row" type="button" data-version-row="1" aria-pressed="false">
+            <span class="v-tag">v1</span>
+            <span class="v-main">
+              <b>草稿 · 2026-10-30 22:10</b>
+              <span class="v-desc">林知夏 · 初稿，私域排期未完成，1 处数据无来源</span>
+            </span>
+          </button>
+          <button class="btn small wide" type="button" id="btnCompare" aria-expanded="false">
+            <svg class="icon" aria-hidden="true"><use href="#i-chart"></use></svg>对比 v1 → v2
+          </button>
+          <div class="diff" id="diffBlock">
+            <div class="diff-head">v1 → v2 的 5 处变更</div>
+            <div class="diff-row"><span class="add">+</span><span>补充竞品定价对比与内测数据两条来源</span></div>
+            <div class="diff-row"><span class="add">+</span><span>补充法务审核意见 2 条：禁用「替代人工」</span></div>
+            <div class="diff-row"><span class="chg">~</span><span>标题由「新品来了」改为「把复杂留给我们，把简单交给用户」</span></div>
+            <div class="diff-row"><span class="chg">~</span><span>私域排期由 5 日扩展到 7 日，覆盖 3 个渠道</span></div>
+            <div class="diff-row"><span class="del">-</span><span>删除未标注来源的「预计转化率提升 32%」</span></div>
+          </div>
+          <div class="why-bubble">
+            <span class="why-num">3</span>
+            <div><b>为什么这样设计 · 可返工</b>版本只增不改，打回必须带意见；v1→v2 的差异一眼可见，返工不再从零开始。</div>
+          </div>
+        </div>
+
+        <div class="rail-card">
+          <h3>交付信息</h3>
+          <div class="info-list">
+            <div class="info-row"><span>交付单号</span><b>D-2026-1031-004</b></div>
+            <div class="info-row"><span>关联任务</span><b>T-1042 · Q4 内容包</b></div>
+            <div class="info-row"><span>关联目标</span><b>G-018 · Q4 新品发布</b></div>
+            <div class="info-row"><span>提交人</span><b>林知夏 · 内容策略</b></div>
+            <div class="info-row"><span>验收人</span><b>你（创始人）</b></div>
+            <div class="info-row"><span>截止时间</span><b>2026-11-03 18:00</b></div>
+            <div class="info-row"><span>成本 / 耗时</span><b>¥6.42 / 2h18m</b></div>
+            <div class="info-row"><span>来源数量</span><b>5 条 · 全部可点回</b></div>
+          </div>
+        </div>
+
+        <div class="rail-card proto-card">
+          <b>原型说明</b>
+          所有标题、金额、耗时与引用均为虚构示例，只用于确认信息结构。正式实现需接任务、资产、知识库与交付中心接口。
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ================= 03 导航收敛 ================= -->
+  <section class="panel" id="panel-nav" role="tabpanel" aria-labelledby="tab-nav">
+    <div class="compare-top">
+      <div class="kpi"><b>42 → 12</b><span>一级导航：当前 42 项，收敛到 12 项</span></div>
+      <div class="kpi"><b>会话 → 任务/交付</b><span>主对象：从聊天记录换成可验收的交付</span></div>
+      <div class="kpi"><b>二选一 → 一个默认</b><span>首次进入：不再强制选「经典 / 极客」</span></div>
+    </div>
+
+    <div class="compare">
+      <section class="nav-col" aria-label="当前导航">
+        <div class="nav-col-head">
+          <div>
+            <h3>现在</h3>
+            <p>5 组平铺 · 认知负担高 · 三个入口做同一件事</p>
+          </div>
+          <span class="nav-count old">42 项</span>
+        </div>
+
+        <div class="nav-group">
+          <h4>指挥中枢 · 8</h4>
+          <div class="nav-tags">
+            <span class="nav-tag dim">工作台</span>
+            <span class="nav-tag dim">指挥中心</span>
+            <span class="nav-tag merge">一句话指挥台</span>
+            <span class="nav-tag merge">项目中心</span>
+            <span class="nav-tag merge">作战室</span>
+            <span class="nav-tag">任务</span>
+            <span class="nav-tag">自治运行</span>
+            <span class="nav-tag">公司管理</span>
+          </div>
+        </div>
+
+        <div class="nav-group">
+          <h4>组织与智能体 · 6</h4>
+          <div class="nav-tags">
+            <span class="nav-tag">Agent 团队</span>
+            <span class="nav-tag">组织架构</span>
+            <span class="nav-tag">Agent 工厂</span>
+            <span class="nav-tag">专家库</span>
+            <span class="nav-tag">离职交接</span>
+            <span class="nav-tag">模型配置</span>
+          </div>
+        </div>
+
+        <div class="nav-group">
+          <h4>协作执行 · 5</h4>
+          <div class="nav-tags">
+            <span class="nav-tag">会议中心</span>
+            <span class="nav-tag">工作流</span>
+            <span class="nav-tag">日程安排</span>
+            <span class="nav-tag">自动化规则</span>
+            <span class="nav-tag">设备操作台</span>
+          </div>
+        </div>
+
+        <div class="nav-group">
+          <h4>知识与资产 · 8</h4>
+          <div class="nav-tags">
+            <span class="nav-tag">知识库</span>
+            <span class="nav-tag">技能中心</span>
+            <span class="nav-tag">成果中心</span>
+            <span class="nav-tag">交付中心</span>
+            <span class="nav-tag">文档风格</span>
+            <span class="nav-tag">记忆库</span>
+            <span class="nav-tag">模板库</span>
+            <span class="nav-tag">素材资产</span>
+          </div>
+        </div>
+
+        <div class="nav-group">
+          <h4>成长与治理 · 12</h4>
+          <div class="nav-tags">
+            <span class="nav-tag lab">成长中心</span>
+            <span class="nav-tag lab">复盘中心</span>
+            <span class="nav-tag lab">培训中心</span>
+            <span class="nav-tag lab">绩效中心</span>
+            <span class="nav-tag lab">治理与审计</span>
+            <span class="nav-tag">外部协作</span>
+            <span class="nav-tag">干预中心</span>
+            <span class="nav-tag lab">技能成长档案</span>
+            <span class="nav-tag">Token 统计</span>
+            <span class="nav-tag">局域网共享</span>
+            <span class="nav-tag">系统诊断</span>
+            <span class="nav-tag">审计日志</span>
+          </div>
+        </div>
+
+        <div class="col-note">
+          以上为 39 个侧边栏项的代表性示意，另有接口测试台、首页跳转等 3 个隐藏/内部页面，合计 42 项。标黄的三项在功能上高度重叠，标青的六项属于成长类低频页。
+        </div>
+      </section>
+
+      <section class="nav-col new" aria-label="收敛后导航">
+        <div class="nav-col-head">
+          <div>
+            <h3>收敛后</h3>
+            <p>12 个一级入口 · 主路径 3 步内完成 · 低频进实验室</p>
+          </div>
+          <span class="nav-count new-count">12 项</span>
+        </div>
+
+        <div class="new-grid">
+          <div class="new-item"><span class="idx">01</span><div><b>收件箱</b><p>所有任务：待验收 / 进行中 / 已完成 / 失败</p></div></div>
+          <div class="new-item"><span class="idx">02</span><div><b>目标</b><p>合并指挥台、作战室、项目中心；规划 / 盯盘 / 复盘</p></div></div>
+          <div class="new-item"><span class="idx">03</span><div><b>AI 员工</b><p>招人、配模型、看能力与负载</p></div></div>
+          <div class="new-item"><span class="idx">04</span><div><b>知识库</b><p>事实依据与来源，交付时自动挂引用</p></div></div>
+          <div class="new-item"><span class="idx">05</span><div><b>成果</b><p>交付物、资产与可复用模板</p></div></div>
+          <div class="new-item"><span class="idx">06</span><div><b>会议</b><p>开会出结论，结论一键转任务</p></div></div>
+          <div class="new-item"><span class="idx">07</span><div><b>自动化</b><p>定时与事件触发，结果进收件箱</p></div></div>
+          <div class="new-item"><span class="idx">08</span><div><b>成本</b><p>预算、花费、按任务与员工归因</p></div></div>
+          <div class="new-item"><span class="idx">09</span><div><b>组织</b><p>部门、权限、席位与交接</p></div></div>
+          <div class="new-item"><span class="idx">10</span><div><b>设置</b><p>公司、模型、通知、界面布局</p></div></div>
+          <div class="new-item"><span class="idx">11</span><div><b>实验室</b><p>成长类 6 页与内部工具，默认收起</p></div></div>
+          <div class="new-item"><span class="idx">12</span><div><b>诊断</b><p>体检、日志、系统状态与修复建议</p></div></div>
+        </div>
+
+        <button class="lab-toggle" type="button" id="labToggle" aria-expanded="false" aria-controls="labBody">
+          <svg class="icon" aria-hidden="true"><use href="#i-chevron"></use></svg>
+          实验室（默认收起）
+          <small>6 个成长页 + 内部工具</small>
+        </button>
+        <div class="lab-body" id="labBody">
+          <span>成长中心</span>
+          <span>复盘中心</span>
+          <span>培训中心</span>
+          <span>绩效中心</span>
+          <span>治理与审计</span>
+          <span>技能成长档案</span>
+          <span>接口测试台</span>
+          <span>首页跳转</span>
+        </div>
+
+        <div class="col-note">
+          实验室不是删除：页面仍存在，⌘K 仍可搜索直达。导航只保留每天要用的入口，避免新用户被「成长 / 复盘 / 绩效」吓退。
+        </div>
+      </section>
+
+      <div class="merge-strip">
+        <div class="merge-src">
+          <span>一句话指挥台</span>
+          <span>作战室</span>
+          <span>项目中心</span>
+        </div>
+        <span class="merge-arrow">→</span>
+        <div class="merge-dst">目标 · 一个入口，三种看法<small>规划（原项目中心）/ 盯盘（原作战室）/ 一句话下达（原指挥台）</small></div>
+        <div class="merge-note">旧链接不失效：自动落到目标的对应视图，并保留原筛选条件。合并后少 2 个入口，但能力不减。</div>
+      </div>
+    </div>
+
+    <div class="decisions">
+      <div class="decisions-head">
+        <div>
+          <h3>需要你拍板的 3 件事</h3>
+          <p class="sub">以下为建议方案，确认后才动组件代码；当前仅静态原型。</p>
+        </div>
+        <span class="tag-ghost">原型示意 · 数据非真实</span>
+      </div>
+      <div class="decision-grid">
+        <div class="decision hot">
+          <span class="tag">建议采用</span>
+          <h4>默认界面：取消强制二选一</h4>
+          <p>现状：首次启动必须选「经典 / 极客」，两个词用户都听不懂。建议：直接进「收件箱」，三栏极客布局收进「设置 · 布局」开关，首启 3 步 tour。</p>
+          <div class="rec"><b>影响：</b>新用户少一步选择、少一个概念；老用户仍可一键切回三栏。</div>
+        </div>
+        <div class="decision">
+          <span class="tag">建议采用</span>
+          <h4>目标合并后的信息架构</h4>
+          <p>目标页只留三个视图：规划（原项目中心）、盯盘（原作战室）、一句话下达（原指挥台）。旧入口不再出现在导航，旧链接自动落到对应视图。</p>
+          <div class="rec"><b>影响：</b>这是 42 → 12 最关键的一刀，确认后即可冻结导航结构。</div>
+        </div>
+        <div class="decision">
+          <span class="tag">建议采用</span>
+          <h4>实验室的收纳范围</h4>
+          <p>成长中心、复盘、培训、绩效、治理审计、技能成长 6 页收进实验室；接口测试台等内部工具只搜不显示。默认收起，不占一级导航。</p>
+          <div class="rec"><b>影响：</b>默认导航更短；重度用户需一次适应，但 ⌘K 仍可直达。</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="page-foot">
+    <span>AI-EOS 产品原型 · 任务收件箱 + 交付单 + 导航收敛 · 2026-10-31</span>
+    <span>文件：apps/web/public/prototype/inbox-deliverable.html · 纯静态 · 不接真实接口</span>
+  </footer>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var $ = function (sel, root) { return (root || document).querySelector(sel); };
+  var $$ = function (sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); };
+
+  function esc(value) {
+    return String(value).replace(/[&<>"']/g, function (ch) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+    });
+  }
+
+  function icon(name, cls) {
+    return '<svg class="icon ' + (cls || "") + '" aria-hidden="true"><use href="#' + name + '"></use></svg>';
+  }
+
+  /* ---------- 数据（全部为原型示意） ---------- */
+  var PEOPLE = {
+    lin: { name: "林知夏", role: "内容策略", initial: "林", av: 0 },
+    chen: { name: "陈墨", role: "行业研究", initial: "陈", av: 1 },
+    zhou: { name: "周野", role: "销售运营", initial: "周", av: 2 },
+    shen: { name: "沈棠", role: "经营分析", initial: "沈", av: 3 },
+    xu: { name: "许一", role: "产品", initial: "许", av: 4 },
+    luo: { name: "罗启", role: "采购与合规", initial: "罗", av: 5 },
+    su: { name: "苏晚", role: "HRBP", initial: "苏", av: 6 },
+    gu: { name: "顾南", role: "客户成功", initial: "顾", av: 7 }
+  };
+
+  var GROUP = {
+    review: { label: "待验收", cls: "review", color: "#fbbf24" },
+    run: { label: "进行中", cls: "run", color: "#22d3ee" },
+    done: { label: "已完成", cls: "done", color: "#34d399" },
+    fail: { label: "失败", cls: "fail", color: "#f87171" }
+  };
+
+  function T(id, title, owner, group, duration, cost, fresh, priority, due, source, cites) {
+    return {
+      id: id, title: title, owner: owner, group: group, duration: duration,
+      cost: cost, fresh: fresh, priority: priority, due: due, source: source, cites: cites || 3
+    };
+  }
+
+  var TASKS = [
+    T("t01", "Q4 新品发布内容包", "lin", "review", "2h18", 6.42, true, "高", "今天 18:00", "Q4 新品发布 kickoff", 5),
+    T("t02", "竞品简报：Cursor 2.0 定价与功能拆解", "chen", "review", "1h05", 3.18, true, "高", "今天 20:00", "竞品跟踪 · 周会", 4),
+    T("t03", "华东区渠道政策 v3", "zhou", "review", "3h40", 8.90, true, "中", "明天 12:00", "渠道政策修订", 4),
+    T("t04", "9 月经营复盘（含毛利归因）", "shen", "review", "4h12", 11.20, false, "高", "明天 10:00", "9 月经营会", 6),
+    T("t05", "官网改版需求清单", "xu", "review", "52m", 2.40, true, "中", "今天 16:00", "官网 2.0 讨论", 3),
+    T("t06", "供应商比价：云 GPU 三家报价", "luo", "review", "1h26", 4.05, false, "低", "周五 18:00", "算力采购", 3),
+    T("t07", "客户成功 QBR 材料（星澜集团）", "gu", "run", "1h12", 3.60, false, "高", "今天 17:30", "星澜集团 QBR", 3),
+    T("t08", "10 月投放预算重排", "zhou", "run", "38m", 1.90, false, "高", "今天 15:00", "Q4 增长例会", 2),
+    T("t09", "招聘 JD：高级后端（Agent 平台）", "su", "run", "24m", 1.10, false, "中", "明天", "Q4 招聘计划", 2),
+    T("t10", "API 文档英文化", "chen", "run", "2h06", 4.80, false, "中", "周四", "出海准备", 3),
+    T("t11", "竞品功能矩阵更新（20 家）", "chen", "run", "56m", 2.30, false, "中", "明天", "竞品跟踪 · 周会", 4),
+    T("t12", "私域社群 7 日内容排期", "lin", "run", "41m", 1.75, true, "中", "今天 19:00", "私域增长实验", 2),
+    T("t13", "季度合规自查（数据出境）", "luo", "run", "1h48", 5.10, false, "高", "周五", "合规季度自查", 3),
+    T("t14", "官网 SEO 关键词清洗", "xu", "run", "33m", 1.40, false, "低", "明天", "官网 2.0 讨论", 2),
+    T("t15", "9 月销售周报（W39）", "zhou", "done", "46m", 1.85, false, "中", "已归档", "销售周报", 2),
+    T("t16", "竞品简报：Notion AI 企业版", "chen", "done", "1h02", 2.66, true, "中", "已交付", "竞品跟踪 · 周会", 4),
+    T("t17", "产品发布 FAQ（12 问）", "lin", "done", "58m", 2.15, false, "高", "已交付", "Q4 新品发布 kickoff", 3),
+    T("t18", "招聘漏斗周报", "su", "done", "21m", 0.86, false, "低", "已归档", "招聘周报", 2),
+    T("t19", "云成本异常排查（8 月）", "luo", "done", "1h34", 4.32, false, "中", "已交付", "云成本告警", 3),
+    T("t20", "客户访谈纪要 ×5", "shen", "done", "2h22", 5.80, false, "中", "已交付", "客户访谈计划", 5),
+    T("t21", "财报 PDF 结构化（2025 Q3）", "shen", "fail", "12m", 0.62, false, "高", "中断", "Q3 财报分析", 1),
+    T("t22", "海外竞品站点抓取", "chen", "fail", "8m", 0.44, false, "中", "中断", "竞品跟踪 · 周会", 0),
+    T("t23", "合同条款抽取（星澜集团）", "luo", "fail", "6m", 0.31, false, "高", "中断", "星澜集团合同", 0),
+    T("t24", "社媒舆情日报", "lin", "fail", "15m", 0.72, false, "低", "中断", "舆情监控", 0)
+  ];
+
+  TASKS[0].summary = "为 11 月 12 日发布会准备主文案、串场稿与私域 7 日排期；关键数字已挂来源，等待验收。";
+  TASKS[0].steps = [
+    { t: "10:02", state: "done", title: "接收目标", desc: "来自会话「Q4 新品发布 kickoff」，确认发布档期 11-12 与三个渠道。" },
+    { t: "10:06", state: "done", title: "拆解计划", desc: "拆为检索、撰写、自检、交付 4 步；明确不含视觉设计，避免范围蔓延。" },
+    { t: "11:18", state: "done", title: "检索与取证", desc: "命中知识库 12 篇，采用 5 条来源；无来源的数字自动拦截。" },
+    { t: "12:06", state: "done", title: "撰写与自检", desc: "生成主文案、串场稿、私域排期；按品牌规范核对标题与禁用词。" },
+    { t: "12:20", state: "current", title: "提交待验收", desc: "交付单 D-2026-1031-004 · v2 已提交，等待你通过或打回。" }
+  ];
+  TASKS[1].summary = "拆解 Cursor 2.0 的定价、功能与目标客群，给出三条可用的差异化话术，等待验收。";
+  TASKS[2].summary = "重写华东区渠道返佣与准入规则，附三档情景测算，等待验收。";
+  TASKS[3].summary = "复盘 9 月收入、毛利与费用偏差，定位到 3 个可行动项，等待验收。";
+  TASKS[4].summary = "把官网 2.0 的 17 条需求收敛为 P0/P1/P2 三档，附验收口径，等待确认。";
+  TASKS[5].summary = "对比三家云 GPU 供应商的单价、账期与 SLA，给出采购建议，等待验收。";
+
+  var FAILURES = {
+    t21: { reason: "扫描件 OCR 置信度仅 61%，关键表格无法还原。", suggest: "建议换用原始 Excel，或先做人工校对再重试。" },
+    t22: { reason: "目标站点返回 403，需要登录态，抓取被拒绝。", suggest: "可改用人工导出 HTML 后上传知识库，再让员工解析。" },
+    t23: { reason: "附件为旧版 .doc，解析器不支持该格式。", suggest: "转存为 .docx 后重试，条款结构会被自动识别。" },
+    t24: { reason: "数据源超时，自动重试 3 次仍失败。", suggest: "已切换备用源，可直接重试；若仍失败请检查网络代理。" }
+  };
+
+  var ARCHIVED_TITLES = [
+    "8 月经营复盘", "Q3 目标拆解", "渠道返佣测算", "新品命名备选",
+    "用户分层标签方案", "客服话术库 v2", "发布会串场稿", "KOL 名单初筛",
+    "竞品价格监测（周）", "招聘渠道 ROI", "数据看板指标口径", "私有化部署方案",
+    "客户续约风险清单", "内容日历（9 月）", "直播脚本：秋季发布会", "品牌视觉规范整理",
+    "销售培训课件", "API 限流方案", "移动端适配清单", "安全问卷答复",
+    "供应商月度评估", "社群运营 SOP", "竞品简报：飞书智能伙伴", "竞品简报：钉钉 AI 助理",
+    "客户旅程地图", "定价方案 A/B", "发票与回款对账", "员工入职手册",
+    "产品路线图（Q4）", "需求池优先级重排", "周会纪要（W41）", "周会纪要（W42）",
+    "舆情周报（W41）", "知识库标签体系"
+  ];
+  var OWNER_KEYS = ["lin", "chen", "zhou", "shen", "xu", "luo", "su", "gu"];
+  ARCHIVED_TITLES.forEach(function (title, i) {
+    TASKS.push({
+      id: "a" + (i + 1),
+      title: title,
+      owner: OWNER_KEYS[i % OWNER_KEYS.length],
+      group: "done",
+      archived: true,
+      duration: (18 + ((i * 7) % 95)) + "m",
+      cost: Number((0.5 + ((i * 13) % 40) / 10).toFixed(2)),
+      fresh: false,
+      priority: ["高", "中", "低"][i % 3],
+      due: "已归档",
+      source: "历史会话",
+      cites: 2 + (i % 4),
+      summary: "「" + title + "」已完成并归档。搜索结果保留原始会话、交付物与来源。"
+    });
+  });
+
+  var state = { query: "", filter: "all", sort: "due", selected: "t01", showArchived: false };
+
+  function taskById(id) {
+    for (var i = 0; i < TASKS.length; i++) if (TASKS[i].id === id) return TASKS[i];
+    return TASKS[0];
+  }
+  function person(key) { return PEOPLE[key] || PEOPLE.lin; }
+  function durationMinutes(text) {
+    var h = /(\d+)h/.exec(text), m = /(\d+)m/.exec(text);
+    return (h ? Number(h[1]) * 60 : 0) + (m ? Number(m[1]) : 0);
+  }
+  function queryMatch(task) {
+    if (!state.query) return true;
+    var q = state.query.toLowerCase();
+    return (task.title + " " + person(task.owner).name + " " + task.source).toLowerCase().indexOf(q) >= 0;
+  }
+  function scopeTasks() {
+    if (state.query) return TASKS.filter(queryMatch);
+    return TASKS.filter(function (t) { return state.showArchived || !t.archived; });
+  }
+  function visibleTasks() {
+    var list = scopeTasks().filter(function (t) { return state.filter === "all" || t.group === state.filter; });
+    if (state.sort === "cost") list.sort(function (a, b) { return b.cost - a.cost; });
+    else if (state.sort === "duration") list.sort(function (a, b) { return durationMinutes(b.duration) - durationMinutes(a.duration); });
+    return list;
+  }
+  function countByGroup(list) {
+    var counts = { all: list.length, review: 0, run: 0, done: 0, fail: 0 };
+    list.forEach(function (t) { counts[t.group] += 1; });
+    return counts;
+  }
+
+  /* ---------- 收件箱渲染 ---------- */
+  var listScroll = $("#listScroll");
+  var detail = $("#detail");
+  var searchInput = $("#searchInput");
+  var searchClear = $("#searchClear");
+  var searchCount = $("#searchCount");
+
+  function taskHTML(task, selected) {
+    var p = person(task.owner);
+    var g = GROUP[task.group];
+    return '<div class="task' + (selected ? " selected" : "") + (task.archived ? " archived" : "") + '" role="button" tabindex="0" data-task="' + task.id + '" aria-current="' + (selected ? "true" : "false") + '">' +
+      '<div class="task-top">' +
+        '<div class="task-main">' +
+          '<div class="task-title">' + esc(task.title) + '</div>' +
+          '<div class="task-meta">' +
+            '<span class="owner"><span class="avatar av-' + p.av + '">' + p.initial + '</span>' + p.name + '</span>' +
+            '<span>' + task.duration + '</span>' +
+            '<span style="color:' + g.color + '">' + g.label + '</span>' +
+            (task.archived ? '<span class="pri low">归档</span>' : (task.priority === "高" ? '<span class="pri">高优</span>' : "")) +
+          '</div>' +
+        '</div>' +
+        '<div class="task-right">' +
+          '<div class="cost">¥' + task.cost.toFixed(2) + '</div>' +
+          '<div class="time">' + esc(task.due) + '</div>' +
+          (task.fresh ? '<span class="badge-new"><i></i>新交付</span>' : "") +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function renderList(vis) {
+    var html = "";
+    if (state.query) {
+      html += '<div class="group-head"><span class="dot" style="background:#818cf8"></span>搜索结果<span class="count">' + vis.length + ' 条</span></div>';
+      if (!vis.length) {
+        html += '<div class="empty"><b>没有匹配「' + esc(state.query) + '」的任务</b>试试「竞品」「周报」「Q4」，或清空搜索查看全部 58 条会话。<br><button class="btn small" type="button" data-clear>清空搜索</button></div>';
+      } else {
+        html += vis.map(function (t) { return taskHTML(t, t.id === state.selected); }).join("");
+      }
+    } else {
+      ["review", "run", "done", "fail"].forEach(function (g) {
+        var items = vis.filter(function (t) { return t.group === g; });
+        if (!items.length) return;
+        html += '<div class="group"><div class="group-head"><span class="dot" style="background:' + GROUP[g].color + '"></span>' + GROUP[g].label + '<span class="count">' + items.length + ' 条</span></div>';
+        html += items.map(function (t) { return taskHTML(t, t.id === state.selected); }).join("");
+        html += '</div>';
+      });
+      if (!state.showArchived) {
+        html += '<button class="archived-row" type="button" data-archived-toggle>更早的 34 条会话已归档 · 点击展开，或直接搜索</button>';
+      } else {
+        html += '<button class="archived-row" type="button" data-archived-toggle>收起更早的 34 条归档会话</button>';
+      }
+    }
+    listScroll.innerHTML = html;
+  }
+
+  function renderCounts(scope, vis) {
+    var counts = countByGroup(scope);
+    $$(".chip").forEach(function (chip) {
+      var key = chip.getAttribute("data-filter");
+      var b = chip.querySelector("b");
+      if (b) b.textContent = counts[key];
+      chip.classList.toggle("active", key === state.filter);
+    });
+    var text;
+    if (state.query) {
+      text = '在 <b>58</b> 条会话中命中 <b>' + scope.length + '</b> 条';
+    } else {
+      text = '58 条会话 · 收件箱 <b>' + scope.length + '</b> 条';
+    }
+    if (state.filter !== "all") text += ' · 筛选「' + GROUP[state.filter].label + '」' + vis.length + ' 条';
+    searchCount.innerHTML = text;
+    searchClear.hidden = !state.query;
+  }
+
+  function refresh() {
+    var vis = visibleTasks();
+    if (state.query && vis.length && !vis.some(function (t) { return t.id === state.selected; })) {
+      state.selected = vis[0].id;
+    }
+    renderList(vis);
+    renderCounts(scopeTasks(), vis);
+    renderDetail(taskById(state.selected));
+  }
+
+  /* ---------- 详情渲染 ---------- */
+  function stepsFor(task) {
+    if (task.steps) return task.steps;
+    var g = GROUP[task.group].label;
+    if (task.group === "fail") {
+      return [
+        { t: "09:12", state: "done", title: "接收目标", desc: "从会话「" + task.source + "」创建任务，确认范围与截止。" },
+        { t: "09:15", state: "done", title: "开始执行", desc: "已生成计划并开始读取输入材料。" },
+        { t: "09:20", state: "fail", title: "执行中断", desc: (FAILURES[task.id] || {}).reason || "执行失败，等待重试。" }
+      ];
+    }
+    if (task.group === "run") {
+      return [
+        { t: "10:08", state: "done", title: "接收目标", desc: "从会话「" + task.source + "」创建任务，确认范围、截止与验收人。" },
+        { t: "10:12", state: "done", title: "拆解计划", desc: "生成执行计划，标注所需知识、工具与取证点。" },
+        { t: "11:06", state: "done", title: "执行中", desc: "已完成 " + task.duration + "，中间产物实时写入任务。" },
+        { t: "当前", state: "current", title: "继续执行", desc: "预计还需 24 分钟；切走、刷新或换设备都不会中断。" }
+      ];
+    }
+    if (task.group === "done") {
+      return [
+        { t: "09:40", state: "done", title: "接收目标", desc: "任务来源「" + task.source + "」，已确认范围与截止。" },
+        { t: "09:46", state: "done", title: "拆解与执行", desc: "按计划完成检索、生成与自检，共引用 " + task.cites + " 条来源。" },
+        { t: "11:02", state: "done", title: "产出交付", desc: "交付物已归档，可在成果页复用为模板。" },
+        { t: "11:06", state: "done", title: "完成并归档", desc: "结果已通知相关人；" + (task.archived ? "历史会话仍可搜索。" : "验收记录已保留。") }
+      ];
+    }
+    return [
+      { t: "09:52", state: "done", title: "接收目标", desc: "从会话「" + task.source + "」创建任务，确认范围、截止与验收人。" },
+      { t: "09:55", state: "done", title: "拆解计划", desc: "拆为检索、撰写、自检、交付 4 步；标注必须取证的结论。" },
+      { t: "11:06", state: "done", title: "执行与取证", desc: "已记录 " + task.cites + " 条来源；缺少来源的数字被自动拦截。" },
+      { t: "12:20", state: "current", title: "产出待验收", desc: "交付单已提交，等待你通过或打回。" }
+    ];
+  }
+
+  function nextStep(task) {
+    if (task.group === "review") return { title: "下一步：验收交付单", desc: "通过即归档并通知相关人；打回会带着具体意见返工，版本只增不改。" };
+    if (task.group === "run") return { title: "下一步：催办或查看执行过程", desc: "任务在后台持续运行，切走不丢结果；完成后会自动进入待验收。" };
+    if (task.group === "done") return { title: "下一步：查看交付或复用为模板", desc: "交付物与来源已归档；同类任务可一键复用，节省下一次的启动成本。" };
+    return { title: "下一步：查看失败原因并重试", desc: "修复输入或格式后重试，会从中断步骤继续，不重复已消耗的成本。" };
+  }
+
+  function deliverableFor(task) {
+    if (task.id === "t01") return { name: "Q4 新品发布内容包 · v2", meta: "3 份文档 · 1 张排期表 · 5 条来源" };
+    if (task.group === "review") return { name: task.title + " · 交付单 v1", meta: "交付单 + " + task.cites + " 条来源 · 等待验收" };
+    if (task.group === "run") return { name: task.title + " · 执行中", meta: "2 个中间文件 · 草稿持续更新" };
+    if (task.group === "done") return { name: task.title + " · 已交付", meta: "交付物已归档 · 可在成果页复用" };
+    return null;
+  }
+
+  function citationsFor(task) {
+    if (task.id === "t01") {
+      return [
+        { type: "知识库", cls: "kb", title: "2026 Q4 产品路线图" },
+        { type: "知识库", cls: "kb", title: "品牌语气规范 v3" },
+        { type: "网页", cls: "web", title: "竞品定价页快照 · Cursor 2.0" },
+        { type: "数据表", cls: "data", title: "内测迁移数据（42 家）" }
+      ];
+    }
+    return [
+      { type: "会话", cls: "chat", title: task.source },
+      { type: "知识库", cls: "kb", title: "相关背景资料" },
+      { type: "数据表", cls: "data", title: "任务执行日志" }
+    ].slice(0, Math.max(1, Math.min(3, task.cites || 1)));
+  }
+
+  function renderDetail(task) {
+    var p = person(task.owner);
+    var g = GROUP[task.group];
+    var stage = task.group === "review" ? "产出待验收" : task.group === "run" ? "执行中" : task.group === "fail" ? "执行中断" : (task.archived ? "已归档" : "已交付");
+    var next = nextStep(task);
+    var steps = stepsFor(task);
+    var deliverable = deliverableFor(task);
+    var citations = citationsFor(task);
+    var failure = FAILURES[task.id];
+
+    var html = '<div class="detail-head">' +
+      '<div>' +
+        '<div class="detail-eyebrow">任务详情 · ' + (task.id === "t01" ? "T-1042" : task.id.toUpperCase()) + '</div>' +
+        '<h2>' + esc(task.title) + '</h2>' +
+        '<div class="badges">' +
+          '<span class="badge ' + g.cls + '"><span class="dot" style="background:' + g.color + '"></span>' + g.label + '</span>' +
+          '<span class="badge neutral">' + task.priority + '优先级</span>' +
+          (task.fresh ? '<span class="badge fresh">有新交付</span>' : "") +
+          (task.archived ? '<span class="badge neutral">已归档</span>' : "") +
+        '</div>' +
+      '</div>' +
+      '<div class="actions">' +
+        '<button class="btn' + (task.group !== "fail" ? " primary" : "") + '" type="button" data-act="view"' + (task.group === "fail" ? " disabled" : "") + '>' + icon("i-package") + '查看交付</button>' +
+        '<button class="btn" type="button" data-act="push"' + (task.group === "done" ? " disabled" : "") + '>' + icon("i-bell") + '催办</button>' +
+        '<button class="btn' + (task.group === "fail" ? " primary" : "") + '" type="button" data-act="retry"' + (task.group !== "fail" ? " disabled" : "") + '>' + icon("i-retry") + '重试</button>' +
+      '</div>' +
+    '</div>';
+
+    html += '<div class="meta-grid">' +
+      '<div class="meta-cell"><span>负责人</span><b>' + p.name + ' · ' + p.role + '</b></div>' +
+      '<div class="meta-cell"><span>来源会话</span><b>' + esc(task.source) + '</b></div>' +
+      '<div class="meta-cell"><span>截止 / 状态</span><b>' + esc(task.due) + '</b></div>' +
+      '<div class="meta-cell"><span>当前阶段</span><b>' + stage + '</b></div>' +
+    '</div>';
+
+    html += '<div class="next"><div class="next-icon">' + icon("i-arrow") + '</div><div><b>' + next.title + '</b><p>' + next.desc + '</p></div></div>';
+
+    html += '<div class="stats3">' +
+      '<div class="stat-mini"><span>耗时</span><b>' + task.duration + '</b></div>' +
+      '<div class="stat-mini"><span>成本</span><b>¥' + task.cost.toFixed(2) + '</b></div>' +
+      '<div class="stat-mini"><span>来源</span><b>' + task.cites + '<small>条</small></b></div>' +
+    '</div>';
+
+    html += '<div class="section"><div class="section-title">任务时间线<span class="line"></span><span class="count">计划 → 执行 → 产出</span></div><div class="timeline">';
+    steps.forEach(function (s) {
+      html += '<div class="tl-item ' + s.state + '"><span class="tl-dot"></span><div class="tl-time">' + esc(s.t) + '</div><div class="tl-title">' + esc(s.title) + '</div><div class="tl-desc">' + esc(s.desc) + '</div></div>';
+    });
+    html += '</div></div>';
+
+    html += '<div class="section"><div class="section-title">交付物<span class="line"></span><span class="count">' + (task.fresh ? "新交付" : "任务产出") + '</span></div>';
+    if (task.group === "fail") {
+      html += '<div class="failure-box"><b>' + icon("i-alert") + '失败原因</b><p>' + esc(failure.reason) + '</p><p class="suggest">' + esc(failure.suggest) + '</p></div>';
+    } else {
+      html += '<div class="deliverable-card"><div class="dc-icon">' + icon("i-doc") + '</div><div class="dc-main"><div class="dc-title">' + esc(deliverable.name) + (task.fresh ? ' <span class="badge fresh">新</span>' : "") + '</div><div class="dc-sub">' + esc(deliverable.meta) + '</div></div><button class="btn small" type="button" data-act="view">打开交付单</button></div>';
+    }
+    html += '</div>';
+
+    html += '<div class="section"><div class="section-title">证据与引用<span class="line"></span><span class="count">' + task.cites + ' 条来源</span></div><div class="cite-list">';
+    citations.forEach(function (c) {
+      html += '<div class="cite-row" role="button" tabindex="0" data-cite="' + esc(c.title) + '"><span class="ev-type ' + c.cls + '">' + c.type + '</span><span>' + esc(c.title) + '</span><span class="cite-link">定位到来源</span></div>';
+    });
+    html += '</div></div>';
+
+    html += '<div class="detail-foot"><span>原型示意 · 所有任务、成本、耗时与引用均为虚构</span><span>最后更新 12:20</span></div>';
+
+    detail.innerHTML = html;
+    detail.scrollTop = 0;
+  }
+
+  /* ---------- 收件箱交互 ---------- */
+  function selectTask(id) {
+    state.selected = id;
+    var vis = visibleTasks();
+    renderList(vis);
+    renderDetail(taskById(id));
+  }
+
+  searchInput.addEventListener("input", function () {
+    state.query = searchInput.value.trim();
+    refresh();
+  });
+  searchClear.addEventListener("click", function () {
+    state.query = "";
+    searchInput.value = "";
+    searchInput.focus();
+    refresh();
+  });
+  $$(".chip").forEach(function (chip) {
+    chip.addEventListener("click", function () {
+      state.filter = chip.getAttribute("data-filter");
+      refresh();
+    });
+  });
+  $("#sortSelect").addEventListener("change", function (e) {
+    state.sort = e.target.value;
+    refresh();
+  });
+  listScroll.addEventListener("click", function (e) {
+    var toggle = e.target.closest("[data-archived-toggle]");
+    if (toggle) {
+      state.showArchived = !state.showArchived;
+      refresh();
+      return;
+    }
+    var clear = e.target.closest("[data-clear]");
+    if (clear) {
+      state.query = "";
+      searchInput.value = "";
+      refresh();
+      return;
+    }
+    var item = e.target.closest("[data-task]");
+    if (item) selectTask(item.getAttribute("data-task"));
+  });
+  listScroll.addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    var item = e.target.closest("[data-task]");
+    if (item) {
+      e.preventDefault();
+      selectTask(item.getAttribute("data-task"));
+    }
+  });
+
+  detail.addEventListener("click", function (e) {
+    var cite = e.target.closest("[data-cite]");
+    if (cite) {
+      toast("原型示意：将跳转到来源「" + cite.getAttribute("data-cite") + "」");
+      return;
+    }
+    var btn = e.target.closest("[data-act]");
+    if (!btn || btn.disabled) return;
+    var task = taskById(state.selected);
+    var act = btn.getAttribute("data-act");
+    if (act === "view") {
+      if (task.id === "t01") {
+        switchTab("deliverable");
+        toast("已打开交付单 D-2026-1031-004 · v2");
+      } else if (task.group === "fail") {
+        toast("该任务没有交付物，请先重试");
+      } else {
+        toast("原型示意：将打开「" + task.title + "」的交付单");
+      }
+    } else if (act === "push") {
+      toast("已催办：" + person(task.owner).name + " 将在 5 分钟内响应（原型示意）");
+    } else if (act === "retry") {
+      toast("已提交重试，将从中断步骤继续（原型示意）");
+    }
+  });
+  detail.addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    var cite = e.target.closest("[data-cite]");
+    if (cite) {
+      e.preventDefault();
+      toast("原型示意：将跳转到来源「" + cite.getAttribute("data-cite") + "」");
+    }
+  });
+
+  /* ---------- 一级导航 / 新建任务（演示提示） ---------- */
+  $$(".nav-item").forEach(function (item) {
+    item.addEventListener("click", function () {
+      var name = item.getAttribute("data-nav");
+      if (name === "收件箱") {
+        toast("当前就在收件箱（原型示意）");
+        return;
+      }
+      if (name === "目标") {
+        toast("原型示意：目标页合并了指挥台、作战室与项目中心");
+        return;
+      }
+      toast("原型示意：本轮只演示收件箱与交付单，「" + name + "」保持入口");
+    });
+  });
+  $$("[data-toast]").forEach(function (btn) {
+    btn.addEventListener("click", function () { toast(btn.getAttribute("data-toast")); });
+  });
+
+  /* ---------- Tab 切换 ---------- */
+  var tabs = $$(".tab");
+  var panels = { inbox: $("#panel-inbox"), deliverable: $("#panel-deliverable"), nav: $("#panel-nav") };
+  function switchTab(name) {
+    tabs.forEach(function (tab) {
+      var active = tab.getAttribute("data-tab") === name;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    Object.keys(panels).forEach(function (key) {
+      panels[key].classList.toggle("active", key === name);
+    });
+    if (name === "deliverable") {
+      var tabsEl = $(".tabs");
+      if (tabsEl && tabsEl.getBoundingClientRect().top < 0) tabsEl.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+  tabs.forEach(function (tab) {
+    tab.addEventListener("click", function () { switchTab(tab.getAttribute("data-tab")); });
+  });
+
+  /* ---------- 交付单：版本、来源、验收 ---------- */
+  var VERSIONS = {
+    2: {
+      kicker: "Q4 新品发布 · Atlas 迁移助手",
+      title: "把复杂留给我们，把简单交给用户",
+      lead: "Q4 新品「Atlas 迁移助手」不教用户一套新工具，而是把迁移这件事从 3 天压缩到 30 分钟。项目、权限、素材原样带走，迁移前自动快照。",
+      bullets: [
+        "一键迁移：历史项目、权限、素材原样带走。",
+        "零学习成本：沿用现有操作习惯，不新增面板。",
+        "可回滚：迁移前自动快照，30 天内随时退回。",
+        "有据可查：42 家内测企业平均 28 分钟完成迁移。"
+      ],
+      meta: ["主文案 986 字", "渠道：发布会 / 官网 / 私域", "标题 15 字"]
+    },
+    1: {
+      kicker: "Q4 新品发布 · 初稿",
+      title: "新品来了：Atlas 让迁移快 10 倍",
+      lead: "Atlas 是面向团队的一站式迁移工具，支持项目、权限与素材迁移。无需培训，开箱即用。",
+      bullets: [
+        "一键迁移：项目、权限、素材一次搬完。",
+        "零学习成本：打开就能用，不新增面板。",
+        "效率提升：预计转化率提升 32%。"
+      ],
+      meta: ["主文案 720 字", "渠道：发布会 / 官网", "标题 20 字 · 超出规范"]
+    }
+  };
+  var currentVersion = 2;
+  var accState = "pending";
+  var accComment = "";
+  var docCard = $("#docCard");
+  var versionChip = $("#versionChip");
+  var v1Banner = $("#v1Banner");
+  var pvKicker = $("#pvKicker");
+  var pvTitle = $("#pvTitle");
+  var pvLead = $("#pvLead");
+  var pvList = $("#pvList");
+  var pvMeta = $("#pvMeta");
+  var previewVersionHint = $("#previewVersionHint");
+  var evCount = $("#evCount");
+  var accHint = $("#accHint");
+  var accBanner = $("#accBanner");
+  var accBadge = $("#accBadge");
+  var accBox = $("#accBox");
+  var accCommentEl = $("#accComment");
+  var accError = $("#accError");
+  var btnApprove = $("#btnApprove");
+  var btnReject = $("#btnReject");
+  var btnUndo = $("#btnUndo");
+  var docStatus = $("#docStatus");
+
+  function renderVersion(v) {
+    currentVersion = v;
+    var data = VERSIONS[v];
+    pvKicker.textContent = data.kicker;
+    pvTitle.textContent = data.title;
+    pvLead.textContent = data.lead;
+    pvList.innerHTML = data.bullets.map(function (item) { return "<li>" + esc(item) + "</li>"; }).join("");
+    pvMeta.innerHTML = data.meta.map(function (item) { return "<span>" + esc(item) + "</span>"; }).join("");
+    previewVersionHint.textContent = (v === 2 ? "v2" : "v1") + " · 主文案节选";
+    versionChip.textContent = "v" + v;
+    docCard.setAttribute("data-preview-version", String(v));
+    v1Banner.hidden = v === 2;
+    evCount.textContent = v === 2 ? "5 条来源" : "3 条来源";
+    $$("[data-version-row]").forEach(function (row) {
+      var active = Number(row.getAttribute("data-version-row")) === v;
+      row.classList.toggle("active", active);
+      row.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    renderAcceptance();
+  }
+
+  function renderAcceptance() {
+    var locked = currentVersion !== 2;
+    accHint.textContent = locked ? "当前查看 v1 · 请回到 v2 验收" : "当前查看 v2 · 可验收";
+    btnApprove.disabled = accState !== "pending" || locked;
+    btnReject.disabled = accState !== "pending" || locked;
+    btnUndo.hidden = accState === "pending";
+    accCommentEl.disabled = accState !== "pending";
+
+    docStatus.className = "badge " + (accState === "approved" ? "done" : accState === "rejected" ? "fail" : "review");
+    docStatus.innerHTML = '<span class="dot" style="background:' + (accState === "approved" ? "#34d399" : accState === "rejected" ? "#f87171" : "#fbbf24") + '"></span>' + (accState === "approved" ? "已通过" : accState === "rejected" ? "已打回" : "待验收");
+    accBadge.className = "badge " + (accState === "approved" ? "done" : accState === "rejected" ? "fail" : "review");
+    accBadge.innerHTML = '<span class="dot" style="background:' + (accState === "approved" ? "#34d399" : accState === "rejected" ? "#f87171" : "#fbbf24") + '"></span>' + (accState === "approved" ? "已通过" : accState === "rejected" ? "已打回" : "待验收");
+    accBox.className = "acceptance" + (accState === "approved" ? " approved" : accState === "rejected" ? " rejected" : "");
+
+    if (accState === "approved") {
+      accBanner.textContent = "已通过验收 · 2026-10-31 15:42 · 验收人：你。交付单已归档并通知林知夏。";
+      accCommentEl.value = accComment || "内容可直接投放，来源完整。";
+    } else if (accState === "rejected") {
+      accBanner.textContent = "已打回 · 意见已发送给林知夏：「" + accComment + "」";
+      accCommentEl.value = accComment;
+    } else {
+      accBanner.textContent = "等待你验收 · 规格与来源已就绪。通过则归档；打回则带着意见返工。";
+      accCommentEl.value = "";
+    }
+  }
+
+  $$("[data-version-row]").forEach(function (row) {
+    row.addEventListener("click", function () {
+      renderVersion(Number(row.getAttribute("data-version-row")));
+      toast("已切换到 v" + currentVersion + "（原型示意）");
+    });
+  });
+
+  var btnCompare = $("#btnCompare");
+  var diffBlock = $("#diffBlock");
+  btnCompare.addEventListener("click", function () {
+    var open = diffBlock.classList.toggle("open");
+    btnCompare.setAttribute("aria-expanded", open ? "true" : "false");
+    btnCompare.innerHTML = icon("i-chart") + (open ? "收起 v1 → v2 差异" : "对比 v1 → v2");
+  });
+
+  $$(".ev-head").forEach(function (head) {
+    head.addEventListener("click", function () {
+      var ev = head.parentElement;
+      var open = ev.classList.toggle("open");
+      head.setAttribute("aria-expanded", open ? "true" : "false");
+      var label = head.querySelector(".ev-open");
+      if (label) label.textContent = open ? "收起" : "展开";
+    });
+    head.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        head.click();
+      }
+    });
+  });
+  $$(".link-btn").forEach(function (btn) {
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      toast("原型示意：将打开来源「" + btn.getAttribute("data-source") + "」");
+    });
+  });
+
+  btnApprove.addEventListener("click", function () {
+    if (currentVersion !== 2) { toast("请回到 v2 最新版本再验收"); return; }
+    if (accState !== "pending") return;
+    accState = "approved";
+    accComment = accCommentEl.value.trim();
+    accError.textContent = "";
+    renderAcceptance();
+    toast("已通过验收：交付单将归档并通知林知夏（原型示意）");
+  });
+  btnReject.addEventListener("click", function () {
+    if (currentVersion !== 2) { toast("请回到 v2 最新版本再验收"); return; }
+    if (accState !== "pending") return;
+    var comment = accCommentEl.value.trim();
+    if (!comment) {
+      accError.textContent = "请填写打回意见，员工需要知道具体改什么。";
+      accCommentEl.focus();
+      return;
+    }
+    accComment = comment;
+    accState = "rejected";
+    accError.textContent = "";
+    renderAcceptance();
+    toast("已打回：意见已发送给林知夏（原型示意）");
+  });
+  btnUndo.addEventListener("click", function () {
+    accState = "pending";
+    accComment = "";
+    accError.textContent = "";
+    renderAcceptance();
+    toast("已撤销验收结果（仅原型演示）");
+  });
+  accCommentEl.addEventListener("input", function () {
+    if (accError.textContent) accError.textContent = "";
+  });
+
+  /* ---------- 实验室折叠 ---------- */
+  var labToggle = $("#labToggle");
+  var labBody = $("#labBody");
+  labToggle.addEventListener("click", function () {
+    var open = labBody.classList.toggle("open");
+    labToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+
+  /* ---------- 全局快捷键 / Toast ---------- */
+  var toastTimer = null;
+  function toast(message) {
+    var el = $("#toast");
+    el.textContent = message;
+    el.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.classList.remove("show"); }, 2600);
+  }
+
+  document.addEventListener("keydown", function (e) {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      switchTab("inbox");
+      searchInput.focus();
+      searchInput.select();
+    }
+  });
+
+  /* ---------- 启动 ---------- */
+  refresh();
+  renderVersion(2);
+})();
+</script>
+</body>
+</html>

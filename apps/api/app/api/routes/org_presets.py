@@ -15,8 +15,9 @@
 import json
 import os
 import re
+import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,8 +25,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import assert_company_capability, get_current_user, get_db
 from app.core.permissions import Capability
 from app.models.agent import Agent, AgentStatus
+from app.models.artifact import Artifact, ArtifactStatus, ArtifactVersion
 from app.models.company import Department
 from app.models.expert_template import ExpertTemplate
+from app.models.task import Task, TaskPriority, TaskStatus
 from app.services.event_system import log_event
 
 router = APIRouter(prefix="/org-presets", tags=["org-presets"])
@@ -79,6 +82,9 @@ async def list_presets():
             "kind": obj.get("kind", "industry_preset"),
             "department_count": len(obj.get("departments", [])),
             "agent_count": posts,
+            "deliverable_template_count": len(
+                obj.get("deliverable_templates") or []),
+            "task_template_count": len(obj.get("task_templates") or []),
         })
     return out
 
@@ -245,3 +251,108 @@ async def apply_preset(pid: str, data: ApplyIn,
         "note": "预览模式（dry_run）" if data.dry_run
         else "组织形态已落地：部门 + 配备专家的智能体，可直接开干",
     }
+
+
+class ScaffoldIn(BaseModel):
+    company_id: str
+    install_deliverables: bool = True
+    install_tasks: bool = True
+    dry_run: bool = False
+
+
+@router.post("/{pid}/scaffold")
+async def scaffold_preset(pid: str, data: ScaffoldIn,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(get_current_user)):
+    """按行业包铺设交付物模板与任务模板（幂等，可 dry_run 预览）。
+
+    交付物：每条模板建一个 DRAFT 成果 + v1 内容（标题 + 大纲章节占位）；
+    任务：每条模板建一个 TODO 任务。同名成果 / 同标题未完成任务一律跳过，
+    重复调用不会产生重复数据。
+    """
+    await assert_company_capability(db, user.id, data.company_id,
+                                    Capability.MANAGE)
+    preset = _load_preset(pid)
+    deliverable_templates = preset.get("deliverable_templates") or []
+    task_templates = preset.get("task_templates") or []
+
+    created = {"deliverables": 0, "tasks": 0}
+    skipped = {"deliverables": 0, "tasks": 0}
+
+    if data.install_deliverables and deliverable_templates:
+        existing_names = set((await db.execute(
+            select(Artifact.name).where(
+                Artifact.company_id == data.company_id))).scalars().all())
+        for tpl in deliverable_templates:
+            name = (tpl.get("name") or "").strip()
+            if not name:
+                continue
+            if name in existing_names:
+                skipped["deliverables"] += 1
+                continue
+            # 同一批模板内重名也按"已存在"处理，避免 dry_run 与落库计数不一致
+            existing_names.add(name)
+            created["deliverables"] += 1
+            if data.dry_run:
+                continue
+            outline = [str(s).strip() for s in (tpl.get("outline") or [])
+                       if str(s).strip()]
+            content = f"# {name}\n\n" + "".join(
+                f"## {section}\n\n" for section in outline)
+            art = Artifact(
+                id=str(uuid.uuid4()),
+                company_id=data.company_id,
+                name=name,
+                artifact_type=(tpl.get("artifact_type") or "document"),
+                current_version=1,
+                status=ArtifactStatus.DRAFT,
+                created_by=user.id,
+            )
+            db.add(art)
+            db.add(ArtifactVersion(
+                id=str(uuid.uuid4()), artifact_id=art.id, version=1,
+                content=content, change_note="行业包模板",
+                status=ArtifactStatus.DRAFT, submitted_by=user.id))
+
+    if data.install_tasks and task_templates:
+        # "未完成"= 除 COMPLETED 外的任何状态；已完成任务不阻止再次铺设
+        existing_titles = set((await db.execute(
+            select(Task.title).where(
+                Task.company_id == data.company_id,
+                Task.status != TaskStatus.COMPLETED))).scalars().all())
+        for tpl in task_templates:
+            title = (tpl.get("title") or "").strip()
+            if not title:
+                continue
+            if title in existing_titles:
+                skipped["tasks"] += 1
+                continue
+            existing_titles.add(title)
+            created["tasks"] += 1
+            if data.dry_run:
+                continue
+            raw_priority = str(tpl.get("priority") or "NORMAL").upper()
+            try:
+                priority = TaskPriority(raw_priority)
+            except ValueError:
+                priority = TaskPriority.NORMAL
+            db.add(Task(
+                company_id=data.company_id,
+                title=title,
+                description=tpl.get("description"),
+                status=TaskStatus.TODO,
+                priority=priority,
+                created_by=user.id,
+            ))
+
+    if not data.dry_run and (created["deliverables"] or created["tasks"]):
+        await db.commit()
+
+    return {
+        "preset": pid,
+        "company_id": data.company_id,
+        "created": created,
+        "skipped": skipped,
+        "dry_run": data.dry_run,
+    }
+
