@@ -74,7 +74,7 @@ export const NAV_GROUPS: NavGroup[] = [
     title: "协作执行",
     hint: "员工之间怎么开会、怎么接线、什么时候自动干",
     items: [
-      { href: "/meetings", label: "会议中心", icon: "◍", desc: "多个员工开会讨论问题，产出结论", keywords: ["meeting", "huiyi", "会议", "讨论"] },
+      { href: "/meetings", label: "会议中心", icon: "◍", desc: "多个员工开会讨论问题，产出结论", keywords: ["meeting", "huiyi", "会议", "讨论"], hidden: true },
       { href: "/workflow-builder", label: "工作流", icon: "⇄", desc: "把多步骤流程串起来，按顺序自动执行", keywords: ["workflow", "gongzuoliu", "工作流", "流程", "编排"] },
       { href: "/schedules", label: "日程安排", icon: "🗓", desc: "定时触发：每天/每周固定时间自动开工", keywords: ["schedule", "richeng", "日程", "定时", "cron", "排期"], hidden: true },
       { href: "/automation", label: "自动化规则", icon: "🤖", desc: "「发生 X 就做 Y」的事件触发规则", keywords: ["automation", "zidonghua", "自动化", "触发器", "规则"], hidden: true },
@@ -99,6 +99,8 @@ export const NAV_GROUPS: NavGroup[] = [
     title: "成长与治理",
     hint: "员工有没有进步、有没有越界、钱花在哪",
     items: [
+      { href: "/evolution", label: "成长与监督", icon: "📈", desc: "CEO 每天自省、每周复盘、每月迭代；每周由监督 Agent 出题考试，老板可人工干预", keywords: ["evolution", "growth", "jinghua", "zihua", "自我进化", "成长", "进化", "周考", "考试", "测评", "人格", "监督"] },
+      { href: "/experience", label: "经验池", icon: "🧩", desc: "成功经验固化成工作流，失败教训变成规避清单，同事经验一键学进记忆", keywords: ["experience", "jingyan", "经验", "经验池", "教训", "工作流复用", "跨agent学习", "学习"], hidden: true },
       { href: "/growth-center", label: "成长中心", icon: "🌱", desc: "员工的成长路径与培养动作", keywords: ["growth", "chengzhang", "成长", "培养"], hidden: true },
       { href: "/reflection", label: "复盘中心", icon: "🔄", desc: "任务结束后的自我复盘与教训沉淀", keywords: ["reflection", "fupan", "复盘", "总结", "教训"], hidden: true },
       { href: "/training", label: "培训中心", icon: "🎓", desc: "针对性训练员工并对比训练前后效果", keywords: ["training", "peixun", "培训", "训练"], hidden: true },

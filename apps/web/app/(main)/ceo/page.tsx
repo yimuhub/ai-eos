@@ -760,6 +760,28 @@ export default function CeoPage() {
         </button>
       </div>
 
+      {/* 成长入口：CEO 不在这一页长大，但它每天/每周/每月的进化与考试在这里可查可干预 */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <Link href="/evolution" className="card card-static p-3 hover:border-[var(--accent)] transition-colors">
+          <div className="text-xs font-medium">📈 自我进化</div>
+          <div className="text-[11px] mt-0.5" style={{ color: "var(--muted)" }}>
+            每天微调、每周复盘、每月迭代；月度提案等你拍板
+          </div>
+        </Link>
+        <Link href="/evolution?tab=exam" className="card card-static p-3 hover:border-[var(--accent)] transition-colors">
+          <div className="text-xs font-medium">🎓 周考测评</div>
+          <div className="text-[11px] mt-0.5" style={{ color: "var(--muted)" }}>
+            监督 Agent 出题评分，看人格、成本纪律与决策质量
+          </div>
+        </Link>
+        <Link href="/experience" className="card card-static p-3 hover:border-[var(--accent)] transition-colors">
+          <div className="text-xs font-medium">🧩 经验池</div>
+          <div className="text-[11px] mt-0.5" style={{ color: "var(--muted)" }}>
+            成功路径固化成工作流，失败教训跨员工共享
+          </div>
+        </Link>
+      </div>
+
       {cid === null && (
         <div className="rounded-xl border px-3.5 py-2.5 text-sm"
           style={{ borderColor: "rgba(251,191,36,0.45)", background: "rgba(251,191,36,0.1)" }}>
