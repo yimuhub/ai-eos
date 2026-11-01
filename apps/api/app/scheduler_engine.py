@@ -171,6 +171,14 @@ async def execute_action(db: AsyncSession, sched: AutomationSchedule) -> dict:
                 "greeting": brief.get("greeting", ""),
                 "needs_you": brief.get("needs_you", {}).get("count", 0)}
 
+    if sched.action_type == "ceo_digest":
+        # 超级 Agent 日报：统计近 24h 统筹/任务/成本/卡点，站内信 + 推送给老板
+        from app.ceo_engine import push_digest
+        digest = await push_digest(db, sched.company_id)
+        return {"generated_at": digest["generated_at"],
+                "tokens": digest["stats"].get("tokens", 0),
+                "stuck_tasks": digest["stats"].get("stuck_tasks", 0)}
+
     raise ValueError(f"unknown action_type {sched.action_type}")
 
 

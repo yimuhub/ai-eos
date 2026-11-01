@@ -41,10 +41,11 @@ CORE_MIN_RATIO = 0.90
 # 2026-11-01 实测：112 / 471；同日补完知识库域（`/knowledge` + `/kb2` 共 20 条）
 # 后为 202 / 461 = 43.8%；再补完「老板批准」这条线（`/intervention` 10 条 +
 # `/experts` 11 条）后为 223 / 461 = 48.4%；补完「本机操作」这条线
-# （`/sandbox` 10 条 + `/computer-agent` 7 条）后为 240 / 461 = 52.1%。
-# 地板取整到 237 / 0.51，任何时候都不许下调。
-BASELINE_TYPED = 237
-BASELINE_MIN_RATIO = 0.51
+# （`/sandbox` 10 条 + `/computer-agent` 7 条）后为 240 / 461 = 52.1%；
+# 超级 Agent（CEO）16 条全部带模型后为 256 / 477 = 53.7%。
+# 地板取整到 253 / 0.53，任何时候都不许下调。
+BASELINE_TYPED = 253
+BASELINE_MIN_RATIO = 0.53
 MIN_TOTAL_OPERATIONS = 400
 
 

@@ -2,7 +2,7 @@
 import enum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, Enum, ForeignKey, String, Text
+from sqlalchemy import Boolean, JSON, Enum, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -76,6 +76,9 @@ class Agent(TimestampMixin, Base):
     created_by_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     # 预留：行级数据域约束（如只允许访问某类数据），语义由上层定义
     data_scope: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 超级 Agent（CEO）：一个公司至多一个。可空是为了让老库幂等补列，
+    # NULL 等价 False；切换 CEO 时由路由把旧的置 False（不删除，保留历史）。
+    is_ceo: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
 
     department: Mapped["Department | None"] = relationship(back_populates="agents")
     model_configs: Mapped[list["AgentModelConfig"]] = relationship(

@@ -65,6 +65,7 @@ from .mailbox import AgentMailbox, MailMessage  # noqa: F401
 from .chat_group import ChatGroup  # noqa: F401
 from .whitelist import ApprovalWhitelist  # noqa: F401
 from .worklog import AgentWorklog, WorklogStatus  # noqa: F401
+from .ceo import CeoMission  # noqa: F401
 from .notification import Notification  # noqa: F401
 from .push_subscription import PushSubscription  # noqa: F401
 from .thread_read import ThreadRead  # noqa: F401

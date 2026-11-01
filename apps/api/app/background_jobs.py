@@ -76,6 +76,20 @@ class _QueueFull:
 QUEUE_FULL = _QueueFull()
 
 
+def capacity_snapshot() -> dict:
+    """后台执行容量快照：worker 总数 + 当前空闲槽位。
+
+    CEO 闸门用它算「系统余量」：一场统筹已经占了一个 worker，
+    再吃满其余槽位会让普通任务全部排队。``_value`` 是 BoundedSemaphore
+    的私有属性，但它是 CPython 的稳定实现；取不到时按 0 处理（→ 闸门走保底）。
+    """
+    try:
+        free = int(getattr(_job_slots, "_value", 0))
+    except Exception:  # noqa: BLE001
+        free = 0
+    return {"workers": _JOB_WORKERS, "free": max(0, free)}
+
+
 def _resolve_job_kind(coro_fn, kind: str | None = None) -> str:
     """任务 kind 只允许有限集合，避免把函数名/路径当标签造成基数爆炸。"""
     if kind:

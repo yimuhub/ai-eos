@@ -29,8 +29,14 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def build_context(db: AsyncSession, agent: Agent, task: Task) -> tuple[list[dict], list[dict]]:
-    """Returns (messages, model_priority_ids)."""
+async def build_context(db: AsyncSession, agent: Agent, task: Task,
+                        extra_system: list[str] | None = None) -> tuple[list[dict], list[dict]]:
+    """Returns (messages, model_priority_ids).
+
+    ``extra_system`` 是调用方注入的额外系统段（CEO 准绳、任务缺口说明等）。
+    紧随人格提示之后、用户消息之前：细节可以被补充，但红线不会被后来的
+    用户消息覆盖——这正是「一根准绳」在上下文里的落点。
+    """
     from app.capability_packs import build_capability_system_prompt, resolve_capabilities
 
     messages: list[dict] = []
@@ -44,6 +50,9 @@ async def build_context(db: AsyncSession, agent: Agent, task: Task) -> tuple[lis
     cap_prompt = build_capability_system_prompt(agent.memory_config)
     system_prompt = f"{base_prompt}\n\n{cap_prompt}" if cap_prompt else base_prompt
     messages.append({"role": "system", "content": system_prompt})
+    for block in (extra_system or []):
+        if block and block.strip():
+            messages.append({"role": "system", "content": block})
 
     # 持久记忆：有能力包时召回相关历史（跨任务经验）
     if "persistent_memory" in caps.packs:
@@ -166,11 +175,13 @@ async def write_checkpoint(
 async def run_agent_on_task(
     db: AsyncSession, agent: Agent, task: Task, actor_type: str = "system",
     takeover_note: str | None = None,
+    extra_system: list[str] | None = None,
 ) -> AgentExecution:
     """Full runtime cycle for one agent-task pair.
 
     V5.5 B1：takeover_note = 老板接管时给的改方向指令，
     恢复执行时作为最高优先级系统指令注入。
+    extra_system：CEO 准绳等调用方注入的系统段（见 build_context）。
     """
     from app.capability_packs import resolve_capabilities
     caps = resolve_capabilities(agent.memory_config)
@@ -189,7 +200,8 @@ async def run_agent_on_task(
                     {"task_id": task.id})
 
     try:
-        messages, model_ids = await build_context(db, agent, task)
+        messages, model_ids = await build_context(db, agent, task,
+                                                  extra_system=extra_system)
         # V5.5 B1：老板接管指令（最高优先级，放在所有上下文之后）
         if takeover_note:
             messages.append({

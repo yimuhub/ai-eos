@@ -59,6 +59,9 @@ class Task(TimestampMixin, Base):
     # 用列而不是内存标记，是因为积压任务要由调度循环在 worker 空闲后
     # 再拉起——重启后排队意图不能丢。可空列，老库由 ensure_columns 自动补。
     auto_start: Mapped[bool | None] = mapped_column(Boolean, default=False)
+    # CEO 统筹归属：子任务挂在同一场 mission 下，是「一根准绳」的落点。
+    # 普通任务为 NULL；可空列由 ensure_columns 幂等补齐。
+    mission_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 
 
 class TaskEvent(TimestampMixin, Base):

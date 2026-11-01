@@ -52,7 +52,11 @@ async def orchestrate_task(data: OrchestrateIn,
             if p.status == TS.PLANNING:
                 await transition(session, p, TS.RUNNING, "system", None)
             await orchestrate(session, p, coord)
-            await transition(session, p, TS.COMPLETED, "agent", coord.id)
+            # 内核收尾时已经把父任务迁到 COMPLETED / FAILED；
+            # 这里只兜底「内核没动过状态」的情况，避免重复迁移抛 409。
+            p_done = await session.get(Task, task_id)
+            if p_done and p_done.status not in (TS.COMPLETED, TS.FAILED):
+                await transition(session, p_done, TS.COMPLETED, "agent", coord.id)
         except Exception:
             import traceback
             traceback.print_exc()
