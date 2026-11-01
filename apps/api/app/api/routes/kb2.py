@@ -30,6 +30,10 @@ from app.knowledge_engine import _tokens
 from app.models.agent import Agent
 from app.models.knowledge import KBChunk, KBDocument, KBDocumentStatus
 from app.models.user import User
+from app.schemas.responses_kb import (KBAgentConfigOut, KBCopyOut, KBCostProfileOut,
+                                      KBDocOut, KBImportOut, KBIndexedOut,
+                                      KBMutationOut, KBRagPreviewOut, KBTemplateOut,
+                                      KBUploadOut)
 
 logger = get_logger(__name__)
 
@@ -121,7 +125,7 @@ class SyncIn(BaseModel):
 
 # ---------------- 文档 CRUD（带 scope 隔离）----------------
 
-@router.post("/agents/{agent_id}/documents")
+@router.post("/agents/{agent_id}/documents", response_model=KBIndexedOut)
 async def create_private_doc(agent_id: str, data: DocIn,
                              db: AsyncSession = Depends(get_db),
                              user: User = Depends(get_current_user)):
@@ -145,9 +149,11 @@ async def create_private_doc(agent_id: str, data: DocIn,
                        company_id=a.company_id, seq=i,
                        content=ch, keywords=sorted(_tokens(ch))[:30]))
     await db.commit()
+    cache_invalidate(a.company_id)
+    return {"id": doc_id, "chunks": len(chunks)}
 
 
-@router.get("/agents/{agent_id}/documents")
+@router.get("/agents/{agent_id}/documents", response_model=list[KBDocOut])
 async def list_private_docs(agent_id: str,
                             category: str | None = Query(None),
                             db: AsyncSession = Depends(get_db),
@@ -163,7 +169,7 @@ async def list_private_docs(agent_id: str,
     return [_doc_out(d) for d in rows]
 
 
-@router.patch("/documents/{doc_id}")
+@router.patch("/documents/{doc_id}", response_model=KBMutationOut)
 async def edit_doc(doc_id: str, data: DocIn,
                    db: AsyncSession = Depends(get_db),
                    user: User = Depends(get_current_user)):
@@ -193,7 +199,7 @@ async def edit_doc(doc_id: str, data: DocIn,
     return {"ok": True}
 
 
-@router.delete("/documents/{doc_id}")
+@router.delete("/documents/{doc_id}", response_model=KBMutationOut)
 async def delete_doc(doc_id: str, db: AsyncSession = Depends(get_db),
                      user: User = Depends(get_current_user)):
     # 归属校验：原先只按 id 取文档，任何登录用户都能删掉别家公司的知识库文档
@@ -216,7 +222,8 @@ async def delete_doc(doc_id: str, db: AsyncSession = Depends(get_db),
 
 # ---------------- 文件上传：双格式存储 ----------------
 
-@router.post("/agents/{agent_id}/upload")
+@router.post("/agents/{agent_id}/upload", response_model=KBUploadOut,
+             response_model_exclude_unset=True)
 async def upload_private_file(agent_id: str, file: UploadFile = File(...),
                               category: str | None = None,
                               db: AsyncSession = Depends(get_db),
@@ -288,7 +295,7 @@ async def upload_private_file(agent_id: str, file: UploadFile = File(...),
 
 # ---------------- 全局公用库管理 ----------------
 
-@router.post("/global/documents")
+@router.post("/global/documents", response_model=KBIndexedOut)
 async def create_global_doc(data: DocIn, company_id: str = Query(...),
                             db: AsyncSession = Depends(get_db),
                             user: User = Depends(get_current_user)):
@@ -316,7 +323,7 @@ async def create_global_doc(data: DocIn, company_id: str = Query(...),
     return {"id": doc_id, "chunks": len(chunks)}
 
 
-@router.get("/global/documents")
+@router.get("/global/documents", response_model=list[KBDocOut])
 async def list_global_docs(company_id: str = Query(...),
                            db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
@@ -331,7 +338,7 @@ async def list_global_docs(company_id: str = Query(...),
 
 # ---------------- 复制 / 同步 ----------------
 
-@router.post("/copy")
+@router.post("/copy", response_model=KBCopyOut)
 async def copy_docs(data: CopyIn, db: AsyncSession = Depends(get_db),
                     user: User = Depends(get_current_user)):
     """把文档复制到目标 Agent 私人库（doc_ids 可来自公用库或另一 Agent）。"""
@@ -375,7 +382,7 @@ async def copy_docs(data: CopyIn, db: AsyncSession = Depends(get_db),
     return {"copied": copied, "count": len(copied)}
 
 
-@router.post("/agents/{agent_id}/sync-from-global")
+@router.post("/agents/{agent_id}/sync-from-global", response_model=KBCopyOut)
 async def sync_from_global(agent_id: str, data: SyncIn,
                            db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
@@ -386,12 +393,12 @@ async def sync_from_global(agent_id: str, data: SyncIn,
 
 # ---------------- 技能模板一键关联 ----------------
 
-@router.get("/templates")
+@router.get("/templates", response_model=list[KBTemplateOut])
 async def templates():
     return list_templates()
 
 
-@router.post("/agents/{agent_id}/import-template/{skill_key}")
+@router.post("/agents/{agent_id}/import-template/{skill_key}", response_model=KBImportOut)
 async def import_template(agent_id: str, skill_key: str,
                           db: AsyncSession = Depends(get_db),
                           user: User = Depends(get_current_user)):
@@ -435,7 +442,7 @@ class KbConfigIn(BaseModel):
     kb_budget_chars: int | None = None
 
 
-@router.put("/agents/{agent_id}/config")
+@router.put("/agents/{agent_id}/config", response_model=KBAgentConfigOut)
 async def set_kb_config(agent_id: str, data: KbConfigIn,
                         db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
@@ -460,14 +467,14 @@ async def set_kb_config(agent_id: str, data: KbConfigIn,
     return {"memory_config": a.memory_config}
 
 
-@router.get("/cost-profiles")
+@router.get("/cost-profiles", response_model=dict[str, KBCostProfileOut])
 async def cost_profiles():
     return COST_PROFILES
 
 
 # ---------------- 成本优化 RAG 查询（调试用）----------------
 
-@router.get("/agents/{agent_id}/rag")
+@router.get("/agents/{agent_id}/rag", response_model=KBRagPreviewOut)
 async def private_rag(agent_id: str, q: str = Query(..., min_length=1),
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):

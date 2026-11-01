@@ -94,6 +94,29 @@
   （探活 `/health`、升级检查 `/clients/update/check`）——路径拼在用户自填的服务地址上，
   走不到统一客户端层；两个路径本轮已人工核对存在。
 
+### 新增：知识库域响应模型收口（A3 长尾，20/20）
+
+- `/knowledge`（6 条）与 `/kb2`（14 条）全部声明 `response_model`，模型集中在
+  `app/schemas/responses_kb.py`。这是「一句话 → 全公司干活」主线里唯一还没收口的
+  数据域：知识库直接决定员工回答里引用了谁的资料。
+- 顺带修掉一个实测出来的缺陷：`POST /kb2/agents/{id}/documents` **函数体里没有
+  `return`**——请求 200，响应体却是 `null`，前端新建文档后拿不到 id，只能把整张
+  私人库列表重取一遍。现在与公用库那条端点一样回 `{id, chunks}`。同一条路径上还漏了
+  `cache_invalidate`：新建文档不失效进程内检索缓存，同一个问题会一直返回旧命中，
+  新员工刚入库的资料读不到（`edit_doc`/`delete_doc`/`create_global_doc` 都有，只这一处漏）。
+- `POST /kb2/agents/{id}/upload` 的两条分支键集不同（转换成功带
+  `chunks/original_saved/size`，提取失败只带 `note`），模型里可选字段 + 路由带
+  `response_model_exclude_unset=True`：没走到的分支不会凭空多出 `null` 键。
+- `/kb2/copy` 与 `sync-from-global` 的 `count` 会**小于**请求的 `doc_ids` 长度：
+  不存在或越权的源文档按"跳过"处理（不当 403 报出去，避免透露存在性）。这本来就是
+  设计行为，但现在有了 `copied`/`count` 两个键，前端能如实显示"复制了 1/2 篇"。
+- 新护栏 `tests/test_kb_contract.py`（14 项）：用临时库把 20 个端点逐个真跑一遍，
+  断言的是**键集合相等**——响应多吐一个键、或模型漏声明一个字段（会被序列化静默裁掉）
+  都会红；另含"这两个模块的端点必须全带 `response_model`"与"模型必须 `extra='allow'`"
+  两条完整性检查。反向验证：临时摘掉 `/kb2/cost-profiles` 的模型，完整性检查准确报出。
+- 棘轮上调：`test_response_models.py` 全库基线 **112 → 200** 条、占比 **23% → 42%**
+  （当前实测 202/461 = 43.8%）。
+
 ## [5.15.0] 从审查到九分：契约、交付、多端与安全收口 — 2026-11-01
 
 > 来源：五视角审查（[审查报告](docs/审查报告_AI-EOS_2026-10-31.md)）与

@@ -9,8 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import (assert_agent_owned, assert_company_owned,
                           assert_kb_doc_owned, get_current_user, get_db)
 from app.knowledge_engine import ingest_document, rag_context, retrieve
-from app.models.knowledge import KBChunk, KBDocument, KBDocumentStatus
+from app.models.knowledge import KBChunk, KBDocument
 from app.models.user import User
+from app.schemas.responses_kb import (KnowledgeDeletedOut, KnowledgeDocCreatedOut,
+                                      KnowledgeDocDetailOut, KnowledgeDocItemOut,
+                                      KnowledgeRagOut, KnowledgeSearchOut)
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
@@ -35,7 +38,7 @@ async def _assert_doc_scope_owned(db, user_id: str, doc: KBDocument) -> None:
         await assert_agent_owned(db, user_id, doc.agent_id)
 
 
-@router.post("/documents")
+@router.post("/documents", response_model=KnowledgeDocCreatedOut)
 async def create_document(
     data: DocCreate,
     company_id: str = Query(...),
@@ -74,7 +77,7 @@ async def create_document(
             "chunk_count": chunks}
 
 
-@router.get("/documents")
+@router.get("/documents", response_model=list[KnowledgeDocItemOut])
 async def list_documents(
     company_id: str = Query(...),
     project_id: str | None = Query(None),
@@ -96,7 +99,7 @@ async def list_documents(
     } for d in rows]
 
 
-@router.get("/documents/{doc_id}")
+@router.get("/documents/{doc_id}", response_model=KnowledgeDocDetailOut)
 async def get_document(
     doc_id: str,
     db: AsyncSession = Depends(get_db),
@@ -115,7 +118,7 @@ async def get_document(
     }
 
 
-@router.delete("/documents/{doc_id}")
+@router.delete("/documents/{doc_id}", response_model=KnowledgeDeletedOut)
 async def delete_document(
     doc_id: str,
     db: AsyncSession = Depends(get_db),
@@ -129,7 +132,7 @@ async def delete_document(
     return {"detail": "deleted"}
 
 
-@router.get("/search")
+@router.get("/search", response_model=KnowledgeSearchOut)
 async def search(
     company_id: str = Query(...),
     q: str = Query(..., min_length=1),
@@ -145,7 +148,7 @@ async def search(
     return {"query": q, "results": hits}
 
 
-@router.get("/rag")
+@router.get("/rag", response_model=KnowledgeRagOut)
 async def rag(
     company_id: str = Query(...),
     q: str = Query(..., min_length=1),

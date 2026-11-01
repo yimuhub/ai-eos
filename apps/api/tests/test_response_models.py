@@ -38,9 +38,10 @@ CORE_MODULES = frozenset({
 
 CORE_MIN_RATIO = 0.90
 
-# 2026-11-01 实测：112 / 471。提升后同步上调，任何时候都不许下调。
-BASELINE_TYPED = 112
-BASELINE_MIN_RATIO = 0.23
+# 2026-11-01 实测：112 / 471；同日补完知识库域（`/knowledge` + `/kb2` 共 20 条）
+# 后为 202 / 461 = 43.8%。地板取整到 200 / 0.42，任何时候都不许下调。
+BASELINE_TYPED = 200
+BASELINE_MIN_RATIO = 0.42
 MIN_TOTAL_OPERATIONS = 400
 
 

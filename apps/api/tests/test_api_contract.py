@@ -31,7 +31,7 @@ def test_frontend_api_calls_match_backend_routes():
     check_api_contract = pytest.importorskip(
         "check_api_contract", reason="契约校验工具不可用")
 
-    broken, dynamic = check_api_contract.check()
+    broken, dynamic, _n_web, _n_mobile = check_api_contract.check()
 
     if broken:
         lines = [f"发现 {len(broken)} 处接口契约不匹配："]
@@ -56,14 +56,22 @@ def test_contract_tool_scans_a_meaningful_number_of_calls():
 
     如果扫描到的调用数骤降（比如前端目录改名、正则失效），
     上面那条用例会因为"没发现任何问题"而通过——那是假的安全感。
+    移动端单独一条：它只有 10 处调用，一次正则失效就静默归零。
     """
     check_api_contract = pytest.importorskip("check_api_contract")
 
     routes = check_api_contract.backend_routes()
     calls = check_api_contract.frontend_calls()
+    mobile = check_api_contract.mobile_calls()
 
     assert len(routes) > 100, f"后端只解析出 {len(routes)} 个路径，OpenAPI 可能未完整生成"
     assert len(calls) > 100, f"只扫到 {len(calls)} 处前端调用，扫描逻辑可能失效"
+    assert len(mobile) >= 10, (
+        f"只扫到 {len(mobile)} 处移动端 call() 调用（实测 10 处），"
+        "mobile/lib/api.ts 的解析逻辑可能失效"
+    )
+    # 移动端全部集中在一个文件里；扫到别的目录说明过滤条件漂了
+    assert {f for f, _l, _m, _p in mobile} == {"mobile/lib/api.ts"}, mobile
 
 
 def test_frontend_has_no_raw_fetch_outside_api_layer():
