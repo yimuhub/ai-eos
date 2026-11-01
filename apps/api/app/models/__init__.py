@@ -69,6 +69,7 @@ from .worklog import AgentWorklog, WorklogStatus  # noqa: F401
 from .ceo import CeoMission  # noqa: F401
 from .evolution import CeoPlaybook, EvolutionRecord  # noqa: F401
 from .exam import CeoExam  # noqa: F401
+from .experience import SharedExperience  # noqa: F401
 from .notification import Notification  # noqa: F401
 from .push_subscription import PushSubscription  # noqa: F401
 from .thread_read import ThreadRead  # noqa: F401

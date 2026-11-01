@@ -107,6 +107,18 @@ async def build_context(db: AsyncSession, agent: Agent, task: Task,
                             + "\n\n".join(methods))[:6000],
             })
 
+    # 跨 Agent 学习：同类任务的已验证工作流 + 本 Agent/同事的成功与失败经验。
+    # 只注入提示词，不自动改流程；失败不阻塞开工（经验是增强项）。
+    try:
+        from app.experience_engine import build_experience_context
+        experience = await build_experience_context(
+            db, str(task.company_id), str(agent.id), task)
+        if experience:
+            messages.append({"role": "system", "content": experience})
+    except Exception as exp_err:
+        logger.warning("经验注入失败，任务继续 task=%s agent=%s: %s",
+                       task.id, agent.id, exp_err, exc_info=True)
+
     # P4: 公文写作能力注入（所有 Agent 都具备 GB/T 9704-2012 排版规范）
     try:
         from app.public_doc_skill import get_public_doc_system_prompt
@@ -417,6 +429,15 @@ async def run_agent_on_task(
             except Exception as mem_err:
                 await log_event(db, "agent.memory_write_failed", "task", task.id,
                                 "agent", agent.id, {"error": str(mem_err)[:200]})
+
+        # 成功经验沉淀：同类任务下次直接复用这条路径，而不是重新试错。
+        try:
+            from app.experience_engine import harvest_task_experience
+            await db.flush()
+            await harvest_task_experience(db, task, agent, success=True)
+        except Exception as exp_err:  # noqa: BLE001 — 沉淀失败不能改判任务结果
+            logger.warning("成功经验沉淀失败 task=%s agent=%s: %s",
+                           task.id, agent.id, exp_err, exc_info=True)
     except Exception as e:
         execution.status = "failed"
         execution.error = str(e)[:4000]
@@ -438,6 +459,15 @@ async def run_agent_on_task(
             await db.rollback()
             logger.error("失败证据落库失败 task=%s agent=%s 原始错误=%s: %s",
                          task.id, agent.id, e, persist_err, exc_info=True)
+
+        # 失败教训沉淀：至少两次尝试才值得记，单次抖动不写资产。
+        try:
+            from app.experience_engine import harvest_task_experience
+            await harvest_task_experience(db, task, agent, success=False,
+                                          error=str(e))
+        except Exception as exp_err:  # noqa: BLE001 — 沉淀失败不能掩盖原始错误
+            logger.warning("失败经验沉淀失败 task=%s agent=%s: %s",
+                           task.id, agent.id, exp_err, exc_info=True)
         raise
     finally:
         await db.flush()
