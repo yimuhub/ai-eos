@@ -29,6 +29,13 @@ from app.computer_real import EXTENDED_CAPABILITIES
 from app.core.logging_config import get_logger
 from app.models.intervention import ApprovalRequest, InterventionPolicy, new_id
 from app.models.user import User
+from app.schemas.responses_computer import (
+    CapabilitiesListOut,
+    CapabilityGrantOut,
+    ComputerExecuteOut,
+    ComputerLogOut,
+    LatestScreenshotOut,
+)
 from app.services.computer_service import (
     ComputerActionDenied,
     capability_status,
@@ -47,7 +54,7 @@ class ActionIn(BaseModel):
     params: dict | None = None
 
 
-@router.post("/grant")
+@router.post("/grant", response_model=CapabilityGrantOut)
 async def grant_capability(
     capability: str = Query(...),
     company_id: str = Query(...),
@@ -76,7 +83,7 @@ async def grant_capability(
     return {"capability": capability, "granted": True}
 
 
-@router.post("/revoke")
+@router.post("/revoke", response_model=CapabilityGrantOut)
 async def revoke_capability(
     capability: str = Query(...),
     company_id: str = Query(...),
@@ -96,7 +103,7 @@ async def revoke_capability(
     return {"capability": capability, "granted": False}
 
 
-@router.get("/permissions")
+@router.get("/permissions", response_model=dict[str, bool])
 async def list_permissions(
     company_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -107,7 +114,7 @@ async def list_permissions(
     return await capability_status(db, company_id)
 
 
-@router.get("/capabilities")
+@router.get("/capabilities", response_model=CapabilitiesListOut)
 async def list_capabilities(
     company_id: str = Query(...),
     db: AsyncSession = Depends(get_db),
@@ -142,7 +149,8 @@ async def _high_risk_needs_approval(db: AsyncSession, company_id: str) -> bool:
     return bool(policy and "computer_command" in (policy.approval_actions or []))
 
 
-@router.post("/execute")
+@router.post("/execute", response_model=ComputerExecuteOut,
+             response_model_exclude_unset=True)
 async def execute_action(
     data: ActionIn,
     company_id: str = Query(...),
@@ -224,7 +232,7 @@ async def execute_action(
             "mode": "REAL" if result.get("ok") else "REAL_FAILED"}
 
 
-@router.get("/logs")
+@router.get("/logs", response_model=list[ComputerLogOut])
 async def list_logs(
     company_id: str = Query(...),
     limit: int = Query(30, ge=1, le=200),
@@ -243,7 +251,7 @@ async def list_logs(
              "created_at": log.created_at.isoformat()} for log in rows]
 
 
-@router.get("/screenshots/latest")
+@router.get("/screenshots/latest", response_model=LatestScreenshotOut)
 async def latest_screenshot(
     company_id: str = Query(...),
     db: AsyncSession = Depends(get_db),

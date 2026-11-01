@@ -9,13 +9,23 @@ from app.computer_workspace import (HIGH_RISK_ACTIONS, MOCK_SCREENSHOT, Computer
                                  ComputerWorkspace, SessionAction, WorkspaceFile,
                                  WorkspaceProvider)
 from app.models.user import User
+from app.schemas.responses_computer import (
+    SandboxActionApproveOut,
+    SandboxActionOut,
+    SandboxActApprovalOut,
+    SandboxActRunOut,
+    SandboxSessionOut,
+    SandboxSessionResumeOut,
+    SandboxWorkspaceFileOut,
+    SandboxWorkspaceOut,
+)
 
 router = APIRouter(prefix="/sandbox", tags=["sandbox"])
 
 
 # ---------- 工作区 ----------
 
-@router.post("/workspaces", status_code=201)
+@router.post("/workspaces", status_code=201, response_model=SandboxWorkspaceOut)
 async def create_workspace(
     name: str = Query(...),
     company_id: str = Query(...),
@@ -31,7 +41,7 @@ async def create_workspace(
     return {"id": w.id, "name": w.name, "provider": w.provider.value}
 
 
-@router.get("/workspaces")
+@router.get("/workspaces", response_model=list[SandboxWorkspaceOut])
 async def list_workspaces(company_id: str = Query(...),
                           db: AsyncSession = Depends(get_db),
                           user: User = Depends(get_current_user)):
@@ -48,7 +58,8 @@ class SessionIn(BaseModel):
     goal: str | None = None
 
 
-@router.post("/workspaces/{wid}/sessions", status_code=201)
+@router.post("/workspaces/{wid}/sessions", status_code=201,
+             response_model=SandboxSessionOut)
 async def start_session(
     wid: str,
     data: SessionIn | None = None,
@@ -89,7 +100,7 @@ def _check_running(s: ComputerSession):
         raise HTTPException(409, f"会话已结束（{s.status}）")
 
 
-@router.post("/sessions/{sid}/pause")
+@router.post("/sessions/{sid}/pause", response_model=SandboxSessionOut)
 async def pause_session(sid: str, db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
     s = await _session(db, sid, user.id)
@@ -102,7 +113,7 @@ async def pause_session(sid: str, db: AsyncSession = Depends(get_db),
     return {"id": sid, "status": "PAUSED"}
 
 
-@router.post("/sessions/{sid}/resume")
+@router.post("/sessions/{sid}/resume", response_model=SandboxSessionResumeOut)
 async def resume_session(sid: str, db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
     s = await _session(db, sid, user.id)
@@ -113,7 +124,7 @@ async def resume_session(sid: str, db: AsyncSession = Depends(get_db),
     return {"id": sid, "status": "RUNNING", "resumed_from_checkpoint": True}
 
 
-@router.post("/sessions/{sid}/cancel")
+@router.post("/sessions/{sid}/cancel", response_model=SandboxSessionOut)
 async def cancel_session(sid: str, db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
     from datetime import datetime, timezone
@@ -149,7 +160,8 @@ MOCK_RESULT = {
 }
 
 
-@router.post("/sessions/{sid}/act")
+@router.post("/sessions/{sid}/act",
+             response_model=SandboxActRunOut | SandboxActApprovalOut)
 async def act(
     sid: str,
     data: ActionIn,
@@ -235,7 +247,7 @@ async def act(
             "screenshots": {"before": before, "after": after}}
 
 
-@router.post("/actions/{aid}/approve")
+@router.post("/actions/{aid}/approve", response_model=SandboxActionApproveOut)
 async def approve_action(aid: str, db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
     """批准待审批的高风险动作。"""
@@ -250,7 +262,7 @@ async def approve_action(aid: str, db: AsyncSession = Depends(get_db),
     return {"id": aid, "approved": True}
 
 
-@router.get("/sessions/{sid}/actions")
+@router.get("/sessions/{sid}/actions", response_model=list[SandboxActionOut])
 async def list_actions(sid: str, db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
     await _session(db, sid, user.id)
@@ -262,7 +274,7 @@ async def list_actions(sid: str, db: AsyncSession = Depends(get_db),
             for a in q.scalars().all()]
 
 
-@router.get("/workspaces/{wid}/files")
+@router.get("/workspaces/{wid}/files", response_model=list[SandboxWorkspaceFileOut])
 async def list_files(wid: str, db: AsyncSession = Depends(get_db),
                      user: User = Depends(get_current_user)):
     w = await db.get(ComputerWorkspace, wid)

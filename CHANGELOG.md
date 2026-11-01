@@ -149,6 +149,37 @@
   公司。key 改为带 `cid`，并补上"名下没有公司"的明确提示而不是空列表。
 - 棘轮上调：全库基线 **200 → 220** 条、占比 **42% → 47%**（当前实测 223/461 = 48.4%）。
 
+### 新增：「本机操作」这条线响应模型收口（A3 长尾，17/17）
+
+- 沙箱与 Computer Agent 两个模块的 17 个端点全部声明 `response_model`：`/sandbox`
+  10 条（工作区、会话生命周期、逐步操作、审批、历史、工作区文件）、
+  `/computer-agent` 7 条（授权、权限总览、能力清单、执行、审计日志、截屏预览）。
+  新文件 `app/schemas/responses_computer.py`，同样统一 `extra="allow"`。
+- `POST /computer-agent/execute` 有四条互不相交的返回分支（命中免批白名单、
+  高危落审批单、`dry_run` 预检、真实执行），合并成一个全可选模型 +
+  `response_model_exclude_unset=True`：待审批那条不会凭空多出 `log_id: null`，
+  前端 `res.status === "awaiting_approval"` 的判断与收口前逐字节一致。
+  `POST /sandbox/sessions/{sid}/act` 只有两条分支且必填字段天然互斥
+  （一条要 `seq`、一条要 `requires_approval`），因此用联合类型而不是合并模型。
+- `/computer-agent/permissions` 声明成 `dict[str, bool]` 而不是模型：它就是
+  `capability_status()` 的「能力名 → 是否授权」映射，键集合由 `EXTENDED_CAPABILITIES`
+  决定、随执行器增减，写死字段等于每次加一种本机能力都要改契约。
+- 可空字段按**数据库列的 nullable** 声明，不是按"当前代码路径看起来总有值"：
+  `SessionAction.verified/before/after` 在「高风险待审批」记录上是 NULL，
+  `ComputerActionLog.result` 在 `nl_computer.py` 的拒绝审计上是 NULL。
+  两处都做过反向验证——把这三列改成必填，`GET /sandbox/sessions/{sid}/actions`
+  立刻 500，正是收口要拦住的那类事故。
+- 新护栏 `tests/test_computer_sandbox_contract.py`（11 项）：临时库真跑两个模块，
+  键集合**相等**断言；覆盖会话「暂停后禁止操作 → 恢复 → 结束后 409」、
+  高危动作两条分支、`save_file/delete_file` 与工作区文件表的联动与 200 字截断、
+  未授权 403 / 未知能力 400 / 执行失败必须 `REAL_FAILED` 不许伪造成成功、
+  审批门 → 免批白名单 → 撤销白名单恢复拦截、跨公司冒用他人 Agent 404、
+  截屏预览只在沙箱根内可读且别人公司取不到，外加两条完整性检查
+  （17 个端点必须全带模型、模型必须 `extra='allow'`）。
+  **所有会碰本机的执行器都用 `monkeypatch.setitem` 顶掉**——测试不会真的截屏、
+  敲键或启动 App。
+- 棘轮上调：全库基线 **220 → 237** 条、占比 **47% → 51%**（当前实测 240/461 = 52.1%）。
+
 ## [5.15.0] 从审查到九分：契约、交付、多端与安全收口 — 2026-11-01
 
 > 来源：五视角审查（[审查报告](docs/审查报告_AI-EOS_2026-10-31.md)）与
