@@ -127,6 +127,13 @@ async def assign_ceo(data: AssignCeoIn,
     except Exception as exc:  # noqa: BLE001 — 进化调度失败不能挡住指派 CEO
         logger.warning("自我进化调度创建失败 company=%s: %s",
                        data.company_id, exc)
+    # 周考与进化同源：周一 08:50 由独立监督官出题，早于 09:30 的周度复盘。
+    try:
+        from app.exam_engine import ensure_exam_schedules
+        await ensure_exam_schedules(db, data.company_id, user.id)
+    except Exception as exc:  # noqa: BLE001 — 周考调度失败同样不阻塞
+        logger.warning("周考调度创建失败 company=%s: %s",
+                       data.company_id, exc)
     return result
 
 

@@ -59,6 +59,16 @@ async def execute_action(db: AsyncSession, sched: AutomationSchedule) -> dict:
         return {"reflected": r["reflected"],
                 "memories_written": r.get("memories_written", 0)}
 
+    if sched.action_type == "ceo_exam_weekly":
+        """CEO 周考：独立监督官出题评分，早于周度深度复盘。"""
+        from app.exam_engine import run_exam
+
+        rec = await run_exam(db, sched.company_id,
+                             user_id=sched.created_by, source="schedule")
+        return {"exam_id": rec.get("id"), "period": rec.get("period_key"),
+                "status": rec.get("status"), "overall": rec.get("overall"),
+                "reused": bool(rec.get("reused"))}
+
     if sched.action_type.startswith("ceo_evolve_"):
         """CEO 分级自我进化：日微调 / 周深度复盘 / 月迭代提案。"""
         from app.self_evolution import run_evolution
