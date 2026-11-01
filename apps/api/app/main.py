@@ -1,4 +1,5 @@
 """AI-EOS API entrypoint."""
+import logging
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -318,6 +319,23 @@ async def request_id_middleware(request, call_next):
     return response
 
 
+def _http_failure_level(status_code: int, route_path: str) -> int:
+    """失败请求该记多响——只记"没人会注意到"的那两类。
+
+    - 5xx：服务端自己的问题，必须 WARNING；
+    - 404 且 route 没匹配上（`unmatched`）：前端调了后端根本不存在的地址。
+      这类失败**不会**在任何业务日志里留痕，用户只会看到一句 "Not Found"，
+      而运维端一片安静——契约破坏正是靠这里出声；
+    - 其余 4xx（401 未登录、403 越权、422 输入错）多是正常交互，记 INFO
+      足够，不抢视野。
+    """
+    if status_code >= 500:
+        return logging.WARNING
+    if status_code == 404 and route_path == "unmatched":
+        return logging.WARNING
+    return logging.INFO
+
+
 @app.middleware("http")
 async def http_metrics_middleware(request, call_next):
     """RED 指标：Rate / Errors / Duration，外加 in-flight 并发数。
@@ -351,6 +369,15 @@ async def http_metrics_middleware(request, call_next):
             method=method, path=path, status=str(status_code))
         HTTP_REQUEST_DURATION_SECONDS.observe(
             duration, method=method, path=path)
+        if status_code >= 400:
+            # request_id 由更外层的 request_id_middleware 写进 state，
+            # 这里取它而不是 contextvar：本中间件在 contextvar 作用域之外。
+            logger.log(
+                _http_failure_level(status_code, path),
+                "HTTP 失败 %s %s -> %s（%.0fms，route=%s，request_id=%s）",
+                method, request.url.path, status_code, duration * 1000, path,
+                getattr(request.state, "request_id", "-") or "-",
+            )
 
 
 @app.exception_handler(StarletteHTTPException)
