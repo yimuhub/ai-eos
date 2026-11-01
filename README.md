@@ -48,6 +48,8 @@ AI chatbots answer questions — but the work still lands on your desk. Meanwhil
 - Issue one task from the Command Center — the CEO agent **decomposes it, dispatches subtasks in parallel, and consolidates a final report**.
 - Batch dispatch to a single agent, a list, a whole department, or the entire company; batch delete, batch reprioritize, and one-click global interrupt.
 - **Failed tasks are retryable** (`POST /tasks/{id}/retry`); pause actually resumes from checkpoints; stuck tasks self-heal on restart.
+- **The CEO improves itself**: daily tweaks, weekly reviews and monthly iteration of its operating persona; an independent supervisor agent sets a weekly exam (personality / cost discipline / decisions / execution), and the owner can override any score.
+- **Experience pool**: successful paths are frozen into reusable workflows and failures become cross-agent lessons; both are injected before similar tasks, cutting retries and token waste.
 
 ### 3. 👥 AI Meeting System
 - Multi-round meetings with user interjection, auto-generated minutes, and action items that convert into tasks with one click.
