@@ -18,7 +18,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select, text, union
+from sqlalchemy import delete, func, or_, select, text, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -43,6 +43,7 @@ from app.schemas.responses import (AgentBatchAssignManagerOut,
                                    AgentCardOut, AgentListItemOut,
                                    AgentManagerOut, AgentModelBindingOut,
                                    AgentModelConfigOut, AgentOut,
+                                   AgentSkillProvisionOut,
                                    AgentSubordinateOut, AgentSwitchModelOut,
                                    CapabilityPacksOut)
 from app.services import license_service
@@ -389,6 +390,21 @@ async def create_agent(data: AgentIn, db: AsyncSession = Depends(get_db),
     await db.commit()
     await db.refresh(agent)
 
+    # 创建即配备技能：本地库命中就装；没有就按岗位生成一张技能卡；
+    # 都没有时兜底通用能力。手工创建不做外网市场搜索（避免建员工要等 8 秒），
+    # 市场补齐由 CEO 招人链路或「智能补齐」接口负责。
+    try:
+        from app.skill_provisioning import provision_agent_skills
+        await provision_agent_skills(
+            db, agent, hints=[data.role or "", data.system_prompt or ""],
+            allow_market=False, allow_generate=True)
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001 — 技能配备失败不影响员工已建成
+        import logging
+        logging.getLogger(__name__).warning(
+            "手工创建 Agent 的技能配备失败 agent=%s: %s: %s",
+            agent.id, type(exc).__name__, exc)
+
     # 周期性工作能力：自动创建一条每日自动化（给自己创建待办任务）
     if "scheduled_work" in capabilities:
         from app.models.automation import AutomationDefinition
@@ -496,6 +512,25 @@ async def agent_card(aid: str, db: AsyncSession = Depends(get_db),
     }
 
 
+@router.post("/{aid}/skills/provision", response_model=AgentSkillProvisionOut)
+async def provision_agent_skill_endpoint(aid: str, deep: bool = True,
+                                         db: AsyncSession = Depends(get_db),
+                                         user=Depends(get_current_user)):
+    """给已有员工补齐技能：本地库 → 公开市场（deep=true）→ 生成。
+
+    创建员工时已自动配备一次；这个接口用于「后来发现技能不够」时手动补齐。
+    外呼与生成都有上限，失败逐级降级，不会让员工不可用。
+    """
+    a = await _load_agent(db, aid)
+    await ensure_agent_access(db, user, a, Capability.OPERATE)
+    from app.skill_provisioning import provision_agent_skills
+    result = await provision_agent_skills(
+        db, a, hints=[a.role or "", a.description or "", a.system_prompt or ""],
+        allow_market=deep, allow_generate=True)
+    await db.commit()
+    return result
+
+
 @router.patch("/{aid}", response_model=AgentOut)
 async def update_agent(aid: str, data: dict, db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
@@ -547,6 +582,10 @@ async def delete_agent(aid: str, db: AsyncSession = Depends(get_db),
     # 删除员工不可逆：其技能绑定、记忆、档案一并消失。
     # DESTRUCTIVE 不在 member 矩阵里，部门负责人也删不了——删除权不下放。
     await ensure_agent_access(db, user, a, Capability.DESTRUCTIVE)
+    # 技能绑定没有数据库级级联：不先清就删人会触发 FK 失败
+    # （自动配备技能上线后，这一点几乎每个员工都会命中）。
+    from app.models.skill import AgentSkill
+    await db.execute(delete(AgentSkill).where(AgentSkill.agent_id == a.id))
     await db.delete(a)
     await db.commit()
 
@@ -766,6 +805,22 @@ async def batch_create_agents(data: BatchCreateIn,
     await db.commit()
     for agent, _ in created:
         await db.refresh(agent)
+
+    # 批量创建只做本地库匹配 + 通用兜底：避免 N 个员工各触发一次模型生成。
+    try:
+        from app.skill_provisioning import provision_agent_skills
+        for agent, item in created:
+            await provision_agent_skills(
+                db, agent,
+                hints=[str(item.get("role") or ""),
+                       str(item.get("description") or "")],
+                allow_market=False, allow_generate=False)
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning(
+            "批量创建 Agent 的技能配备失败: %s: %s", type(exc).__name__, exc)
+
     return {
         "created": [{"id": a.id, "name": a.name, "role": a.role} for a, _ in created],
         "created_count": len(created),

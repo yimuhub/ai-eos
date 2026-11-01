@@ -1,6 +1,4 @@
 """Skill Center — list skills, install/uninstall on agents."""
-import asyncio
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import or_, select
@@ -11,7 +9,8 @@ from app.core.permissions import Capability, require_company_scope
 from app.core.logging_config import get_logger
 from app.core.scope import build_ctx, ensure_agent_access
 from app.db.session import get_db
-from app.skill_system import BUILTIN_SKILLS
+from app.skill_provisioning import (ensure_builtin_skills, fetch_market_skill,
+                                    security_scan, search_market_skills)
 from app.models.agent import Agent
 from app.models.company import Company
 from app.models.membership import CompanyMember
@@ -34,13 +33,7 @@ async def ensure_skills_seeded(db: AsyncSession):
     global _seeded
     if _seeded:
         return
-    for cls in BUILTIN_SKILLS:
-        inst = cls()
-        exists = await db.execute(select(SkillRow).where(SkillRow.slug == inst.id))
-        if not exists.scalar_one_or_none():
-            db.add(SkillRow(slug=inst.id, name=inst.name, description=inst.description,
-                            version=inst.version, input_schema=inst.input_schema,
-                            output_schema=inst.output_schema, permissions=inst.permissions))
+    await ensure_builtin_skills(db)
     await db.commit()
     _seeded = True
 
@@ -120,22 +113,6 @@ class ImportIn(BaseModel):
     force: bool = False               # 安全审核未通过时强制导入
 
 
-DANGEROUS_PATTERNS = [
-    "rm -rf", "curl *| bash", "curl *| sh", "wget *| sh", "eval(",
-    "exec(", "os.system", "subprocess", "__import__", "base64 -d",
-    "chmod 777", "/etc/passwd", ".ssh", "crypto", "bitcoin", "keylogger",
-]
-
-
-def security_scan(text: str) -> dict:
-    """skill 内容安全审核：命中危险模式则标记。"""
-    low = (text or "").lower()
-    hits = [pat.replace("*", "") for pat in DANGEROUS_PATTERNS
-            if ("*" in pat and pat.replace(" *", " ") in low) or ("*" not in pat and pat in low)]
-    return {"safe": len(hits) == 0, "hits": hits,
-            "level": "pass" if not hits else ("high" if len(hits) >= 3 else "warn")}
-
-
 @router.post("/import", status_code=201,
              response_model=SkillImportOut)
 async def import_skill(data: ImportIn, company_id: str = Query(...),
@@ -165,75 +142,13 @@ async def import_skill(data: ImportIn, company_id: str = Query(...),
             "scope": row.scope, "security_scan": scan}
 
 
-# ---------- Skill 市场（对接公开 skill 仓库） ----------
-MARKET_REPOS = [
-    {"name": "anthropics/skills", "desc": "Anthropic 官方 Agent Skills",
-     "api": "https://api.github.com/repos/anthropics/skills/contents/skills",
-     "raw": "https://raw.githubusercontent.com/anthropics/skills/main/{path}"},
-    {"name": "awesome-claude-code", "desc": "社区精选 Claude 技能合集",
-     "api": "https://api.github.com/repos/hesreallyhim/awesome-claude-code/contents/skills",
-     "raw": "https://raw.githubusercontent.com/hesreallyhim/awesome-claude-code/main/skills/{path}"},
-]
-
+# ---------- Skill 市场（对接公开 skill 仓库，实现在 skill_provisioning） ----------
 
 @router.get("/market/search", response_model=SkillMarketSearchOut)
 async def market_search(q: str = "", limit: int = Query(20, le=50)):
-    """搜索公开 skill 市场上的技能（GitHub 公开仓库目录）。
-
-    原实现在 async 路由里用 urllib.request.urlopen 串行拉多个仓库
-    （10s 超时 × N 仓库 = 阻塞整个事件循环）；改为 httpx.AsyncClient
-    并发抓取，单仓库失败只跳过自己、不影响整体。
-    """
-    import httpx
-
-    async def _fetch_repo(client, repo: dict) -> list[dict]:
-        try:
-            resp = await client.get(
-                repo["api"],
-                headers={"User-Agent": "ai-eos",
-                         "Accept": "application/vnd.github+json"})
-            resp.raise_for_status()
-            items = resp.json()
-        except Exception as e:
-            logger.warning("skill 市场仓库 %s 抓取失败，已跳过：%s: %s",
-                           repo["name"], type(e).__name__, e)
-            return []
-        out = []
-        for it in items if isinstance(items, list) else []:
-            if it.get("type") != "dir":
-                continue
-            name = it.get("name", "")
-            if q and q.lower() not in name.lower():
-                continue
-            out.append({
-                "name": name, "repo": repo["name"], "path": it.get("path"),
-                "url": it.get("html_url"), "source_market": repo["desc"],
-                "raw_url": repo["raw"].format(path=f"{it.get('path')}/SKILL.md"),
-            })
-        return out
-
-    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-        per_repo = await asyncio.gather(
-            *[_fetch_repo(client, repo) for repo in MARKET_REPOS],
-            return_exceptions=True)
-    results: list[dict] = []
-    for repo, r in zip(MARKET_REPOS, per_repo):
-        if isinstance(r, BaseException):
-            logger.warning("skill 市场仓库 %s 抓取异常，已跳过：%s",
-                           repo["name"], r)
-            continue
-        results.extend(r)
-    results = results[:limit]
+    """搜索公开 skill 市场上的技能（GitHub 公开仓库目录）。"""
+    results = await search_market_skills(q, limit=limit)
     return {"results": results, "total": len(results)}
-
-
-async def _fetch_raw_skill(raw_url: str) -> str:
-    """用 httpx 异步拉取 GitHub raw 文本（失败抛异常，由调用方转 502）。"""
-    import httpx
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-        resp = await client.get(raw_url, headers={"User-Agent": "ai-eos"})
-        resp.raise_for_status()
-        return resp.content.decode("utf-8", errors="replace")
 
 
 @router.post("/market/fetch-preview", response_model=SkillPreviewOut)
@@ -248,7 +163,7 @@ async def market_fetch_preview(data: dict,
     if not raw_url.startswith("https://raw.githubusercontent.com"):
         raise HTTPException(400, "仅支持 GitHub raw 地址")
     try:
-        content = await _fetch_raw_skill(raw_url)
+        content = await fetch_market_skill(raw_url)
     except Exception as e:
         logger.warning("skill 市场预览拉取失败 %s：%s: %s", raw_url,
                        type(e).__name__, e)
@@ -270,7 +185,7 @@ async def install_from_market(data: dict, company_id: str = Query(...),
     if not raw_url.startswith("https://raw.githubusercontent.com"):
         raise HTTPException(400, "仅支持 GitHub raw 地址")
     try:
-        content = await _fetch_raw_skill(raw_url)
+        content = await fetch_market_skill(raw_url)
     except Exception as e:
         logger.warning("skill 市场安装拉取失败 %s：%s: %s", raw_url,
                        type(e).__name__, e)

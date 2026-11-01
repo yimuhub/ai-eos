@@ -115,6 +115,8 @@ PLAN_PROMPT = """你是这家公司的 CEO（超级 Agent）。老板用一句�
   同一场最多新招 {max_new_agents} 人，超出就分给最接近的现有员工。
 - 红线写"绝对不能出现的东西"（如不得编造数据、不得对外发送、不得修改财务原始凭证）。
 - 验收标准写"怎样算合格"，要可判断，不要写"质量高"这种空话。
+- 每个子任务写 required_skills：完成它必须具备的 1~3 项技能（如「竞品调研」「公文排版」）。
+  这是给员工自动配技能用的，写具体能力，不要写「认真负责」。
 - 只输出 JSON，不要任何其它文字：
 {{"title":"不超过30字的任务名",
   "objective":"一句话目标（保留老板原意）",
@@ -123,6 +125,7 @@ PLAN_PROMPT = """你是这家公司的 CEO（超级 Agent）。老板用一句�
   "acceptance":["..."],
   "terminology":{{"关键术语":"本公司的口径"}},
   "subtasks":[{{"title":"子任务名","description":"具体要做什么、边界在哪","agent_name":"员工姓名或新岗位名",
+              "required_skills":["技能1","技能2"],
               "agent_role":"仅新招时填","department":"仅新招时填","group":"仅新招时填","reason":"仅新招时填"}}]}}
 """
 
@@ -320,6 +323,7 @@ def _normalize_plan(raw: dict, instruction: str,
         st_title = str(item.get("title") or "").strip()[:200]
         if not st_title:
             continue
+        required_skills = _as_str_list(item.get("required_skills"), limit=5)
         wanted = str(item.get("agent_name") or "").strip()[:200]
         matched = _match_agent(wanted, agents)
         new_idx: int | None = None
@@ -342,7 +346,15 @@ def _normalize_plan(raw: dict, instruction: str,
                     "group": group,
                     "reason": reason,
                     "agent_id": "",
+                    "required_skills": list(required_skills),
+                    "skills": [],
+                    "skill_errors": [],
                 })
+            elif new_idx is not None:
+                # 同一个新岗位被拆成多条子任务：技能取并集，不要只看第一条
+                merged = new_agents[new_idx].get("required_skills") or []
+                new_agents[new_idx]["required_skills"] = list(
+                    dict.fromkeys(merged + required_skills))[:5]
         agent = matched
         if agent is None and new_idx is None:
             agent = agents[0]  # 超过新招上限：分给现有第一人，预览里标未匹配
@@ -354,6 +366,7 @@ def _normalize_plan(raw: dict, instruction: str,
             "agent_name": agent.name if agent is not None else new_agents[new_idx]["name"],
             "agent_matched": matched is not None,
             "new_agent_index": new_idx,
+            "required_skills": required_skills,
         })
     if not subtasks:
         raise CeoError("CEO 没有拆出任何可执行的子任务，请补充目标细节后重试", 502)
@@ -573,7 +586,19 @@ async def _provision_new_agents(db: AsyncSession, mission: CeoMission,
     for idx, proposal in enumerate(proposals[:MAX_NEW_AGENTS]):
         if proposal.get("agent_id"):
             # 上一次开工已经建过人、但被队列回退打回 PLANNING：不重复招
-            created.append(proposal)
+            created.append({
+                "agent_id": proposal.get("agent_id", ""),
+                "name": proposal.get("name", ""),
+                "role": proposal.get("role", ""),
+                "department": proposal.get("department", ""),
+                "group": proposal.get("group", ""),
+                "reason": proposal.get("reason", ""),
+                "proposed_name": proposal.get("proposed_name")
+                                 or proposal.get("name", ""),
+                "required_skills": proposal.get("required_skills") or [],
+                "skills": proposal.get("skills") or [],
+                "skill_errors": proposal.get("skill_errors") or [],
+            })
             continue
         dept = await _ensure_department(
             db, mission.company_id,
@@ -597,6 +622,21 @@ async def _provision_new_agents(db: AsyncSession, mission: CeoMission,
         for role, model_id in fallback_models:
             db.add(AgentModelConfig(agent_id=agent.id, role=role,
                                     model_id=model_id))
+
+        # 技能自动配备：本地库 → 公开市场 → CEO 生成（详见 skill_provisioning）。
+        # 任何一级失败只降级，不会让「开工」失败；结果写进新招台账供前端展示。
+        hints = [str(mission.objective or ""),
+                 " ".join(str(s) for s in (proposal.get("required_skills") or []))]
+        for st in (mission.plan or []):
+            if st.get("new_agent_index") == idx:
+                hints.extend([str(st.get("title") or ""),
+                              str(st.get("description") or "")])
+                hints.extend(str(s) for s in (st.get("required_skills") or []))
+        from app.skill_provisioning import provision_agent_skills
+        skill_info = await provision_agent_skills(
+            db, agent, hints=hints, coordinator=coord,
+            allow_market=True, allow_generate=True)
+
         for st in (mission.plan or []):
             if st.get("new_agent_index") == idx:
                 st["agent_id"] = agent.id
@@ -611,12 +651,17 @@ async def _provision_new_agents(db: AsyncSession, mission: CeoMission,
             "group": group.name if group else "",
             "reason": str(proposal.get("reason") or ""),
             "proposed_name": str(proposal.get("name") or ""),
+            "required_skills": list(proposal.get("required_skills") or []),
+            "skills": skill_info.get("bound") or [],
+            "skill_errors": skill_info.get("errors") or [],
         })
         await log_event(db, "ceo.agent_hired", "agent", agent.id, "agent",
                         str(coord.id),
                         {"mission_id": mission.id, "department": dept.name,
                          "group": group.name if group else "",
-                         "role": agent.role or ""},
+                         "role": agent.role or "",
+                         "skills": [b.get("name") for b in
+                                    (skill_info.get("bound") or [])]},
                         company_id=mission.company_id)
 
     mission.new_agents = created

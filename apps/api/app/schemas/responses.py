@@ -281,6 +281,25 @@ class AgentCardOut(BaseModel):
     card_version: str
 
 
+class AgentSkillBoundOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    id: str
+    slug: str
+    name: str
+    source: str
+    reason: str
+
+
+class AgentSkillProvisionOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    bound: list[AgentSkillBoundOut]
+    library: int
+    market: int
+    generated: int
+    fallback: int
+    errors: list[str]
+
+
 class AgentBatchDeleteFailureOut(BaseModel):
     id: str
     reason: str

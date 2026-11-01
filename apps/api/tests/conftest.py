@@ -143,6 +143,11 @@ os.environ.setdefault("AIEOS_LOG_LEVEL", "ERROR")
 os.environ["DEBUG"] = "false"
 os.environ["SQL_ECHO"] = "false"
 os.environ["STORAGE_DIR"] = str(_TMP_ROOT / "storage")
+# 自动技能配备 / CEO 工作流调研会外呼 GitHub 与模型：测试里一律关闭，
+# 需要覆盖这些分支的用例显式 monkeypatch 对应函数并把开关打开。
+os.environ["AIEOS_SKILL_MARKET_AUTO"] = "0"
+os.environ["AIEOS_SKILL_AUTO_GENERATE"] = "0"
+os.environ["AIEOS_CEO_WEB_RESEARCH"] = "0"
 # 清掉可能存在的模型密钥，确保"无密钥"路径被真实覆盖
 for _k in ("OPENAI_COMPAT_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"):
     os.environ.pop(_k, None)

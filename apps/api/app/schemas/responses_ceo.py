@@ -52,6 +52,8 @@ class CeoPlannedSubtaskOut(BaseModel):
     agent_matched: bool
     # 指向 new_agents 的下标（预览阶段把子任务和「待招的人」对上）
     new_agent_index: int | None = None
+    # 完成该子任务必须具备的技能（供自动配备与前端展示）
+    required_skills: list[str] = []
 
 
 class CeoNewAgentOut(BaseModel):
@@ -70,6 +72,11 @@ class CeoNewAgentOut(BaseModel):
     reason: str = ""
     agent_id: str = ""
     proposed_name: str = ""
+    # 完成岗位任务所需的技能名（计划阶段由 CEO 给出）
+    required_skills: list[str] = []
+    # 已自动配备的技能（入职后回填真实绑定结果）
+    skills: list[dict] = []
+    skill_errors: list[str] = []
 
 
 class CeoMissionPreviewOut(BaseModel):

@@ -65,6 +65,33 @@
   SQLite 自动补列与 Alembic 双轨一致；新增 2 项契约/行为测试，覆盖落位、
   模型继承、上限、去重、重名后缀与组织架构可见性。
 
+### 新增：员工创建即自动配备技能（本地库 → 市场 → CEO 生成）
+
+新建员工不再只是「一个岗位名 + 一段提示词」：系统按岗位与任务描述自动配技能，
+并把技能卡里的**方法论**真正注入执行提示词，而不只是挂一张技能名清单。
+
+- **三级兜底**：① 本地技能库按岗位/任务 token 打分，命中即装（零外呼）；
+  ② 本地没有就去 GitHub 公开技能目录找 `SKILL.md`；③ 市场也没有，由 CEO
+  按岗位与任务上下文生成一张专属技能卡（适用场景 / 步骤 / 交付标准 / 常见错误）。
+  三级都失败才退回内置 `web_search`——**不允许无技能上岗**。
+- **安全边界**：市场抓取只允许 `https://raw.githubusercontent.com`，8 秒超时、
+  64 KB 上限；内容必须过 `security_scan` 才能入库，只当文本注入、不执行任何代码。
+  顺带修好一个真实漏检：`curl https://… | bash` 因为 URL 一长就绕过了原来的
+  字面量模式，现在用正则跨任意 URL 识别管道执行。
+- **方法论进提示词**：运行时把已装技能的 `instruction` 按技能分组注入系统消息
+  （单项 1500 字、总量 6000 字截断），技能从「证书」变成「作业指导书」。
+- **触发点**：手工建员工（本地库 + 生成）、批量建员工（仅本地库 + 兜底，
+  避免 N 个员工各触发一次模型）、CEO 缺岗招人（三级全开）、
+  以及新增 `POST /agents/{aid}/skills/provision?deep=` 供存量员工手动补齐。
+- **可审计、可降级**：每次配备写 `skill.auto_bound` 事件，`ceo.agent_hired`
+  事件带上已配技能名；任一级失败只降级不阻断建人/开工，失败原因进 `skill_errors`
+  由前端展示。外呼与生成分别受 `AIEOS_SKILL_MARKET_AUTO`、
+  `AIEOS_SKILL_AUTO_GENERATE` 开关控制，测试环境默认关闭、分支用 monkeypatch 覆盖。
+- **顺手修掉一个真 bug**：`agent_skills` 没有数据库级级联，自动绑技能上线后
+  「删除员工」会因外键失败——现在删人前先清绑定。
+- **契约**：`CeoPlannedSubtaskOut.required_skills`、`CeoNewAgentOut.skills/skill_errors`、
+  `AgentSkillProvisionOut`；CEO 契约 23 项与技能配备 3 项测试全部通过。
+
 ### 新增：接口契约长尾（A3 续）
 
 - 再补 68 个响应模型：`governance` 23/23、`tokens` 13/13、`war_room` 14/15、

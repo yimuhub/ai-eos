@@ -76,25 +76,36 @@ async def build_context(db: AsyncSession, agent: Agent, task: Task,
 
     # Installed skills described to the model
     result = await db.execute(
-        select(SkillRow.slug, SkillRow.name, SkillRow.description)
+        select(SkillRow.slug, SkillRow.name, SkillRow.description,
+               SkillRow.scope, SkillRow.input_schema)
         .join(AgentSkill, AgentSkill.skill_id == SkillRow.id)
         .where(AgentSkill.agent_id == agent.id)
     )
     skills = result.all()
     if skills:
-        # 一次 IN 批量取 scope，替代"每个已装技能一条 SELECT"的 N+1
-        slugs = [slug for slug, _n, _d in skills]
-        scope_rows = (await db.execute(select(
-            SkillRow.slug, SkillRow.scope).where(SkillRow.slug.in_(slugs)))).all()
-        skill_scopes = {slug: (sc or "public") for slug, sc in scope_rows}
         scope_lines = "\n".join(
-            f"- {n} ({slug}) [{skill_scopes.get(slug, 'public')}]: {d or ''}"
-            for slug, n, d in skills)
+            f"- {n} ({slug}) [{(sc or 'public')}]: {d or ''}"
+            for slug, n, d, sc, _schema in skills)
         messages.append({
             "role": "system",
             "content": f"已安装技能（[public]=公共技能 [exclusive]=专属技能）：\n{scope_lines}\n"
                        f"根据任务需求自行调用所需技能，并在成果中说明使用了哪些技能。",
         })
+        # 技能卡里的方法论必须真正进提示词：只列技能名等于"挂了张证书不上岗"。
+        # 每个技能截断、总量截断，避免把上下文预算吃光。
+        methods = []
+        for slug, name, _d, _sc, schema in skills:
+            instruction = ""
+            if isinstance(schema, dict):
+                instruction = str(schema.get("instruction") or "").strip()
+            if instruction:
+                methods.append(f"### {name}（{slug}）\n{instruction[:1500]}")
+        if methods:
+            messages.append({
+                "role": "system",
+                "content": ("技能执行方法论（按步骤执行，不要跳过）：\n\n"
+                            + "\n\n".join(methods))[:6000],
+            })
 
     # P4: 公文写作能力注入（所有 Agent 都具备 GB/T 9704-2012 排版规范）
     try:
