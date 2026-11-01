@@ -1,7 +1,7 @@
 "use client";
 import { useMemo, useState } from "react";
 import { api, describeError } from "@/lib/api";
-import { useResource } from "@/lib/useResource";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 
 /* ============================================================
    治理与控制：改进审批 · 能力包市场 · 企业模板 · 自治等级
@@ -9,7 +9,11 @@ import { useResource } from "@/lib/useResource";
    ============================================================ */
 
 type Case = { id: string; agent_id: string; what_improved?: string; why?: string; risk?: string; expect_effect?: string; status?: string };
-type Install = { id: string; package_key: string; version: string; approved_by?: string };
+type Install = {
+  id: string; package_id: string; package_key: string; package_name: string;
+  package_type: string; version: string; installed_by?: string | null;
+  installed_at?: string | null;
+};
 type Template = { key: string; name: string };
 
 const AVATAR_COLORS = ["#f59e0b,#ef4444", "#6366f1,#8b5cf6", "#22d3ee,#3b82f6",
@@ -36,25 +40,24 @@ const statusBadge = (s: string) => {
 };
 
 export default function GovernancePage() {
-  // 治理数据是账号级的（接口不带 company_id），三块面板互不依赖 →
-  // 三个独立 key 并发加载，各自缓存；写操作后只重取受影响的那一块。
+  // 提案与模板是账号级的（接口不带 company_id），安装记录是按公司的 →
+  // 三块面板互不依赖，三个独立 key 并发加载、各自缓存；
+  // 写操作后只重取受影响的那一块。
+  const cid = useActiveCompanyId();
   const { data: caseData, error: caseError, refresh: refreshCases } = useResource<Case[]>(
     "governance:cases",
     () => api.get<Case[]>("/governance/self-improvement-cases"),
   );
+  // 以前这里调的是 /governance/marketplace/packages——那是**能力包目录**，
+  // 而且返回数组，代码按 { installations } 对象读，永远取到 undefined，
+  // 「已安装」面板因此从来没亮过。安装记录有自己的只读接口。
   const { data: installData, refresh: refreshInstalls } = useResource<Install[]>(
-    "governance:packages",
-    async () => {
-      const r = await api.get<{ installations?: Install[] }>("/governance/marketplace/packages");
-      return r.installations || [];
-    },
+    cid ? `governance:installs:${cid}` : null,
+    () => api.get<Install[]>(`/governance/installations?company_id=${cid}`),
   );
   const { data: templateData, error: templateError } = useResource<Template[]>(
     "governance:templates",
-    async () => {
-      const r = await api.get<{ templates?: Template[] }>("/governance/templates");
-      return r.templates || [];
-    },
+    () => api.get<Template[]>("/governance/templates"),
   );
   const cases = useMemo<Case[]>(() => caseData ?? [], [caseData]);
   const installs = useMemo<Install[]>(() => installData ?? [], [installData]);

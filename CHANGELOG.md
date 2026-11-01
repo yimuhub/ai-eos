@@ -43,6 +43,30 @@
   用户数据。护栏：`test_sql_echo_is_decoupled_from_debug`、
   `test_settings_debug_is_never_reassigned_at_runtime`。
 
+### 修正：用量统计与治理中心的 4 个实测缺陷
+
+补响应模型时对着真实返回值逐字段比对，暴露出 4 个"接口 200、页面不报错、数据却是
+错的"问题——这类缺陷不会被编译、lint 或"能打开"任何一关拦住：
+
+- `GET /tokens/pricing/models` 的 `provider_type` 用 `str(枚举)`，返回
+  `ModelProviderType.OPENAI_COMPAT` 而不是全站统一的 `openai_compat`（另有 5 处
+  都用 `.value`，这里是唯一的例外）；前端计费下拉把枚举名直接显示给用户。
+- `GET /tokens/stats/by-task` 的 `name` 恒等于任务 UUID：反查只取 `obj.name`，而
+  `Task` 的显示列叫 `title` → 任务维度一整列都是哈希。
+- `GET /tokens/stats/by-scenario` 是六个维度里唯一不带 `name` 的，前端只能自己抄一
+  份场景标签表——且抄的那份比后端多 `EXPERT_SEARCH`/`EXPERT_TEAM` 两个真实场景码，
+  后端标签表反而漏了（明细流水的 `scenario_label` 对这两个也显示英文原码）。现在
+  后端补齐标签、维度统一带 `name`，前端那份重复表删除。
+- 治理中心「已安装」面板调的是返回**能力包目录**的 `/governance/marketplace/packages`，
+  还把数组当 `{installations}` 对象读，因此永远显示"暂无安装记录"；企业模板面板同
+  一 bug（`{templates}`）。新增只读接口 `GET /governance/installations?company_id=…`
+  （join 出 `package_key`、回滚过的不计、租户边界由 router 级 `require_company_scope`
+  覆盖），两个面板改为按真实形状读数组。
+- 护栏：`tests/test_usage_stats_contract.py`（6 项，含一条"不许再出现
+  `str(x.provider_type)`"的静态扫描）。**遗留**：能力包的"安装"动作在 UI 里仍没有
+  入口（只有发布），所以「已安装」面板要有数据得先补安装按钮——这是产品决定，未擅自
+  实现。
+
 ## [5.15.0] 从审查到九分：契约、交付、多端与安全收口 — 2026-11-01
 
 > 来源：五视角审查（[审查报告](docs/审查报告_AI-EOS_2026-10-31.md)）与

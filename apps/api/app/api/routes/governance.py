@@ -26,9 +26,10 @@ from app.schemas.responses_governance import (
     AutonomousLogOut, AutonomousOverviewItemOut, AutonomousSettingsDeletedOut,
     AutonomousSettingsSavedOut, CaseDecisionOut, CompanyFromTemplateOut,
     ExecutionLoggedOut, EmergencyStopOut, ImprovementCaseOut,
-    ImprovementDeployOut, ImprovementProposedOut, InstallationRollbackOut,
-    MarketplacePackageOut, PackageInstallOut, PackagePublishedOut,
-    ResumeCheckpointOut, SandboxTestOut, TemplateOut, TemplateSavedOut)
+    ImprovementDeployOut, ImprovementProposedOut, InstallationOut,
+    InstallationRollbackOut, MarketplacePackageOut, PackageInstallOut,
+    PackagePublishedOut, ResumeCheckpointOut, SandboxTestOut, TemplateOut,
+    TemplateSavedOut)
 
 router = APIRouter(prefix="/governance", tags=["governance"],
                    dependencies=[Depends(require_company_scope())])
@@ -306,6 +307,33 @@ async def install_package(
     await db.commit()
     return {"installed": True, "installation_id": inst.id,
             "package": p.name, "version": p.latest_version}
+
+
+@router.get("/installations", response_model=list[InstallationOut])
+async def list_installations(company_id: str = Query(...),
+                             db: AsyncSession = Depends(get_db),
+                             user: User = Depends(get_current_user)):
+    """本公司当前生效的能力包安装记录（已回滚的不计）。
+
+    以前"安装"和"回滚"两个写接口都有，唯独没有读接口，于是治理中心的
+    「已安装」面板去调了返回**能力包目录**的 /marketplace/packages
+    ——数组被当成 {installations: ...} 对象读，永远显示"暂无安装记录"。
+    租户边界由 router 级 require_company_scope() 覆盖（company_id 必带）。
+    """
+    q = await db.execute(
+        select(PackageInstallation, MarketplacePackage)
+        .join(MarketplacePackage,
+              MarketplacePackage.id == PackageInstallation.package_id)
+        .where(PackageInstallation.company_id == company_id,
+               PackageInstallation.rolled_back_at.is_(None))
+        .order_by(PackageInstallation.created_at.desc()))
+    return [{"id": inst.id, "package_id": pkg.id,
+             "package_key": pkg.key, "package_name": pkg.name,
+             "package_type": pkg.package_type, "version": inst.version,
+             "installed_by": inst.installed_by,
+             "installed_at": (inst.created_at.isoformat()
+                              if inst.created_at else None)}
+            for inst, pkg in q.all()]
 
 
 @router.post("/installations/{inst_id}/rollback",

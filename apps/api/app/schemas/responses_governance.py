@@ -166,6 +166,25 @@ class InstallationRollbackOut(BaseModel):
     rolled_back: bool
 
 
+class InstallationOut(BaseModel):
+    """GET /governance/installations 的单条安装记录。
+
+    `package_key` 来自 MarketplacePackage.key（安装记录本身只有 package_id），
+    治理中心「已安装」面板显示的就是它。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    package_id: str
+    package_key: str
+    package_name: str
+    package_type: str
+    version: str
+    installed_by: str | None
+    installed_at: str | None
+
+
 # ---------------------------------------------------------------------------
 # 企业模板（app/api/routes/governance.py · P3-15）
 # ---------------------------------------------------------------------------
@@ -457,12 +476,13 @@ class UsageGroupOut(UsageGroupStatsOut):
 class ScenarioUsageOut(UsageGroupStatsOut):
     """GET /tokens/stats/by-scenario：占比 + 降本建议。
 
-    该维度**没有** name —— stats_by_scenario 不调 _attach_names，前端拿到的是
-    场景码本身（key），这里照实声明，不凭空补一个 null 字段。
+    `name` 是 SCENARIO_LABELS 里的中文标签（未登记的场景码原样回填 key），
+    与其余 5 个维度一样都带可读名称。
     """
 
     model_config = ConfigDict(extra="allow")
 
+    name: str
     cost_pct: float
     rule_candidate: bool
     suggestion: str | None

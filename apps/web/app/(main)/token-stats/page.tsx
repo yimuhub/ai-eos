@@ -24,14 +24,6 @@ type UsageLog = {
   total_cost: number; latency_ms: number; success: boolean; created_at?: string | null;
 };
 
-const SCENARIOS: Record<string, string> = {
-  CHAT: "对话聊天", MEETING: "会议", TASK: "任务执行", RUNTIME: "运行时",
-  FACTORY: "Agent工厂", TRAINING: "培训", LEARNING: "学习成长",
-  REFLECTION: "复盘反思", ORCHESTRATION: "编排调度", TEAM_GEN: "团队生成",
-  SKILL: "技能", OTHER: "其他",
-  EXPERT_SEARCH: "找专家", EXPERT_TEAM: "专家组队",
-};
-
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
   if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
@@ -359,9 +351,7 @@ export default function TokenAdminPage() {
             <StatTable title="(c) 公司维度" icon="🏢" rows={byCompany} emptyHint="暂无公司用量记录" />
             <StatTable title="(d) 项目维度" icon="📂" rows={byProject} emptyHint="任务执行关联项目后可统计" />
             <StatTable title="(e) 任务维度 — Top 消耗" icon="📌" rows={byTask} emptyHint="暂无任务级用量记录" />
-            <StatTable title="(f) 场景维度 — 学习/会议/任务…" icon="🎯" rows={
-              byScenario.map((r) => ({ ...r, name: SCENARIOS[r.key] || r.key }))
-            } emptyHint="暂无场景分类数据" />
+            <StatTable title="(f) 场景维度 — 学习/会议/任务…" icon="🎯" rows={byScenario} emptyHint="暂无场景分类数据" />
           </div>
         </div>
       )}

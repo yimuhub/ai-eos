@@ -105,8 +105,11 @@ async def list_models_for_pricing(db: AsyncSession = Depends(get_db),
                                   user: User = Depends(get_current_user)):
     """可配置计费的模型清单（模型配置页的全部模型）。"""
     q = await db.execute(select(Model))
+    # 必须用 .value：`str(ModelProviderType.OPENAI_COMPAT)` 在 Python 3.12
+    # 返回 "ModelProviderType.OPENAI_COMPAT"，前端拿到的是枚举名而不是
+    # openai_compat——全站其它 5 处都用 .value，这里以前是唯一的例外。
     return [{"id": m.id, "name": m.name, "model_id": m.model_id,
-             "provider_type": str(m.provider_type)} for m in q.scalars().all()]
+             "provider_type": m.provider_type.value} for m in q.scalars().all()]
 
 
 @router.post("/pricing", status_code=201, response_model=PricingUpsertOut)
@@ -216,7 +219,10 @@ async def _attach_names(db, rows, kind: str):
             from app.models.task import Task
             obj = await db.get(Task, oid)
         if obj is not None:
-            r["name"] = getattr(obj, "name", None) or r["key"]
+            # 任务的显示列叫 title，不叫 name。只取 name 会让任务维度的
+            # name 恒等于 UUID——前端那一整列都是哈希。
+            r["name"] = (getattr(obj, "name", None)
+                         or getattr(obj, "title", None) or r["key"])
     return rows
 
 
@@ -390,6 +396,9 @@ async def stats_by_scenario(company_id: str = Query(...), days: int = Query(30),
     rows = await _group_stats(db, TokenUsage.scenario, conds)
     total_cost = sum(r["total_cost"] for r in rows) or 1.0
     for r in rows:
+        # 其余 5 个维度都带 name，这一维以前只带场景码，
+        # 每个前端都得自己再抄一份标签表（token-stats 就抄了一份）
+        r["name"] = SCENARIO_LABELS.get(r["key"], r["key"])
         rule_ok = _SCENARIO_BUDGET_HINT.get(r["key"], False)
         r["cost_pct"] = round(r["total_cost"] / total_cost * 100, 1)
         r["rule_candidate"] = rule_ok
@@ -405,6 +414,9 @@ SCENARIO_LABELS = {
     "LEARNING": "学习成长", "REFLECTION": "复盘反思",
     "ORCHESTRATION": "编排调度", "TEAM_GEN": "团队生成",
     "SKILL": "技能", "OTHER": "其他",
+    # experts.py 实际写入的两个场景码以前不在表里，明细流水与场景维度
+    # 只能显示英文原码
+    "EXPERT_SEARCH": "找专家", "EXPERT_TEAM": "专家组队",
 }
 
 
