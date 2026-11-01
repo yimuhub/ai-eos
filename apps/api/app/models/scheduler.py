@@ -68,7 +68,12 @@ class AutomationRun(Base):
 
 def compute_next_run(trigger_type: str, config: dict | None,
                      after: datetime) -> datetime:
-    """计算下次运行时间。"""
+    """计算下次运行时间。
+
+    支持 interval / daily / weekly / monthly 四种触发器。
+    weekly 的 weekday 用 ISO 约定（周一=0）；monthly 的 day 夹在 1–28，
+    避免「31 号」在 2 月永远不触发、也让月末行为可预测。
+    """
     if trigger_type == "interval":
         seconds = int((config or {}).get("seconds", 60))
         return after + timedelta(seconds=seconds)
@@ -78,6 +83,25 @@ def compute_next_run(trigger_type: str, config: dict | None,
                                   second=0, microsecond=0)
         if candidate <= after:
             candidate += timedelta(days=1)
+        return candidate
+    if trigger_type == "weekly":
+        hh, mm = ((config or {}).get("time", "09:00")).split(":")
+        weekday = int((config or {}).get("weekday", 0)) % 7
+        candidate = after.replace(hour=int(hh), minute=int(mm),
+                                  second=0, microsecond=0)
+        candidate += timedelta(days=(weekday - candidate.weekday()) % 7)
+        if candidate <= after:
+            candidate += timedelta(days=7)
+        return candidate
+    if trigger_type == "monthly":
+        hh, mm = ((config or {}).get("time", "09:00")).split(":")
+        day = min(max(int((config or {}).get("day", 1)), 1), 28)
+        candidate = after.replace(day=day, hour=int(hh), minute=int(mm),
+                                  second=0, microsecond=0)
+        if candidate <= after:
+            year = after.year + (1 if after.month == 12 else 0)
+            month = 1 if after.month == 12 else after.month + 1
+            candidate = candidate.replace(year=year, month=month)
         return candidate
     # 默认 5 分钟后
     return after + timedelta(minutes=5)

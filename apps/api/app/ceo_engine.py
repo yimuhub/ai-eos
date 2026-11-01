@@ -383,8 +383,9 @@ def _normalize_plan(raw: dict, instruction: str,
     }
 
 
-def _plan_messages(roster: str, instruction: str) -> list[dict]:
-    return [
+def _plan_messages(roster: str, instruction: str,
+                   playbook: str = "") -> list[dict]:
+    messages = [
         {"role": "system",
          "content": "你是企业 CEO，负责把老板的一句话变成可执行的准绳与分工方案。"},
         {"role": "user",
@@ -392,6 +393,14 @@ def _plan_messages(roster: str, instruction: str) -> list[dict]:
                                        max_subtasks=MAX_SUBTASKS,
                                        max_new_agents=MAX_NEW_AGENTS)},
     ]
+    # 自进化沉淀的运行人格紧随身份之后：它来自真实复盘，优先于模型默认习惯，
+    # 又不覆盖老板这一次的具体指令（用户消息仍在最后）。
+    if playbook.strip():
+        messages.insert(1, {
+            "role": "system",
+            "content": f"你的运行人格与原则（自进化沉淀，必须遵守）：\n{playbook}",
+        })
+    return messages
 
 
 async def create_mission(db: AsyncSession, *, company_id: str, user_id: str,
@@ -415,7 +424,9 @@ async def create_mission(db: AsyncSession, *, company_id: str, user_id: str,
     roster, agents = await _roster_lines(db, company_id)
 
     try:
-        raw = await _chat(db, coord, _plan_messages(roster, instruction))
+        from app.self_evolution import playbook_text
+        playbook = await playbook_text(db, company_id)
+        raw = await _chat(db, coord, _plan_messages(roster, instruction, playbook))
         plan = _normalize_plan(_extract_json(raw), instruction, agents)
     except CeoError:
         raise
@@ -1026,13 +1037,21 @@ async def _finalize(db: AsyncSession, mission: CeoMission,
     agent = await db.get(Agent, mission.coordinator_agent_id)
     if agent is not None:
         try:
-            report = await _chat(db, agent, [
+            from app.self_evolution import playbook_text
+            playbook = await playbook_text(db, mission.company_id)
+            messages = [
                 {"role": "system", "content": "你是企业 CEO，向老板做最终汇报。"},
                 {"role": "user", "content": SUMMARY_PROMPT.format(
                     anchor=build_anchor_block(mission),
                     results="\n".join(ok) or "（无）",
                     problems="\n".join(problems) or "（无）")},
-            ], max_tokens=2400)
+            ]
+            if playbook.strip():
+                messages.insert(1, {
+                    "role": "system",
+                    "content": f"你的运行人格与原则（自进化沉淀，汇报时对照自检）：\n{playbook}",
+                })
+            report = await _chat(db, agent, messages, max_tokens=2400)
         except Exception as exc:  # noqa: BLE001 — 汇总失败也要给老板一份可读结果
             logger.warning("CEO 汇总失败 mission=%s: %s", mission.id, exc)
     if not report:

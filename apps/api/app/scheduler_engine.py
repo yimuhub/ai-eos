@@ -59,6 +59,17 @@ async def execute_action(db: AsyncSession, sched: AutomationSchedule) -> dict:
         return {"reflected": r["reflected"],
                 "memories_written": r.get("memories_written", 0)}
 
+    if sched.action_type.startswith("ceo_evolve_"):
+        """CEO 分级自我进化：日微调 / 周深度复盘 / 月迭代提案。"""
+        from app.self_evolution import run_evolution
+
+        level = sched.action_type.removeprefix("ceo_evolve_")
+        rec = await run_evolution(db, sched.company_id, level,
+                                  user_id=sched.created_by, source="schedule")
+        return {"evolution_id": rec.get("id"), "level": level,
+                "status": rec.get("status"),
+                "reused": bool(rec.get("reused"))}
+
     if sched.action_type == "snapshot_performance":
         from app.performance_engine import snapshot_company
         results = await snapshot_company(db, sched.company_id)

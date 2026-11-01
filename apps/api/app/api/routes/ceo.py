@@ -15,6 +15,7 @@ from app.ceo_engine import (CeoError, append_instruction, build_digest,
                             pause_mission, push_digest, reclaim_mission,
                             resume_mission, set_ceo_agent)
 from app.core.permissions import Capability
+from app.core.logging_config import get_logger
 from app.db.session import get_db
 from app.models.agent import Agent
 from app.models.ceo import CeoMission
@@ -29,6 +30,7 @@ from app.schemas.responses_ceo import (CeoAssignOut, CeoCancelOut,
 from app.services.ceo_concurrency import current_capacity
 
 router = APIRouter(prefix="/ceo", tags=["ceo"])
+logger = get_logger(__name__)
 
 
 class CreateMissionIn(BaseModel):
@@ -117,6 +119,14 @@ async def assign_ceo(data: AssignCeoIn,
     # 指定 CEO 即开通每日 09:00 运行日报（幂等）。超级 Agent 的第一职责
     # 是替老板盯盘，日报不该再要求老板自己去日程里手动建一条。
     await ensure_digest_schedule(db, data.company_id, user.id)
+    # 同时开通日/周/月三级自我进化（幂等）：CEO 的成长节奏与日报同源，
+    # 不需要老板再去日程里配三条。
+    try:
+        from app.self_evolution import ensure_evolution_schedules
+        await ensure_evolution_schedules(db, data.company_id, user.id)
+    except Exception as exc:  # noqa: BLE001 — 进化调度失败不能挡住指派 CEO
+        logger.warning("自我进化调度创建失败 company=%s: %s",
+                       data.company_id, exc)
     return result
 
 
