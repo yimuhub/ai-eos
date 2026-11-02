@@ -4,9 +4,18 @@ import { api, describeError, isCancelled, streamPost } from "@/lib/api";
 import { notify } from "@/components/Toast";
 import NotificationBell from "@/components/NotificationBell";
 import CitationList from "@/components/CitationList";
+import { BusyHint, ChatProcessBar, ChatProcessCard } from "@/components/ChatProcessCard";
 import {
   citationsFromEvent, citationsFromMeta, type Citation,
 } from "@/lib/citations";
+import {
+  applyChatProcessEvent,
+  isProcessEvent,
+  newChatProcess,
+  processFromMeta,
+  type ChatProcess,
+  type ChatProcessEvent,
+} from "@/lib/chatProcess";
 import {
   clock, meetingMeta, sessionMeta, taskMeta,
   type GroupMsg, type MeetingDetail, type WsAgent, type WsChatGroup, type WsMeeting, type WsMode, type WsMsg,
@@ -22,12 +31,16 @@ import {
 
 type Skill = { id: string; name: string; description?: string | null; source_label?: string };
 
-/** 单聊消息：历史 meta 与流式 done 都归一到 citations 上，渲染只用这一份。 */
-type ChatMsg = WsMsg & { citations?: Citation[] };
+/** 单聊消息：历史 meta 与流式 done 都归一到 citations/process 上，渲染只用这一份。 */
+type ChatMsg = WsMsg & { citations?: Citation[]; process?: ChatProcess | null };
 type HistoryMsg = WsMsg & { meta?: unknown };
 
 function fromHistory(rows: HistoryMsg[]): ChatMsg[] {
-  return rows.map((m) => ({ ...m, citations: citationsFromMeta(m.meta) }));
+  return rows.map((m) => ({
+    ...m,
+    citations: citationsFromMeta(m.meta),
+    process: processFromMeta(m.meta),
+  }));
 }
 
 const SUGGESTIONS = [
@@ -211,7 +224,7 @@ export default function WorkspaceChat({
     }
   }, [skills, cid]);
 
-  const patchLast = useCallback((patch: (m: WsMsg) => WsMsg) => {
+  const patchLast = useCallback((patch: (m: ChatMsg) => ChatMsg) => {
     setMsgs((prev) => {
       if (!prev.length) return prev;
       const next = prev.slice();
@@ -252,6 +265,8 @@ export default function WorkspaceChat({
     // 一旦切离过这个会话，界面上的 msgs 已被重新拉取，累加器不能再往里写；
     // 之后的增量只记在 acc 里，等 done 后用服务端历史整段补齐。
     let detached = false;
+    // 失败/中止时服务端没有这轮回复，刷新历史会把本地的错误卡片抹掉
+    let failed = false;
     const stale = () => currentKeyRef.current !== sendKey || viewEpochRef.current !== sendEpoch;
     const live = () => !detached && !stale();
     try {
@@ -270,7 +285,9 @@ export default function WorkspaceChat({
         return;
       }
 
-      if (!stale()) setMsgs((p) => [...p, { role: "agent", content: "", streaming: true }]);
+      if (!stale()) setMsgs((p) => [...p, {
+        role: "agent", content: "", streaming: true, process: newChatProcess(),
+      }]);
       let serverError = "";
       await streamPost(`/agents/${target.id}/chat/stream`, { message: text }, {
         signal: ac.signal,
@@ -278,6 +295,14 @@ export default function WorkspaceChat({
           // 关键：只跳过 UI，不中断请求——服务端要读完这轮才能落库
           if (stale()) { detached = true; return; }
           if (detached) return;
+          if (ev.type === "delta" || ev.type === "done" || ev.type === "error"
+            || isProcessEvent(ev.type)) {
+            patchLast((m) => ({
+              ...m,
+              process: applyChatProcessEvent(
+                m.process ?? newChatProcess(), ev as ChatProcessEvent),
+            }));
+          }
           if (ev.type === "delta") {
             started = true;
             acc += String(ev.text || "");
@@ -295,6 +320,7 @@ export default function WorkspaceChat({
               citations: citationsFromEvent(ev),
             }));
           } else if (ev.type === "error") {
+            failed = true;
             serverError = String(ev.message || "服务端处理失败");
           }
         },
@@ -304,6 +330,7 @@ export default function WorkspaceChat({
         setMsgs((p) => [...p, { role: "agent", content: `❌ ${serverError}` }]);
       }
     } catch (e) {
+      failed = true;
       if (!live()) {
         // 旧会话已切走：错误不打扰当前界面，回复由服务端下次历史补回
       } else if (ac.signal.aborted || isCancelled(e)) {
@@ -312,12 +339,16 @@ export default function WorkspaceChat({
           ...m,
           content: m.content ? `${m.content}\n\n（已停止，这轮回复未保存到历史）` : "（已停止）",
           streaming: false,
+          process: applyChatProcessEvent(m.process ?? newChatProcess(), { type: "stopped" }),
         }));
       } else {
+        const message = describeError(e, "发送失败");
         patchLast((m) => ({
           ...m,
-          content: started ? m.content : `❌ ${describeError(e, "发送失败")}`,
+          content: started ? m.content : `❌ ${message}`,
           streaming: false,
+          process: applyChatProcessEvent(
+            m.process ?? newChatProcess(), { type: "error", message }),
         }));
       }
     } finally {
@@ -328,7 +359,7 @@ export default function WorkspaceChat({
         setBusy(false);
         setStatus("");
         // 后台跑完的那一段没有逐字渲染，用服务端历史把完整回复补回来
-        if (detached || acc === "") void refreshHistory(target.id);
+        if (!failed && (detached || acc === "")) void refreshHistory(target.id);
       }
     }
   }, [mode, agent, busy, input, files, patchLast, refreshHistory]);
@@ -350,6 +381,7 @@ export default function WorkspaceChat({
   const [groupMsgs, setGroupMsgs] = useState<GroupMsg[]>([]);
   const [groupLoading, setGroupLoading] = useState(false);
   const [groupBusy, setGroupBusy] = useState(false);
+  const [groupStartedAt, setGroupStartedAt] = useState<number | null>(null);
   const groupEnd = useRef<HTMLDivElement>(null);
 
   const loadGroup = useCallback(async () => {
@@ -383,6 +415,7 @@ export default function WorkspaceChat({
     const sendEpoch = viewEpochRef.current;
     const same = () => currentKeyRef.current === sendKey && viewEpochRef.current === sendEpoch;
     setGroupBusy(true);
+    setGroupStartedAt(Date.now());
     setInput("");
     atBottomRef.current = true;
     forceScrollRef.current = true;
@@ -401,7 +434,10 @@ export default function WorkspaceChat({
       notify("error", describeError(e, "群聊发送失败"));
       if (same()) setGroupMsgs((p) => [...p, { role: "system", text: `❌ ${describeError(e, "群聊发送失败")}` }]);
     } finally {
-      if (same()) setGroupBusy(false);
+      if (same()) {
+        setGroupBusy(false);
+        setGroupStartedAt(null);
+      }
       if (currentKeyRef.current === sendKey) loadGroup();
     }
   }, [groupScope, groupId, cid, groupBusy, input, loadGroup]);
@@ -676,7 +712,9 @@ export default function WorkspaceChat({
 
   const skillCount = useMemo(() => skills?.length ?? 0, [skills]);
   const lastMsg = msgs[msgs.length - 1];
-  const showThinking = mode === "single" && busy && (!!status || !lastMsg?.streaming || !lastMsg?.content);
+  // 过程卡片就是可见回执；只有旧消息没有 process 时才兜底显示转圈
+  const showThinking = mode === "single" && busy && !lastMsg?.process
+    && (!!status || !lastMsg?.streaming || !lastMsg?.content);
 
   const canSend = mode === "single"
     ? (!!input.trim() || !!files.length) && !busy
@@ -808,6 +846,13 @@ export default function WorkspaceChat({
       </div>
       )}
 
+      {mode === "single" && (
+        <ChatProcessBar
+          process={lastMsg?.role === "agent" ? lastMsg.process : null}
+          agentName={agent?.name}
+        />
+      )}
+
       {/* 消息流 */}
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto ws-scroll px-4 py-4"
         onScroll={() => {
@@ -861,6 +906,15 @@ export default function WorkspaceChat({
                           📄 {m.file_name} · 已存入交付中心
                         </p>
                       )}
+                      {m.process && (
+                        <div className="mt-1.5">
+                          <ChatProcessCard
+                            process={m.process}
+                            agentName={agent?.name}
+                            live={!!m.streaming}
+                          />
+                        </div>
+                      )}
                       {m.citations?.length ? <CitationList citations={m.citations} /> : null}
                     </div>
                   </div>
@@ -898,11 +952,7 @@ export default function WorkspaceChat({
                   text={m.text} time={m.created_at} />
               ))}
               {groupBusy && (
-                <div className="flex items-center gap-2 text-xs" style={{ color: "var(--muted)" }}>
-                  <span className="w-3 h-3 rounded-full border-2 animate-spin"
-                    style={{ borderColor: "var(--border)", borderTopColor: "var(--accent)" }} aria-hidden />
-                  群里正在轮流回应…
-                </div>
+                <BusyHint startedAt={groupStartedAt} label="群里正在轮流回应" />
               )}
               <div ref={groupEnd} />
             </>

@@ -2,13 +2,27 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, describeError, downloadURL, fetchBlobURL, isCancelled, streamPost } from "@/lib/api";
 import { notify } from "@/components/Toast";
+import { ChatProcessBar, ChatProcessCard } from "@/components/ChatProcessCard";
+import {
+  applyChatProcessEvent,
+  isProcessEvent,
+  newChatProcess,
+  processFromMeta,
+  type ChatProcess,
+  type ChatProcessEvent,
+} from "@/lib/chatProcess";
 
 /* ============================================================
    AgentChat：老板↔员工对话主界面
    - 支持附件上传（图片/文字/PPT/Excel/Word/MD）→ 直接进私人知识库
    ============================================================ */
 
-type Msg = { id?: string; role: string; content: string; created_at?: string; streaming?: boolean };
+type Msg = {
+  id?: string; role: string; content: string; created_at?: string; streaming?: boolean;
+  /** 本轮过程（思考/模型/工具）；历史消息从 meta.process 还原 */
+  process?: ChatProcess | null;
+};
+type HistoryMsg = Msg & { meta?: unknown };
 type FolderFile = { id?: string; name: string; size?: number };
 
 export default function AgentChat({
@@ -34,7 +48,8 @@ export default function AgentChat({
 
   const load = useCallback(async () => {
     try {
-      setMsgs(await api.get<Msg[]>(`/agents/${agentId}/chat/history?limit=50`));
+      const rows = await api.get<HistoryMsg[]>(`/agents/${agentId}/chat/history?limit=50`);
+      setMsgs(rows.map((m) => ({ ...m, process: processFromMeta(m.meta) })));
     } catch { /* 历史拉不到不影响发新消息，保持空列表 */ }
   }, [agentId]);
 
@@ -90,8 +105,10 @@ export default function AgentChat({
     const ac = new AbortController();
     abortRef.current = ac;
 
-    // 流式回复：先把空气泡挂上，再逐字往里填
-    setMsgs((p) => [...p, { role: "agent", content: "", streaming: true }]);
+    // 流式回复：先挂上过程卡（"正在思考"立即可见），再逐字往里填
+    setMsgs((p) => [...p, {
+      role: "agent", content: "", streaming: true, process: newChatProcess(),
+    }]);
     const patchLast = (patch: (m: Msg) => Msg) => setMsgs((p) => {
       if (!p.length) return p;
       const next = p.slice();
@@ -104,6 +121,14 @@ export default function AgentChat({
       await streamPost(`/agents/${agentId}/chat/stream`, { message: text }, {
         signal: ac.signal,
         onEvent: (ev) => {
+          if (ev.type === "delta" || ev.type === "done" || ev.type === "error"
+            || isProcessEvent(ev.type)) {
+            patchLast((m) => ({
+              ...m,
+              process: applyChatProcessEvent(
+                m.process ?? newChatProcess(), ev as ChatProcessEvent),
+            }));
+          }
           if (ev.type === "delta") {
             started = true;
             acc += String(ev.text || "");
@@ -128,12 +153,16 @@ export default function AgentChat({
           ...m,
           content: m.content ? `${m.content}\n\n（已停止，这轮回复未保存到历史）` : "（已停止）",
           streaming: false,
+          process: applyChatProcessEvent(m.process ?? newChatProcess(), { type: "stopped" }),
         }));
       } else {
+        const message = describeError(e, "发送失败");
         patchLast((m) => ({
           ...m,
-          content: started ? m.content : `❌ ${describeError(e, "发送失败")}`,
+          content: started ? m.content : `❌ ${message}`,
           streaming: false,
+          process: applyChatProcessEvent(
+            m.process ?? newChatProcess(), { type: "error", message }),
         }));
       }
     }
@@ -188,6 +217,8 @@ export default function AgentChat({
         </div>
       )}
 
+      <ChatProcessBar process={msgs[msgs.length - 1]?.process} agentName="员工" />
+
       <div className="flex-1 overflow-y-auto py-3 space-y-2.5">
         {!msgs.length && (
           <p className="text-xs text-center py-8 leading-relaxed" style={{ color: "var(--muted)" }}>
@@ -197,13 +228,22 @@ export default function AgentChat({
           </p>
         )}
         {msgs.map((m, i) => (
-          <div key={m.id || i} className={`flex ${m.role === "boss" ? "justify-end" : "justify-start"}`}>
+          <div key={m.id || i} className={`flex flex-col ${m.role === "boss" ? "items-end" : "items-start"}`}>
             <div className={`max-w-[85%] px-3 py-2 rounded-2xl text-xs leading-relaxed whitespace-pre-wrap ${
               m.role === "boss" ? "bg-indigo-600 text-white rounded-br-sm" : "rounded-bl-sm"}`}
               style={m.role !== "boss" ? { background: "var(--surface-2)", color: "var(--foreground)" } : {}}>
               {m.content}
               {m.streaming && <span className="ws-caret" aria-hidden />}
             </div>
+            {m.role !== "boss" && m.process && (
+              <div className="mt-1 w-full max-w-[92%]">
+                <ChatProcessCard
+                  process={m.process}
+                  agentName="员工"
+                  live={!!m.streaming}
+                />
+              </div>
+            )}
           </div>
         ))}
         {uploading && (
@@ -212,7 +252,8 @@ export default function AgentChat({
               style={{ background: "var(--surface-2)" }}>正在解析附件并存入知识库…</div>
           </div>
         )}
-        {busy && !(msgs[msgs.length - 1]?.streaming && msgs[msgs.length - 1]?.content) && (
+        {busy && !msgs[msgs.length - 1]?.process
+          && !(msgs[msgs.length - 1]?.streaming && msgs[msgs.length - 1]?.content) && (
           <div className="flex justify-start">
             <div className="px-3 py-2 rounded-2xl rounded-bl-sm text-xs pulse-dot"
               style={{ background: "var(--surface-2)" }}>对方正在输入…</div>

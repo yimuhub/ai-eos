@@ -37,6 +37,15 @@ import { confirmAction } from "@/components/ConfirmDialog";
 import { notify } from "@/components/Toast";
 import CeoPet from "@/components/CeoPet";
 import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
+import { ChatProcessBar, ChatProcessCard } from "@/components/ChatProcessCard";
+import {
+  applyChatProcessEvent,
+  isProcessEvent,
+  newChatProcess,
+  processFromMeta,
+  type ChatProcess,
+  type ChatProcessEvent,
+} from "@/lib/chatProcess";
 import { desktopBridge } from "@/lib/desktopBridge";
 
 type Companion = {
@@ -73,6 +82,8 @@ type Msg = {
   created_at?: string;
   streaming?: boolean;
   attachments?: AttachmentChip[];
+  /** 本轮过程（思考/模型/工具）；历史消息从 meta.process 还原 */
+  process?: ChatProcess | null;
 };
 
 type AttachmentChip = { id?: string; name: string; size?: number };
@@ -153,7 +164,6 @@ export default function CeoDock() {
   const [msgsLoading, setMsgsLoading] = useState(false);
   const [threadsBusy, setThreadsBusy] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState("");
   const [err, setErr] = useState("");
   const [input, setInput] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -185,6 +195,9 @@ export default function CeoDock() {
 
   const threadIdRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // 本轮失败时服务端没有 agent 消息，busy 转 false 的重拉会抹掉错误卡片；
+  // 记录线程 id，只跳过这一轮的重拉。
+  const skipReloadFor = useRef<string | null>(null);
   const recordingRef = useRef(false);
   const suppressClickRef = useRef(false);
   const dragRef = useRef<{
@@ -242,10 +255,13 @@ export default function CeoDock() {
       );
       if (gen !== msgsGen.current) return;
       setMsgs(Array.isArray(d.messages) ? d.messages.map((m) => {
-        const meta = (m as Msg & { meta?: { attachments?: AttachmentChip[] } }).meta;
+        const meta = (m as Msg & {
+          meta?: { attachments?: AttachmentChip[]; process?: unknown };
+        }).meta;
         return {
           ...m,
           attachments: Array.isArray(meta?.attachments) ? meta.attachments : undefined,
+          process: processFromMeta(meta),
         };
       }) : []);
       setSummary(d.summary || "");
@@ -379,6 +395,10 @@ export default function CeoDock() {
     // 流式进行中不重拉历史：否则服务端只落了老板那句，
     // 会把正在逐字填充的回复气泡覆盖掉。
     if (!open || !hasCeo || !threadId || busy) return;
+    if (skipReloadFor.current === threadId) {
+      skipReloadFor.current = null;
+      return;
+    }
     void loadMessages(threadId);
   }, [open, hasCeo, threadId, busy, loadMessages]);
 
@@ -707,8 +727,8 @@ export default function CeoDock() {
     setInput("");
     setAttachments([]);
     setErr("");
-    setStatus("");
     setBusy(true);
+    // 本地先建好过程：界面立刻出现"CEO 正在思考中"，不等服务端第一帧
     setMsgs((prev) => [
       ...prev,
       {
@@ -716,13 +736,19 @@ export default function CeoDock() {
         content: text,
         attachments: sentAttachments.length ? sentAttachments : undefined,
       },
-      { role: "agent", content: "", streaming: true },
+      {
+        role: "agent",
+        content: "",
+        streaming: true,
+        process: newChatProcess(),
+      },
     ]);
 
     const ac = new AbortController();
     abortRef.current = ac;
     let acc = "";
     let started = false;
+    let failed = false;
 
     try {
       await streamPost(`/agents/${agentId}/chat/stream`, {
@@ -736,20 +762,27 @@ export default function CeoDock() {
       }, {
         signal: ac.signal,
         onEvent: (ev) => {
+          // 过程事件先归约：阶段/模型/思考/工具/正文/结束都写进同一条时间线
+          if (ev.type === "delta" || ev.type === "done" || ev.type === "error"
+            || isProcessEvent(ev.type)) {
+            patchLast((m) => ({
+              ...m,
+              process: applyChatProcessEvent(
+                m.process ?? newChatProcess(), ev as ChatProcessEvent),
+            }));
+          }
           if (ev.type === "delta") {
             started = true;
             acc += String(ev.text || "");
             patchLast((m) => ({ ...m, content: acc, streaming: true }));
-          } else if (ev.type === "status") {
-            setStatus(String(ev.text || ""));
           } else if (ev.type === "done") {
             if (ev.thread_id && !threadIdRef.current) {
               setThread(String(ev.thread_id));
             }
             acc = String(ev.reply ?? acc);
             patchLast((m) => ({ ...m, content: acc || "（没有收到内容）", streaming: false }));
-            setStatus("");
           } else if (ev.type === "error") {
+            failed = true;
             // 已吐出的字保留，错误另起一行，避免半截回复被整段覆盖
             patchLast((m) => ({
               ...m,
@@ -758,31 +791,36 @@ export default function CeoDock() {
                 : `❌ ${ev.message || "CEO 回复失败"}`,
               streaming: false,
             }));
-            setStatus("");
           }
         },
       });
     } catch (e) {
+      failed = true;
       if (isCancelled(e) || ac.signal.aborted) {
         patchLast((m) => ({
           ...m,
           content: m.content ? `${m.content}\n\n（已停止，本轮回复未保存）` : "（已停止）",
           streaming: false,
+          process: applyChatProcessEvent(m.process ?? newChatProcess(), { type: "stopped" }),
         }));
       } else {
+        const message = describeError(e, "发送失败");
         patchLast((m) => ({
           ...m,
-          content: started ? m.content : `❌ ${describeError(e, "发送失败")}`,
+          content: started ? m.content : `❌ ${message}`,
           streaming: false,
+          process: applyChatProcessEvent(
+            m.process ?? newChatProcess(), { type: "error", message }),
         }));
       }
     } finally {
       if (abortRef.current === ac) abortRef.current = null;
-      setBusy(false);
-      setStatus("");
-      refreshCompanion();
       const tid = threadIdRef.current;
-      if (tid) void loadMessages(tid, true);
+      // 失败/中止时服务端没有这轮 agent 消息，重拉会抹掉本地的错误卡片
+      skipReloadFor.current = failed ? tid : null;
+      setBusy(false);
+      refreshCompanion();
+      if (tid && !failed) void loadMessages(tid, true);
       void loadThreads(true);
     }
   }
@@ -864,7 +902,8 @@ export default function CeoDock() {
 
   const label = comboLabel(shortcut, isMac);
   const last = msgs[msgs.length - 1];
-  const showThinking = busy && !last?.streaming;
+  // 过程卡片本身就是"正在思考"的可见回执；只有旧消息没有 process 时才兜底
+  const showThinking = busy && !last?.streaming && !last?.process;
   const skillQ = skillQuery.trim().toLowerCase();
   const visibleSkills = skills
     .filter((s) => !skillQ
@@ -1339,6 +1378,12 @@ export default function CeoDock() {
             </details>
           )}
 
+          {/* 即时回执：滚动到哪里都能看到 CEO 现在在做什么 */}
+          <ChatProcessBar
+            process={last?.role === "agent" ? last.process : null}
+            agentName={data?.ceo_agent_name || "CEO"}
+          />
+
           {/* 消息区 */}
           <div ref={listRef} className="ws-scroll flex-1 space-y-2.5 overflow-y-auto px-3 py-3">
             {msgsLoading && !msgs.length && (
@@ -1372,7 +1417,7 @@ export default function CeoDock() {
             {msgs.map((m, i) => {
               const boss = m.role === "boss";
               return (
-                <div key={m.id || i} className={`flex ${boss ? "justify-end" : "justify-start"}`}>
+                <div key={m.id || i} className={`flex flex-col ${boss ? "items-end" : "items-start"}`}>
                   <div
                     className={`max-w-[86%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-xs leading-relaxed ${
                       boss ? "rounded-br-sm bg-indigo-600 text-white" : "rounded-bl-sm"
@@ -1395,6 +1440,15 @@ export default function CeoDock() {
                     )}
                     {m.streaming && <span className="ws-caret" aria-hidden />}
                   </div>
+                  {!boss && m.process && (
+                    <div className="mt-1 w-full max-w-[92%]">
+                      <ChatProcessCard
+                        process={m.process}
+                        agentName={data?.ceo_agent_name || "CEO"}
+                        live={!!m.streaming}
+                      />
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -1416,12 +1470,6 @@ export default function CeoDock() {
               </div>
             )}
           </div>
-
-          {status && (
-            <p className="px-3.5 pb-1 text-[10px] pulse-dot" style={{ color: "var(--muted)" }}>
-              {status}
-            </p>
-          )}
 
           {/* 输入区 */}
           <div className="border-t p-2.5" style={{ borderColor: "var(--border)" }}>
