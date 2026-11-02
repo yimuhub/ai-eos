@@ -468,6 +468,9 @@ class OpenAICompatProvider(BaseModelProvider):
         return {
             "content": choice["message"].get("content") or "",
             "tool_calls": choice["message"].get("tool_calls"),
+            # finish_reason 必须带出来：推理型模型会把整段 max_tokens 花在思考上，
+            # 此时 content 是空的但调用"成功"，只有 length 能说明它是被截断的。
+            "finish_reason": choice.get("finish_reason"),
             "usage": data.get("usage", {}),
             "raw_model": data.get("model", self.model_id),
         }

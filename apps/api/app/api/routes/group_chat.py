@@ -135,6 +135,12 @@ WEB_SEARCH_TOOL = {
 # 单次 90s（共享 client 的默认 read=120s，这里再收紧到前端 300s 预算内），
 # 仍复用 model_gateway 的共享连接池与超时/重试机制。
 GROUP_CHAT_LLM_CONFIG = {"max_tokens": 512, "timeout": 90}
+# 推理型模型的 max_tokens 是"思考 + 正文"一起算的：实测 Sage-A1.5 会把 512
+# 全花在思考上（finish_reason=length、正文 0 字），看起来就是"员工没说话"。
+# 这种截断原样重发必然还是空，所以重试时把预算抬到这一档。
+# 2048 不够——同一位员工抬到 2048 后仍是 length（思考本身就要 2000+），
+# 4096 实测能吐出正文/工具调用。只在重发那一轮抬，正常轮仍是 512。
+GROUP_CHAT_RETRY_MAX_TOKENS = 4096
 GROUP_CHAT_CONCURRENCY = 4
 # 任务/话题描述入 prompt 前截断，防止超长需求把上下文撑爆
 GROUP_CHAT_TOPIC_LIMIT = 1200
@@ -220,13 +226,27 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
             "然后对搜索结果进行总结提炼（3-5条要点）后回答。严禁凭记忆编造数据。"})
     messages.append({"role": "user", "content": topic})
 
+    cfg = dict(GROUP_CHAT_LLM_CONFIG)
     llm = await gw.chat_with_agent_models_by_agent(
-        agent, messages, tools=[WEB_SEARCH_TOOL], config=GROUP_CHAT_LLM_CONFIG)
+        agent, messages, tools=[WEB_SEARCH_TOOL], config=cfg)
     content = (llm.get("content") or "").strip()
     # agnes-2.5-flash 可能返回空 content 但有 tool_calls，走下方工具调用分支
     if not content and not (llm.get("tool_calls") or []):
-        logger.warning("群聊发言空内容且无工具调用 agent=%s topic=%s",
-                       agent.name, (topic or "")[:60])
+        # 空正文不等于"员工没话说"，别直接甩一句 (未发言) 给老板。
+        # 被 max_tokens 截断的（思考占满预算）要抬预算再发一次——原样重发
+        # 一定还是空；非截断的空才当作采样踩空，用同一份上下文重发。
+        finish = llm.get("finish_reason")
+        if finish == "length" and cfg.get("max_tokens", 0) < GROUP_CHAT_RETRY_MAX_TOKENS:
+            cfg["max_tokens"] = GROUP_CHAT_RETRY_MAX_TOKENS
+        logger.warning("群聊发言空正文，重试一次 agent=%s finish=%s max_tokens=%s topic=%s",
+                       agent.name, finish, cfg.get("max_tokens"), (topic or "")[:60])
+        llm = await gw.chat_with_agent_models_by_agent(
+            agent, messages, tools=[WEB_SEARCH_TOOL], config=cfg)
+        content = (llm.get("content") or "").strip()
+        if not content and not (llm.get("tool_calls") or []):
+            logger.warning("群聊发言重试后仍为空 agent=%s finish=%s topic=%s",
+                           agent.name, llm.get("finish_reason"),
+                           (topic or "")[:60])
     search_used = False
     tool_calls = llm.get("tool_calls") or []
     # agnes 等模型可能以文本形式输出 <tool_call>（无论是否有结构化字段），一律解析并剥离
@@ -267,8 +287,7 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
             # 多轮工具调用循环（最多3轮），直到模型给出总结性回答
             for _ in range(3):
                 second = await gw.chat_with_agent_models_by_agent(
-                    agent, messages, tools=[WEB_SEARCH_TOOL],
-                    config=GROUP_CHAT_LLM_CONFIG)
+                    agent, messages, tools=[WEB_SEARCH_TOOL], config=cfg)
                 s_content = (second.get("content") or "").strip()
                 s_struct = second.get("tool_calls") or []
                 s_text = _parse_text_tool_calls(s_content)

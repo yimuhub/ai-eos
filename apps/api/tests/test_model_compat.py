@@ -433,3 +433,40 @@ async def test_stream_with_agent_models_announces_fallback(monkeypatch):
     assert events[2]["model_name"] == "好模型" and events[2]["attempt"] == 2
     assert events[4]["used_model_id"] == "m-good"
     assert isinstance(events[4]["elapsed_ms"], int)
+
+
+async def test_chat_surfaces_finish_reason(monkeypatch):
+    """空正文要能看出"是被截断的还是采样踩空"，否则重试策略只能靠猜。
+
+    真实场景：推理型模型的 max_tokens 把"思考 + 正文"一起算，Sage-A1.5 实测
+    512 全花在思考上（reasoning 1900+ 字），content 是空但 HTTP 200。
+    群聊发言据此决定原样重发还是抬预算重发。
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "model": "Sage-A1.5",
+            "choices": [{"message": {"role": "assistant", "content": None},
+                         "finish_reason": "length"}],
+            "usage": {"completion_tokens": 512},
+        })
+
+    _use_transport(monkeypatch, handler)
+    provider = model_gateway.OpenAICompatProvider(
+        "http://127.0.0.1:8787/v1", "", "Sage-A1.5")
+
+    result = await provider.chat([{"role": "user", "content": "讲一下"}],
+                                 config={"max_tokens": 512})
+
+    assert result["content"] == ""
+    assert result["finish_reason"] == "length"
+
+
+async def test_chat_finish_reason_is_none_when_upstream_omits_it(monkeypatch):
+    """不规范的老网关不带 finish_reason，取空值而不是 KeyError。"""
+    _use_transport(monkeypatch, lambda request: _completion("好的"))
+    provider = model_gateway.OpenAICompatProvider(
+        "http://127.0.0.1:8787/v1", "", "Sage-A1.5")
+
+    result = await provider.chat([{"role": "user", "content": "在吗"}])
+
+    assert result["finish_reason"] is None
