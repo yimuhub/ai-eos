@@ -326,8 +326,12 @@ export default function WorkspaceChat({
         },
       });
       if (serverError && live()) {
-        patchLast((m) => ({ ...m, content: acc || "（没有收到内容）", streaming: false }));
-        setMsgs((p) => [...p, { role: "agent", content: `❌ ${serverError}` }]);
+        // 错误写进同一个气泡：另起一条会让失败的那轮看起来是「空白回复 + 莫名报错」
+        patchLast((m) => ({
+          ...m,
+          content: acc ? `${acc}\n\n❌ ${serverError}` : `❌ ${serverError}`,
+          streaming: false,
+        }));
       }
     } catch (e) {
       failed = true;
