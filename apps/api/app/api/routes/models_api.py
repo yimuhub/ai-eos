@@ -24,6 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.config import is_sensitive_env_name
+from app.core.env_store import (PROVIDER_ENV_VARS, is_allowed_model_env,
+                                mask_key, persist_env_key)
 from app.core.net_guard import OutboundURLRejected, validate_outbound_url_async
 from app.core.permissions import Capability, ensure_capability
 from app.db.session import get_db
@@ -124,15 +126,6 @@ async def _validate_model_base_url(base_url: str | None) -> None:
         raise HTTPException(400, f"base_url 不安全：{e}")
 
 
-# 各 provider 对应的默认环境变量名（与 .env.example 保持一致）。
-# 这里只用于"密钥是否就位"的判断，永远不读取/返回密钥内容。
-PROVIDER_ENV_VARS: dict[str, str] = {
-    "openai_compat": "OPENAI_COMPAT_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-}
-
-
 def key_available(model_row: Model) -> bool:
     """该模型在**实际调用时**能否取到密钥。
 
@@ -155,63 +148,6 @@ def key_available(model_row: Model) -> bool:
 class EnvKeyIn(BaseModel):
     env_name: str
     api_key: str
-
-
-def _mask_key(key: str) -> str:
-    """只回显足够让人确认"是不是填对了那一串"的片段。"""
-    if len(key) <= 8:
-        return "…" + key[-2:]
-    return key[:4] + "…" + key[-4:]
-
-
-def _persist_env_key(env_name: str, api_key: str) -> None:
-    """把密钥写进 .env 并立即生效（原子替换 + 600 权限）。
-
-    * 只替换同名行，其余内容原样保留——.env 里还有 JWT_SECRET 等
-      别的配置，整文件重写必须无损。
-    * 先写临时文件再 os.replace，写到一半断电不会留下截断的 .env。
-    * 同时写入 os.environ：`resolved_api_key` 是按调用时读取的，
-      因此不需要重启后端，下一次任务就能用上新密钥。
-    """
-    import os
-    import tempfile
-
-    from app.core.env_loader import env_file_path
-
-    path = env_file_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    line = f"{env_name}={api_key}"
-
-    kept: list[str] = []
-    replaced = False
-    if path.is_file():
-        for old in path.read_text(encoding="utf-8").splitlines():
-            probe = old.strip()
-            if probe.startswith("export "):
-                probe = probe[len("export "):].lstrip()
-            if probe.split("=", 1)[0].strip() == env_name:
-                if not replaced:
-                    kept.append(line)
-                    replaced = True
-                continue  # 同名行只保留一条
-            kept.append(old)
-    if not replaced:
-        kept.append(line)
-
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".env.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(kept) + "\n")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError as exc:
-            logger.warning("清理 .env 临时文件失败（不影响写入结果）: %s", exc)
-        raise
-
-    os.environ[env_name] = api_key
 
 
 # 有意**不**声明 response_model：返回体里的 `masked` 是密钥片段
@@ -237,13 +173,15 @@ async def save_env_key(data: EnvKeyIn, user: User = Depends(get_current_user)):
         raise HTTPException(403, "只有系统管理员可以写入服务端密钥。")
 
     env_name = (data.env_name or "").strip()
-    if env_name not in set(PROVIDER_ENV_VARS.values()):
+    if is_sensitive_env_name(env_name):
+        raise HTTPException(
+            400, "该变量名看起来像一个敏感配置（密钥/令牌等），不能通过此接口写入。")
+    if not is_allowed_model_env(env_name):
         raise HTTPException(
             400,
-            f"env_name 只允许 {sorted(set(PROVIDER_ENV_VARS.values()))}，"
+            f"env_name 只允许 {sorted(set(PROVIDER_ENV_VARS.values()))} "
+            "或服务端生成的自定义供应商变量（AIEOS_PROVIDER_*_API_KEY），"
             "不能写入其它变量。")
-    if is_sensitive_env_name(env_name):  # 白名单已挡住，保留作为纵深防御
-        raise HTTPException(400, "不能写入服务端敏感变量。")
 
     key = data.api_key or ""
     if not 8 <= len(key) <= 512:
@@ -252,13 +190,12 @@ async def save_env_key(data: EnvKeyIn, user: User = Depends(get_current_user)):
         raise HTTPException(400, "密钥里不能包含空白字符或引号，请检查是否多复制了内容。")
 
     try:
-        _persist_env_key(env_name, key)
+        persist_env_key(env_name, key)
     except OSError as e:
         raise HTTPException(
             500, f"写入 .env 失败：{e.strerror or e}。请确认后端目录有写权限。")
 
-    # 立刻用新密钥做一次可用性确认：写进去了 ≠ 能用
-    return {"saved": True, "env_name": env_name, "masked": _mask_key(key),
+    return {"saved": True, "env_name": env_name, "masked": mask_key(key),
             "applied": True}
 
 
@@ -313,9 +250,12 @@ async def diagnostics(db: AsyncSession = Depends(get_db),
     本接口让前端能明确告诉用户卡在哪一步。安全约束：
     **只报告密钥是否存在（布尔），绝不返回密钥内容本身**。
     """
-    rows = list((await db.execute(select(Model).where(
+    all_rows = list((await db.execute(select(Model).where(
         or_(Model.company_id.is_(None),
             Model.company_id.in_(await _my_company_ids(db, user.id)))))).scalars())
+    # 停用的模型不参与"能否开工"的判断：界面上关掉一个坏模型，
+    # 自检就不应继续因为它的失败把人拦在门外。
+    rows = [m for m in all_rows if m.enabled is not False]
     providers = []
     for ptype, env_name in PROVIDER_ENV_VARS.items():
         configured = [m for m in rows
@@ -347,8 +287,10 @@ async def diagnostics(db: AsyncSession = Depends(get_db),
                            if key_available(m) and _test_failed(m)]
 
     missing_hint = ""
-    if not rows:
-        missing_hint = "还没有配置任何模型。请添加一个模型（推荐 OpenAI 兼容地址）。"
+    if not all_rows:
+        missing_hint = "还没有配置任何模型。请先添加供应商，再拉取并启用模型。"
+    elif not rows:
+        missing_hint = "所有模型都已停用。请在模型配置中至少启用一个模型。"
     elif not ready_models:
         if connectivity_failed:
             err = (connectivity_failed[0].config or {}).get("last_test_error") or ""
@@ -387,6 +329,15 @@ async def list_models(company_id: str | None = Query(None),
         mine = [company_id]
     q = await db.execute(select(Model).where(
         or_(Model.company_id.is_(None), Model.company_id.in_(mine))))
+    rows = list(q.scalars())
+    from app.models.model_provider import ModelProvider
+
+    provider_ids = {m.provider_id for m in rows if m.provider_id}
+    names: dict[str, str] = {}
+    if provider_ids:
+        names = {p.id: p.name for p in (await db.execute(
+            select(ModelProvider).where(ModelProvider.id.in_(provider_ids))
+        )).scalars()}
     return [
         {"id": m.id, "name": m.name, "provider_type": m.provider_type.value,
          "base_url": m.base_url, "model_id": m.model_id,
@@ -394,8 +345,17 @@ async def list_models(company_id: str | None = Query(None),
          "company_id": m.company_id,
          # 未归属的配置要显式标出来，前端才能提示去认领，
          # 否则用户只会疑惑"为什么这条我删不掉"。
-         "unowned": m.company_id is None}
-        for m in q.scalars()
+         "unowned": m.company_id is None,
+         "provider_id": m.provider_id,
+         "provider_name": names.get(m.provider_id or ""),
+         "model_type": m.model_type or "text",
+         "multimodal": bool(m.multimodal),
+         "capabilities": m.capabilities or [],
+         "enabled": m.enabled is not False,
+         "config_source": m.config_source or "default",
+         "last_synced_at": (m.last_synced_at.isoformat()
+                            if m.last_synced_at else None)}
+        for m in rows
     ]
 
 
@@ -455,21 +415,71 @@ async def update_model(mid: str, data: dict, db: AsyncSession = Depends(get_db),
         await ensure_capability(db, user.id, claim_to, Capability.MANAGE)
         m.company_id = claim_to
 
-    allowed = {"name", "base_url", "api_key_env", "model_id", "config"}
+    # 类型改了或显式要求重置时，按新类型重新生成系统默认配置。
+    # 否则界面上把「图片模型」改成「文本模型」后，仍留着一堆尺寸参数，
+    # 看起来配过了、实际完全对不上。
+    reset_config = bool(data.pop("reset_config", False))
+    old_type = m.model_type
+    new_type = data.get("model_type", old_type)
+    reset_needed = reset_config or (
+        "model_type" in data and new_type != old_type and "config" not in data)
+
+    allowed = {"name", "base_url", "api_key_env", "model_id", "config",
+               "model_type", "multimodal", "capabilities", "enabled",
+               "provider_id", "config_source", "upstream_meta"}
     if "provider_type" in data:
         m.provider_type = ModelProviderType(data["provider_type"])
     if "api_key_env" in data:
         _reject_sensitive_env(data["api_key_env"])
         if not (data["api_key_env"] or "").strip():
-            # 和学习 POST 一致：清空变量名时落 provider 默认变量，
+            # 和 POST 一致：清空变量名时落 provider 默认变量，
             # 而不是留下一行"取不到任何密钥"的空指向。
             data["api_key_env"] = PROVIDER_ENV_VARS.get(
                 ModelProviderType(data.get("provider_type", m.provider_type.value)).value)
     if "base_url" in data:
         await _validate_model_base_url(data["base_url"])
+    if "provider_id" in data and data["provider_id"]:
+        from app.models.model_provider import ModelProvider
+
+        provider = await db.get(ModelProvider, data["provider_id"])
+        if provider is None:
+            raise HTTPException(404, "供应商不存在")
+        # 只能把模型挂到自己公司的供应商下，防止借参数跨租户搬运
+        if provider.company_id is None:
+            raise HTTPException(409, "该供应商未归属公司，请先认领。")
+        await ensure_capability(db, user.id, provider.company_id, Capability.MANAGE)
+        if m.company_id and provider.company_id != m.company_id:
+            raise HTTPException(409, "不能把模型挂到别家公司的供应商下。")
+    if "model_type" in data:
+        from app.models.agent import ModelType
+
+        try:
+            ModelType(str(data["model_type"]))
+        except ValueError:
+            raise HTTPException(
+                400, f"model_type 只能是 {[t.value for t in ModelType]}")
+    if "config" in data and "config_source" not in data:
+        # 手工改过配置就标 manual：界面上要能区分"上游来的"与"我改的"，
+        # 否则下次同步会把人工修正静默盖掉而没有提示。
+        m.config_source = "manual"
+    if "provider_id" in data and not data["provider_id"]:
+        # 空串落库会变成悬空引用（等同 NULL 的语义），直接归一为 None。
+        data["provider_id"] = None
     for k, v in data.items():
         if k in allowed:
             setattr(m, k, v)
+
+    if reset_needed:
+        from app.model_discovery import default_config_for
+
+        upstream = m.upstream_meta if isinstance(m.upstream_meta, dict) else {}
+        m.config = default_config_for(
+            str(m.model_type or "text"),
+            {"context_window": upstream.get("context_window"),
+             "max_output_tokens": upstream.get("max_output_tokens")},
+            m.model_id)
+        m.config_source = "auto"
+
     await db.commit()
     return {"id": m.id, "name": m.name, "company_id": m.company_id}
 
@@ -624,7 +634,7 @@ async def list_provider_models(data: FetchModelsIn,
       但云元数据地址仍拒绝）。
     * 错误响应只回状态码/简短原因，**不回显上游响应体**。
     """
-    import httpx
+    from app.model_discovery import discover_models
 
     if data.api_key_env is not None:
         raise HTTPException(
@@ -637,42 +647,19 @@ async def list_provider_models(data: FetchModelsIn,
     except ValueError:
         raise HTTPException(400, f"provider_type must be one of {[p.value for p in ModelProviderType]}")
 
-    key = data.api_key or ""
     try:
-        await validate_outbound_url_async(data.base_url, allow_private=True)
+        result = await discover_models(
+            provider_type, data.base_url, data.api_key or "", allow_private=True)
     except OutboundURLRejected as e:
         raise HTTPException(400, f"base_url 不安全：{e}")
-
-    url = data.base_url.rstrip("/")
-    if not url.endswith("/models"):
-        url = f"{url}/models" if url.endswith("/v1") else f"{url}/v1/models"
-    headers: dict[str, str] = {}
-    if key:
-        if provider_type is ModelProviderType.ANTHROPIC:
-            headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
-        else:
-            headers = {"Authorization": f"Bearer {key}"}
-    try:
-        async with httpx.AsyncClient(timeout=15, trust_env=False,
-                                     follow_redirects=False) as client:
-            resp = await client.get(url, headers=headers)
-            if resp.status_code == 401:
-                return {"status": "error", "error": "认证失败（401）：请检查 API Key"}
-            if resp.status_code != 200:
-                # 绝不回显上游 body（可能包含回显的密钥或内网信息）
-                return {"status": "error",
-                        "error": f"上游返回 HTTP {resp.status_code}"}
-            body = resp.json()
-            models = [m.get("id") for m in body.get("data", []) if m.get("id")]
-            return {"status": "ok", "base_url": data.base_url, "models": sorted(models)}
-    except httpx.ConnectError:
-        return {"status": "error", "error": "无法连接该 base_url"}
-    except OutboundURLRejected as e:
-        raise HTTPException(400, f"base_url 不安全：{e}")
-    except Exception as e:
-        # 只给异常类型与截断后的说明，避免把上游内容带进响应
-        return {"status": "error",
-                "error": f"{type(e).__name__}: {str(e)[:150]}"}
+    if not result.ok:
+        # 发现层已做到：不回显上游 body、不记录密钥
+        return {"status": "error", "error": result.error or "拉取模型失败"}
+    # `models` 保持裸 id 列表（旧客户端契约）；`items` 是新前端的完整信息：
+    # 类型、多模态、能力与按类型生成的默认配置。
+    return {"status": "ok", "base_url": data.base_url,
+            "models": sorted(m["id"] for m in result.models),
+            "items": result.models}
 
 
 class BatchSelectIn(BaseModel):

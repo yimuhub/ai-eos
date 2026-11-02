@@ -438,6 +438,15 @@ class ModelConfigItemOut(BaseModel):
     config: dict | None
     company_id: str | None
     unowned: bool
+    # 供应商与模型分类（升级前的老行为 NULL，读取侧有等价默认）
+    provider_id: str | None = None
+    provider_name: str | None = None
+    model_type: str | None = None
+    multimodal: bool | None = None
+    capabilities: list | None = None
+    enabled: bool | None = None
+    config_source: str | None = None
+    last_synced_at: str | None = None
 
 
 class ModelCreatedOut(BaseModel):
@@ -501,3 +510,48 @@ class ModelBatchImportOut(BaseModel):
     imported: list[str]
     imported_count: int
     skipped_existing: list[str]
+
+
+class ModelProviderItemOut(BaseModel):
+    """供应商对外视图。**永不包含密钥内容**，只有变量名与存在性。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    name: str
+    provider_type: str
+    base_url: str | None = None
+    api_key_env: str | None = None
+    api_key_present: bool = False
+    enabled: bool = True
+    config: dict | None = None
+    company_id: str | None = None
+    unowned: bool = False
+    model_count: int = 0
+    enabled_model_count: int = 0
+    last_check_ok: bool | None = None
+    last_check_at: str | None = None
+    last_check_error: str | None = None
+
+
+class ProviderDiscoverOut(BaseModel):
+    """拉取/测试结果：`models` 为 id 列表，`items` 带类型与默认配置。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    status: str
+    base_url: str | None = None
+    models: list | None = None
+    items: list | None = None
+    error: str | None = None
+    model_count: int = 0
+
+
+class ModelProviderImportOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    imported: list[str]
+    updated: list[str]
+    adopted: list[str]
+    skipped: list[str]
+    imported_count: int

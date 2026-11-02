@@ -709,6 +709,25 @@ def _resolve_api_key(model_row: Model) -> str:
     return settings.resolved_api_key(model_row.api_key_env, provider_name)
 
 
+# 模型行里可以下发给 provider 的调用参数。只认这三个：其余 config 项
+# （尺寸、时长、上游元数据）属于生成类接口的配置，不能混进 chat 请求体。
+_RUNTIME_CONFIG_KEYS = ("temperature", "max_tokens", "timeout")
+
+
+def _runtime_config(model_row: Model, config: dict | None) -> dict | None:
+    """调用方显式 config 优先；没给的键才用模型行里保存的默认值。
+
+    这样「模型配置中心」设置的 temperature / max_tokens 才真正生效，
+    同时不会覆盖上层（如 CEO 对话）按场景传入的参数。
+    """
+    stored = model_row.config if isinstance(model_row.config, dict) else {}
+    merged = dict(config or {})
+    for key in _RUNTIME_CONFIG_KEYS:
+        if key not in merged and stored.get(key) is not None:
+            merged[key] = stored[key]
+    return merged or None
+
+
 def _metric_labels(model_row: Model) -> tuple[str, str]:
     """LLM 指标的标签：provider + 模型名（低基数，不用每次请求的 id）。"""
     raw_provider = getattr(model_row, "provider_type", "")
@@ -898,6 +917,10 @@ class ModelGateway:
                 continue
             attempted += 1
             # 熔断：冷却期内的模型直接跳过，不浪费一次调用
+            if row.enabled is False:
+                failures.append(f"{row.name}：已在模型配置中停用")
+                logger.info("模型 %s(%s) 已停用，跳过本次调用", row.name, mid)
+                continue
             if _in_cooldown(mid):
                 failures.append(f"{row.name}：熔断冷却中，已跳过")
                 logger.warning("模型 %s(%s) 处于熔断冷却期，跳过本次调用",
@@ -912,7 +935,9 @@ class ModelGateway:
             t0 = time.time()
             metric_t0 = time.perf_counter()
             try:
-                result = await provider.chat(messages, tools=tools, config=config)
+                result = await provider.chat(
+                    messages, tools=tools,
+                    config=_runtime_config(row, config))
                 result["used_model_id"] = mid
                 _note_success(mid)
                 # ---- Token 计量（只 add 不 commit，外层事务统一提交）----
@@ -1012,6 +1037,12 @@ class ModelGateway:
                 missing.append(mid)
                 continue
             attempted += 1
+            if row.enabled is False:
+                failures.append(f"{row.name}：已在模型配置中停用")
+                logger.info("模型 %s(%s) 已停用，跳过本次流式调用", row.name, mid)
+                yield {"type": "model_error", "model_id": mid,
+                       "model_name": row.name, "message": "已在模型配置中停用"}
+                continue
             if _in_cooldown(mid):
                 failures.append(f"{row.name}：熔断冷却中，已跳过")
                 logger.warning("模型 %s(%s) 处于熔断冷却期，跳过本次流式调用",
@@ -1035,7 +1066,9 @@ class ModelGateway:
             emitted = False
             final: dict = {}
             try:
-                async for ev in provider.stream(messages, tools=tools, config=config):
+                async for ev in provider.stream(
+                        messages, tools=tools,
+                        config=_runtime_config(row, config)):
                     if ev.get("type") == "delta":
                         emitted = True
                         yield ev

@@ -304,9 +304,11 @@ async def test_stream_with_agent_models_announces_fallback(monkeypatch):
     from types import SimpleNamespace
 
     good = SimpleNamespace(id="m-good", name="好模型", provider_type="openai_compat",
-                           base_url="", model_id="good", api_key="")
+                           base_url="", model_id="good", api_key="",
+                           enabled=None, config=None)
     bad = SimpleNamespace(id="m-bad", name="坏模型", provider_type="openai_compat",
-                          base_url="", model_id="bad", api_key="")
+                          base_url="", model_id="bad", api_key="",
+                          enabled=None, config=None)
 
     class Db:
         async def get(self, model, mid):
