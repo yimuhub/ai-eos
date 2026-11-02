@@ -67,6 +67,7 @@ from .agent_group import AgentGroup  # noqa: F401
 from .whitelist import ApprovalWhitelist  # noqa: F401
 from .worklog import AgentWorklog, WorklogStatus  # noqa: F401
 from .ceo import CeoMission  # noqa: F401
+from .ceo_thread import CeoThread  # noqa: F401
 from .evolution import CeoPlaybook, EvolutionRecord  # noqa: F401
 from .exam import CeoExam  # noqa: F401
 from .experience import SharedExperience  # noqa: F401

@@ -20,14 +20,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.ceo_companion import DEFAULT_THREAD_TITLE, ensure_default_thread
 from app.core.logging_config import get_logger
 from app.core.permissions import Capability
 from app.core.scope import ensure_agent_access
-from app.db.base import Base
 from app.db.session import AsyncSessionLocal
 from app.models.agent import Agent
-from sqlalchemy import JSON, String, Integer, Text, ForeignKey
-from sqlalchemy.orm import Mapped, mapped_column
+from app.models.agent_chat import AgentChatMessage
+from app.models.ceo_thread import CeoThread
 
 logger = get_logger(__name__)
 
@@ -148,22 +148,9 @@ def _now():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-class AgentChatMessage(Base):
-    """老板与单个 Agent 的私聊记录。"""
-    __tablename__ = "agent_chat_messages"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    agent_id: Mapped[str] = mapped_column(
-        ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
-    company_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
-    role: Mapped[str] = mapped_column(String(10), nullable=False)  # boss | agent
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    meta: Mapped[dict | None] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(default=_now, index=True)
-
-
 class ChatIn(BaseModel):
     message: str
+    thread_id: str | None = None
 
 
 async def _visible_agent(db: AsyncSession, user, agent_id: str) -> Agent:
@@ -180,14 +167,49 @@ async def _visible_agent(db: AsyncSession, user, agent_id: str) -> Agent:
     return a
 
 
+# 滚动摘要：攒够 16 条再压一次，最近 6 条始终保留原文。
+SUMMARY_TRIGGER_MESSAGES = 16
+SUMMARY_KEEP_RECENT = 6
+SUMMARY_MAX_CHARS = 800
+
+
+async def _resolve_thread(db: AsyncSession, a: Agent,
+                          thread_id: str | None) -> CeoThread | None:
+    """确定本次对话落在哪个线程。
+
+    普通员工私聊保持无线程（thread_id 为空）；CEO 不传线程时复用默认线程，
+    首次打开会把历史老消息归入其中，保证"永久保存"从第一天起就成立。
+    """
+    if not thread_id:
+        if not a.is_ceo:
+            return None
+        return await ensure_default_thread(db, a)
+
+    thread = await db.get(CeoThread, thread_id)
+    if (thread is None or str(thread.agent_id) != str(a.id)
+            or str(thread.company_id) != str(a.company_id)):
+        raise HTTPException(404, "对话不存在")
+    return thread
+
+
 async def _save_msg(db: AsyncSession, agent: Agent, role: str,
-                    content: str, meta: dict | None = None):
+                    content: str, meta: dict | None = None,
+                    thread: CeoThread | None = None):
     msg = AgentChatMessage(
         id=str(uuid.uuid4()), agent_id=str(agent.id),
-        company_id=str(agent.company_id), role=role,
-        content=content[:8000], meta=meta or {})
+        company_id=str(agent.company_id),
+        thread_id=str(thread.id) if thread is not None else None,
+        role=role, content=content[:8000], meta=meta or {})
     db.add(msg)
     await db.flush()
+    if thread is not None:
+        thread.message_count = (thread.message_count or 0) + 1
+        thread.last_message_at = _now()
+        if (role == "boss"
+                and (thread.title or DEFAULT_THREAD_TITLE) == DEFAULT_THREAD_TITLE):
+            first = (content.strip().splitlines() or [""])[0][:30].strip()
+            if first:
+                thread.title = first
     return msg
 
 
@@ -289,8 +311,68 @@ async def _agent_model_ids(db: AsyncSession, a: Agent) -> list[str]:
                                        key=lambda c: order.get(c.role, 3))]
 
 
-async def _build_qa_messages(db: AsyncSession, a: Agent, text: str) -> list[dict]:
-    """问答上下文的完整拼装：人设 + 长期记忆 + 知识库 + 最近对话 + 能力提示。"""
+async def _skill_prompt(db: AsyncSession, a: Agent, text: str) -> str | None:
+    """紧凑技能提示：全量只列一行摘要，方法论只挑本轮最相关的 2 个。
+
+    CEO 绑定 10 张技能卡，全量注入每轮要多花数千 token；而大多数回合
+    只用到其中一两项。索引保证"知道自己会什么"，top-2 保证"真会用"。
+    """
+    from app.knowledge_engine import _tokens
+    from app.models.skill import AgentSkill, Skill as SkillRow
+
+    rows = (await db.execute(
+        select(SkillRow.slug, SkillRow.name, SkillRow.description,
+               SkillRow.input_schema)
+        .join(AgentSkill, AgentSkill.skill_id == SkillRow.id)
+        .where(AgentSkill.agent_id == str(a.id)))).all()
+    if not rows:
+        return None
+
+    q_tokens = _tokens(text)
+    index_lines: list[str] = []
+    scored: list[tuple[int, str, str, str]] = []
+    for slug, name, desc, schema in rows:
+        instruction = ""
+        if isinstance(schema, dict):
+            instruction = str(schema.get("instruction") or "").strip()
+        index_lines.append(f"- {name}（{slug}）：{(desc or '')[:50]}")
+        if instruction:
+            score = len(q_tokens & _tokens(
+                f"{name} {desc or ''} {instruction[:600]}"))
+            if score:
+                scored.append((score, name, slug, instruction))
+
+    scored.sort(key=lambda x: -x[0])
+    out = "你的绑定技能（按需调用）：\n" + "\n".join(index_lines)
+    if scored:
+        methods = "\n\n".join(
+            f"### {name}（{slug}）\n{instruction[:700]}"
+            for _score, name, slug, instruction in scored[:2])
+        out += "\n\n本轮重点方法论：\n" + methods
+    return out[:2600]
+
+
+_COMPLEX_HINTS = ("方案", "分析", "拆解", "规划", "复盘", "评估", "对比",
+                  "策略", "预算", "风险", "招聘", "组织", "报告", "为什么", "如何")
+
+
+def _model_ids_for_text(model_ids: list[str], text: str) -> list[str]:
+    """短问题先用便宜的备用模型，复杂问题仍用主模型。
+
+    网关按顺序尝试、失败才降级，因此"便宜在前"不会降低可用性：
+    便宜的挂了照样落到主模型；复杂请求则一开始就走主模型保质量。
+    """
+    if len(model_ids) < 2:
+        return model_ids
+    is_complex = len(text) >= 120 or any(k in text for k in _COMPLEX_HINTS)
+    if is_complex:
+        return model_ids
+    return [*model_ids[1:], model_ids[0]]
+
+
+async def _build_qa_messages(db: AsyncSession, a: Agent, text: str,
+                             thread: CeoThread | None = None) -> list[dict]:
+    """问答上下文的完整拼装：人设 + 摘要 + 长期记忆 + 知识库 + 技能 + 最近对话。"""
     from app.kb_engine import cost_optimized_rag
     from app.memory_engine import recall
 
@@ -306,6 +388,11 @@ async def _build_qa_messages(db: AsyncSession, a: Agent, text: str) -> list[dict
         "2. 如果被问到经营数据而你记得相关事实就汇报，没有数据就说明需要核实\n"
         "3. 简洁、口语化，像向老板汇报一样")
     messages.append({"role": "system", "content": base_prompt})
+
+    # 线程摘要：更早的对话已经压缩，避免把整段历史反复塞进上下文
+    if thread is not None and thread.summary:
+        messages.append({"role": "system",
+                         "content": f"此前对话摘要：\n{thread.summary[:1200]}"})
 
     # 长期记忆召回
     try:
@@ -327,9 +414,21 @@ async def _build_qa_messages(db: AsyncSession, a: Agent, text: str) -> list[dict
     except Exception as kb_err:
         logger.warning("聊天知识库检索失败 agent=%s: %s", a.id, kb_err, exc_info=True)
 
+    # 技能：紧凑索引 + 本轮最相关的方法论
+    try:
+        skill_text = await _skill_prompt(db, a, text)
+        if skill_text:
+            messages.append({"role": "system", "content": skill_text})
+    except Exception as skill_err:
+        logger.warning("聊天技能注入失败 agent=%s: %s", a.id, skill_err,
+                       exc_info=True)
+
     # 最近对话上下文（最近7条，跳过刚存的当前消息避免重复）
-    recent = (await db.execute(select(AgentChatMessage).where(
-        AgentChatMessage.agent_id == str(a.id)).order_by(
+    q_recent = select(AgentChatMessage).where(
+        AgentChatMessage.agent_id == str(a.id))
+    if thread is not None:
+        q_recent = q_recent.where(AgentChatMessage.thread_id == str(thread.id))
+    recent = (await db.execute(q_recent.order_by(
         AgentChatMessage.created_at.desc()).limit(7))).scalars().all()
     for r in reversed(recent[1:]):  # [0] 是刚存的当前 boss 消息，跳过
         messages.append({"role": "user" if r.role == "boss" else "assistant",
@@ -456,16 +555,97 @@ async def _materialize_docs(db: AsyncSession, a: Agent, raw_reply: str):
     return doc_file, doc_error
 
 
+async def _maybe_summarize_thread(db: AsyncSession, a: Agent,
+                                  thread: CeoThread | None,
+                                  gw, model_ids: list[str]) -> None:
+    """滚动摘要：攒够一批旧消息就压缩，并抽取少量长期记忆。
+
+    只动"最近 6 条之外"的消息：近期原文始终留在上下文里，摘要负责
+    更早的事实与承诺。摘要失败只记日志，绝不阻断对话——原始消息还在。
+    """
+    if thread is None or not model_ids:
+        return
+    done = int(thread.summarized_count or 0)
+    total = int(thread.message_count or 0)
+    if total - done < SUMMARY_TRIGGER_MESSAGES:
+        return
+    take = total - done - SUMMARY_KEEP_RECENT
+    if take <= 0:
+        return
+
+    rows = (await db.execute(
+        select(AgentChatMessage)
+        .where(AgentChatMessage.thread_id == str(thread.id))
+        .order_by(AgentChatMessage.created_at).offset(done).limit(take)
+    )).scalars().all()
+    if not rows:
+        return
+
+    convo = "\n".join(
+        f"{'老板' if r.role == 'boss' else 'CEO'}：{r.content[:260]}"
+        for r in rows)
+    prompt = (
+        "把「已有纪要」和「新增对话」合并成一份不超过 500 字的滚动纪要，"
+        "只保留事实、决定、承诺、待办和老板偏好，去掉寒暄与重复。"
+        "第一行直接给纪要正文，不要标题。"
+        "然后另起若干行，用 `MEM: ` 开头列出最多 3 条值得长期记住的事实；"
+        "没有就写 `MEM: 无`。")
+    try:
+        res = await gw.chat_with_agent_models(
+            [model_ids[-1]],
+            [{"role": "system", "content": prompt},
+             {"role": "user", "content":
+              f"已有纪要：\n{thread.summary or '（无）'}\n\n新增对话：\n{convo}"}])
+    except Exception as summary_err:
+        logger.warning("线程摘要生成失败 agent=%s thread=%s: %s",
+                       a.id, thread.id, summary_err, exc_info=True)
+        return
+
+    raw = (res.get("content") or "").strip()
+    if not raw:
+        return
+    summary_lines: list[str] = []
+    facts: list[str] = []
+    for line in raw.splitlines():
+        item = line.strip()
+        if item.upper().startswith("MEM:"):
+            fact = item[4:].strip()
+            if fact and fact != "无":
+                facts.append(fact)
+        elif item:
+            summary_lines.append(item)
+    summary = "\n".join(summary_lines).strip()
+    if summary:
+        thread.summary = summary[:SUMMARY_MAX_CHARS]
+    thread.summarized_count = done + len(rows)
+
+    if facts:
+        from app.memory_engine import MemoryType, remember
+        for fact in facts[:3]:
+            try:
+                await remember(db, str(a.id), str(a.company_id),
+                               MemoryType.SEMANTIC, fact[:400],
+                               importance=0.75)
+            except Exception as mem_err:
+                logger.warning("对话长期记忆写入失败 agent=%s: %s",
+                               a.id, mem_err, exc_info=True)
+
+
 @router.get("/{aid}/chat/history")
 async def chat_history(aid: str, limit: int = Query(50, ge=1, le=200),
+                       thread_id: str | None = Query(None),
                        db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
     a = await _visible_agent(db, user, aid)
-    rows = (await db.execute(select(AgentChatMessage).where(
-        AgentChatMessage.agent_id == str(a.id)).order_by(
+    q = select(AgentChatMessage).where(AgentChatMessage.agent_id == str(a.id))
+    if thread_id:
+        thread = await _resolve_thread(db, a, thread_id)
+        q = q.where(AgentChatMessage.thread_id == str(thread.id))
+    rows = (await db.execute(q.order_by(
         AgentChatMessage.created_at.desc()).limit(limit))).scalars().all()
     return [{"id": r.id, "role": r.role, "content": r.content,
-             "meta": r.meta, "created_at": str(r.created_at)}
+             "meta": r.meta, "thread_id": r.thread_id,
+             "created_at": str(r.created_at)}
             for r in reversed(rows)]
 
 
@@ -481,6 +661,7 @@ async def boss_chat(aid: str, data: ChatIn,
     text = data.message.strip()
     if not text:
         raise HTTPException(400, "empty message")
+    thread = await _resolve_thread(db, a, data.thread_id)
 
     # 本次对话触发的动作汇总（前端用来展示"我到底做了什么"）。
     # 提到函数开头显式初始化：原代码用 locals().get("_actions") 做惰性判断，
@@ -489,18 +670,19 @@ async def boss_chat(aid: str, data: ChatIn,
     # 证据链：本轮 web_search 命中的来源，随回复一起落库并回传前端
     citations: list[dict] = []
 
-    await _save_msg(db, a, "boss", text)
+    await _save_msg(db, a, "boss", text, thread=thread)
 
     # 本机操作 / 安排任务：不需要 LLM，两步可秒回
     short = await _try_short_intents(db, a, str(user.id), text)
     if short:
-        await _save_msg(db, a, "agent", short["reply"], short["meta"])
+        await _save_msg(db, a, "agent", short["reply"], short["meta"],
+                        thread=thread)
         await db.commit()
         return {"reply": short["reply"], "actions": short["actions"],
                 "citations": []}
 
     # ---------- 普通问答：记忆 + 知识库 + LLM ----------
-    messages = await _build_qa_messages(db, a, text)
+    messages = await _build_qa_messages(db, a, text, thread=thread)
 
     gw = ModelGateway(db)
     from app.model_gateway import usage_context
@@ -508,7 +690,7 @@ async def boss_chat(aid: str, data: ChatIn,
     # 函数末尾 commit 前 exit；异常上抛路径沿用旧语义（不比原来差）。
     _usage_scope = usage_context(agent=a, scenario="CHAT", user_id=str(user.id))
     _usage_scope.__enter__()
-    model_ids = await _agent_model_ids(db, a)
+    model_ids = _model_ids_for_text(await _agent_model_ids(db, a), text)
     llm = await gw.chat_with_agent_models(model_ids, messages, tools=_CHAT_TOOLS)
     # 处理 tool_calls：调用 web_search 后回填消息再循环
     tool_calls = llm.get("tool_calls") or []
@@ -641,36 +823,45 @@ async def boss_chat(aid: str, data: ChatIn,
     final_reply = visible_reply(final_reply) or "(无回复)"
     # 证据链随回复落库，/chat/history 的 meta 里即可回放同一份来源
     await _save_msg(db, a, "agent", final_reply,
-                    {"citations": citations} if citations else None)
+                    {"citations": citations} if citations else None,
+                    thread=thread)
 
-    # 省 token 记忆：每 6 轮压缩一次近期对话为单条摘要记忆
+    # 省 token 记忆：普通私聊每 6 轮压一条摘要；CEO 线程走滚动摘要（更省）
+    if thread is None:
+        try:
+            cnt = (await db.execute(select(AgentChatMessage).where(
+                AgentChatMessage.agent_id == str(a.id)))).scalars().all()
+            if len(cnt) >= 12 and len(cnt) % 6 == 0:
+                recent_txt = "\n".join(
+                    f"{'老板' if m.role == 'boss' else '我'}: {m.content[:120]}"
+                    for m in cnt[-6:])
+                digest = await gw.chat_with_agent_models(model_ids, [
+                    {"role": "system", "content":
+                        "把这6条对话压缩成一条不超过100字的记忆要点，"
+                        "只保留关键事实、决定和承诺，不要客套话。只输出要点。"},
+                    {"role": "user", "content": recent_txt},
+                ])
+                from app.memory_engine import MemoryType, remember
+                await remember(db, str(a.id), str(a.company_id),
+                               MemoryType.EPISODIC,
+                               (digest.get("content") or "").strip()[:300],
+                               importance=0.7)
+        except Exception as digest_err:
+            # 记忆压缩失败不阻断对话，但会导致记忆越攒越多直至超出上下文预算
+            logger.warning("对话记忆压缩失败 agent=%s: %s", a.id, digest_err,
+                           exc_info=True)
+
     try:
-        cnt = (await db.execute(select(AgentChatMessage).where(
-            AgentChatMessage.agent_id == str(a.id)))).scalars().all()
-        if len(cnt) >= 12 and len(cnt) % 6 == 0:
-            recent_txt = "\n".join(
-                f"{'老板' if m.role == 'boss' else '我'}: {m.content[:120]}"
-                for m in cnt[-6:])
-            digest = await gw.chat_with_agent_models(model_ids, [
-                {"role": "system", "content":
-                    "把这6条对话压缩成一条不超过100字的记忆要点，"
-                    "只保留关键事实、决定和承诺，不要客套话。只输出要点。"},
-                {"role": "user", "content": recent_txt},
-            ])
-            from app.memory_engine import MemoryType, remember
-            await remember(db, str(a.id), str(a.company_id),
-                           MemoryType.EPISODIC,
-                           (digest.get("content") or "").strip()[:300],
-                           importance=0.7)
-    except Exception as digest_err:
-        # 记忆压缩失败不阻断对话，但会导致记忆越攒越多直至超出上下文预算
-        logger.warning("对话记忆压缩失败 agent=%s: %s", a.id, digest_err,
+        await _maybe_summarize_thread(db, a, thread, gw, model_ids)
+    except Exception as summary_err:
+        logger.warning("线程滚动摘要失败 agent=%s: %s", a.id, summary_err,
                        exc_info=True)
 
     _usage_scope.__exit__(None, None, None)
     await db.commit()
     return {"reply": final_reply, "file": doc_file, "doc_error": doc_error,
-            "actions": actions, "citations": citations}
+            "actions": actions, "citations": citations,
+            "thread_id": str(thread.id) if thread is not None else None}
 
 
 # ---------------- 流式聊天（SSE） ----------------
@@ -680,6 +871,7 @@ _CHAT_TOOLS = [WEB_SEARCH_TOOL, WEB_FETCH_TOOL, *COMPUTER_TOOLS]
 
 class ChatStreamIn(BaseModel):
     message: str
+    thread_id: str | None = None
 
 
 def _sse(payload: dict) -> str:
@@ -738,7 +930,8 @@ class DocMarkerFilter:
         return out
 
 
-async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str):
+async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
+                       thread_id: str | None = None):
     """SSE 生成器。
 
     自建 session：请求级依赖的回收时机与长连接无关，
@@ -754,20 +947,24 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str):
             if a is None:
                 yield _sse({"type": "error", "message": "员工不存在或已离职"})
                 return
+            thread = await db.get(CeoThread, thread_id) if thread_id else None
 
             short = await _try_short_intents(db, a, user_id, text)
             if short:
-                await _save_msg(db, a, "agent", short["reply"], short["meta"])
+                await _save_msg(db, a, "agent", short["reply"], short["meta"],
+                                thread=thread)
                 await db.commit()
                 # 短路径本来就是秒回，也按流式帧发，前端只有一套逻辑
                 yield _sse({"type": "delta", "text": short["reply"]})
                 yield _sse({"type": "done", "reply": short["reply"],
-                            "actions": short["actions"], "citations": []})
+                            "actions": short["actions"], "citations": [],
+                            "thread_id": thread_id})
                 return
 
             yield _sse({"type": "status", "text": "正在检索记忆与知识库…"})
-            messages = await _build_qa_messages(db, a, text)
-            model_ids = await _agent_model_ids(db, a)
+            messages = await _build_qa_messages(db, a, text, thread=thread)
+            model_ids = _model_ids_for_text(
+                await _agent_model_ids(db, a), text)
             gw = ModelGateway(db)
             flt = DocMarkerFilter()
             actions: list[dict] = []
@@ -857,11 +1054,18 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str):
             doc_file, doc_error = await _materialize_docs(db, a, flt.raw)
             reply = visible_reply(flt.raw) or "（这次没有生成内容，请再说一次或换个问法）"
             await _save_msg(db, a, "agent", reply,
-                            {"citations": citations} if citations else None)
+                            {"citations": citations} if citations else None,
+                            thread=thread)
+            try:
+                await _maybe_summarize_thread(db, a, thread, gw, model_ids)
+            except Exception as summary_err:
+                logger.warning("流式线程摘要失败 agent=%s: %s", agent_id,
+                               summary_err, exc_info=True)
             await db.commit()
             yield _sse({"type": "done", "reply": reply, "file": doc_file,
                         "doc_error": doc_error, "actions": actions,
-                        "citations": citations})
+                        "citations": citations,
+                        "thread_id": str(thread.id) if thread is not None else None})
         except Exception as exc:
             logger.warning("流式聊天失败 agent=%s: %s", agent_id, exc, exc_info=True)
             try:
@@ -892,12 +1096,14 @@ async def boss_chat_stream(aid: str, data: ChatStreamIn,
     text = data.message.strip()
     if not text:
         raise HTTPException(400, "empty message")
+    thread = await _resolve_thread(db, a, data.thread_id)
     # 先落老板这句：即使后面模型挂了，历史里也留有他的指令
-    await _save_msg(db, a, "boss", text)
+    await _save_msg(db, a, "boss", text, thread=thread)
     await db.commit()
 
     return StreamingResponse(
-        _chat_stream(str(a.id), str(a.company_id), str(user.id), text),
+        _chat_stream(str(a.id), str(a.company_id), str(user.id), text,
+                     str(thread.id) if thread is not None else None),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -915,6 +1121,8 @@ from sqlalchemy import event  # noqa: E402
 def _clear_chat(mapper, connection, target):
     connection.execute(AgentChatMessage.__table__.delete().where(
         AgentChatMessage.__table__.c.agent_id == str(target.id)))
+    connection.execute(CeoThread.__table__.delete().where(
+        CeoThread.__table__.c.agent_id == str(target.id)))
 
 
 class GenDocIn(BaseModel):

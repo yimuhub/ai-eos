@@ -215,14 +215,9 @@ async def _chat(db: AsyncSession, agent: Agent, messages: list[dict],
 # 选 CEO / 立锚 / 拆解
 # ---------------------------------------------------------------------------
 
-async def pick_coordinator(db: AsyncSession, company_id: str,
-                           requested_id: str | None = None) -> Agent:
-    if requested_id:
-        agent = await db.get(Agent, requested_id)
-        if not agent or agent.company_id != company_id:
-            raise CeoError("指定的 CEO 不存在或不属于这家公司", 404)
-        return agent
-
+async def find_coordinator(db: AsyncSession,
+                           company_id: str) -> Agent | None:
+    """找本公司 CEO；没指定时按老数据兜底，但尊重显式解除。"""
     agent = (await db.execute(
         select(Agent).where(Agent.company_id == company_id,
                             Agent.is_ceo.is_(True))
@@ -240,6 +235,20 @@ async def pick_coordinator(db: AsyncSession, company_id: str,
             text = f"{a.name or ''} {a.role or ''}".lower()
             if any(h in text for h in hints):
                 return a
+    return None
+
+
+async def pick_coordinator(db: AsyncSession, company_id: str,
+                           requested_id: str | None = None) -> Agent:
+    if requested_id:
+        agent = await db.get(Agent, requested_id)
+        if not agent or agent.company_id != company_id:
+            raise CeoError("指定的 CEO 不存在或不属于这家公司", 404)
+        return agent
+
+    agent = await find_coordinator(db, company_id)
+    if agent:
+        return agent
     raise CeoError(
         "本公司还没有指定 CEO。请先在「CEO 指挥台」里指定一位员工担任超级 Agent。", 409)
 

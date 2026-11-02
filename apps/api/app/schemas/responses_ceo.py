@@ -270,3 +270,73 @@ class CeoDigestScheduleOut(BaseModel):
     schedule_id: str
     trigger_config: dict[str, Any]
     created: bool
+
+
+# ---------------------------------------------------------------------------
+# 常驻助手（线程 / 入口卡片）
+# ---------------------------------------------------------------------------
+
+class CeoCompanionOut(BaseModel):
+    model_config = _free()
+
+    has_ceo: bool
+    company_id: str
+    ceo_agent_id: str | None = None
+    ceo_agent_name: str | None = None
+    ceo_role: str | None = None
+    thread_id: str | None = None
+    thread_title: str | None = None
+    summary: str | None = None
+    message_count: int
+    last_message_at: str | None = None
+    today_tokens: int
+    today_cost: float
+    budget_paused: bool
+    quick_prompts: list[str]
+
+
+class CeoThreadOut(BaseModel):
+    model_config = _free()
+
+    id: str
+    title: str
+    summary: str | None = None
+    message_count: int
+    last_message_at: str | None = None
+    created_at: str | None = None
+
+
+class CeoThreadListOut(BaseModel):
+    model_config = _free()
+
+    has_ceo: bool
+    company_id: str
+    ceo_agent_id: str | None = None
+    threads: list[CeoThreadOut]
+
+
+class CeoThreadMessageOut(BaseModel):
+    model_config = _free()
+
+    id: str
+    role: str
+    content: str
+    meta: dict[str, Any] | None = None
+    thread_id: str | None = None
+    created_at: str | None = None
+
+
+class CeoThreadMessagesOut(BaseModel):
+    model_config = _free()
+
+    thread_id: str
+    title: str
+    summary: str | None = None
+    messages: list[CeoThreadMessageOut]
+
+
+class CeoThreadDeleteOut(BaseModel):
+    model_config = _free()
+
+    ok: bool
+    thread_id: str
