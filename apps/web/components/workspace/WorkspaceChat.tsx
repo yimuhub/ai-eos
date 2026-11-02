@@ -396,7 +396,11 @@ export default function WorkspaceChat({
         `/group-chat/${groupScope}/${groupId}/history?company_id=${cid}`);
       // 慢请求回来时用户可能已经切到别的群：别把旧群的消息写进新群
       if (currentKeyRef.current !== key) return;
-      setGroupMsgs(d.messages || []);
+      // 历史消息的 process 由后端按 content.process 平铺，归约回前端同口径的 ChatProcess
+      setGroupMsgs((d.messages || []).map((m) => ({
+        ...m,
+        process: m.process ? processFromMeta({ process: m.process }) : undefined,
+      })));
     } catch {
       if (currentKeyRef.current === key) setGroupMsgs([]);
     }
@@ -423,20 +427,97 @@ export default function WorkspaceChat({
     setInput("");
     atBottomRef.current = true;
     forceScrollRef.current = true;
-    // 先把自己的话放上去，再等员工依次回应（接口是同步的，可能要几十秒）
+    // 先把自己的话放上去，再等员工依次回应（每个员工有专属的 process 下落盘）
     setGroupMsgs((p) => [...p, { role: "boss", text }]);
     try {
-      const d = await api.post<{ replies: { agent_name: string; text: string }[] }>(
-        `/group-chat/${groupScope}/${groupId}?company_id=${cid}`, { message: text });
-      if (same()) {
-        setGroupMsgs((p) => [
-          ...p,
-          ...(d.replies || []).map((r) => ({ role: "agent", agent_name: r.agent_name, text: r.text })),
-        ]);
-      }
+      await streamPost(`/group-chat/${groupScope}/${groupId}/stream?company_id=${cid}`,
+        { message: text }, {
+          onEvent: (ev) => {
+            // 切走别的群：这段流不再写回当前界面，让后台跑完落库即可
+            if (!same()) return;
+            switch (ev.type) {
+              case "group_start":
+                // 等第一个 agent_start 出现后再往下接
+                break;
+              case "agent_start":
+                setGroupMsgs((p) => [...p, {
+                  role: "agent",
+                  agent_name: String(ev.agent_name ?? ""),
+                  text: "",
+                  streaming: true,
+                  process: newChatProcess(),
+                }]);
+                break;
+              case "agent_done":
+                setGroupMsgs((p) => {
+                  const last = p[p.length - 1];
+                  if (!last || last.role !== "agent" || !last.streaming) return p;
+                  const next = p.slice();
+                  next[next.length - 1] = {
+                    ...last,
+                    // 正文整体落盘，过程随 process 一起保存到消息里
+                    text: String(ev.text || last.text),
+                    streaming: false,
+                    process: last.process
+                      ? applyChatProcessEvent(last.process, ev as ChatProcessEvent)
+                      : last.process,
+                    search_used: ev.search_used === true ? true : last.search_used,
+                  };
+                  return next;
+                });
+                break;
+              case "group_done":
+                setGroupBusy(false);
+                setGroupStartedAt(null);
+                break;
+              case "error":
+                // 流式通道挂断：在途 agent 不能再显示"思考中"，补到系统消息里
+                notify("error", describeError(new Error(String(ev.message || "群聊流式失败")), "群聊发送失败"));
+                setGroupBusy(false);
+                setGroupStartedAt(null);
+                setGroupMsgs((p) => {
+                  const next = p.slice();
+                  const last = next[next.length - 1];
+                  if (last && last.role === "agent" && last.streaming) {
+                    next[next.length - 1] = {
+                      ...last,
+                      streaming: false,
+                      text: `${last.text}${last.text ? "\n" : ""}（流式失败：${ev.message}）`,
+                    };
+                  }
+                  if (next[next.length - 1]?.role !== "system") {
+                    next.push({ role: "system", text: `❌ ${describeError(new Error(String(ev.message || "群聊流式失败")), "群聊发送失败")}` });
+                  }
+                  return next;
+                });
+                break;
+              default:
+                // 过程事件与正文逐字（status/model/model_error/reasoning/tool_start/
+                // tool_end/done/delta）全部写到当前发言的 agent 头上
+                if (!isProcessEvent(ev.type) && ev.type !== "delta" && ev.type !== "done") break;
+                setGroupMsgs((p) => {
+                  const last = p[p.length - 1];
+                  if (!last || last.role !== "agent" || !last.streaming) return p;
+                  const next = p.slice();
+                  const m = { ...last };
+                  m.process = applyChatProcessEvent(
+                    m.process ?? newChatProcess(), ev as ChatProcessEvent);
+                  if (ev.type === "delta") {
+                    m.text = String(m.text || "") + String(ev.text || "");
+                  }
+                  next[next.length - 1] = m;
+                  return next;
+                });
+            }
+          },
+        });
     } catch (e) {
       notify("error", describeError(e, "群聊发送失败"));
-      if (same()) setGroupMsgs((p) => [...p, { role: "system", text: `❌ ${describeError(e, "群聊发送失败")}` }]);
+      if (same()) {
+        setGroupBusy(false);
+        setGroupStartedAt(null);
+        setGroupMsgs((p) => [...p, { role: "system", text: `❌ ${describeError(e, "群聊发送失败")}` }]);
+      }
     } finally {
       if (same()) {
         setGroupBusy(false);
@@ -952,8 +1033,10 @@ export default function WorkspaceChat({
                     : "在群里说一句话，参与项目的员工会依次回应，结论会自动同步到项目知识库。"} />
               )}
               {groupMsgs.map((m, i) => (
-                <ChatBubble key={m.id || i} role={m.role} name={m.agent_name || (m.role === "boss" ? "我" : "系统")}
-                  text={m.text} time={m.created_at} />
+                <ChatBubble key={m.id || i} role={m.role}
+                  name={m.agent_name || (m.role === "boss" ? "我" : "系统")}
+                  text={m.text} time={m.created_at}
+                  process={m.process} live={!!m.streaming} />
               ))}
               {groupBusy && (
                 <BusyHint startedAt={groupStartedAt} label="群里正在轮流回应" />
@@ -1267,7 +1350,14 @@ export default function WorkspaceChat({
 
 /* ---------------- 小部件 ---------------- */
 
-function ChatBubble({ role, name, text, time }: { role: string; name: string; text: string; time?: string | null }) {
+function ChatBubble({ role, name, text, time, process, live }: {
+  role: string;
+  name: string;
+  text: string;
+  time?: string | null;
+  process?: ChatProcess | null;
+  live?: boolean;
+}) {
   if (role === "boss") {
     return (
       <div className="self-end max-w-[86%]">
@@ -1290,7 +1380,15 @@ function ChatBubble({ role, name, text, time }: { role: string; name: string; te
           <span className="text-xs font-medium">{name}</span>
           {time && <span className="text-[10px]" style={{ color: "var(--muted)" }}>{clock(time)}</span>}
         </div>
-        <div className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: "#c9cad5" }}>{text}</div>
+        <div className="text-[13px] leading-relaxed whitespace-pre-wrap" style={{ color: "#c9cad5" }}>
+          {text}
+          {live && <span className="ws-caret" aria-hidden />}
+        </div>
+        {process && (
+          <div className="mt-1.5">
+            <ChatProcessCard process={process} agentName={name} live={live} />
+          </div>
+        )}
       </div>
     </div>
   );

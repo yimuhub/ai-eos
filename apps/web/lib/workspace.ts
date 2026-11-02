@@ -1,5 +1,7 @@
 /** 工作台（方案 B）共用的类型与展示工具。数据全部来自现有接口，不另建模型。 */
 
+import { type ChatProcess } from "@/lib/chatProcess";
+
 export type WsAgent = {
   id: string;
   name: string;
@@ -76,7 +78,10 @@ export type GroupMsg = {
   role: string;
   agent_name?: string | null;
   text: string;
+  streaming?: boolean;
+  process?: ChatProcess | null;
   created_at?: string | null;
+  search_used?: boolean | null;
 };
 
 export type MeetingMsg = {

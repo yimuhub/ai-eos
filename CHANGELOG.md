@@ -5,6 +5,30 @@
 
 ## [Unreleased]
 
+### 完善：群聊全过程可视化（后端 SSE + 前端接入）
+
+- **现象**：单聊老板能看到每个 Agent 的"思考/模型/工具"完整过程，群聊的员工
+  发言却只有一行正文——没人知道员工在发哑巴话、调了什么工具、用了哪个模型，
+  和单聊的体验是割裂的。
+- **改法**：① `POST /group-chat/{scope}/{scope_id}/stream` 把每段流式过程事件
+  `status/model/model_error/reasoning/tool_start/tool_end/delta` 按原样透传到
+  SSE，同时用 `ProcessAccumulator.feed()` 累加到对应 Agent 的本地过程里；
+  ② 每个 Agent 发言结束落库 `GroupChatMessage.content.process`（`duration_ms`
+  + `steps` + `model`），群聊 group 结束后，前端 `loadGroup` 把历史消息的
+  `process` 用 `processFromMeta()` 解回 `ChatProcess`；
+  ③ 前端 `ChatBubble` 透传 `live={!!m.streaming}`，`ChatProcessCard` 同时
+  支撑群聊/单聊的历史回放和实时过于（包括 15 秒心跳"仍在思考中"和"已卡住"
+  提示）；
+- **过程状态机的坑**：群聊的 `process` 是每段 Agent 发言重新计算的，不能把单聊
+  运行时那份中间态直接煮进历史——所以最后统一写 `status: done`，`endedAt`
+  统一成 `durationMs`；前端回放不走 `applyChatProcessEvent`。
+- **实测**：4 项单测钉住事件序列（group_start/agent_start/agent_done/group_done/
+  error）、过程落库（steps ≥ 2、duration_ms > 0）、空群、非法 scope；全量
+  API 测试 956 项全部通过。
+- **已踩的坑**：调试环境的 API Key 只从 `.env` 读——当时测试库的
+  `OPENAI_COMPAT_API_KEY` 是空字符串，直接 401 model_error；用本地 `.env`
+  配齐后第一条流就收到了 `model(agnes-flash) → 正文`。
+
 ### 完善：群聊发言空正文自动重试，不再直接显示「(未发言)」
 
 - **现象**：修好绑定后实测业务群聊，5 位成员里 4 位正常发言，SEO 专家仍是一句

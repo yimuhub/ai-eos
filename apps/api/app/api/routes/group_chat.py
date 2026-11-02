@@ -3,12 +3,16 @@
 - 每个 Agent 独立调用：各自知识库(cost_optimized_rag) + web_search 工具
 - 后发言的 Agent 能看到先发言 Agent 的内容（互相可见，像开会）
 - 消息持久化到 group_chat_messages 表
+- ``POST /{scope}/{scope_id}/stream`` 是同一条链路的流式版：老板实时看见
+  "谁在想、想的是什么、选了哪个模型、搜了什么、正文逐字出来"
 """
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import JSON, String, ForeignKey, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +22,8 @@ from app.api.deps import assert_company_capability, get_current_user, get_db
 from app.core.logging_config import get_logger
 from app.core.permissions import Capability
 from app.db.base import Base
-from app.models.agent import Agent, Model
+from app.db.session import AsyncSessionLocal
+from app.models.agent import Agent, AgentModelConfig, Model
 from app.models.user import User
 import re as _re2
 
@@ -117,7 +122,10 @@ async def _get_member_agents(db, company_id, scope, scope_id):
         return agents
     rows = (await db.execute(select(Agent).where(
         Agent.id.in_(ids), Agent.company_id == company_id))).scalars().all()
-    return list(rows)
+    # SQLite 的 IN 子句不保持入参顺序，按 ids（群成员/任务参与人）的顺序重排，
+    # 这样流式输出的先后顺序与群成员顺序一致。
+    by_id = {str(a.id): a for a in rows}
+    return [by_id[i] for i in ids if i in by_id]
 
 
 WEB_SEARCH_TOOL = {
@@ -152,8 +160,194 @@ def _company_semaphore(company_id: str) -> asyncio.Semaphore:
     return sem
 
 
-async def _agent_speak(db, gw, agent, topic, history_lines):
-    """单个 Agent 发言：知识库 + 可选 web_search + 同事发言可见。"""
+# 流式群聊：没有事件的那段时间也要保持连接活跃，否则反代/浏览器会把
+# "员工还在想" 判成断线。落库的过程精简版与单聊同口径。
+GROUP_CHAT_HEARTBEAT_S = 15
+MAX_PROCESS_STEPS = 30
+MAX_PROCESS_REASONING = 4000
+
+# 流式群聊结束标志（sentinel），端点在线程断掉时也能安全收场
+_GROUP_STREAM_DONE = object()
+
+
+def _sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+class ProcessAccumulator:
+    """把转发出去的过程事件攒成能落库的精简版，供刷新后回放。
+
+    群聊的历史接口直接把 message content 平铺返回，所以 process 也放在
+    content 里；前端的 processFromMeta 认这个形状（与单聊 meta.process 一致）。
+    """
+
+    def __init__(self):
+        self.steps: list[dict] = []
+        self.reasoning = ""
+        self.model: str | None = None
+        self.started = time.monotonic()
+
+    def _add(self, kind: str, label: str, status: str = "done",
+             detail: str | None = None, step_id: str | None = None) -> None:
+        if len(self.steps) >= MAX_PROCESS_STEPS:
+            return
+        step = {"kind": kind, "label": label[:80], "status": status}
+        if detail:
+            step["detail"] = detail[:240]
+        if step_id:
+            step["id"] = step_id
+        self.steps.append(step)
+
+    def feed(self, ev: dict) -> None:
+        kind = ev.get("type")
+        if kind == "reasoning":
+            self.reasoning = (self.reasoning
+                              + str(ev.get("text") or ""))[:MAX_PROCESS_REASONING]
+        elif kind == "status":
+            text = str(ev.get("text") or "").strip()
+            if text and (not self.steps
+                         or self.steps[-1].get("label") != text[:80]):
+                self._add("stage", text)
+        elif kind == "model":
+            name = str(ev.get("model_name") or ev.get("model_id") or "模型")
+            self.model = name
+            attempt = ev.get("attempt") or 1
+            self._add("model", f"调用模型 · {name}",
+                      detail=None if attempt == 1 else f"第 {attempt} 顺位（已降级）")
+        elif kind == "model_error":
+            name = str(ev.get("model_name") or ev.get("model_id") or "模型")
+            self._add("model_error", f"{name} 调用失败", "error",
+                      str(ev.get("message") or "")[:240])
+        elif kind == "tool_start":
+            self._add("tool", str(ev.get("label") or ev.get("name") or "调用工具"),
+                      "running", str(ev.get("args") or ""),
+                      step_id=str(ev.get("id") or ""))
+        elif kind == "tool_end":
+            step_id = str(ev.get("id") or "")
+            for step in self.steps:
+                if step.get("id") == step_id and step["kind"] == "tool":
+                    step["status"] = "error" if ev.get("ok") is False else "done"
+                    if ev.get("summary"):
+                        step["detail"] = (f"{step.get('detail')} · "
+                                          f"{ev['summary']}")[:240] if step.get("detail") \
+                            else str(ev["summary"])[:240]
+                    if isinstance(ev.get("duration_ms"), (int, float)):
+                        step["duration_ms"] = int(ev["duration_ms"])
+                    break
+        elif kind == "delta":
+            if not any(s["kind"] == "stage" and s["label"] == "正在生成回答…"
+                       for s in self.steps):
+                self._add("stage", "正在生成回答…")
+
+    def meta(self) -> dict:
+        out: dict = {"duration_ms": int((time.monotonic() - self.started) * 1000)}
+        steps = [{k: v for k, v in s.items() if k != "id"} for s in self.steps]
+        if steps:
+            out["steps"] = steps
+        if self.reasoning:
+            out["reasoning"] = self.reasoning
+        if self.model:
+            out["model"] = self.model
+        return out
+
+
+async def _forward(emit, ev: dict) -> None:
+    """有流就转发，没有流（阻塞式 POST）就当无事发生。"""
+    if emit is not None:
+        await emit(ev)
+
+
+async def _execute_tool_step(emit, tc: dict, args: dict):
+    """跑一次工具调用，并把它播报成一条看得见的步骤。
+
+    搜索这类外部动作动辄几秒，老板看到的应该是「谁在搜什么、搜到几条、花了
+    多久」，而不是界面空白地转圈。异常照常往外抛——是否中断由调用方决定，
+    但一定要先出声（tool_end ok=false）再走。
+    """
+    from app.skill_system import execute_skill
+
+    fn = tc.get("function") or {}
+    name = str(fn.get("name") or "web_search")
+    tool_id = str(tc.get("id") or uuid.uuid4().hex[:12])
+    query = str(args.get("query") or "")
+    label = (f"联网搜索 · {query[:40]}" if query else f"调用工具 · {name}")
+    await _forward(emit, {"type": "tool_start", "id": tool_id, "name": name,
+                          "label": label, "args": query})
+    started = time.monotonic()
+    try:
+        res = await execute_skill(name, args)
+    except Exception as tool_err:
+        await _forward(emit, {
+            "type": "tool_end", "id": tool_id, "ok": False,
+            "summary": f"{type(tool_err).__name__}: {tool_err}"[:160],
+            "duration_ms": int((time.monotonic() - started) * 1000)})
+        raise
+    hits = (res.get("result") or {}).get("results") or []
+    await _forward(emit, {
+        "type": "tool_end", "id": tool_id, "ok": True,
+        "summary": (f"{len(hits)} 条结果" if hits else "无结果"),
+        "duration_ms": int((time.monotonic() - started) * 1000)})
+    return res
+
+
+async def _prepare_default_models(db, agents):
+    """未绑过模型的 Agent 挂上公司默认对话模型再开工，只改数据不丢框架。
+
+    没有已配模型的 Agent 会回复 "(未发言)".
+    """
+    from app.model_discovery import chat_model_condition
+
+    default_model = (await db.execute(
+        select(Model.id).where(chat_model_condition())
+        .order_by(Model.created_at).limit(1))).scalar_one_or_none()
+    for a in agents:
+        cfg = (await db.execute(select(AgentModelConfig).where(
+            AgentModelConfig.agent_id == str(a.id)))).scalars().first()
+        if not cfg and default_model:
+            db.add(AgentModelConfig(agent_id=str(a.id), role="primary",
+                                    model_id=default_model))
+            await db.flush()
+
+
+async def _llm_round(gw, agent, messages, emit=None):
+    """跑一轮 LLM，返回与 chat() 同形状的 {content, tool_calls, finish_reason}。
+
+    给了 emit 就走流式：思考、选了哪个模型、正文逐字出来只有流式才有，
+    分片照样攒回来，_agent_speak 后续的剥标记/工具/文档生成不必为流式各写一套。
+    流式一轮既没正文也没工具调用时改用非流式补一轮——只有 chat() 带
+    finish_reason，才能交给网关判断"是思考吃满预算要抬预算，还是采样踩空"。
+    """
+    if emit is None:
+        return await gw.chat_with_agent_models_by_agent(
+            agent, messages, tools=[WEB_SEARCH_TOOL], config=GROUP_CHAT_LLM_CONFIG)
+    await emit({"type": "delta_reset"})
+    parts: list[str] = []
+    done: dict = {}
+    async for ev in gw.stream_with_agent_models_by_agent(
+            agent, messages, tools=[WEB_SEARCH_TOOL],
+            config=GROUP_CHAT_LLM_CONFIG):
+        if ev.get("type") == "done":
+            done = ev
+            continue
+        if ev.get("type") == "delta":
+            parts.append(ev.get("text") or "")
+        await emit(ev)
+    content = "".join(parts)
+    tool_calls = done.get("tool_calls") or []
+    if content.strip() or tool_calls:
+        return {"content": content, "tool_calls": done.get("tool_calls"),
+                "finish_reason": "stop"}
+    await emit({"type": "status", "text": "这轮没吐出内容，换非流式补一轮…"})
+    return await gw.chat_with_agent_models_by_agent(
+        agent, messages, tools=[WEB_SEARCH_TOOL], config=GROUP_CHAT_LLM_CONFIG)
+
+
+async def _agent_speak(db, gw, agent, topic, history_lines, emit=None):
+    """单个 Agent 发言：知识库 + 可选 web_search + 同事发言可见。
+
+    ``emit`` 给定时全程走流式：思考、模型选择/降级、搜索工具、逐字正文都会
+    播报出去；不给时（阻塞式 POST）行为和以前完全一致。
+    """
     from app.kb_engine import cost_optimized_rag
     from app.public_doc_skill import get_public_doc_system_prompt
     import re as _re
@@ -200,15 +394,22 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
         logger.warning("群聊文档风格注入失败 agent=%s: %s", agent.id, style_err,
                        exc_info=True)
     # 知识库
+    await _forward(emit, {"type": "status", "text": "正在翻本项目知识库…"})
     try:
         rag = await cost_optimized_rag(db, agent.company_id, str(agent.id),
                                        topic[:300], agent=agent)
         if rag.get("context_text"):
             messages.append({"role": "system",
                              "content": f"相关知识库：\n{rag['context_text'][:2000]}"})
+        await _forward(emit, {
+            "type": "status",
+            "text": ("知识库里找到相关内容" if rag.get("context_text")
+                     else "知识库没有相关资料，凭本岗位经验回答")})
     except Exception as kb_err:
         logger.warning("群聊知识库检索失败 agent=%s: %s", agent.id, kb_err,
                        exc_info=True)
+        await _forward(emit, {"type": "status",
+                              "text": "知识库检索失败，本轮不带知识库资料"})
     # 历史发言（含其他 Agent）
     if history_lines:
         messages.append({"role": "system",
@@ -220,8 +421,7 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
             "然后对搜索结果进行总结提炼（3-5条要点）后回答。严禁凭记忆编造数据。"})
     messages.append({"role": "user", "content": topic})
 
-    llm = await gw.chat_with_agent_models_by_agent(
-        agent, messages, tools=[WEB_SEARCH_TOOL], config=GROUP_CHAT_LLM_CONFIG)
+    llm = await _llm_round(gw, agent, messages, emit=emit)
     content = (llm.get("content") or "").strip()
     # agnes-2.5-flash 可能返回空 content 但有 tool_calls，走下方工具调用分支
     if not content and not (llm.get("tool_calls") or []):
@@ -232,12 +432,14 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
         if llm.get("finish_reason") == "length":
             logger.warning("群聊发言正文被 token 预算截断，网关重发后仍为空 "
                            "agent=%s topic=%s", agent.name, (topic or "")[:60])
+            await _forward(emit, {"type": "status",
+                                  "text": "思考把这一轮的额度用完了，正文没能生成…"})
         else:
             logger.warning("群聊发言空正文，重发一次 agent=%s finish=%s topic=%s",
                            agent.name, llm.get("finish_reason"), (topic or "")[:60])
-            llm = await gw.chat_with_agent_models_by_agent(
-                agent, messages, tools=[WEB_SEARCH_TOOL],
-                config=GROUP_CHAT_LLM_CONFIG)
+            await _forward(emit, {"type": "status",
+                                  "text": "这轮没给出内容，同一份上下文重发一次…"})
+            llm = await _llm_round(gw, agent, messages, emit=emit)
             content = (llm.get("content") or "").strip()
             if not content and not (llm.get("tool_calls") or []):
                 logger.warning("群聊发言重发后仍为空 agent=%s finish=%s topic=%s",
@@ -260,8 +462,7 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
         for tc in tool_calls:
             try:
                 args = json.loads(tc.get("function", {}).get("arguments", "{}"))
-                from app.skill_system import execute_skill
-                res = await execute_skill(tc["function"]["name"], args)
+                res = await _execute_tool_step(emit, tc, args)
                 hits = (res.get("result") or {}).get("results") or []
                 summary = "\n".join(
                     f"- {h.get('title','')}: {(h.get('body') or '')[:150]}"
@@ -270,7 +471,10 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
                     search_used = True
                     q = args.get("query", "")
                     search_summaries.append(f"搜索「{q}」的结果：\n{summary}")
-            except Exception:
+            except Exception as tool_err:
+                logger.warning("群聊首轮工具调用失败 tool=%s agent=%s: %s",
+                               (tc.get("function") or {}).get("name"),
+                               agent.id, tool_err, exc_info=True)
                 continue
         if search_summaries:
             # agnes 对标准 tool role 支持不佳——用 user 消息注入搜索结果
@@ -280,11 +484,11 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
                              "content": "[web_search 搜索结果]\n"
                                         + "\n\n".join(search_summaries)
                                         + "\n\n请基于以上搜索结果总结提炼（3-5条要点），从你的专业角度回答。"})
+            await _forward(emit, {"type": "status",
+                                  "text": "搜到了，正在基于结果总结…"})
             # 多轮工具调用循环（最多3轮），直到模型给出总结性回答
             for _ in range(3):
-                second = await gw.chat_with_agent_models_by_agent(
-                    agent, messages, tools=[WEB_SEARCH_TOOL],
-                    config=GROUP_CHAT_LLM_CONFIG)
+                second = await _llm_round(gw, agent, messages, emit=emit)
                 s_content = (second.get("content") or "").strip()
                 s_struct = second.get("tool_calls") or []
                 s_text = _parse_text_tool_calls(s_content)
@@ -294,8 +498,7 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
                     for tc in s_struct:
                         try:
                             args2 = json.loads((tc.get("function") or {}).get("arguments", "{}"))
-                            from app.skill_system import execute_skill as _es
-                            r2 = await _es(tc["function"]["name"], args2)
+                            r2 = await _execute_tool_step(emit, tc, args2)
                             messages.append({"role": "assistant", "content": "", "tool_calls": [tc]})
                             messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                              "content": str((r2.get("result") or r2))[:1500]})
@@ -313,8 +516,7 @@ async def _agent_speak(db, gw, agent, topic, history_lines):
                     for tc in s_text:
                         try:
                             args2 = json.loads(tc["function"]["arguments"])
-                            from app.skill_system import execute_skill as _es
-                            r2 = await _es(tc["function"]["name"], args2)
+                            r2 = await _execute_tool_step(emit, tc, args2)
                             res_data = r2.get("result") or {}
                             hits = (res_data.get("results") or [])[:5]
                             summary = "\n".join(
@@ -416,25 +618,12 @@ async def group_chat(scope: str, scope_id: str, data: GroupChatIn,
     # 3. 依次发言（后说的能看到先说的）；未配置模型的回退全局默认模型。
     # 回退必须限定「能对话」的模型并按登记时间取：这里曾经用 select(Model.id)
     # 的第一行，撞上图片模型后整群成员每轮都 400，且错误只有一句 Bad Request。
-    from app.models.agent import AgentModelConfig
-    from app.model_discovery import chat_model_condition
-    default_model = (await db.execute(
-        select(Model.id).where(chat_model_condition())
-        .order_by(Model.created_at).limit(1))).scalar_one_or_none()
-
-    async def _ensure_model(a):
-        cfg = (await db.execute(select(AgentModelConfig).where(
-            AgentModelConfig.agent_id == str(a.id)))).scalars().first()
-        if not cfg and default_model:
-            db.add(AgentModelConfig(agent_id=str(a.id), role="primary",
-                                    model_id=default_model))
-            await db.flush()
+    await _prepare_default_models(db, agents)
 
     replies = []
     sem = _company_semaphore(company_id)
     for ag in agents:
         try:
-            await _ensure_model(ag)
             # 模型配置（及此前发言）先落库再调 LLM，避免写事务跨越网络等待
             await db.commit()
             # 按公司限制同时进行的群聊 LLM 调用数（含工具续轮）
@@ -453,6 +642,146 @@ async def group_chat(scope: str, scope_id: str, data: GroupChatIn,
         replies.append({"agent_id": str(ag.id), "agent_name": ag.name, **out})
         history.append((ag.name, out["text"]))
     return {"replies": replies}
+
+
+@router.post("/{scope}/{scope_id}/stream")
+async def group_chat_stream(
+    scope: str, scope_id: str, data: GroupChatIn,
+    company_id: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """老板发言 → 所有参与 Agent 依次反馈（互相可见），逐字实时输出。
+
+    与 ``group_chat`` 同一条数据链路（角色、模型、RAG、工具、正文）—— 只
+    不再等完整条结果，每条中间状态都转发给老板：
+
+    * ``group_start`` ：参与的所有代理、占比和开始时间
+    * ``agent_start``/``agent_done`` ：单个代理的思考/模型/工具/正文
+      （其 ``process`` 随 ``tool_end``/``done`` 缀回；`ProcessAccumulator`）
+    * ``group_done``/``error`` ：整轮结束或失败
+    * 静止超过 ``GROUP_CHAT_HEARTBEAT_S`` 秒自动补 ``status`` 心跳
+    * process 落库在每段 `agent_done` 前完成，`history` 回放同单聊
+
+    端点照常放在最后一段，不抢占 ``/{scope}/{scope_id}`` 的短路径。
+    """
+    if scope not in ("project", "task", "group"):
+        raise HTTPException(400, "scope must be project, task or group")
+    await _owned_company(db, user.id, company_id, Capability.OPERATE)
+    from app.model_gateway import ModelGateway
+    gw = ModelGateway(db)
+
+    # 1. 存老板消息
+    db.add(GroupChatMessage(
+        id=uuid.uuid4().hex[:32], company_id=company_id, scope=scope,
+        scope_id=scope_id, agent_id=None, agent_name=None, role="boss",
+        content={"text": data.message}))
+    await db.flush()
+
+    # 2. 取参与 Agent + 已有发言记录（先落库存量数据再流）
+    agents = await _get_member_agents(db, company_id, scope, scope_id)
+    prev = (await db.execute(select(GroupChatMessage).where(
+        GroupChatMessage.company_id == company_id,
+        GroupChatMessage.scope == scope,
+        GroupChatMessage.scope_id == scope_id).order_by(
+        GroupChatMessage.created_at))).scalars().all()
+    history = [(m.agent_name or ("我" if m.role == "boss" else "同事"),
+                (m.content or {}).get("text", "")) for m in prev]
+    await db.commit()
+
+    # 3. 未绑对应对话模型的 Agent 挂上默认模型再开工
+    await _prepare_default_models(db, agents)
+
+    agents_payload = [{"agent_id": str(a.id), "agent_name": a.name}
+                      for a in agents]
+
+    async def event_stream():
+        q = asyncio.Queue()
+
+        # 每个 Agent 各自的 活 过程
+        _active: dict = {"name": None, "proc": None}
+
+        async def emit(ev: dict) -> None:
+            """事件同时喂给当前 Agent 的 process 累加器（供落库回放）与消费端。"""
+            proc = _active.get("proc")
+            if proc is not None:
+                proc.feed(ev)
+            await q.put(ev)
+
+        async def heartbeat():
+            """没新事件时，15 秒补一次 status（心跳）保持连接不断。"""
+            while True:
+                await asyncio.sleep(GROUP_CHAT_HEARTBEAT_S)
+                name = _active["name"]
+                await q.put({"type": "status",
+                             "text": (f"{name} 仍在思考中，请稍候…" if name
+                                      else "进一步汇总中，请稍候…")})
+
+        async def agent_loop():
+            """按顺序跑每个 Agent，事件全部经由 q 输出。"""
+            try:
+                q.put_nowait({"type": "group_start",
+                              "text": f"会议开始（{len(agents)} 名员工参与）",
+                              "count": len(agents),
+                              "agents": agents_payload})
+                for ag in agents:
+                    proc = ProcessAccumulator()
+                    _active["name"] = ag.name
+                    _active["proc"] = proc
+                    q.put_nowait({"type": "agent_start",
+                                  "agent_id": str(ag.id),
+                                  "agent_name": ag.name})
+                    try:
+                        async with _company_semaphore(company_id):
+                            out = await _agent_speak(
+                                db, gw, ag, data.message,
+                                [f"{n}: {t}" for n, t in history],
+                                emit=emit)
+                    except Exception as e:
+                        out = {"text": f"（{ag.name} 发言失败：{e}）",
+                               "search_used": False}
+                    _active["name"] = None
+                    # process 必须随正文一起落库，history 才能回放
+                    db.add(GroupChatMessage(
+                        id=uuid.uuid4().hex[:32], company_id=company_id,
+                        scope=scope, scope_id=scope_id, agent_id=str(ag.id),
+                        agent_name=ag.name, role="agent",
+                        content={"text": out["text"],
+                                 "search_used": out["search_used"],
+                                 "process": proc.meta()}))
+                    await db.commit()
+                    q.put_nowait({"type": "agent_done",
+                                  "agent_id": str(ag.id),
+                                  "agent_name": ag.name,
+                                  "text": out["text"],
+                                  "search_used": out["search_used"],
+                                  "model": proc.model or ag.role})
+                q.put_nowait({"type": "group_done",
+                              "text": "谢谢大家，群聊结束", "count": len(agents)})
+                q.put_nowait(_GROUP_STREAM_DONE)
+            except Exception as e:
+                logger.warning("群聊流式失败: %s", e, exc_info=True)
+                q.put_nowait({"type": "error",
+                              "message": str(e) or type(e).__name__})
+                q.put_nowait(_GROUP_STREAM_DONE)
+
+        sem_task = asyncio.create_task(agent_loop())
+        hb = asyncio.create_task(heartbeat())
+        try:
+            while True:
+                ev = await q.get()
+                if ev is _GROUP_STREAM_DONE:
+                    break
+                yield _sse(ev)
+        finally:
+            sem_task.cancel()
+            hb.cancel()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache",
+                 "Connection": "keep-alive", "X-Accel-Buffering": "no"})
 
 
 @router.get("/{scope}/{scope_id}/history")
