@@ -5,7 +5,8 @@ from .user import User  # noqa: F401
 from .refresh_token import RefreshToken  # noqa: F401
 from .company import Company, Department  # noqa: F401
 from .membership import CompanyMember, DepartmentMember  # noqa: F401
-from .agent import Agent, AgentModelConfig, Model  # noqa: F401
+from .agent import Agent, AgentModelConfig, Model, ModelType  # noqa: F401
+from .model_provider import ModelProvider  # noqa: F401
 from .skill import AgentSkill, Skill  # noqa: F401
 from .task import (AgentExecution, ExecutionCheckpoint, Intervention, Task,  # noqa: F401
                    TaskEvent)

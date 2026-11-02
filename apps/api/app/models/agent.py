@@ -1,8 +1,10 @@
 """Agent digital employees + model configs (P1-04, P1-05)."""
 import enum
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, JSON, Enum, ForeignKey, String, Text
+from sqlalchemy import (Boolean, DateTime, JSON, Enum, ForeignKey, String,
+                        Text)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -31,6 +33,17 @@ class ModelProviderType(str, enum.Enum):
     GEMINI = "gemini"
 
 
+class ModelType(str, enum.Enum):
+    """模型用途。文本之外的类型不能当聊天模型绑定给员工。"""
+
+    TEXT = "text"
+    IMAGE = "image"
+    VIDEO = "video"
+    AUDIO = "audio"
+    EMBEDDING = "embedding"
+    OTHER = "other"
+
+
 class Model(TimestampMixin, Base):
     """A registered LLM endpoint (provider adapter config)."""
     __tablename__ = "models"
@@ -42,6 +55,26 @@ class Model(TimestampMixin, Base):
     api_key_env: Mapped[str | None] = mapped_column(String(200))
     model_id: Mapped[str] = mapped_column(String(200))  # e.g. agnes-2.5-flash
     config: Mapped[dict | None] = mapped_column(JSON, default=dict)
+
+    # --- 供应商与模型类型（全部可空：老库靠 ensure_columns 幂等补列） ---
+    # 归属的供应商。NULL = 升级前登记的直连模型，前端以「旧版直连」展示。
+    provider_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_providers.id", ondelete="SET NULL"),
+        nullable=True, index=True)
+    # text|image|video|audio|embedding|other。NULL 等价 text（升级前只有聊天模型）。
+    model_type: Mapped[str | None] = mapped_column(
+        String(20), nullable=True, index=True)
+    # 是否多模态（可接受/生成多种输入输出，如看图、生图）
+    multimodal: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # 能力标签：chat / vision / tools / reasoning / image_generation / ...
+    capabilities: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
+    # NULL 等价 True：历史模型默认可用。
+    enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=True)
+    # auto（上游拉取）| manual（人工设置）| default（无上游信息时按类型补全）
+    config_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # 上游原始元数据（上下文长度、模态、定价等），供重新同步与排查
+    upstream_meta: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=dict)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class AgentModelConfig(TimestampMixin, Base):

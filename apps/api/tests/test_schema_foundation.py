@@ -28,7 +28,7 @@ LEGACY_MIGRATIONS = API_ROOT / "alembic"
 
 NEW_TABLES = ("queue_items", "deliverable_comments",
               "company_subscriptions", "company_secrets",
-              "push_subscriptions", "thread_reads")
+              "push_subscriptions", "thread_reads", "model_providers")
 
 
 def _indexes(table_name: str) -> dict[str, tuple[str, ...]]:
@@ -215,7 +215,8 @@ def test_thread_reads_scope_is_unique():
 
 def test_migration_revisions_extend_current_heads():
     active = _script_dir(ACTIVE_MIGRATIONS)
-    assert active.get_heads() == ["0011"]
+    assert active.get_heads() == ["0012"]
+    assert active.get_revision("0012").down_revision == "0011"
     assert active.get_revision("0011").down_revision == "0010"
     assert active.get_revision("0010").down_revision == "0009"
     assert active.get_revision("0009").down_revision == "0008"
@@ -239,6 +240,7 @@ def test_migration_revisions_extend_current_heads():
         ("0009", "0009_ceo_growth.py"),
         ("0010", "0010_ceo_identity_skills.py"),
         ("0011", "0011_ceo_companion_threads.py"),
+        ("0012", "0012_model_providers.py"),
     ):
         path = ACTIVE_MIGRATIONS / "versions" / filename
         loaded = _load_revision(path)
