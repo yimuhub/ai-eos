@@ -36,6 +36,7 @@ import {
 import { confirmAction } from "@/components/ConfirmDialog";
 import { notify } from "@/components/Toast";
 import CeoPet from "@/components/CeoPet";
+import AttachmentPicker, { type Attachment } from "@/components/AttachmentPicker";
 import { desktopBridge } from "@/lib/desktopBridge";
 
 type Companion = {
@@ -71,7 +72,29 @@ type Msg = {
   thread_id?: string | null;
   created_at?: string;
   streaming?: boolean;
+  attachments?: AttachmentChip[];
 };
+
+type AttachmentChip = { id?: string; name: string; size?: number };
+
+type SkillItem = {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  scope: string;
+  source: string;
+  binding_source: string;
+};
+
+type ModelItem = {
+  id: string;
+  name: string;
+  provider_type: string;
+  model_id: string;
+};
+
+type Box = { x: number; y: number; w: number; h: number };
 
 type Pos = { right: number; bottom: number };
 
@@ -88,6 +111,27 @@ function fmtTokens(n: number): string {
 function fmtCost(n: number): string {
   if (!n) return "¥0";
   return n < 0.01 ? `¥${n.toFixed(4)}` : `¥${n.toFixed(2)}`;
+}
+
+function defaultDialogBox(): Box {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const w = Math.min(460, vw - 16);
+  const h = Math.min(720, vh - 16);
+  return { x: Math.max(0, vw - w - 12), y: Math.max(0, vh - h - 12), w, h };
+}
+
+function clampDialogBox(b: Box): Box {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const w = Math.min(b.w, vw);
+  const h = Math.min(b.h, vh);
+  return {
+    w,
+    h,
+    x: Math.max(0, Math.min(b.x, vw - w)),
+    y: Math.max(0, Math.min(b.y, vh - h)),
+  };
 }
 
 export default function CeoDock() {
@@ -121,6 +165,21 @@ export default function CeoDock() {
   const [isDesktopApp, setIsDesktopApp] = useState(false);
   const [desktopShortcutError, setDesktopShortcutError] = useState("");
 
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [skills, setSkills] = useState<SkillItem[]>([]);
+  const [installed, setInstalled] = useState<Record<string, boolean>>({});
+  const [skillQuery, setSkillQuery] = useState("");
+  const [skillBusy, setSkillBusy] = useState("");
+  const [skillsErr, setSkillsErr] = useState("");
+  const [models, setModels] = useState<ModelItem[]>([]);
+  const [modelId, setModelId] = useState("");
+  const [modelLoading, setModelLoading] = useState(false);
+  const [modelSaving, setModelSaving] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [box, setBox] = useState<Box | null>(null);
+  const [boxDragging, setBoxDragging] = useState(false);
+
   const [pos, setPos] = useState<Pos>({ right: 20, bottom: 24 });
   const [dragging, setDragging] = useState(false);
 
@@ -141,6 +200,7 @@ export default function CeoDock() {
   const inputRef = useRef<HTMLInputElement>(null);
   const threadsGen = useRef(0);
   const msgsGen = useRef(0);
+  const boxDragRef = useRef<{ dx: number; dy: number } | null>(null);
 
   recordingRef.current = recording;
 
@@ -181,7 +241,13 @@ export default function CeoDock() {
         `/ceo/threads/${tid}/messages?limit=200`,
       );
       if (gen !== msgsGen.current) return;
-      setMsgs(Array.isArray(d.messages) ? d.messages.map((m) => ({ ...m })) : []);
+      setMsgs(Array.isArray(d.messages) ? d.messages.map((m) => {
+        const meta = (m as Msg & { meta?: { attachments?: AttachmentChip[] } }).meta;
+        return {
+          ...m,
+          attachments: Array.isArray(meta?.attachments) ? meta.attachments : undefined,
+        };
+      }) : []);
       setSummary(d.summary || "");
     } catch (e) {
       if (gen === msgsGen.current && !silent) {
@@ -191,6 +257,48 @@ export default function CeoDock() {
       if (gen === msgsGen.current) setMsgsLoading(false);
     }
   }, []);
+
+  const loadModels = useCallback(async (agentId: string) => {
+    setModelLoading(true);
+    try {
+      const qs = cid ? `?company_id=${encodeURIComponent(cid)}` : "";
+      const list = await api.get<ModelItem[]>(`/models${qs}`);
+      const visible = Array.isArray(list) ? list : [];
+      setModels(visible);
+      const binds = await api.get<{ role: string; model_id: string }[]>(
+        `/agents/${agentId}/models`,
+      );
+      const primary = binds.find((b) => b.role === "primary")?.model_id;
+      setModelId(
+        primary && visible.some((m) => m.id === primary)
+          ? primary
+          : visible[0]?.id || "",
+      );
+    } catch {
+      // 模型列表拿不到不阻塞对话；下拉显示「未接入大模型」，发消息时仍走原绑定
+      setModels([]);
+      setModelId("");
+    } finally {
+      setModelLoading(false);
+    }
+  }, [cid]);
+
+  const loadSkills = useCallback(async (agentId: string) => {
+    setSkillsErr("");
+    try {
+      const qs = cid ? `?company_id=${encodeURIComponent(cid)}` : "";
+      const [all, bound] = await Promise.all([
+        api.get<SkillItem[]>(`/skills${qs}`),
+        api.get<SkillItem[]>(`/agents/${agentId}/skills`),
+      ]);
+      setSkills(Array.isArray(all) ? all : []);
+      const map: Record<string, boolean> = {};
+      for (const s of Array.isArray(bound) ? bound : []) map[s.id] = true;
+      setInstalled(map);
+    } catch (e) {
+      setSkillsErr(describeError(e, "读取技能失败"));
+    }
+  }, [cid]);
 
   /* ---------- 公司 / CEO 切换 ---------- */
 
@@ -248,6 +356,24 @@ export default function CeoDock() {
     const timer = window.setTimeout(() => inputRef.current?.focus(), 60);
     return () => window.clearTimeout(timer);
   }, [open, hasCeo, refreshCompanion, loadThreads]);
+
+  useEffect(() => {
+    if (!open) return;
+    setBox((prev) => (prev ? clampDialogBox(prev) : defaultDialogBox()));
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onResize = () => setBox((prev) => (prev ? clampDialogBox(prev) : prev));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || !hasCeo || !data?.ceo_agent_id) return;
+    void loadModels(data.ceo_agent_id);
+    void loadSkills(data.ceo_agent_id);
+  }, [open, hasCeo, data?.ceo_agent_id, loadModels, loadSkills]);
 
   useEffect(() => {
     // 流式进行中不重拉历史：否则服务端只落了老板那句，
@@ -480,6 +606,77 @@ export default function CeoDock() {
     }, 0);
   }
 
+  /* ---------- 对话框拖动 / 全屏 ---------- */
+
+  function onBoxDragStart(e: ReactPointerEvent<HTMLElement>) {
+    if (fullscreen || !box) return;
+    // 标题栏上的按钮/下拉不该触发拖动
+    if ((e.target as HTMLElement).closest("button,select,input,a")) return;
+    boxDragRef.current = { dx: e.clientX - box.x, dy: e.clientY - box.y };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setBoxDragging(true);
+  }
+
+  function onBoxDragMove(e: ReactPointerEvent<HTMLElement>) {
+    const d = boxDragRef.current;
+    if (!d) return;
+    setBox((prev) => (prev ? clampDialogBox({
+      ...prev,
+      x: e.clientX - d.dx,
+      y: e.clientY - d.dy,
+    }) : prev));
+  }
+
+  function onBoxDragEnd(e: ReactPointerEvent<HTMLElement>) {
+    if (!boxDragRef.current) return;
+    boxDragRef.current = null;
+    setBoxDragging(false);
+    if (e.currentTarget.hasPointerCapture?.(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+  }
+
+  /* ---------- 模型 / 技能 ---------- */
+
+  async function changeModel(next: string) {
+    const aid = data?.ceo_agent_id;
+    if (!aid || !next || next === modelId || modelSaving) return;
+    const prev = modelId;
+    setModelId(next);
+    setModelSaving(true);
+    try {
+      await api.put(`/agents/${aid}/switch-model`, { model_id: next });
+      const name = models.find((m) => m.id === next)?.name || "新模型";
+      notify("success", `CEO 已切换到「${name}」`);
+    } catch (e) {
+      setModelId(prev);
+      notify("error", describeError(e, "切换模型失败"));
+    } finally {
+      setModelSaving(false);
+    }
+  }
+
+  async function toggleSkill(s: SkillItem) {
+    const aid = data?.ceo_agent_id;
+    if (!aid || skillBusy) return;
+    const on = !!installed[s.id];
+    setSkillBusy(s.slug);
+    setSkillsErr("");
+    try {
+      if (on) {
+        await api.post(`/skills/${s.slug}/uninstall`, { agent_id: aid });
+      } else {
+        await api.post(`/skills/${s.slug}/install`, { agent_id: aid });
+      }
+      setInstalled((prev) => ({ ...prev, [s.id]: !on }));
+      notify("success", on ? `已解绑「${s.name}」` : `已绑定「${s.name}」`);
+    } catch (e) {
+      setSkillsErr(describeError(e, on ? "解绑失败" : "绑定失败"));
+    } finally {
+      setSkillBusy("");
+    }
+  }
+
   /* ---------- 对话动作 ---------- */
 
   const patchLast = (patch: (m: Msg) => Msg) => {
@@ -492,8 +689,15 @@ export default function CeoDock() {
   };
 
   async function send(raw?: string) {
-    const text = (raw ?? input).trim();
+    const typed = (raw ?? input).trim();
     const agentId = data?.ceo_agent_id;
+    const sentAttachments: AttachmentChip[] = attachments.map((a) => ({
+      id: a.id || undefined,
+      name: a.name,
+      size: a.size,
+    }));
+    // 允许只发附件：后端要求非空消息，补一句默认指令
+    const text = typed || (sentAttachments.length ? "请帮我看看我上传的附件。" : "");
     if (!text || busy || !agentId) return;
     if (data?.budget_paused) {
       notify("error", "成本预算已暂停，请先到「Token 统计」调高额度");
@@ -501,12 +705,17 @@ export default function CeoDock() {
     }
 
     setInput("");
+    setAttachments([]);
     setErr("");
     setStatus("");
     setBusy(true);
     setMsgs((prev) => [
       ...prev,
-      { role: "boss", content: text },
+      {
+        role: "boss",
+        content: text,
+        attachments: sentAttachments.length ? sentAttachments : undefined,
+      },
       { role: "agent", content: "", streaming: true },
     ]);
 
@@ -519,6 +728,11 @@ export default function CeoDock() {
       await streamPost(`/agents/${agentId}/chat/stream`, {
         message: text,
         thread_id: threadIdRef.current,
+        // 上传失败的条目没有 id，不带给后端，但气泡里仍保留文件名
+        attachments: sentAttachments
+          .filter((a) => !!a.id)
+          .map((a) => ({ id: a.id, name: a.name })),
+        model_id: modelId || undefined,
       }, {
         signal: ac.signal,
         onEvent: (ev) => {
@@ -622,6 +836,9 @@ export default function CeoDock() {
     setOpen(false);
     setSettingsOpen(false);
     setRecording(false);
+    setFullscreen(false);
+    setSkillsOpen(false);
+    setAttachments([]);
   }, []);
 
   // Esc 关闭抽屉；正在录制快捷键时由录制逻辑自己处理。
@@ -632,17 +849,29 @@ export default function CeoDock() {
       if (e.key !== "Escape" || recordingRef.current) return;
       e.preventDefault();
       e.stopImmediatePropagation();
+      // 技能面板开着时先收起面板，再按一次才关对话框
+      if (skillsOpen) {
+        setSkillsOpen(false);
+        return;
+      }
       close();
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [open, close]);
+  }, [open, close, skillsOpen]);
 
   if (!data?.has_ceo) return null;
 
   const label = comboLabel(shortcut, isMac);
   const last = msgs[msgs.length - 1];
   const showThinking = busy && !last?.streaming;
+  const skillQ = skillQuery.trim().toLowerCase();
+  const visibleSkills = skills
+    .filter((s) => !skillQ
+      || `${s.name} ${s.slug} ${s.description || ""}`.toLowerCase().includes(skillQ))
+    .sort((a, b) => Number(!!installed[b.id]) - Number(!!installed[a.id])
+      || a.name.localeCompare(b.name, "zh"));
+  const boundCount = Object.values(installed).filter(Boolean).length;
 
   return (
     <>
@@ -725,19 +954,37 @@ export default function CeoDock() {
         <div
           role="dialog"
           aria-label="和 CEO 的对话"
-          className="fixed z-[9500] flex flex-col overflow-hidden rounded-2xl border shadow-2xl animate-fade-up"
+          className={`fixed z-[9500] flex flex-col overflow-hidden border shadow-2xl animate-fade-up ${
+            fullscreen ? "rounded-none" : "rounded-2xl"
+          }`}
           style={{
-            right: 12,
-            bottom: 12,
-            width: "min(400px, calc(100vw - 24px))",
-            height: "min(680px, calc(100vh - 24px))",
+            ...(fullscreen
+              ? { left: 0, top: 0, width: "100vw", height: "100vh" }
+              : box
+                ? { left: box.x, top: box.y, width: box.w, height: box.h }
+                : {
+                    right: 12,
+                    bottom: 12,
+                    width: "min(420px, calc(100vw - 24px))",
+                    height: "min(720px, calc(100vh - 24px))",
+                  }),
             background: "linear-gradient(180deg, #15151f, #0f0f16)",
             borderColor: "var(--border)",
           }}
         >
           <header
-            className="flex items-center gap-2.5 border-b px-3.5 py-3"
-            style={{ borderColor: "var(--border)" }}
+            onPointerDown={onBoxDragStart}
+            onPointerMove={onBoxDragMove}
+            onPointerUp={onBoxDragEnd}
+            onPointerCancel={onBoxDragEnd}
+            onDoubleClick={(e) => {
+              if ((e.target as HTMLElement).closest("button,select,input,a")) return;
+              setFullscreen((v) => !v);
+            }}
+            className={`flex items-center gap-2.5 border-b px-3.5 py-3 ${
+              fullscreen ? "" : boxDragging ? "cursor-grabbing" : "cursor-grab"
+            }`}
+            style={{ borderColor: "var(--border)", touchAction: "none" }}
           >
             <div
               className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[10px] font-bold tracking-wide text-white"
@@ -754,6 +1001,16 @@ export default function CeoDock() {
                 公司 CEO · 今日 {fmtTokens(data.today_tokens)} tokens · {fmtCost(data.today_cost)}
               </div>
             </div>
+            <button
+              type="button"
+              onClick={() => setFullscreen((v) => !v)}
+              className="flex h-7 w-7 items-center justify-center rounded-lg text-sm hover:bg-white/[0.06]"
+              style={{ color: "var(--muted)" }}
+              title={fullscreen ? "退出全屏（也可双击标题栏）" : "全屏（也可双击标题栏）"}
+              aria-label={fullscreen ? "退出全屏" : "全屏"}
+            >
+              {fullscreen ? "⤡" : "⛶"}
+            </button>
             <button
               type="button"
               onClick={() => setSettingsOpen((v) => !v)}
@@ -885,6 +1142,173 @@ export default function CeoDock() {
             </button>
           </div>
 
+          {/* 模型 / 技能 */}
+          <div
+            className="flex items-center gap-1.5 border-b px-3 py-2"
+            style={{ borderColor: "var(--border)" }}
+          >
+            <span className="shrink-0 text-[10px]" style={{ color: "var(--muted)" }}>
+              模型
+            </span>
+            <select
+              className="input min-w-0 flex-1 !py-1 text-[11px]"
+              value={modelId}
+              disabled={modelLoading || modelSaving || busy || !models.length}
+              onChange={(e) => void changeModel(e.target.value)}
+              aria-label="选择 CEO 使用的大模型"
+              title="切换 CEO 使用的大模型"
+            >
+              {!models.length && <option value="">未接入大模型</option>}
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                  {m.model_id ? ` · ${m.model_id}` : ""}
+                </option>
+              ))}
+            </select>
+            {modelSaving && (
+              <span className="shrink-0 text-[10px]" style={{ color: "var(--muted)" }}>
+                保存中…
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => setSkillsOpen((v) => !v)}
+              disabled={busy}
+              className={`flex shrink-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] transition-colors ${
+                skillsOpen ? "bg-indigo-500/20 text-indigo-300" : "hover:bg-white/[0.06]"
+              }`}
+              style={
+                skillsOpen
+                  ? undefined
+                  : { color: "var(--muted)", border: "1px solid var(--border)" }
+              }
+              aria-expanded={skillsOpen}
+              aria-label="绑定技能"
+              title="绑定 / 解绑 CEO 的技能"
+            >
+              技能{boundCount ? ` · ${boundCount}` : ""}
+            </button>
+          </div>
+
+          {skillsOpen && (
+            <div
+              className="absolute inset-0 z-20 flex flex-col"
+              style={{ background: "rgba(11,11,16,0.97)" }}
+            >
+              <div
+                className="flex items-center gap-2 border-b px-3.5 py-3"
+                style={{ borderColor: "var(--border)" }}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-semibold">CEO 技能</div>
+                  <div className="text-[10px]" style={{ color: "var(--muted)" }}>
+                    已绑定 {boundCount} / {skills.length} 项 · 点击即切换
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSkillsOpen(false)}
+                  className="flex h-7 w-7 items-center justify-center rounded-lg text-xs hover:bg-white/[0.06]"
+                  style={{ color: "var(--muted)" }}
+                  aria-label="关闭技能面板"
+                >
+                  ✕
+                </button>
+              </div>
+              <div
+                className="border-b px-3.5 py-2"
+                style={{ borderColor: "var(--border)" }}
+              >
+                <input
+                  value={skillQuery}
+                  onChange={(e) => setSkillQuery(e.target.value)}
+                  placeholder="搜索技能…"
+                  className="input w-full !py-1.5 text-xs"
+                  aria-label="搜索技能"
+                />
+              </div>
+              <div className="ws-scroll flex-1 space-y-1.5 overflow-y-auto px-3 py-3">
+                {skillsErr && (
+                  <div
+                    className="rounded-lg px-2.5 py-2 text-[11px]"
+                    style={{ background: "rgba(248,113,113,0.12)", color: "#fca5a5" }}
+                  >
+                    {skillsErr}
+                  </div>
+                )}
+                {!visibleSkills.length && (
+                  <p className="py-8 text-center text-xs" style={{ color: "var(--muted)" }}>
+                    {skills.length ? "没有匹配的技能" : "正在读取技能…"}
+                  </p>
+                )}
+                {visibleSkills.map((s) => {
+                  const on = !!installed[s.id];
+                  return (
+                    <button
+                      key={s.id}
+                      type="button"
+                      onClick={() => void toggleSkill(s)}
+                      disabled={!!skillBusy}
+                      className="flex w-full items-start gap-2.5 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-white/[0.05] disabled:opacity-60"
+                      style={{
+                        border: `1px solid ${
+                          on ? "rgba(99,102,241,0.4)" : "var(--border)"
+                        }`,
+                        background: on ? "rgba(99,102,241,0.09)" : "transparent",
+                      }}
+                      aria-pressed={on}
+                    >
+                      <span
+                        className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border text-[10px] font-bold"
+                        style={{
+                          borderColor: on ? "#6366f1" : "var(--border)",
+                          background: on ? "#4f46e5" : "transparent",
+                          color: "#fff",
+                        }}
+                        aria-hidden
+                      >
+                        {on ? "✓" : ""}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-1.5">
+                          <span className="truncate text-xs font-medium">{s.name}</span>
+                          {s.binding_source === "ceo_bundle" && (
+                            <span
+                              className="shrink-0 rounded px-1 py-0.5 text-[9px]"
+                              style={{ background: "rgba(251,191,36,0.12)", color: "#fcd34d" }}
+                            >
+                              CEO 专属
+                            </span>
+                          )}
+                          {skillBusy === s.slug && (
+                            <span className="shrink-0 text-[9px]" style={{ color: "var(--muted)" }}>
+                              处理中…
+                            </span>
+                          )}
+                        </span>
+                        {s.description && (
+                          <span
+                            className="mt-0.5 block max-h-8 overflow-hidden text-[10px] leading-relaxed"
+                            style={{ color: "var(--muted)" }}
+                          >
+                            {s.description}
+                          </span>
+                        )}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p
+                className="border-t px-3.5 py-2 text-[10px] leading-relaxed"
+                style={{ borderColor: "var(--border)", color: "var(--muted)" }}
+              >
+                手动绑定与 CEO 自主学会的技能会一直保留；CEO 专属技能随任命自动装载，解任时一并解除。
+              </p>
+            </div>
+          )}
+
           {data.budget_paused && (
             <div
               className="px-3.5 py-2 text-[11px]"
@@ -956,6 +1380,19 @@ export default function CeoDock() {
                     style={boss ? undefined : { background: "var(--surface-2)", color: "var(--foreground)" }}
                   >
                     {m.content || (m.streaming ? "…" : "（空）")}
+                    {!!m.attachments?.length && (
+                      <span className="mt-1.5 flex flex-wrap gap-1">
+                        {m.attachments.map((a, ai) => (
+                          <span
+                            key={`${a.id || a.name}-${ai}`}
+                            className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px]"
+                            style={{ background: "rgba(255,255,255,0.16)", color: "#e5e7eb" }}
+                          >
+                            📄 {a.name}
+                          </span>
+                        ))}
+                      </span>
+                    )}
                     {m.streaming && <span className="ws-caret" aria-hidden />}
                   </div>
                 </div>
@@ -988,6 +1425,14 @@ export default function CeoDock() {
 
           {/* 输入区 */}
           <div className="border-t p-2.5" style={{ borderColor: "var(--border)" }}>
+            <div className="mb-2">
+              <AttachmentPicker
+                value={attachments}
+                onChange={setAttachments}
+                disabled={busy || data.budget_paused}
+                label="上传附件"
+              />
+            </div>
             <div className="flex items-center gap-1.5">
               <input
                 ref={inputRef}
@@ -1021,7 +1466,7 @@ export default function CeoDock() {
                 <button
                   type="button"
                   onClick={() => void send()}
-                  disabled={!input.trim() || data.budget_paused}
+                  disabled={(!input.trim() && !attachments.length) || data.budget_paused}
                   className="btn-primary shrink-0 !px-3.5 !py-2 text-xs disabled:opacity-40"
                 >
                   发送
