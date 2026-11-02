@@ -94,6 +94,20 @@ async def lifespan(app: FastAPI):
     if _added:
         logger.info("[startup] 自动补齐 %d 个新增列", len(_added))
 
+    # 历史 CEO 自愈：升级前已任命的 CEO 也要改名、补齐专属技能包。
+    # 失败只记日志，不阻断启动——技能是增强项，不该让服务起不来。
+    try:
+        from app.ceo_skill_bundle import ensure_ceo_bundles
+        from app.db.session import AsyncSessionLocal
+        async with AsyncSessionLocal() as _ceo_session:
+            _ceo_fix = await ensure_ceo_bundles(_ceo_session)
+            await _ceo_session.commit()
+        if _ceo_fix["agents"]:
+            logger.info("[startup] CEO 自愈：%d 名 CEO，补齐 %d 项技能",
+                        _ceo_fix["agents"], _ceo_fix["skills_added"])
+    except Exception as _ceo_e:  # noqa: BLE001 — 自愈失败不能拖住服务
+        logger.warning("[startup] CEO 技能包自愈失败（不影响启动）：%s", _ceo_e)
+
     # 超管回填（P5）：老库没有 is_superadmin 概念，若不标记一个超管，
     # 安装向导会把已有数据的安装误判成"全新安装"。必须放在 ensure_columns
     # 之后（列可能是上一步补出来的）。失败只记日志，绝不阻断启动。

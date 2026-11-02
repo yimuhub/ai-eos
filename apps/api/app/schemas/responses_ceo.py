@@ -41,6 +41,15 @@ class CeoAssignOut(BaseModel):
     ceo_agent_name: str
 
 
+class CeoReleaseOut(BaseModel):
+    model_config = _free()
+
+    company_id: str
+    released_agent_id: str
+    released_agent_name: str
+    restored_name: str
+
+
 class CeoPlannedSubtaskOut(BaseModel):
     model_config = _free()
 

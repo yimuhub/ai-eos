@@ -230,14 +230,16 @@ async def pick_coordinator(db: AsyncSession, company_id: str,
     if agent:
         return agent
 
-    # 兜底：老数据没有 is_ceo 标记，按岗位名找
+    # 兜底只服务「从未写过 is_ceo」的老数据；显式 False 表示老板已解除，
+    # 不能再按岗位名把同一个人认回 CEO。
     candidates = (await db.execute(
         select(Agent).where(Agent.company_id == company_id))).scalars().all()
-    hints = ("ceo", "总经理", "总裁", "首席执行官", "负责人")
-    for a in candidates:
-        text = f"{a.name or ''} {a.role or ''}".lower()
-        if any(h in text for h in hints):
-            return a
+    if all(a.is_ceo is None for a in candidates):
+        hints = ("ceo", "总经理", "总裁", "首席执行官", "负责人")
+        for a in candidates:
+            text = f"{a.name or ''} {a.role or ''}".lower()
+            if any(h in text for h in hints):
+                return a
     raise CeoError(
         "本公司还没有指定 CEO。请先在「CEO 指挥台」里指定一位员工担任超级 Agent。", 409)
 
@@ -1386,20 +1388,58 @@ async def reclaim_mission(db: AsyncSession, mission_id: str) -> dict:
             "retry_tasks": len(retries)}
 
 
+async def _release_ceo_identity(db: AsyncSession, agent: Agent) -> int:
+    """在同一事务里收回 CEO 身份：还原姓名 + 卸掉专属技能包。"""
+    from app.ceo_skill_bundle import release_ceo_bundle
+
+    if not agent.is_ceo:
+        return 0
+    agent.is_ceo = False
+    if agent.pre_ceo_name:
+        agent.name = agent.pre_ceo_name
+        agent.pre_ceo_name = None
+    return await release_ceo_bundle(db, agent)
+
+
 async def set_ceo_agent(db: AsyncSession, company_id: str,
                         agent_id: str) -> dict:
+    from app.ceo_skill_bundle import apply_ceo_bundle, ensure_ceo_identity
+
     agent = await db.get(Agent, agent_id)
     if agent is None or agent.company_id != company_id:
         raise CeoError("员工不存在或不属于这家公司", 404)
-    await db.execute(update(Agent).where(Agent.company_id == company_id)
-                     .values(is_ceo=False)
-                     .execution_options(synchronize_session=False))
+    # 切换 CEO 时旧 CEO 也要完整卸任：原名还原、专属技能收回。
+    previous = (await db.execute(
+        select(Agent).where(Agent.company_id == company_id,
+                            Agent.is_ceo.is_(True))
+    )).scalars().all()
+    for old in previous:
+        if str(old.id) != str(agent.id):
+            await _release_ceo_identity(db, old)
     agent.is_ceo = True
+    ensure_ceo_identity(agent)
+    await apply_ceo_bundle(db, agent)
     await log_event(db, "ceo.agent_assigned", "agent", agent.id, "user", None,
                     {"agent_name": agent.name}, company_id=company_id)
     await db.commit()
     return {"company_id": company_id, "ceo_agent_id": agent.id,
             "ceo_agent_name": agent.name}
+
+
+async def release_ceo_agent(db: AsyncSession, company_id: str,
+                            agent_id: str) -> dict:
+    """解除 CEO：还原姓名、收回专属技能，保留其他技能与历史记录。"""
+    agent = await db.get(Agent, agent_id)
+    if agent is None or agent.company_id != company_id:
+        raise CeoError("员工不存在或不属于这家公司", 404)
+    if not agent.is_ceo:
+        raise CeoError("该员工当前不是 CEO", 409)
+    await _release_ceo_identity(db, agent)
+    await log_event(db, "ceo.agent_released", "agent", agent.id, "user", None,
+                    {"restored_name": agent.name}, company_id=company_id)
+    await db.commit()
+    return {"company_id": company_id, "released_agent_id": agent.id,
+            "released_agent_name": "CEO", "restored_name": agent.name}
 
 
 # ---------------------------------------------------------------------------

@@ -83,6 +83,9 @@ class Agent(TimestampMixin, Base):
     # 超级 Agent（CEO）：一个公司至多一个。可空是为了让老库幂等补列，
     # NULL 等价 False；切换 CEO 时由路由把旧的置 False（不删除，保留历史）。
     is_ceo: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
+    # 任命 CEO 前的姓名。任命时 name 改为统一显示名「CEO」，解除时按它还原；
+    # 单独存列而不是塞进 data_scope：改名是可逆的身份状态，不是业务约束。
+    pre_ceo_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     department: Mapped["Department | None"] = relationship(back_populates="agents")
     group: Mapped["AgentGroup | None"] = relationship(back_populates="agents")

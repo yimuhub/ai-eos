@@ -13,7 +13,7 @@ from app.ceo_engine import (CeoError, append_instruction, build_digest,
                             cancel_mission, create_mission, ensure_digest_schedule,
                             launch_mission, mission_detail, mission_list_item,
                             pause_mission, push_digest, reclaim_mission,
-                            resume_mission, set_ceo_agent)
+                            release_ceo_agent, resume_mission, set_ceo_agent)
 from app.core.permissions import Capability
 from app.core.logging_config import get_logger
 from app.db.session import get_db
@@ -25,8 +25,8 @@ from app.schemas.responses_ceo import (CeoAssignOut, CeoCancelOut,
                                        CeoDigestOut, CeoDigestScheduleOut,
                                        CeoInstructionOut, CeoLaunchOut,
                                        CeoMissionDetailOut, CeoMissionListItemOut,
-                                       CeoMissionPreviewOut, CeoReportOut,
-                                       CeoRetryOut, CeoStatusOut)
+                                       CeoMissionPreviewOut, CeoReleaseOut,
+                                       CeoReportOut, CeoRetryOut, CeoStatusOut)
 from app.services.ceo_concurrency import current_capacity
 
 router = APIRouter(prefix="/ceo", tags=["ceo"])
@@ -46,6 +46,11 @@ class LaunchIn(BaseModel):
 
 
 class AssignCeoIn(BaseModel):
+    company_id: str
+    agent_id: str
+
+
+class ReleaseCeoIn(BaseModel):
     company_id: str
     agent_id: str
 
@@ -90,7 +95,9 @@ async def get_ceo_config(company_id: str = Query(...),
         select(Agent).where(Agent.company_id == company_id)
         .order_by(Agent.created_at))).scalars().all()
     ceo = next((a for a in agents if a.is_ceo), None)
-    if ceo is None:
+    # 只有老数据（从未写过 is_ceo）才按岗位名兜底。解除 CEO 会显式写 False，
+    # 若继续按岗位名兜底，刚解除的「总经理」会立刻又被认成 CEO。
+    if ceo is None and all(a.is_ceo is None for a in agents):
         hints = ("ceo", "总经理", "总裁", "首席执行官", "负责人")
         ceo = next(
             (a for a in agents
@@ -135,6 +142,19 @@ async def assign_ceo(data: AssignCeoIn,
         logger.warning("周考调度创建失败 company=%s: %s",
                        data.company_id, exc)
     return result
+
+
+@router.post("/config/release", response_model=CeoReleaseOut)
+async def release_ceo(data: ReleaseCeoIn,
+                      db: AsyncSession = Depends(get_db),
+                      user=Depends(deps.get_current_user)):
+    """解除 CEO：原名还原、专属技能收回；调度与历史记录保留。"""
+    await deps.assert_company_capability(db, user.id, data.company_id,
+                                         Capability.ADMIN)
+    try:
+        return await release_ceo_agent(db, data.company_id, data.agent_id)
+    except CeoError as exc:
+        _raise(exc)
 
 
 # ---------------------------------------------------------------------------

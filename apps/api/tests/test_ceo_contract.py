@@ -117,7 +117,7 @@ def _assert_keys(body: dict, model, where: str = "") -> None:
 
 async def test_every_ceo_route_declares_a_response_model():
     routes = [r for r in ceo_routes.router.routes]
-    assert len(routes) == 16, f"CEO 端点数量变了：{len(routes)}"
+    assert len(routes) == 17, f"CEO 端点数量变了：{len(routes)}"
     bare = [f"{sorted(r.methods)} {r.path}" for r in routes
             if getattr(r, "response_model", None) is None]
     assert not bare, f"这些 CEO 端点返回裸 dict：{bare}"
@@ -210,7 +210,7 @@ async def test_gate_ignores_non_throttle_failures():
 
 async def test_mission_preview_keeps_more_than_five_subtasks(
         client, make_user, make_company, monkeypatch, queued_jobs):
-    plan = _plan(8, ["王总", "小李", "小张"])
+    plan = _plan(8, ["CEO", "小李", "小张"])
     _install_fake_chat(monkeypatch, plan)
     user, co, ids = await _company_with_agents(client, make_user, make_company)
 
@@ -305,7 +305,7 @@ async def test_mission_preview_keeps_more_than_five_subtasks(
 
 async def test_launch_requires_planning_state(client, make_user, make_company,
                                               monkeypatch, queued_jobs):
-    _install_fake_chat(monkeypatch, _plan(2, ["王总", "小李"]))
+    _install_fake_chat(monkeypatch, _plan(2, ["CEO", "小李"]))
     user, co, _ = await _company_with_agents(client, make_user, make_company)
     r = await client.post("/ceo/missions", json={
         "company_id": co["id"], "instruction": "写一份增长方案"},
@@ -333,7 +333,7 @@ def _plan_with_open_roles() -> dict:
         "terminology": {},
         "subtasks": [
             {"title": "增长策略", "description": "定主渠道与预算",
-             "agent_name": "王总"},
+             "agent_name": "CEO"},
             {"title": "内容排期", "description": "写选题与发布节奏",
              "agent_name": "内容主编", "agent_role": "内容主编",
              "department": "内容部", "group": "增长内容组",
@@ -508,7 +508,7 @@ async def test_new_hire_cap_dedup_and_name_collision(
         groups = (await s.execute(select(AgentGroup.name).where(
             AgentGroup.company_id == co["id"]))).scalars().all()
 
-    assert names == sorted(["王总", "小李", "小张", "分析师", "分析师（2）", "运营"]), \
+    assert names == sorted(["CEO", "小李", "小张", "分析师", "分析师（2）", "运营"]), \
         f"重名没有加后缀或招多了人：{names}"
     assert sorted(depts) == ["产品部", "设计部"], "只应建实际落位用到的部门"
     assert sorted(groups) == ["内容组", "视觉组"], "组的复用/新建不对"
@@ -608,7 +608,7 @@ async def test_execute_subtask_marks_short_output_off_track(
 
 async def test_mission_runs_retries_off_track_once_and_delivers_report(
         make_user, make_company, client, monkeypatch, queued_jobs):
-    plan = _plan(2, ["王总", "小李"])
+    plan = _plan(2, ["CEO", "小李"])
     _install_fake_chat(monkeypatch, plan, reviews=[
         {"title": "子任务1", "on_track": True, "reason": "符合"},
         {"title": "子任务2", "on_track": False, "reason": "答非所问，缺少预算"},
@@ -693,7 +693,7 @@ async def test_mission_runs_retries_off_track_once_and_delivers_report(
 
 async def test_resume_includes_subtasks_finished_before_pause(
         make_user, make_company, client, monkeypatch, queued_jobs):
-    plan = _plan(2, ["王总", "小李"])
+    plan = _plan(2, ["CEO", "小李"])
     seen = {"summary": ""}
 
     async def _fake_chat(db, agent, messages, max_tokens=1600):
@@ -752,7 +752,7 @@ async def test_resume_includes_subtasks_finished_before_pause(
 
 async def test_reclaim_reruns_after_completion(make_user, make_company, client,
                                                monkeypatch, queued_jobs):
-    _install_fake_chat(monkeypatch, _plan(2, ["王总", "小李"]))
+    _install_fake_chat(monkeypatch, _plan(2, ["CEO", "小李"]))
     user, co, _ = await _company_with_agents(client, make_user, make_company)
     created = await client.post("/ceo/missions", json={
         "company_id": co["id"], "instruction": "写一份增长方案"},
@@ -840,7 +840,7 @@ async def test_scheduler_executes_ceo_digest_action(client, make_user,
 
 async def test_viewer_can_read_but_cannot_operate_mission(
         client, make_user, make_company, monkeypatch, queued_jobs):
-    _install_fake_chat(monkeypatch, _plan(2, ["王总", "小李"]))
+    _install_fake_chat(monkeypatch, _plan(2, ["CEO", "小李"]))
     user, co, _ = await _company_with_agents(client, make_user, make_company)
     created = await client.post("/ceo/missions", json={
         "company_id": co["id"], "instruction": "写一份增长方案"},
@@ -876,7 +876,7 @@ async def test_viewer_can_read_but_cannot_operate_mission(
 
 async def test_cross_tenant_mission_access_is_404(tenants, client, monkeypatch,
                                                   queued_jobs):
-    _install_fake_chat(monkeypatch, _plan(2, ["王总", "小李"]))
+    _install_fake_chat(monkeypatch, _plan(2, ["CEO", "小李"]))
     alice, co = tenants.alice, tenants.alice_co
     agent = await _agent(client, alice, co["id"], "王总", "总经理")
     r = await client.post("/ceo/config", json={"company_id": co["id"],

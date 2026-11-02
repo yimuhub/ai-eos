@@ -36,3 +36,8 @@ class AgentSkill(TimestampMixin, Base):
 
     agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id"), index=True)
     skill_id: Mapped[str] = mapped_column(ForeignKey("skills.id"), index=True)
+    # 绑定来源：manual=手工安装，auto=自动配备，ceo_bundle=CEO 专属包。
+    # 解除 CEO 时只删 ceo_bundle，绝不误删老板手工装或员工自己学的技能。
+    # 可空是为了兼容升级前的老行（NULL 等价 manual）。
+    source: Mapped[str | None] = mapped_column(String(20), nullable=True,
+                                               default="manual")

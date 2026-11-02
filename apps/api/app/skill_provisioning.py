@@ -133,7 +133,7 @@ async def _bound_skill_ids(db: AsyncSession, agent_id: str) -> set[str]:
 
 
 async def bind_skill(db: AsyncSession, agent_id: str,
-                     skill: SkillRow) -> bool:
+                     skill: SkillRow, *, source: str = "auto") -> bool:
     """幂等安装：已装返回 False，新装返回 True。"""
     exists = (await db.execute(
         select(AgentSkill.id).where(AgentSkill.agent_id == agent_id,
@@ -141,7 +141,7 @@ async def bind_skill(db: AsyncSession, agent_id: str,
         .limit(1))).first()
     if exists:
         return False
-    db.add(AgentSkill(agent_id=agent_id, skill_id=skill.id))
+    db.add(AgentSkill(agent_id=agent_id, skill_id=skill.id, source=source))
     await db.flush()
     return True
 
@@ -156,6 +156,11 @@ async def local_skill_matches(db: AsyncSession, company_id: str,
     rows = (await db.execute(
         select(SkillRow).where(
             SkillRow.status == SkillStatus.ENABLED,
+            # 系统级专属技能（CEO 包等）不参与批量自动匹配，只能显式绑定；
+            # 公司自建的私有技能仍按岗位匹配——它本来就只在本公司可见。
+            or_(SkillRow.company_id.is_not(None),
+                SkillRow.scope.is_(None),
+                SkillRow.scope != "exclusive"),
             or_(SkillRow.company_id.is_(None),
                 SkillRow.company_id == company_id))
         .limit(200))).scalars().all()
