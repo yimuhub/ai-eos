@@ -18,7 +18,7 @@ from app.models.agent import Model
 from app.models.user import User
 
 BASE_URL = "http://127.0.0.1:9/v1"
-SECRET = "sk-provider-test-1234567890"
+SECRET = "test-provider-key-1234567890"
 
 
 async def _promote(user_id: str) -> None:
