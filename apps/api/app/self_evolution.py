@@ -237,10 +237,13 @@ async def _latest_exam(db: AsyncSession, company_id: str) -> dict | None:
         .order_by(CeoExam.created_at.desc()).limit(1))).scalars().first()
     if row is None:
         return None
+    # week_start 必须是字符串：这份指标会整体写进 EvolutionRecord.metrics
+    # （JSON 列），datetime 让 autoflush 的 json.dumps 直接抛 TypeError，
+    # 每轮日/周/月进化记录都落库失败。
     return {"id": row.id, "overall": row.overall, "grade": row.grade,
             "personality": row.personality or {},
             "scores": row.scores or {},
-            "week_start": row.week_start}
+            "week_start": row.week_start.isoformat() if row.week_start else None}
 
 
 async def _prev_record(db: AsyncSession, company_id: str, level: str) -> dict | None:

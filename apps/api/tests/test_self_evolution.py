@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime
 
@@ -226,6 +227,39 @@ async def test_emergency_stop_skips_evolution(tenants):
         await s.commit()
     rec = await _run(co, "daily", tenants.alice["id"])
     assert rec["status"] == "SKIPPED" and "紧急停止" in (rec["error"] or "")
+
+
+async def test_exam_week_start_does_not_break_metrics_persist(tenants,
+                                                              monkeypatch):
+    """上场周考的 week_start 是 datetime，跟着指标一起进 JSON 列会炸库。
+
+    真实事故：json.dumps 抛 TypeError，日/周/月进化记录一条都写不进去。
+    """
+    from app.models.exam import CeoExam
+
+    co = tenants.alice_co["id"]
+    await _seed(co, tenants.alice["id"])
+    _no_llm(monkeypatch)
+    async with AsyncSessionLocal() as s:
+        s.add(CeoExam(id=str(uuid.uuid4()), company_id=co,
+                      period_key="2026-W44",
+                      week_start=datetime(2026, 10, 26),
+                      week_end=datetime(2026, 11, 2),
+                      status="GRADED", overall=82.0, grade="B",
+                      scores={}, personality={}))
+        await s.commit()
+
+    rec = await _run(co, "daily", tenants.alice["id"])
+    assert rec["status"] == "APPLIED", rec.get("error")
+    assert rec["metrics"]["exam"]["week_start"] == "2026-10-26T00:00:00"
+
+    async with AsyncSessionLocal() as s:
+        row = (await s.execute(select(EvolutionRecord)
+                              .where(EvolutionRecord.id == rec["id"]))).scalar_one()
+        assert (row.metrics or {}).get("exam", {}).get("week_start") == \
+            "2026-10-26T00:00:00"
+        # 写进去的必须能被 json 序列化，否则下一次 autoflush 仍会抛
+        json.dumps(row.metrics)
 
 
 # ---------------------------------------------------------------------------

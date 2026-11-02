@@ -5,6 +5,21 @@
 
 ## [Unreleased]
 
+### 修复：CEO 自我进化记录写不进库（周考时间戳进了 JSON 列）
+
+- **现象**：本地跑起来后 API 日志里反复出现同一条崩溃（一次启动窗口内 14 次），
+  日/周/月进化、playbook 版本全部落不了库，前端「自我进化」页看不到新记录。
+- **真因**：`self_evolution._latest_exam` 把上一场周考的 `week_start`（datetime）
+  原样放进指标字典，`run_evolution` 接着 `rec.metrics = metrics`——`metrics` 是
+  JSON 列，autoflush 时 `json.dumps` 直接抛
+  `TypeError: Object of type datetime is not JSON serializable`。
+  只要公司考过一场周考，之后每一轮进化都会崩在同一行。
+- **修法**：在源头转成 ISO 字符串（与 `exam_engine` 已有的写法对齐），
+  而不是在落库处再包一层序列化兜底。`week_start` 全项目只用于展示与打包进
+  prompt，没有任何地方按 datetime 读它。
+- **测试**：新增回归用例——带 `week_start` 的周考存在时，日进化仍能 APPLIED，
+  且从库里读回的 `metrics` 可被 `json.dumps`。
+
 ### 修复：图片/视频模型被自动绑成员工对话模型，整群发言失败
 
 - **现象**：业务群聊 5 位成员齐刷刷「发言失败」，原因是一句读不懂的上游
