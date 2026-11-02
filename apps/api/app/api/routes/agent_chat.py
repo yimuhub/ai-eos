@@ -10,6 +10,7 @@
 """
 import json
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -958,6 +959,83 @@ class DocMarkerFilter:
         return out
 
 
+# ---------------- 过程可视化：阶段 / 模型 / 工具 / 思考 ----------------
+
+MAX_PROCESS_STEPS = 30          # 落库的过程步骤上限
+MAX_PROCESS_REASONING = 4000    # 落库的思考正文上限（实时流不截断）
+
+
+def _tool_label(fname: str) -> str:
+    """工具名 → 老板看得懂的一句话，别把 snake_case 直接甩到界面上。"""
+    if fname == "web_search":
+        return "联网搜索"
+    if fname == "web_fetch":
+        return "抓取网页正文"
+    if fname.startswith("computer_"):
+        return f"操作电脑 · {fname.replace('computer_', '')}"
+    return fname or "调用工具"
+
+
+def _tool_args_preview(fname: str, targs: dict) -> str:
+    """只挑能说明意图的参数，避免整页 JSON 塞进时间线。"""
+    for key in ("query", "url", "command", "path", "filename", "title"):
+        value = targs.get(key)
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())[:160]
+    if not targs:
+        return ""
+    try:
+        return json.dumps(targs, ensure_ascii=False)[:160]
+    except (TypeError, ValueError):
+        return str(targs)[:160]
+
+
+def _tool_summary(fname: str, payload: object, body: str,
+                  ok: bool, error: str = "") -> str:
+    """工具结果压成一行：条数/字数比整段结果更有信息量。"""
+    if not ok:
+        return f"失败：{error or '未知错误'}"[:220]
+    data = payload if isinstance(payload, dict) else {}
+    if fname == "web_search":
+        results = data.get("results")
+        if isinstance(results, list):
+            return f"找到 {len(results)} 条来源"
+    if fname == "web_fetch":
+        for key in ("text", "content", "body"):
+            value = data.get(key)
+            if isinstance(value, str) and value:
+                return f"已抓取正文（{len(value)} 字）"
+    if fname.startswith("computer_"):
+        return f"已执行 {fname.replace('computer_', '')}"
+    text = " ".join(str(body or "").split())
+    return (text[:180] + "…") if len(text) > 180 else (text or "已返回")
+
+
+def _process_meta(state: dict, started_at: float) -> dict:
+    """把运行期的过程收成可落库的精简版（历史里能回放）。"""
+    steps: list[dict] = []
+    for s in state["steps"]:
+        if len(steps) >= MAX_PROCESS_STEPS:
+            break
+        if s.get("status") == "running":
+            continue
+        item = {"kind": s["kind"], "label": s["label"][:80],
+                "status": s["status"]}
+        if s.get("detail"):
+            item["detail"] = s["detail"][:240]
+        if s.get("duration_ms") is not None:
+            item["duration_ms"] = int(s["duration_ms"])
+        steps.append(item)
+    out: dict = {"duration_ms": int((time.monotonic() - started_at) * 1000)}
+    if steps:
+        out["steps"] = steps
+    if state["reasoning"]:
+        out["reasoning"] = state["reasoning"][:MAX_PROCESS_REASONING]
+    if state["model"]:
+        out["model"] = state["model"]
+    return out
+
+
 async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
                        thread_id: str | None = None,
                        attachments: list[ChatAttachment] | None = None,
@@ -966,10 +1044,72 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
 
     自建 session：请求级依赖的回收时机与长连接无关，
     流还没开始写的时候它可能已经被关掉了。
+
+    事件分两类：
+    * 正文：``delta`` / ``done`` / ``error``
+    * 过程：``status``（阶段）、``model`` / ``model_error``（选了谁、是否降级）、
+      ``reasoning``（推理模型的思考增量）、``tool_start`` / ``tool_end``
     """
     from app.model_gateway import ModelGateway, usage_context
 
     attachments = attachments or []
+    started_at = time.monotonic()
+    # 第一帧先于任何 DB/上下文工作：老板发完消息要立刻看到"已收到"，
+    # 否则模型排队或建上下文的那几秒里界面完全空白。
+    yield _sse({"type": "status", "stage": "accepted",
+                "text": "已收到，正在准备…"})
+
+    state: dict = {"steps": [], "reasoning": "", "model": None,
+                   "usage": {}, "tool_calls": None}
+
+    def add_step(kind: str, label: str, status: str = "done",
+                 detail: str | None = None) -> dict:
+        step = {"kind": kind, "label": label[:80], "status": status}
+        if detail:
+            step["detail"] = detail[:240]
+        if len(state["steps"]) < MAX_PROCESS_STEPS:
+            state["steps"].append(step)
+        return step
+
+    def status_frame(text: str, stage: str | None = None) -> str:
+        add_step("stage", text)
+        payload = {"type": "status", "text": text}
+        if stage:
+            payload["stage"] = stage
+        return _sse(payload)
+
+    def handle_gateway_event(ev: dict) -> list[str]:
+        """网关事件 → 前端帧 + 本地过程记录。"""
+        kind = ev.get("type")
+        if kind == "reasoning":
+            piece = str(ev.get("text") or "")
+            if not piece:
+                return []
+            room = MAX_PROCESS_REASONING - len(state["reasoning"])
+            if room > 0:
+                state["reasoning"] += piece[:room]
+            return [_sse({"type": "reasoning", "text": piece})]
+        if kind == "model":
+            name = str(ev.get("model_name") or ev.get("model_id") or "模型")
+            state["model"] = name
+            add_step("model", f"调用模型 · {name}",
+                     detail=f"第 {ev.get('attempt') or 1} 顺位")
+            return [_sse({"type": "model", "model_id": ev.get("model_id"),
+                          "model_name": name,
+                          "attempt": ev.get("attempt")})]
+        if kind == "model_error":
+            name = str(ev.get("model_name") or ev.get("model_id") or "模型")
+            message = str(ev.get("message") or "调用失败")
+            add_step("model_error", f"{name} 调用失败", "error", message)
+            return [_sse({"type": "model_error",
+                          "model_id": ev.get("model_id"),
+                          "model_name": name, "message": message})]
+        if kind == "done":
+            state["tool_calls"] = ev.get("tool_calls")
+            state["usage"] = ev.get("usage") or {}
+            return []
+        return []
+
     async with AsyncSessionLocal() as db:
         try:
             # 鉴权已在 handler 里做完（_visible_agent → 未通过时直接 404）。
@@ -981,24 +1121,33 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
             thread = await db.get(CeoThread, thread_id) if thread_id else None
 
             # 带附件时不能走"安排任务"等短路径：那会把文件当没看见
-            short = None if attachments else await _try_short_intents(
-                db, a, user_id, text)
+            short = None
+            if not attachments:
+                yield status_frame("正在理解你的意图…", "intent")
+                short = await _try_short_intents(db, a, user_id, text)
             if short:
-                await _save_msg(db, a, "agent", short["reply"], short["meta"],
+                for act in short.get("actions") or []:
+                    if act.get("type") == "create_task":
+                        add_step("action", "已创建任务",
+                                 detail=f"指派给 {act.get('assignee') or '本人'}")
+                meta = dict(short.get("meta") or {})
+                meta["process"] = _process_meta(state, started_at)
+                await _save_msg(db, a, "agent", short["reply"], meta,
                                 thread=thread)
                 await db.commit()
                 # 短路径本来就是秒回，也按流式帧发，前端只有一套逻辑
                 yield _sse({"type": "delta", "text": short["reply"]})
                 yield _sse({"type": "done", "reply": short["reply"],
                             "actions": short["actions"], "citations": [],
+                            "elapsed_ms": int((time.monotonic() - started_at) * 1000),
                             "thread_id": thread_id})
                 return
 
             attachments_text = ""
             if attachments:
-                yield _sse({"type": "status", "text": "正在读取附件…"})
+                yield status_frame("正在读取附件…", "attachments")
                 attachments_text = await build_attachments_context(attachments)
-            yield _sse({"type": "status", "text": "正在检索记忆与知识库…"})
+            yield status_frame("正在检索记忆与知识库…", "context")
             messages = await _build_qa_messages(
                 db, a, text, thread=thread, attachments_text=attachments_text)
             model_ids = await _agent_model_ids(db, a)
@@ -1015,7 +1164,6 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
             citations: list[dict] = []
 
             with usage_context(agent=a, scenario="CHAT", user_id=user_id):
-                tool_calls = None
                 rounds = 0
                 while True:
                     async for ev in gw.stream_with_agent_models(
@@ -1024,9 +1172,11 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
                             piece = flt.feed(ev["text"])
                             if piece:
                                 yield _sse({"type": "delta", "text": piece})
-                        elif ev.get("type") == "done":
-                            tool_calls = ev.get("tool_calls")
+                        else:
+                            for frame in handle_gateway_event(ev):
+                                yield frame
 
+                    tool_calls = state["tool_calls"]
                     # 搜索 → 抓正文 → 作答是三步，留 3 轮工具预算
                     if not tool_calls or rounds >= 3:
                         break
@@ -1035,7 +1185,7 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
                     # 一个写事务，先把本会话待提交的用量/消息落盘，否则工具侧
                     # 提交会一直等到 busy_timeout 后报 "database is locked"。
                     await db.commit()
-                    yield _sse({"type": "status", "text": "正在调用工具…"})
+                    yield status_frame(f"正在调用工具（第 {rounds} 轮）…", "tools")
                     messages.append({"role": "assistant", "content": "",
                                      "tool_calls": tool_calls})
                     for tc in tool_calls:
@@ -1050,6 +1200,17 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
                             # 参数不是合法 JSON 时工具会拿到空参数执行，留痕便于排查模型输出问题
                             logger.warning("流式工具参数解析失败 tool=%s agent=%s: %s",
                                            fname, agent_id, exc)
+                        tool_id = tc.get("id") or f"tool-{uuid.uuid4().hex[:8]}"
+                        label = _tool_label(fname)
+                        preview = _tool_args_preview(fname, targs)
+                        step = add_step("tool", label, "running", preview)
+                        tool_started = time.monotonic()
+                        yield _sse({"type": "tool_start", "id": tool_id,
+                                    "name": fname, "label": label,
+                                    "args": preview})
+                        ok = True
+                        error_text = ""
+                        payload: object = None
                         try:
                             if fname.startswith("computer_"):
                                 cap = fname.replace("computer_", "")
@@ -1063,25 +1224,39 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
                                 res = await execute_skill_safe(
                                     db, fname, targs, company_id=company_id,
                                     agent_id=agent_id)
+                                payload = _tool_payload(res)
                                 if fname == "web_search":
-                                    _merge_citations(citations, _tool_payload(res))
+                                    _merge_citations(citations, payload)
                             body = str((res.get("result")
                                         if isinstance(res, dict) else None) or res)
                         except Exception as tool_err:
                             # 工具失败要让模型知道，否则它会基于"工具没返回"编答案
+                            ok = False
+                            error_text = str(tool_err) or type(tool_err).__name__
                             logger.warning("流式聊天工具失败 tool=%s agent=%s: %s",
                                            fname, agent_id, tool_err, exc_info=True)
                             body = f"error: {tool_err}"
+                        duration_ms = int((time.monotonic() - tool_started) * 1000)
+                        summary = _tool_summary(
+                            fname, payload, body, ok, error_text)
+                        step["status"] = "done" if ok else "error"
+                        step["duration_ms"] = duration_ms
+                        step["detail"] = (
+                            f"{preview} · {summary}" if preview else summary)[:240]
+                        yield _sse({"type": "tool_end", "id": tool_id,
+                                    "name": fname, "ok": ok,
+                                    "summary": summary,
+                                    "duration_ms": duration_ms})
                         messages.append({"role": "tool",
                                          "tool_call_id": tc.get("id"),
                                          "content": body})
-                    tool_calls = None
+                    state["tool_calls"] = None
 
                 # 工具轮次用尽仍未吐正文：去掉 tools 再问一次，逼模型基于
                 # 已拿到的搜索结果作答。否则前端只会收到一堆 status 和空回复。
                 if not flt.raw.strip():
                     await db.commit()
-                    yield _sse({"type": "status", "text": "正在整理搜索结果…"})
+                    yield status_frame("正在整理搜索结果…", "finalize")
                     messages.append({"role": "system", "content":
                         "现在必须直接回答老板的问题：基于上面的工具结果作答；"
                         "数据缺失就如实说明缺哪一项，不要再调用工具。"})
@@ -1090,15 +1265,21 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
                             piece = flt.feed(ev["text"])
                             if piece:
                                 yield _sse({"type": "delta", "text": piece})
+                        else:
+                            for frame in handle_gateway_event(ev):
+                                yield frame
 
             tail = flt.flush()
             if tail:
                 yield _sse({"type": "delta", "text": tail})
             doc_file, doc_error = await _materialize_docs(db, a, flt.raw)
             reply = visible_reply(flt.raw) or "（这次没有生成内容，请再说一次或换个问法）"
-            await _save_msg(db, a, "agent", reply,
-                            {"citations": citations} if citations else None,
-                            thread=thread)
+            meta: dict = {}
+            if citations:
+                meta["citations"] = citations
+            # 过程随消息落库：重新打开历史也能看到当时思考/调用了什么
+            meta["process"] = _process_meta(state, started_at)
+            await _save_msg(db, a, "agent", reply, meta, thread=thread)
             try:
                 await _maybe_summarize_thread(db, a, thread, gw, model_ids)
             except Exception as summary_err:
@@ -1108,6 +1289,9 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
             yield _sse({"type": "done", "reply": reply, "file": doc_file,
                         "doc_error": doc_error, "actions": actions,
                         "citations": citations,
+                        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+                        "model": state["model"],
+                        "usage": state["usage"],
                         "thread_id": str(thread.id) if thread is not None else None})
         except Exception as exc:
             logger.warning("流式聊天失败 agent=%s: %s", agent_id, exc, exc_info=True)
@@ -1116,7 +1300,8 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
             except Exception:
                 logger.warning("流式聊天回滚失败 agent=%s", agent_id, exc_info=True)
             yield _sse({"type": "error",
-                        "message": str(exc) or type(exc).__name__})
+                        "message": str(exc) or type(exc).__name__,
+                        "elapsed_ms": int((time.monotonic() - started_at) * 1000)})
 
 
 @router.post("/{aid}/chat/stream")
@@ -1127,9 +1312,12 @@ async def boss_chat_stream(aid: str, data: ChatStreamIn,
 
     与 ``/chat`` 共用意图识别、上下文构建和文档产出，差别只在"边生成边推"。
     事件类型：
-    * ``status`` 阶段提示（检索中/调工具），不进正文
+    * ``status`` 阶段提示（准备/检索/调工具），带 ``stage`` 便于前端归组
+    * ``model`` / ``model_error`` 正在用哪个模型、失败后是否降级
+    * ``reasoning`` 推理模型的思考增量（没开思考的模型不会发）
+    * ``tool_start`` / ``tool_end`` 工具调用的开始、结果与耗时
     * ``delta``  正文增量，前端直接追加
-    * ``done``   结束，带完整 reply / file / actions
+    * ``done``   结束，带完整 reply / file / actions / elapsed_ms
     * ``error``  失败原因（本轮正文不会落库）
     """
     # 可见性校验必须在返回 StreamingResponse **之前**：一旦开流，

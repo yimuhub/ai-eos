@@ -517,6 +517,15 @@ class OpenAICompatProvider(BaseModelProvider):
                             usage = chunk["usage"]
                         for choice in chunk.get("choices") or []:
                             delta = choice.get("delta") or {}
+                            # 推理模型（DeepSeek-R1 / Qwen 等）的思考流单独下发：
+                            # reasoning_content 是主流字段，个别网关用 reasoning。
+                            thought = (delta.get("reasoning_content")
+                                       or delta.get("reasoning"))
+                            if thought:
+                                # 思考一旦可见就不再 failover：换模型会让同一段
+                                # 思考前后来自不同模型，比报错更让人困惑。
+                                emitted = True
+                                yield {"type": "reasoning", "text": thought}
                             piece = delta.get("content")
                             if piece:
                                 emitted = True
@@ -1007,11 +1016,20 @@ class ModelGateway:
                 failures.append(f"{row.name}：熔断冷却中，已跳过")
                 logger.warning("模型 %s(%s) 处于熔断冷却期，跳过本次流式调用",
                                row.name, mid)
+                yield {"type": "model_error", "model_id": mid,
+                       "model_name": row.name, "message": "熔断冷却中，已跳过"}
                 continue
             provider = self._build_provider(row)
             if provider is None:
                 failures.append(f"{row.name}：未知 provider 类型 {row.provider_type}")
+                yield {"type": "model_error", "model_id": mid,
+                       "model_name": row.name,
+                       "message": f"未知 provider 类型 {row.provider_type}"}
                 continue
+            # 先报"用哪个模型"，前端才能把长时间的等待归因到具体模型，
+            # 也能在降级时看见换了谁。
+            yield {"type": "model", "model_id": mid,
+                   "model_name": row.name, "attempt": attempted}
             t0 = time.time()
             metric_t0 = time.perf_counter()
             emitted = False
@@ -1035,6 +1053,8 @@ class ModelGateway:
                 failures.append(f"{row.name}：{last_summary}")
                 logger.warning("模型 %s(%s) 流式调用失败：%s",
                                row.name, mid, last_summary)
+                yield {"type": "model_error", "model_id": mid,
+                       "model_name": row.name, "message": last_summary}
                 _note_failure(mid)
                 _observe_llm_call(row, "error",
                                   time.perf_counter() - metric_t0)
@@ -1064,7 +1084,8 @@ class ModelGateway:
                               final.get("usage"))
             yield {"type": "done", "usage": final.get("usage") or {},
                    "tool_calls": final.get("tool_calls"),
-                   "model": row.name, "used_model_id": mid}
+                   "model": row.name, "used_model_id": mid,
+                   "elapsed_ms": int((time.time() - t0) * 1000)}
             return
 
         if attempted == 0:

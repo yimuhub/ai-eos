@@ -267,3 +267,80 @@ async def test_stream_drops_stream_options_then_succeeds(monkeypatch):
     assert len(bodies) == 2
     assert bodies[0].get("stream_options")
     assert "stream_options" not in bodies[1]
+
+
+# ---------------------------------------------------------------------------
+# 流式过程可见性：思考增量 + 模型选择/降级事件
+# ---------------------------------------------------------------------------
+async def test_stream_forwards_reasoning_deltas(monkeypatch):
+    """推理模型的 reasoning_content / reasoning 要单独下发，不能丢。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        chunks = [
+            {"choices": [{"delta": {"reasoning_content": "先核对数据"}}]},
+            {"choices": [{"delta": {"reasoning": "再给结论"}}]},
+            {"choices": [{"delta": {"content": "结论如下"}}]},
+            {"choices": [], "usage": {"total_tokens": 9}},
+        ]
+        body = "".join(
+            f"data: {json.dumps(c, ensure_ascii=False)}\n\n" for c in chunks)
+        body += "data: [DONE]\n\n"
+        return httpx.Response(200, content=body.encode())
+
+    _use_transport(monkeypatch, handler)
+    provider = model_gateway.OpenAICompatProvider(
+        "http://127.0.0.1:8787/v1", "", "R1")
+
+    events = [ev async for ev in provider.stream(
+        [{"role": "user", "content": "你好"}])]
+
+    assert [ev["text"] for ev in events if ev["type"] == "reasoning"] == [
+        "先核对数据", "再给结论"]
+    assert [ev["text"] for ev in events if ev["type"] == "delta"] == ["结论如下"]
+
+
+async def test_stream_with_agent_models_announces_fallback(monkeypatch):
+    """首字之前可以降级；前端要能看见"用了谁、谁失败了"。"""
+    from types import SimpleNamespace
+
+    good = SimpleNamespace(id="m-good", name="好模型", provider_type="openai_compat",
+                           base_url="", model_id="good", api_key="")
+    bad = SimpleNamespace(id="m-bad", name="坏模型", provider_type="openai_compat",
+                          base_url="", model_id="bad", api_key="")
+
+    class Db:
+        async def get(self, model, mid):
+            return {"m-good": good, "m-bad": bad}.get(mid)
+
+    class BadProvider:
+        async def stream(self, messages, tools=None, config=None):
+            raise RuntimeError("upstream boom")
+            yield  # pragma: no cover
+
+    class GoodProvider:
+        async def stream(self, messages, tools=None, config=None):
+            yield {"type": "delta", "text": "兜底成功"}
+            yield {"type": "final", "usage": {}, "tool_calls": None}
+
+    providers = {"m-bad": BadProvider(), "m-good": GoodProvider()}
+    monkeypatch.setattr(model_gateway.ModelGateway, "_build_provider",
+                        staticmethod(lambda row: providers[row.id]))
+
+    async def _noop_usage(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(model_gateway, "record_token_usage", _noop_usage)
+    monkeypatch.setattr(model_gateway, "_observe_llm_call",
+                        lambda *a, **k: None)
+
+    events = [ev async for ev in model_gateway.ModelGateway(
+        Db()).stream_with_agent_models(
+            ["m-bad", "m-good"], [{"role": "user", "content": "hi"}])]
+
+    kinds = [ev["type"] for ev in events]
+    assert kinds == ["model", "model_error", "model", "delta", "done"]
+    assert events[0]["model_name"] == "坏模型"
+    assert events[1]["message"].startswith("RuntimeError")
+    assert events[2]["model_name"] == "好模型" and events[2]["attempt"] == 2
+    assert events[4]["used_model_id"] == "m-good"
+    assert isinstance(events[4]["elapsed_ms"], int)

@@ -222,3 +222,119 @@ async def test_stream_chat_requires_ownership(client, tenants):
                           json={"message": "hi"},
                           headers=tenants.alice["headers"])
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 6) 全过程可视化：立刻有回执，思考/模型/工具都下发并随消息落库
+# ---------------------------------------------------------------------------
+async def test_stream_chat_shows_process_and_persists_it(client, make_user,
+                                                        make_company,
+                                                        monkeypatch):
+    from app.api.routes import agent_chat as chat_routes
+
+    user = await make_user()
+    company = await make_company(user)
+    agent = await _make_agent(client, user, company)
+
+    async def fake_skill(db, fname, args, *, company_id=None, agent_id=None):
+        assert fname == "web_search"
+        return {"result": {"results": [{
+            "title": "竞品 A", "url": "https://a.example/pricing",
+            "body": "年费 99 元"}]}}
+
+    monkeypatch.setattr(chat_routes, "execute_skill_safe", fake_skill)
+
+    calls = {"n": 0}
+
+    async def fake_stream(self, model_ids, messages, tools=None, config=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield {"type": "model", "model_id": "m-fake",
+                   "model_name": "Fake-1", "attempt": 1}
+            yield {"type": "reasoning", "text": "先搜索竞品定价。"}
+            yield {"type": "done", "usage": {"total_tokens": 10},
+                   "tool_calls": [{
+                       "id": "call-1", "type": "function",
+                       "function": {"name": "web_search",
+                                    "arguments": json.dumps({"query": "竞品定价"})}}],
+                   "model": "Fake-1"}
+        else:
+            yield {"type": "delta", "text": "竞品 A 年费 99 元。"}
+            yield {"type": "done", "usage": {}, "tool_calls": None,
+                   "model": "Fake-1"}
+
+    monkeypatch.setattr(ModelGateway, "stream_with_agent_models", fake_stream)
+
+    r = await client.post(f"/agents/{agent['id']}/chat/stream",
+                          json={"message": "查一下竞品定价"},
+                          headers=user["headers"])
+    assert r.status_code == 200, r.text
+    events = parse_sse(r.text)
+
+    # 第一帧必须是"已收到"，不能等建完上下文才出现
+    assert events[0]["type"] == "status" and events[0]["stage"] == "accepted"
+    assert any(e["type"] == "model" and e["model_name"] == "Fake-1"
+               for e in events)
+    assert [e["text"] for e in events if e["type"] == "reasoning"] == [
+        "先搜索竞品定价。"]
+
+    starts = [e for e in events if e["type"] == "tool_start"]
+    ends = [e for e in events if e["type"] == "tool_end"]
+    assert starts and starts[0]["name"] == "web_search"
+    assert starts[0]["label"] == "联网搜索"
+    assert starts[0]["args"] == "竞品定价"
+    assert ends and ends[0]["ok"] is True
+    assert "找到 1 条来源" in ends[0]["summary"]
+    assert isinstance(ends[0]["duration_ms"], int)
+
+    done = [e for e in events if e["type"] == "done"][0]
+    assert done["reply"] == "竞品 A 年费 99 元。"
+    assert done["model"] == "Fake-1"
+    assert isinstance(done["elapsed_ms"], int)
+
+    history = await _history(client, user, agent["id"])
+    meta = history[1]["meta"]
+    assert meta["citations"][0]["url"] == "https://a.example/pricing"
+    proc = meta["process"]
+    assert proc["reasoning"] == "先搜索竞品定价。"
+    assert proc["model"] == "Fake-1"
+    assert any(s["kind"] == "tool" and s["label"] == "联网搜索"
+               and s["status"] == "done" and s["duration_ms"] >= 0
+               for s in proc["steps"])
+    assert isinstance(proc["duration_ms"], int)
+
+
+async def test_stream_chat_surfaces_model_fallback(client, make_user,
+                                                   make_company, monkeypatch):
+    user = await make_user()
+    company = await make_company(user)
+    agent = await _make_agent(client, user, company)
+
+    async def fake_stream(self, model_ids, messages, tools=None, config=None):
+        yield {"type": "model", "model_id": "bad",
+               "model_name": "坏模型", "attempt": 1}
+        yield {"type": "model_error", "model_id": "bad",
+               "model_name": "坏模型", "message": "HTTP 500"}
+        yield {"type": "model", "model_id": "good",
+               "model_name": "好模型", "attempt": 2}
+        yield {"type": "delta", "text": "兜底成功"}
+        yield {"type": "done", "usage": {}, "tool_calls": None,
+               "model": "好模型"}
+
+    monkeypatch.setattr(ModelGateway, "stream_with_agent_models", fake_stream)
+
+    r = await client.post(f"/agents/{agent['id']}/chat/stream",
+                          json={"message": "在吗"},
+                          headers=user["headers"])
+    events = parse_sse(r.text)
+    errors = [e for e in events if e["type"] == "model_error"]
+    assert errors and errors[0]["message"] == "HTTP 500"
+    done = [e for e in events if e["type"] == "done"][0]
+    assert done["model"] == "好模型"
+
+    history = await _history(client, user, agent["id"])
+    steps = history[1]["meta"]["process"]["steps"]
+    assert any(s["kind"] == "model_error" and s["status"] == "error"
+               for s in steps)
+    assert any(s["kind"] == "model" and "好模型" in s["label"]
+               for s in steps)
