@@ -397,10 +397,14 @@ async def group_chat(scope: str, scope_id: str, data: GroupChatIn,
     # 先把老板消息落库，避免整个群聊期间（含多次 LLM 调用）一直持有写事务
     await db.commit()
 
-    # 3. 依次发言（后说的能看到先说的）；未配置模型的回退全局默认模型
+    # 3. 依次发言（后说的能看到先说的）；未配置模型的回退全局默认模型。
+    # 回退必须限定「能对话」的模型并按登记时间取：这里曾经用 select(Model.id)
+    # 的第一行，撞上图片模型后整群成员每轮都 400，且错误只有一句 Bad Request。
     from app.models.agent import AgentModelConfig
-    all_models = (await db.execute(select(Model.id))).scalars().all()
-    default_model = all_models[0] if all_models else None
+    from app.model_discovery import chat_model_condition
+    default_model = (await db.execute(
+        select(Model.id).where(chat_model_condition())
+        .order_by(Model.created_at).limit(1))).scalar_one_or_none()
 
     async def _ensure_model(a):
         cfg = (await db.execute(select(AgentModelConfig).where(

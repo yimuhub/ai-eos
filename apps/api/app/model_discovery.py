@@ -92,6 +92,32 @@ def type_label(model_type: str | None) -> str:
     return _MODEL_TYPE_LABELS.get(model_type or ModelType.TEXT.value, "其他")
 
 
+# 只有文本模型能当员工的对话模型。图片/视频/音频/向量模型走的是别的接口
+# （如 /v1/images/generations），拿它对话必然 400，而上游的报错往往只有一句
+# Bad Request，看不出是绑错类型——所以要在绑定入口就拦住。
+CHAT_CAPABLE_TYPES = (ModelType.TEXT.value,)
+
+
+def is_chat_model(model_type: str | None) -> bool:
+    """该模型类型能否用于对话。NULL 等价 text（升级前登记的只有聊天模型）。"""
+    return model_type is None or model_type in CHAT_CAPABLE_TYPES
+
+
+def chat_model_condition():
+    """`is_chat_model` 的 SQL 版，给"自动挑一个模型"的查询用。"""
+    from sqlalchemy import or_
+
+    from app.models.agent import Model
+    return or_(Model.model_type.is_(None),
+               Model.model_type.in_(CHAT_CAPABLE_TYPES))
+
+
+def chat_model_rejection(model) -> str:
+    """绑定被拒时给前端的中文原因，点名类型而不是丢一个上游 400。"""
+    return (f"「{model.name}」是{type_label(model.model_type)}模型，"
+            f"不能绑定为对话模型——请改绑文本模型。")
+
+
 def _norm_list(value: Any) -> list[str]:
     if isinstance(value, str):
         return [p.strip().lower() for p in re.split(r"[+,]", value) if p.strip()]

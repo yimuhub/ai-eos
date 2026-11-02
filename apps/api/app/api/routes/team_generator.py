@@ -246,8 +246,10 @@ async def generate_team(data: GenerateIn,
     mid = data.model_id
     if not mid:
         from app.models import Model
-        row = (await db.execute(select(Model.id).limit(1))).scalar_one_or_none()
-        mid = row
+        from app.model_discovery import chat_model_condition
+        mid = (await db.execute(
+            select(Model.id).where(chat_model_condition())
+            .order_by(Model.created_at).limit(1))).scalar_one_or_none()
     if mid:
         for ag in agent_by_name.values():
             db.add(AgentModelConfig(agent_id=str(ag.id), role="primary", model_id=str(mid)))

@@ -574,6 +574,9 @@ async def bind_model_to_agents(mid: str, data: BindAgentsIn,
             409, "该模型配置未归属公司，请先认领（PATCH 带上 company_id）再绑定。")
     if m.company_id != data.company_id:
         raise HTTPException(409, "该模型不属于指定的公司，不能跨公司绑定。")
+    from app.model_discovery import chat_model_rejection, is_chat_model
+    if not is_chat_model(m.model_type):
+        raise HTTPException(400, chat_model_rejection(m))
 
     agent_ids = [aid for (aid,) in (await db.execute(
         select(Agent.id).where(Agent.company_id == data.company_id))).all()]

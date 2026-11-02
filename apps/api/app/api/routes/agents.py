@@ -915,12 +915,30 @@ async def batch_assign_manager(data: BatchAssignManagerIn,
     return {"updated": ok, "failed": failed}
 
 
+async def _require_chat_model(db: AsyncSession, model_id: str):
+    """员工绑定的模型必须能对话。
+
+    图片/视频/音频/向量模型走的是别的接口，绑成员工的对话模型后每一轮都
+    是上游 400，而报错往往只有一句 Bad Request，看不出是绑错了类型。
+    """
+    from app.model_discovery import chat_model_rejection, is_chat_model
+    from app.models import Model
+
+    m = await db.get(Model, model_id)
+    if not m:
+        raise HTTPException(404, "模型不存在")
+    if not is_chat_model(m.model_type):
+        raise HTTPException(400, chat_model_rejection(m))
+    return m
+
+
 @router.post("/{aid}/models", status_code=201,
              response_model=AgentModelConfigOut)
 async def bind_model(aid: str, data: ModelBindingIn,
                      db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     a = await _load_agent(db, aid)
     await ensure_agent_access(db, user, a, Capability.OPERATE)
+    await _require_chat_model(db, data.model_id)
     binding = AgentModelConfig(agent_id=aid, role=data.role, model_id=data.model_id)
     db.add(binding)
     await db.commit()
@@ -940,6 +958,8 @@ async def switch_model(aid: str, data: SwitchModelIn,
     """切换 Agent 的主模型（替换 existing primary binding）。"""
     a = await _load_agent(db, aid)
     await ensure_agent_access(db, user, a, Capability.OPERATE)
+    # 先校验再删旧绑定：否则一个被拒的切换请求会把员工原有的模型清掉
+    await _require_chat_model(db, data.model_id)
 
     # 删除旧的 primary binding
     old = await db.execute(

@@ -728,8 +728,11 @@ export default function ModelsPage() {
     return { tone: "warn" as const, text: diag.hint || "模型已登记但缺少密钥" };
   }, [diag]);
 
+  // 只有文本模型能当员工的对话模型；图片/视频/向量模型走别的接口，
+  // 绑上去每轮都是上游 400（后端 bind / switch 同规则会拒）。
+  const chatCapable = (m: ModelRow) => !m.model_type || m.model_type === "text";
   const textModels = models.filter(
-    (m) => m.enabled !== false && (!m.model_type || m.model_type === "text"));
+    (m) => m.enabled !== false && chatCapable(m));
 
   async function saveFallbackKey() {
     const key = fallbackKeyValue.trim();
@@ -811,10 +814,12 @@ export default function ModelsPage() {
                   className="btn-ghost !py-1 !px-2 text-xs">
                   {testingModel === m.id ? "测试中…" : "测试"}
                 </button>
-                <button onClick={() => bindAll(m)} className="btn-ghost !py-1 !px-2 text-xs"
-                  title="设为公司全部员工的首选模型；已有首选模型的员工不受影响">
-                  绑定全员
-                </button>
+                {chatCapable(m) && (
+                  <button onClick={() => bindAll(m)} className="btn-ghost !py-1 !px-2 text-xs"
+                    title="设为公司全部员工的首选模型；已有首选模型的员工不受影响">
+                    绑定全员
+                  </button>
+                )}
                 <button onClick={() => toggleEnabled(m)} className="btn-ghost !py-1 !px-2 text-xs">
                   {disabled ? "启用" : "停用"}
                 </button>

@@ -446,14 +446,17 @@ async def create_from_template(
 
     created_agents = []
     # ---- 步骤3后自动绑定首选模型 ----
-    # 「公司默认模型」字段目前不存在，退化为取该公司可见的第一个登记模型
+    # 「公司默认模型」字段目前不存在，退化为取该公司可见的第一个**可对话**模型
     # （向导步骤2登记的即为第一个；向导登记时 company_id 为空即共享模型，
     # 故一并纳入候选）。写法紧贴 agents.py 批量创建：AgentModelConfig(role="primary")。
+    # 必须排除图片/视频/向量模型：它们走不了对话接口，绑上去每轮都是 400。
     from app.models.agent import AgentModelConfig, Model as ModelCfg
+    from app.model_discovery import chat_model_condition
     mq = await db.execute(
         select(ModelCfg)
         .where(or_(ModelCfg.company_id == owner_company_id,
                    ModelCfg.company_id.is_(None)))
+        .where(chat_model_condition())
         .order_by(ModelCfg.created_at)
         .limit(1))
     first_model = mq.scalars().first()
