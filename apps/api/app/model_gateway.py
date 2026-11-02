@@ -146,6 +146,39 @@ def _drop_unsupported_param(body: dict, status: int, raw: str) -> str | None:
     return None
 
 
+# 推理型模型的 max_tokens 是「思考 + 正文」一起算的。实测 Sage-A1.5 在 512 预算下
+# 会把整段花在思考上：finish_reason=length、正文 0 字、tool_calls 0，而 HTTP 是 200
+# 成功。非流式调用点（群聊/会议/专家/收件箱/自我进化/周考）都为了控成本设了较小的
+# max_tokens，于是"员工没说话""回复空白"会一个接一个冒出来。原样重发必然还是空，
+# 只有把预算抬够才能出正文——这条策略放在 provider 层，而不是让每个调用方各写一遍。
+REASONING_RETRY_MAX_TOKENS = 4096
+
+
+def _is_truncated_empty(result: dict) -> bool:
+    """正文为空、也没在要求调用工具，并且是被 max_tokens 截断的。
+
+    空正文 + tool_calls 是模型在说"我要先搜索"，不是没话说，不能当截断处理。
+    """
+    return (result.get("finish_reason") == "length"
+            and not (result.get("content") or "").strip()
+            and not (result.get("tool_calls") or []))
+
+
+def _merge_usage(*usages: dict | None) -> dict:
+    """把多次尝试的用量加总。
+
+    被截断的那一轮也真花了 token（预算全烧在思考上），只记最后一次会让用量流水
+    和成本统计漏账，预算上限也因此变松。只加数值字段，嵌套的 details 原样丢弃。
+    """
+    total: dict = {}
+    for usage in usages:
+        for key, value in (usage or {}).items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            total[key] = total.get(key, 0) + value
+    return total
+
+
 def _merge_system_messages(messages: list[dict]) -> list[dict]:
     """把多条 system 合成一条放在开头。
 
@@ -436,6 +469,39 @@ class OpenAICompatProvider(BaseModelProvider):
         return UpstreamAPIError(str(exc) + hint, request=exc.request,
                                 response=exc.response, excerpt=exc.excerpt)
 
+    async def _post_chat(self, body: dict, headers: dict, timeout) -> dict:
+        """POST /chat/completions，含「这个参数我不支持就去掉再发」的兼容降级。
+
+        复用模块级共享 client：连接池有上限、超时分阶段，且对超时/5xx/429
+        做有限的指数退避重试。
+        """
+        url = f"{self.base_url}/chat/completions"
+        while True:
+            try:
+                resp = await _post_with_retry(
+                    url, json=body, headers=headers, timeout=timeout)
+                return resp.json()
+            except UpstreamAPIError as exc:
+                dropped = _drop_unsupported_param(body, exc.response.status_code,
+                                                  exc.excerpt)
+                if not dropped:
+                    raise self._explain_error(exc)
+                body.pop(dropped, None)
+                logger.warning("模型 %s 不支持参数 %s，去掉后重试：%s",
+                               self.model_id, dropped, exc.excerpt)
+
+    def _chat_result(self, data: dict) -> dict:
+        choice = data["choices"][0]
+        return {
+            "content": choice["message"].get("content") or "",
+            "tool_calls": choice["message"].get("tool_calls"),
+            # finish_reason 必须带出来：推理型模型会把整段 max_tokens 花在思考上，
+            # 此时 content 是空的但调用"成功"，只有 length 能说明它是被截断的。
+            "finish_reason": choice.get("finish_reason"),
+            "usage": data.get("usage", {}),
+            "raw_model": data.get("model", self.model_id),
+        }
+
     async def chat(self, messages: list[dict], tools=None, config: dict | None = None) -> dict:
         cfg = config or {}
         body = {
@@ -447,33 +513,26 @@ class OpenAICompatProvider(BaseModelProvider):
         if tools:
             body["tools"] = tools
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        # 复用模块级共享 client：连接池有上限、超时分阶段，
-        # 且对超时/5xx/429 做有限的指数退避重试。
-        url = f"{self.base_url}/chat/completions"
-        while True:
-            try:
-                resp = await _post_with_retry(
-                    url, json=body, headers=headers, timeout=cfg.get("timeout"))
-                break
-            except UpstreamAPIError as exc:
-                dropped = _drop_unsupported_param(body, exc.response.status_code,
-                                                  exc.excerpt)
-                if not dropped:
-                    raise self._explain_error(exc)
-                body.pop(dropped, None)
-                logger.warning("模型 %s 不支持参数 %s，去掉后重试：%s",
-                               self.model_id, dropped, exc.excerpt)
-        data = resp.json()
-        choice = data["choices"][0]
-        return {
-            "content": choice["message"].get("content") or "",
-            "tool_calls": choice["message"].get("tool_calls"),
-            # finish_reason 必须带出来：推理型模型会把整段 max_tokens 花在思考上，
-            # 此时 content 是空的但调用"成功"，只有 length 能说明它是被截断的。
-            "finish_reason": choice.get("finish_reason"),
-            "usage": data.get("usage", {}),
-            "raw_model": data.get("model", self.model_id),
-        }
+        result = self._chat_result(await self._post_chat(
+            body, headers, cfg.get("timeout")))
+        budget = body.get("max_tokens")
+        # 没有 max_tokens 就不存在"被它截断"：网关嫌参数本身太长时已经把它
+        # 去掉了，这里再塞回去只会重复吃一次 400。
+        if not (_is_truncated_empty(result)
+                and isinstance(budget, int)
+                and budget < REASONING_RETRY_MAX_TOKENS):
+            return result
+        # 预算被思考吃满：这一轮没有任何可用产出，但 token 已经花掉了，
+        # 所以抬预算重发并把两次的用量合并记账（截断那轮也要在账上）。
+        logger.warning("模型 %s 的 %s token 预算被思考占满（正文为空），"
+                       "抬到 %s 重发一次", self.model_id, budget,
+                       REASONING_RETRY_MAX_TOKENS)
+        first_usage = result.get("usage")
+        retried = self._chat_result(await self._post_chat(
+            {**body, "max_tokens": REASONING_RETRY_MAX_TOKENS},
+            headers, cfg.get("timeout")))
+        retried["usage"] = _merge_usage(first_usage, retried.get("usage"))
+        return retried
 
     async def stream(self, messages, tools=None, config=None):
         """SSE 流式调用。
@@ -1099,6 +1158,13 @@ class ModelGateway:
                     if ev.get("type") == "delta":
                         emitted = True
                         yield ev
+                    elif ev.get("type") == "reasoning":
+                        # 思考增量必须转发：这是老板唯一能看见"员工在想什么"的
+                        # 通道，之前这里只转 delta，单聊的过程面板永远收不到思考。
+                        # 与 provider.stream 同一条规矩：思考一旦可见就不再换模型
+                        # 重来，否则同一段思考前后拼的是两个模型，比报错更迷惑。
+                        emitted = True
+                        yield ev
                     elif ev.get("type") == "final":
                         final = ev
             except Exception as e:
@@ -1155,13 +1221,8 @@ class ModelGateway:
         raise RuntimeError(
             f"已绑定的 {attempted} 个模型全部调用失败：{'; '.join(failures)}")
 
-    async def chat_with_agent_models_by_agent(self, agent, messages,
-                                              tools=None, config=None):
-        """按 Agent 的模型配置（primary→secondary→fallback）调用。
-
-        ``config`` 透传给 provider（max_tokens / temperature / timeout），
-        群聊等短回复场景用它显式限长并缩短单次超时。
-        """
+    async def _agent_model_ids(self, agent) -> list[str]:
+        """按 Agent 的绑定顺序（primary→secondary→fallback）取模型 id。"""
         from sqlalchemy import select
         from app.models.agent import AgentModelConfig
         cfg_rows = (await self.db.execute(select(AgentModelConfig).where(
@@ -1171,5 +1232,26 @@ class ModelGateway:
                     key=lambda c: order.get(c.role, 3))]
         if not model_ids:
             raise RuntimeError(f"Agent {agent.name} 未配置模型")
+        return model_ids
+
+    async def chat_with_agent_models_by_agent(self, agent, messages,
+                                              tools=None, config=None):
+        """按 Agent 的模型配置（primary→secondary→fallback）调用。
+
+        ``config`` 透传给 provider（max_tokens / temperature / timeout），
+        群聊等短回复场景用它显式限长并缩短单次超时。
+        """
         return await self.chat_with_agent_models(
-            model_ids, messages, tools=tools, config=config)
+            await self._agent_model_ids(agent), messages,
+            tools=tools, config=config)
+
+    async def stream_with_agent_models_by_agent(self, agent, messages,
+                                                tools=None, config=None):
+        """``stream_with_agent_models`` 的按 Agent 版本，事件序列完全一致。
+
+        群聊要把每个员工的思考/模型/正文过程推给老板，用的就是这一条。
+        """
+        async for ev in self.stream_with_agent_models(
+                await self._agent_model_ids(agent), messages,
+                tools=tools, config=config):
+            yield ev

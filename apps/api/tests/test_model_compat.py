@@ -262,6 +262,102 @@ async def test_401_with_key_does_not_claim_key_missing(monkeypatch):
     assert "被服务商拒绝" in str(exc_info.value)   # 指向"Key 失效/站点不匹配"
 
 
+def _use_stream_providers(monkeypatch, providers: dict, names: dict | None = None):
+    """给 stream_with_agent_models 换上假 provider 和假模型表。"""
+    from types import SimpleNamespace
+    names = names or {}
+    rows = {mid: SimpleNamespace(id=mid, name=names.get(mid, mid),
+                                 provider_type="openai_compat", base_url="",
+                                 model_id=mid, api_key="", enabled=None,
+                                 config=None) for mid in providers}
+
+    class Db:
+        async def get(self, model, mid):
+            return rows.get(mid)
+
+    monkeypatch.setattr(model_gateway.ModelGateway, "_build_provider",
+                        staticmethod(lambda row: providers[row.id]))
+
+    async def _noop_usage(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(model_gateway, "record_token_usage", _noop_usage)
+    monkeypatch.setattr(model_gateway, "_observe_llm_call", lambda *a, **k: None)
+    return model_gateway.ModelGateway(Db())
+
+
+async def test_stream_with_agent_models_forwards_reasoning(monkeypatch):
+    """思考增量不能在这层被丢掉——老板要看的就是它。
+
+    曾经这里只转发 delta，provider.stream 发出的 reasoning 全被吞掉，
+    而前端早就有渲染思考的分支：推理模型员工的"思考过程"永远是空的。
+    """
+    class Thinker:
+        async def stream(self, messages, tools=None, config=None):
+            yield {"type": "reasoning", "text": "先对齐口径，"}
+            yield {"type": "reasoning", "text": "再给结论。"}
+            yield {"type": "delta", "text": "本周主线是复购。"}
+            yield {"type": "final", "usage": {}, "tool_calls": None}
+
+    gw = _use_stream_providers(monkeypatch, {"m-1": Thinker()},
+                               {"m-1": "推理模型"})
+
+    events = [ev async for ev in gw.stream_with_agent_models(
+        ["m-1"], [{"role": "user", "content": "hi"}])]
+
+    assert [ev["type"] for ev in events] == [
+        "model", "reasoning", "reasoning", "delta", "done"]
+    assert "".join(ev["text"] for ev in events
+                   if ev["type"] == "reasoning") == "先对齐口径，再给结论。"
+
+
+async def test_stream_does_not_switch_models_once_reasoning_is_visible(
+        monkeypatch):
+    """思考已经推给老板了就别换模型重来：两段不同模型的思考拼一条更迷惑。"""
+    class FlakyThinker:
+        async def stream(self, messages, tools=None, config=None):
+            yield {"type": "reasoning", "text": "我在想…"}
+            raise RuntimeError("中途断了")
+            yield  # pragma: no cover
+
+    class Backup:
+        async def stream(self, messages, tools=None, config=None):
+            yield {"type": "delta", "text": "备用模型的答案"}
+            yield {"type": "final", "usage": {}, "tool_calls": None}
+
+    gw = _use_stream_providers(monkeypatch,
+                               {"m-a": FlakyThinker(), "m-b": Backup()},
+                               {"m-a": "会断的模型", "m-b": "备用模型"})
+
+    with pytest.raises(RuntimeError):
+        [ev async for ev in gw.stream_with_agent_models(
+            ["m-a", "m-b"], [{"role": "user", "content": "hi"}])]
+
+
+async def test_stream_by_agent_uses_the_agents_binding_order(monkeypatch):
+    """群聊按员工取模型走的是同一条流式链路。"""
+    seen: list[list[str]] = []
+
+    class Talker:
+        async def stream(self, messages, tools=None, config=None):
+            yield {"type": "delta", "text": "收到"}
+            yield {"type": "final", "usage": {}, "tool_calls": None}
+
+    gw = _use_stream_providers(monkeypatch, {"m-1": Talker()}, {"m-1": "模型"})
+
+    async def _ids(agent):
+        seen.append([agent.name])
+        return ["m-1"]
+
+    gw._agent_model_ids = _ids
+    agent = type("A", (), {"name": "小红书运营", "id": "a-1"})()
+    events = [ev async for ev in gw.stream_with_agent_models_by_agent(
+        agent, [{"role": "user", "content": "hi"}])]
+
+    assert seen == [["小红书运营"]]
+    assert [ev["type"] for ev in events] == ["model", "delta", "done"]
+
+
 async def test_stream_surfaces_upstream_error_body(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, json={"error": {"message": "bad request payload"}})
@@ -435,30 +531,52 @@ async def test_stream_with_agent_models_announces_fallback(monkeypatch):
     assert isinstance(events[4]["elapsed_ms"], int)
 
 
-async def test_chat_surfaces_finish_reason(monkeypatch):
-    """空正文要能看出"是被截断的还是采样踩空"，否则重试策略只能靠猜。
+def _scripted(responses: list[dict]) -> tuple[callable, list[dict]]:
+    """按脚本逐次应答，同时记录每次实际发出去的 body。"""
+    bodies: list[dict] = []
+    script = list(responses)
 
-    真实场景：推理型模型的 max_tokens 把"思考 + 正文"一起算，Sage-A1.5 实测
-    512 全花在思考上（reasoning 1900+ 字），content 是空但 HTTP 200。
-    群聊发言据此决定原样重发还是抬预算重发。
-    """
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={
-            "model": "Sage-A1.5",
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=script.pop(0) if script else
+                              {"model": "Sage-A1.5",
+                               "choices": [{"message": {"role": "assistant",
+                                                        "content": "兜底"},
+                                            "finish_reason": "stop"}]})
+
+    return handler, bodies
+
+
+def _truncated() -> dict:
+    """HTTP 200、正文 0 字、整段预算花在思考上。"""
+    return {"model": "Sage-A1.5",
             "choices": [{"message": {"role": "assistant", "content": None},
                          "finish_reason": "length"}],
-            "usage": {"completion_tokens": 512},
-        })
+            "usage": {"prompt_tokens": 100, "completion_tokens": 512,
+                      "total_tokens": 612}}
 
-    _use_transport(monkeypatch, handler)
+
+def _said(text: str) -> dict:
+    return {"model": "Sage-A1.5",
+            "choices": [{"message": {"role": "assistant", "content": text},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 40,
+                      "total_tokens": 140}}
+
+
+async def test_chat_surfaces_finish_reason(monkeypatch):
+    """调用"成功"不代表有正文：只有 finish_reason 能区分截断和采样踩空。"""
+    _use_transport(monkeypatch, lambda request: httpx.Response(200, json={
+        "model": "Sage-A1.5",
+        "choices": [{"message": {"role": "assistant", "content": "好的"},
+                     "finish_reason": "stop"}]}))
     provider = model_gateway.OpenAICompatProvider(
         "http://127.0.0.1:8787/v1", "", "Sage-A1.5")
 
-    result = await provider.chat([{"role": "user", "content": "讲一下"}],
-                                 config={"max_tokens": 512})
+    result = await provider.chat([{"role": "user", "content": "在吗"}])
 
-    assert result["content"] == ""
-    assert result["finish_reason"] == "length"
+    assert result["content"] == "好的"
+    assert result["finish_reason"] == "stop"
 
 
 async def test_chat_finish_reason_is_none_when_upstream_omits_it(monkeypatch):
@@ -470,3 +588,87 @@ async def test_chat_finish_reason_is_none_when_upstream_omits_it(monkeypatch):
     result = await provider.chat([{"role": "user", "content": "在吗"}])
 
     assert result["finish_reason"] is None
+
+
+async def test_chat_escalates_max_tokens_when_reasoning_eats_the_budget(
+        monkeypatch):
+    """思考占满 max_tokens → 正文 0 字，原样重发必然还是空，必须抬预算重发。
+
+    真实场景（实测 Sage-A1.5）：512 预算下 reasoning 1900+ 字、content 空、
+    completion_tokens 恰好 512；同一份上下文放到 4096 就出正文。策略放在
+    provider 层，群聊/会议/专家/自我进化这些非流式调用点才不用各写一遍。
+    """
+    handler, bodies = _scripted([_truncated(), _said("本周主线是复购。")])
+    _use_transport(monkeypatch, handler)
+    provider = model_gateway.OpenAICompatProvider(
+        "http://127.0.0.1:8787/v1", "", "Sage-A1.5")
+
+    result = await provider.chat([{"role": "user", "content": "本周主线"}],
+                                 config={"max_tokens": 512})
+
+    assert result["content"] == "本周主线是复购。"
+    assert len(bodies) == 2
+    assert bodies[0]["max_tokens"] == 512
+    assert bodies[1]["max_tokens"] == model_gateway.REASONING_RETRY_MAX_TOKENS
+    assert bodies[1]["messages"] == bodies[0]["messages"], "重发不改上下文"
+    # 截断那一轮真花了 token，两次的用量必须一起记账
+    assert result["usage"] == {"prompt_tokens": 200,
+                               "completion_tokens": 552,
+                               "total_tokens": 752}
+
+
+async def test_chat_does_not_escalate_a_tool_request_or_a_big_budget(
+        monkeypatch):
+    """两种情况别抬预算：模型在要求调用工具（不是没话说）、预算本来就已经够。"""
+    tool_call = {"model": "Sage-A1.5",
+                 "choices": [{"message": {
+                     "role": "assistant", "content": None,
+                     "tool_calls": [{"id": "c1", "type": "function",
+                                     "function": {"name": "web_search",
+                                                  "arguments": "{}"}}]},
+                     "finish_reason": "length"}]}
+    handler, bodies = _scripted([tool_call])
+    _use_transport(monkeypatch, handler)
+    provider = model_gateway.OpenAICompatProvider(
+        "http://127.0.0.1:8787/v1", "", "Sage-A1.5")
+
+    result = await provider.chat([{"role": "user", "content": "查一下"}],
+                                 config={"max_tokens": 512})
+    assert len(bodies) == 1, "空正文 + tool_calls 走工具分支，不是截断"
+    assert result["tool_calls"]
+
+    handler2, bodies2 = _scripted([_truncated()])
+    _use_transport(monkeypatch, handler2)
+    await provider.chat([{"role": "user", "content": "本周主线"}],
+                        config={"max_tokens": 8192})
+    assert len(bodies2) == 1, "预算已经高于重发档，不再往上抬"
+
+
+async def test_chat_does_not_put_max_tokens_back_after_dropping_it(
+        monkeypatch):
+    """小上下文网关会因为 length 报错而去掉 max_tokens——不能再塞回去。
+
+    塞回去只会重复吃一次 400，而且没有 max_tokens 就不存在"被它截断"。
+    """
+    bodies: list[dict] = []
+    seen = {"first": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        if seen["first"]:
+            seen["first"] = False
+            return httpx.Response(400, json={"error": {
+                "message": "This model's maximum context length is 4096 tokens"}})
+        return httpx.Response(200, json=_truncated())
+
+    _use_transport(monkeypatch, handler)
+    provider = model_gateway.OpenAICompatProvider(
+        "http://127.0.0.1:8787/v1", "", "Sage-A1.5")
+
+    result = await provider.chat([{"role": "user", "content": "讲一下"}],
+                                 config={"max_tokens": 8192})
+
+    assert len(bodies) == 2
+    assert "max_tokens" not in bodies[1]
+    assert result["content"] == ""

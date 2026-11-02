@@ -1,7 +1,9 @@
-"""群聊发言空正文：自动重试一次，被截断的还要抬预算，不再直接显示「(未发言)」。
+"""群聊发言空正文：分清「截断」和「采样踩空」，别把老板晾在「(未发言)」上。
 
-上游把推理计入 completion tokens，所以"调用成功但正文为空"多是 max_tokens 被
-思考吃满（finish_reason=length）——同一份上下文原样重发必然还是空。
+上游把推理计入 completion tokens，所以"调用成功但正文为空"有两种：
+1. 思考把 max_tokens 吃满（finish_reason=length）——原样重发必然还是空，
+   抬预算重发由 model_gateway 统一做（见 test_model_compat.py），这层再发只是多烧钱；
+2. 兼容网关偶尔整轮吐空（首 token 踩空、直接命中停止位）——同一份上下文重发就能出内容。
 也要钉住反面：模型只是要求调用工具时不能误判成"没话说"而重试——那会把
 tool_calls 覆盖掉，员工从此搜索不出结果。
 """
@@ -9,7 +11,6 @@ from __future__ import annotations
 
 import uuid
 
-from app.api.routes import group_chat as gc
 from app.api.routes.group_chat import _agent_speak
 from app.db.session import AsyncSessionLocal
 from app.models.agent import Agent
@@ -51,33 +52,8 @@ async def _quiet_rag(monkeypatch):
     monkeypatch.setattr("app.kb_engine.cost_optimized_rag", _none)
 
 
-async def test_truncated_reasoning_retries_with_a_bigger_budget(
-        client, tenants, monkeypatch):
-    """思考占满 max_tokens → 正文 0 字。原样重发一定还是空，必须抬预算。
-
-    实测上游把推理算进 completion tokens：Sage-A1.5 在 512 下
-    finish_reason=length、正文空、思考 1900+ 字；同一份上下文放到 4096 就能出话。
-    """
-    await _quiet_rag(monkeypatch)
-    agent = await _make_agent(tenants.alice_co["id"])
-    gw = _FakeGw([{"content": "", "tool_calls": [], "finish_reason": "length"},
-                  {"content": "我负责盯竞品和价格带，每周出一版对比结论。",
-                   "tool_calls": [], "finish_reason": "stop"}])
-
-    async with AsyncSessionLocal() as s:
-        out = await _agent_speak(s, gw, agent, "你的职责是什么", [])
-
-    assert len(gw.calls) == 2, "空正文应触发一次重发"
-    assert gw.calls[0] == gw.calls[1], "重发用同一份上下文，不偷偷改指令"
-    assert gw.configs[0]["max_tokens"] == 512
-    assert gw.configs[1]["max_tokens"] == gc.GROUP_CHAT_RETRY_MAX_TOKENS, \
-        "被截断的重试必须加大预算，否则只是白烧一次"
-    assert "竞品" in out["text"]
-    assert out["text"] != "(未发言)"
-
-
-async def test_sampling_flake_retries_without_changing_the_budget(
-        client, tenants, monkeypatch):
+async def test_sampling_flake_resends_the_same_context_once(client, tenants,
+                                                           monkeypatch):
     await _quiet_rag(monkeypatch)
     agent = await _make_agent(tenants.alice_co["id"])
     gw = _FakeGw([{"content": "", "tool_calls": [], "finish_reason": "stop"},
@@ -87,21 +63,42 @@ async def test_sampling_flake_retries_without_changing_the_budget(
     async with AsyncSessionLocal() as s:
         out = await _agent_speak(s, gw, agent, "你的职责是什么", [])
 
+    assert len(gw.calls) == 2, "空正文应触发一次重发"
+    assert gw.calls[0] == gw.calls[1], "重发用同一份上下文，不偷偷改指令"
     assert gw.configs[0] == gw.configs[1], "没截断就别擅自加钱"
     assert "素材" in out["text"]
 
 
-async def test_still_empty_after_retry_does_not_loop(client, tenants,
-                                                     monkeypatch):
+async def test_truncated_reply_is_not_resent_at_the_same_budget(
+        client, tenants, monkeypatch):
+    """finish_reason=length 交给网关抬预算重发，这里不再原样重发一次。
+
+    实测 Sage-A1.5 在 512 下思考占满整段预算（正文 0 字），同一份上下文放到
+    4096 才出话。走到这层仍是截断的空，说明连抬预算都没救回来——再发一次
+    同样的请求只是多烧一轮 token。
+    """
     await _quiet_rag(monkeypatch)
     agent = await _make_agent(tenants.alice_co["id"])
-    gw = _FakeGw([{"content": "", "tool_calls": [], "finish_reason": "length"},
-                  {"content": "", "tool_calls": [], "finish_reason": "length"}])
+    gw = _FakeGw([{"content": "", "tool_calls": [], "finish_reason": "length"}])
 
     async with AsyncSessionLocal() as s:
         out = await _agent_speak(s, gw, agent, "你的职责是什么", [])
 
-    assert len(gw.calls) == 2, "只重试一次，不给一个哑掉的模型反复烧钱"
+    assert len(gw.calls) == 1, "截断的原样重发必然还是空，不该再烧一次"
+    assert out["text"] == "(未发言)"
+
+
+async def test_still_empty_after_resend_does_not_loop(client, tenants,
+                                                     monkeypatch):
+    await _quiet_rag(monkeypatch)
+    agent = await _make_agent(tenants.alice_co["id"])
+    gw = _FakeGw([{"content": "", "tool_calls": [], "finish_reason": "stop"},
+                  {"content": "", "tool_calls": [], "finish_reason": "stop"}])
+
+    async with AsyncSessionLocal() as s:
+        out = await _agent_speak(s, gw, agent, "你的职责是什么", [])
+
+    assert len(gw.calls) == 2, "只重发一次，不给一个哑掉的模型反复烧钱"
     assert out["text"] == "(未发言)"
 
 
