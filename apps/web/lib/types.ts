@@ -32,6 +32,10 @@ export interface Department {
   pinned?: boolean;
 }
 
+/** 模型类型：决定调用方式与默认配置表单 */
+export type ModelType =
+  | "text" | "image" | "video" | "audio" | "embedding" | "other";
+
 export interface ModelConfig {
   id: ID;
   name: string;
@@ -43,7 +47,88 @@ export interface ModelConfig {
   company_id?: ID | null;
   /** 未归属的配置只能认领、不能直接删除。 */
   unowned?: boolean;
+  /** 所属供应商；升级前登记的直连模型为 null */
+  provider_id?: ID | null;
+  provider_name?: string | null;
+  model_type?: ModelType | string | null;
+  multimodal?: boolean | null;
+  capabilities?: string[] | null;
+  enabled?: boolean | null;
+  /** auto = 拉取时按类型生成；manual = 人工改过 */
+  config_source?: "auto" | "manual" | string | null;
+  last_synced_at?: string | null;
 }
+
+/** `GET /model-providers` —— 供应商（连接与密钥），可无限添加 */
+export interface ModelProvider {
+  id: ID;
+  name: string;
+  provider_type: string;
+  base_url: string | null;
+  api_key_env: string | null;
+  /** 只说明密钥是否就位，永不返回密钥内容 */
+  api_key_present: boolean;
+  enabled: boolean;
+  config?: Record<string, unknown> | null;
+  company_id?: ID | null;
+  unowned?: boolean;
+  model_count: number;
+  enabled_model_count: number;
+  last_check_ok?: boolean | null;
+  last_check_at?: string | null;
+  last_check_error?: string | null;
+}
+
+/** 拉取到的一个上游模型：带类型、多模态与按类型生成的默认配置 */
+export interface DiscoveredModel {
+  id: string;
+  name: string;
+  model_type: ModelType | string;
+  type_label?: string;
+  multimodal: boolean;
+  capabilities: string[];
+  config: Record<string, unknown>;
+  upstream?: Record<string, unknown> | null;
+}
+
+/** `POST /model-providers/{id}/pull|test` */
+export type ProviderDiscoverResult =
+  | {
+      status: "ok";
+      base_url?: string | null;
+      models: string[];
+      items: DiscoveredModel[];
+      model_count: number;
+    }
+  | {
+      status: "error";
+      error: string;
+      models?: null;
+      items?: null;
+      model_count?: number;
+    };
+
+/** `POST /model-providers/{id}/import` */
+export interface ProviderImportResult {
+  imported: string[];
+  updated: string[];
+  adopted: string[];
+  skipped: string[];
+  imported_count: number;
+}
+
+/** `POST /models/providers/batch-import` 的返回 */
+export interface BatchImportResult {
+  imported_count: number;
+  skipped_existing?: string[];
+  /** 部分导入失败时后端会回传逐条原因 */
+  errors?: string[];
+}
+
+/** `POST /models/providers/list-models` 的返回：成功给列表，失败给原因 */
+export type ProviderModelsResult =
+  | { status: "ok"; models: string[]; items?: DiscoveredModel[] }
+  | { status: "error"; error: string };
 
 /** 员工的能力包绑定与执行底座（存在 `agents.memory_config` 里） */
 export interface AgentMemoryConfig {
@@ -180,19 +265,6 @@ export interface RoleCapabilities {
 /** `GET /models/convert-config` —— 文档转换专用模型 */
 export interface ConvertConfig {
   convert_model_id: string | null;
-}
-
-/** `POST /models/providers/list-models` 的返回：成功给列表，失败给原因 */
-export type ProviderModelsResult =
-  | { status: "ok"; models: string[] }
-  | { status: "error"; error: string };
-
-/** `POST /models/providers/batch-import` 的返回 */
-export interface BatchImportResult {
-  imported_count: number;
-  skipped_existing?: string[];
-  /** 部分导入失败时后端会回传逐条原因 */
-  errors?: string[];
 }
 
 /** `POST /models/{id}/test` 的返回 */
