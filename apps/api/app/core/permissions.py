@@ -147,11 +147,17 @@ async def resolve_role(db: AsyncSession, user_id: str,
 
     顺序（P5 契约，改顺序等于改权限，务必同步测试）：
 
+    0. `companies.owner_id` 命中 → OWNER（所有权是事实源，优先于超管捷径）
     1. 平台超管且在该公司**没有生效成员身份** → ADMIN（可进入任意公司，但不是所有者）
-    2. `companies.owner_id` 或 active 的 `company_members.role='owner'` → OWNER
+    2. active 的 `company_members.role='owner'` → OWNER
     3. active 成员：company_admin → ADMIN、member → MEMBER、viewer → VIEWER
     4. 仅在部门成员表里出现过 → MEMBER（部门负责人身份不改变公司角色）
     5. 其余 → None
+
+    为什么所有权要排在超管之前：首位安装者通常同时是超管与公司所有者。
+    若先命中超管捷径，他会拿到 ADMIN——而 ADMIN 按矩阵没有 ADMIN 级能力
+    （"管理员不该拥有所有权级能力"），于是公司级配置会被自己的超管身份拦住。
+    只对"超管且确实是所有者"生效；非所有者的超管仍按 ADMIN。
 
     每个请求都会调用这里，因此查询次数必须与"成员数量"无关：
     company / user / 成员 / 部门成员各至多一次（前两者通常命中 identity map）。
@@ -164,6 +170,10 @@ async def resolve_role(db: AsyncSession, user_id: str,
     if company is None:
         return None
 
+    # 0) 所有权：公司表是事实源
+    if company.owner_id == user_id:
+        return Role.OWNER
+
     member = await _company_member(db, company_id, user_id)
     member_active = _is_active_member(member)
 
@@ -172,9 +182,7 @@ async def resolve_role(db: AsyncSession, user_id: str,
         return Role.ADMIN
 
     member_role = (member.role or "").lower() if member is not None else ""
-    # 2) 所有权：公司表是事实源，成员表里的 owner 是镜像
-    if company.owner_id == user_id:
-        return Role.OWNER
+    # 2) 成员表里的 owner 是公司表所有权的镜像
     if member_active and member_role == "owner":
         return Role.OWNER
 

@@ -595,6 +595,7 @@ export default function WorkspacePage() {
       else if (d.name === "left") toggleLeft();
       else if (d.name === "right") toggleRight();
       else if (d.name === "new-chat") setPicking(true);
+      else if (d.name === "ceo") window.dispatchEvent(new CustomEvent("aieos:ceo-toggle"));
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);

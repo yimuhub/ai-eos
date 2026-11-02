@@ -31,6 +31,8 @@ logger = get_logger(__name__)
 CEO_DISPLAY_NAME = "CEO"
 CEO_BUNDLE_VERSION = 1
 CEO_BUNDLE_SOURCE = "ceo_bundle"
+# 老数据没有 is_ceo 标记，只能按岗位名推断；与 ceo_engine.find_coordinator 共用一份口径。
+CEO_ROLE_HINTS: tuple[str, ...] = ("ceo", "总经理", "总裁", "首席执行官", "负责人")
 
 CEO_SKILLS: tuple[dict, ...] = (
     {
@@ -228,11 +230,45 @@ def ensure_ceo_identity(agent: Agent) -> None:
         agent.name = CEO_DISPLAY_NAME
 
 
+async def _adopt_legacy_ceos(db: AsyncSession) -> list[Agent]:
+    """收编「从未写过 is_ceo」的老数据里按岗位名认出的 CEO。
+
+    这层兜底原本只存在于读取路径：页面把他当 CEO，但名字不改、技能包不装。
+    公司只要有过显式 is_ceo（True 或 False）就完全交给显式状态，
+    避免老板解除后又被岗位名认回来。
+    """
+    company_ids = (await db.execute(
+        select(Agent.company_id)
+        .where(Agent.company_id.is_not(None)).distinct()
+    )).scalars().all()
+    adopted: list[Agent] = []
+    for cid in company_ids:
+        has_ceo = (await db.execute(
+            select(Agent.id).where(Agent.company_id == cid,
+                                   Agent.is_ceo.is_(True)).limit(1)
+        )).scalars().first()
+        if has_ceo:
+            continue
+        rows = (await db.execute(
+            select(Agent).where(Agent.company_id == cid)
+        )).scalars().all()
+        if not rows or any(a.is_ceo is not None for a in rows):
+            continue
+        for agent in rows:
+            text = f"{agent.name or ''} {agent.role or ''}".lower()
+            if any(h in text for h in CEO_ROLE_HINTS):
+                agent.is_ceo = True
+                adopted.append(agent)
+                break
+    return adopted
+
+
 async def ensure_ceo_bundles(db: AsyncSession) -> dict:
     """启动自愈：历史任命的 CEO 也要改名、补齐技能包。"""
-    agents = (await db.execute(
+    agents = list((await db.execute(
         select(Agent).where(Agent.is_ceo.is_(True))
-    )).scalars().all()
+    )).scalars().all())
+    agents.extend(await _adopt_legacy_ceos(db))
     added_total = 0
     for agent in agents:
         ensure_ceo_identity(agent)

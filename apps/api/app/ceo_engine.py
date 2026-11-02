@@ -230,10 +230,10 @@ async def find_coordinator(db: AsyncSession,
     candidates = (await db.execute(
         select(Agent).where(Agent.company_id == company_id))).scalars().all()
     if all(a.is_ceo is None for a in candidates):
-        hints = ("ceo", "总经理", "总裁", "首席执行官", "负责人")
+        from app.ceo_skill_bundle import CEO_ROLE_HINTS
         for a in candidates:
             text = f"{a.name or ''} {a.role or ''}".lower()
-            if any(h in text for h in hints):
+            if any(h in text for h in CEO_ROLE_HINTS):
                 return a
     return None
 

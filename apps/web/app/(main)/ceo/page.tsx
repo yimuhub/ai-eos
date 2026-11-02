@@ -40,6 +40,13 @@ type CeoConfig = {
   candidates: CeoAgentOption[];
 };
 
+type CeoRelease = {
+  company_id: string;
+  released_agent_id: string;
+  released_agent_name: string;
+  restored_name: string;
+};
+
 type CeoCapacity = {
   requested: number;
   provider_cap: number;
@@ -382,6 +389,9 @@ export default function CeoPage() {
   const [pickAgentId, setPickAgentId] = useState("");
   const [assigning, setAssigning] = useState(false);
   const [assignError, setAssignError] = useState("");
+  const [releasing, setReleasing] = useState(false);
+  const [releaseError, setReleaseError] = useState("");
+  const [releasedNote, setReleasedNote] = useState("");
 
   /* ------ 2. 并发容量 ------ */
   const capacity = useResource<CeoCapacity>(
@@ -552,6 +562,18 @@ export default function CeoPage() {
 
   /* ------ 动作 ------ */
 
+  // 极客模式下本页在 iframe 里，常驻小人在外层窗口；事件不会跨文档，需显式转发。
+  function notifyCeoChanged() {
+    window.dispatchEvent(new CustomEvent("aieos:ceo-changed"));
+    if (window.parent && window.parent !== window) {
+      try {
+        window.parent.dispatchEvent(new CustomEvent("aieos:ceo-changed"));
+      } catch {
+        /* 跨域时忽略：外层会按窗口聚焦/新鲜度自取 */
+      }
+    }
+  }
+
   async function assignCeo() {
     if (!cid || !pickAgentId) return;
     const switching = !!config.data?.has_ceo;
@@ -573,13 +595,49 @@ export default function CeoPage() {
       });
       // 以响应为准：卡片上显示的永远是服务端确认的那个人
       notify("success", `已指定 ${res.ceo_agent_name} 为 CEO`);
+      setReleasedNote("");
       config.refresh();
       capacity.refresh(); // 负责人的供应商档位可能变了 → 三层容量重算
       setPickAgentId("");
+      // 常驻小人立刻出现/切换
+      notifyCeoChanged();
     } catch (e) {
       setAssignError(describeError(e, "指定 CEO 失败"));
     } finally {
       setAssigning(false);
+    }
+  }
+
+  async function releaseCeo() {
+    if (!cid || !cfg?.has_ceo || releasing) return;
+    const ok = await confirmAction({
+      title: "解除 CEO？",
+      description:
+        "这位员工的姓名会还原为任命前的名字，CEO 专属技能自动收回；手工安装或自己学的技能保留，历史对话与定时任务也保留。",
+      bullets: ["恢复任命前的姓名", "收回 CEO 专属技能包", "保留对话记录、其他技能与调度"],
+      confirmText: "解除 CEO",
+      danger: true,
+    });
+    if (!ok) return;
+    setReleasing(true);
+    setReleaseError("");
+    setReleasedNote("");
+    try {
+      const res = await api.post<CeoRelease>("/ceo/config/release", {
+        company_id: cid,
+        agent_id: cfg.ceo_agent_id,
+      });
+      const note = `已解除 CEO，姓名还原为「${res.restored_name}」`;
+      setReleasedNote(note);
+      notify("success", note);
+      config.refresh();
+      capacity.refresh();
+      setPickAgentId("");
+      notifyCeoChanged();
+    } catch (e) {
+      setReleaseError(describeError(e, "解除 CEO 失败"));
+    } finally {
+      setReleasing(false);
     }
   }
 
@@ -851,7 +909,33 @@ export default function CeoPage() {
                 </button>
               </div>
             )}
+            {cfg.has_ceo && (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={releaseCeo}
+                  disabled={releasing || assigning}
+                  className="rounded-lg px-3 py-1.5 text-xs font-medium disabled:opacity-40"
+                  style={{
+                    border: "1px solid rgba(248,113,113,0.35)",
+                    color: "#fca5a5",
+                    background: "rgba(248,113,113,0.08)",
+                  }}
+                >
+                  {releasing ? "解除中…" : "解除 CEO"}
+                </button>
+                <span className="text-[11px]" style={{ color: "var(--muted)" }}>
+                  解除后恢复原名，专属技能自动收回
+                </span>
+              </div>
+            )}
             <InlineError>{assignError}</InlineError>
+            <InlineError>{releaseError}</InlineError>
+            {releasedNote && (
+              <p className="text-[11px]" style={{ color: "#6ee7b7" }}>
+                ✓ {releasedNote}
+              </p>
+            )}
           </div>
         )}
       </Section>

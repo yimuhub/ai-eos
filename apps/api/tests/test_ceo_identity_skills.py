@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.ceo_skill_bundle import (CEO_SKILLS, ensure_ceo_bundles)
 from app.db.session import AsyncSessionLocal
@@ -130,6 +130,48 @@ async def test_startup_self_heal_renames_legacy_ceo_and_binds_bundle(tenants):
         assert agent.pre_ceo_name == "老张"
     bound = await _skill_bindings(aid)
     assert {spec["slug"] for spec in CEO_SKILLS} <= set(bound)
+
+
+async def test_startup_self_heal_adopts_legacy_role_hint_ceo(tenants):
+    """升级前的老 CEO 只有岗位名、没有 is_ceo：启动后要正式收编、改名、装包。"""
+    alice, co = tenants.alice, tenants.alice_co
+    aid = str(uuid.uuid4())
+    async with AsyncSessionLocal() as s:
+        s.add(Agent(id=aid, company_id=co["id"], name="测试负责人", role="内容合规",
+                    status=AgentStatus.IDLE, created_by_user_id=alice["id"]))
+        await s.commit()
+        # 模拟老库：升级前 is_ceo 列是后加的，历史行是 NULL 而不是 False
+        await s.execute(text("UPDATE agents SET is_ceo = NULL WHERE id = :id"),
+                       {"id": aid})
+        await s.commit()
+
+        await ensure_ceo_bundles(s)
+        await s.commit()
+
+        agent = await s.get(Agent, aid)
+        assert agent.is_ceo is True
+        assert agent.name == "CEO"
+        assert agent.pre_ceo_name == "测试负责人"
+    bound = await _skill_bindings(aid)
+    assert {spec["slug"] for spec in CEO_SKILLS} <= set(bound)
+
+
+async def test_startup_self_heal_keeps_explicitly_released_ceo_released(tenants):
+    """老板解除后 is_ceo=False 是显式状态，不能再按岗位名认回来。"""
+    alice, co = tenants.alice, tenants.alice_co
+    aid = await _seed_agent(co["id"], alice["id"], "王总", "总经理")
+    async with AsyncSessionLocal() as s:
+        agent = await s.get(Agent, aid)
+        agent.is_ceo = False
+        await s.commit()
+
+        await ensure_ceo_bundles(s)
+        await s.commit()
+
+        agent = await s.get(Agent, aid)
+        assert agent.is_ceo is False
+        assert agent.name == "王总"
+    assert not (await _skill_bindings(aid))
 
 
 async def test_system_exclusive_skills_are_not_auto_provisioned(

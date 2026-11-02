@@ -633,6 +633,46 @@ async def test_resolve_role_returns_none_for_foreign_company(client, tenants):
         assert await resolve_role(db, tenants.alice["id"], None) is None
 
 
+async def test_superadmin_who_owns_company_keeps_owner_capabilities(
+        make_user, make_company):
+    """首位安装者通常同时是超管与所有者：必须解析成 OWNER。
+
+    否则会命中超管捷径拿到 ADMIN，而 ADMIN 按矩阵没有 ADMIN 级能力，
+    公司级配置（指定/解除 CEO 等）会被自己的超管身份拦住。
+    """
+    from app.db.session import AsyncSessionLocal
+    from app.core.permissions import Capability, Role, resolve_role, role_has
+    from app.models.user import User
+
+    user = await make_user()
+    co = await make_company(user)
+    async with AsyncSessionLocal() as db:
+        u = await db.get(User, user["id"])
+        u.is_superadmin = True
+        await db.commit()
+        role = await resolve_role(db, user["id"], co["id"])
+    assert role is Role.OWNER
+    assert role_has(role, Capability.ADMIN)
+
+
+async def test_superadmin_without_ownership_stays_admin(make_user, make_company):
+    """超管不是所有者时仍按 ADMIN：能进公司，但不拿所有权级能力。"""
+    from app.db.session import AsyncSessionLocal
+    from app.core.permissions import Capability, Role, resolve_role, role_has
+    from app.models.user import User
+
+    boss = await make_user()
+    other = await make_user()
+    co = await make_company(other)
+    async with AsyncSessionLocal() as db:
+        u = await db.get(User, boss["id"])
+        u.is_superadmin = True
+        await db.commit()
+        role = await resolve_role(db, boss["id"], co["id"])
+    assert role is Role.ADMIN
+    assert not role_has(role, Capability.ADMIN)
+
+
 # ---------------------------------------------------------------------------
 # 静态护栏扫出来的那一批：逐个用行为验证兜住
 # ---------------------------------------------------------------------------

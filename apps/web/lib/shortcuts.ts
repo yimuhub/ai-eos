@@ -48,4 +48,5 @@ export const SHORTCUTS: ShortcutItem[] = [
   { key: "↵", label: "打开", desc: "打开高亮任务的详情页" },
   { key: "?", label: "快捷键帮助", desc: "打开 / 关闭本面板" },
   { key: "⌘K", label: "全局搜索", desc: "原有命令面板，行为不变" },
+  { key: "⌘⇧K", label: "唤起 CEO", desc: "随时打开 CEO 对话（组合可在抽屉设置里改）" },
 ];

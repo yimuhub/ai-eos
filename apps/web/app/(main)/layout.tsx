@@ -9,7 +9,9 @@ import UpdateBanner from "@/components/UpdateBanner";
 import ClassicLayout from "@/components/ClassicLayout";
 import ModeChooser from "@/components/ModeChooser";
 import FirstRunTour from "@/components/FirstRunTour";
+import CeoDock from "@/components/CeoDock";
 import { api, ApiError, getToken } from "@/lib/api";
+import { matchesCeoShortcut, readCeoShortcut } from "@/lib/ceoShortcut";
 import { isEmbedded } from "@/lib/apps";
 import { useUIMode } from "@/lib/ui-mode";
 
@@ -167,6 +169,9 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
   const chrome = (
     <>
       {hosts}
+      {/* 常驻 CEO：指定后小人出现在任何页面，点击/⌘⇧K 随时对话。
+          内嵌 iframe 分支不渲染，避免标签里出现第二个小人。 */}
+      <CeoDock />
       {/* 自动升级横幅：只在桌面壳里工作，浏览器访问零渲染 */}
       <UpdateBanner />
       {desktop && <div className="app-drag fixed inset-x-0 top-0 z-40 h-[34px]" aria-hidden />}
@@ -233,7 +238,16 @@ function EmbedReporter() {
 function EmbedShortcuts() {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      if (!(e.metaKey || e.ctrlKey)) return;
+      // CEO 唤起键排在最前：默认 ⌘⇧K 与 ⌘K 同键位，不能先被命令面板吃掉。
+      // 组合可在抽屉里改，所以每次按键都读一次本机配置（同源 localStorage）。
+      if (matchesCeoShortcut(e, readCeoShortcut())) {
+        e.preventDefault();
+        e.stopPropagation();
+        window.parent.postMessage({ type: "aieos:shortcut", name: "ceo" }, window.location.origin);
+        return;
+      }
+      if (e.altKey) return;
       const k = e.key.toLowerCase();
       const name = k === "k" ? "palette" : k === "b" ? "left" : k === "j" ? "right" : k === "n" ? "new-chat" : "";
       if (!name) return;
