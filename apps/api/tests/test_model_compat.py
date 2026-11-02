@@ -92,6 +92,93 @@ async def test_chat_drops_tools_when_server_rejects_them(monkeypatch):
     assert bodies[1]["messages"] == bodies[0]["messages"]  # 只去掉参数，不改请求语义
 
 
+_MULTI_SYSTEM_MSGS = [
+    {"role": "system", "content": "你是「战略研究员」。"},
+    {"role": "system", "content": "你的长期记忆：\n- 上月营收 12 万"},
+    {"role": "user", "content": "上一轮的问题"},
+    {"role": "assistant", "content": "上一轮的回答"},
+    {"role": "system", "content": "回答长度要求：300-800 字。"},
+    {"role": "system", "content": "【文档产出能力】……"},
+    {"role": "user", "content": "你好，请用一句话介绍你自己"},
+]
+
+
+async def test_chat_sends_a_single_system_message(monkeypatch):
+    """兼容网关只认一条 system：多条会 400 upstream_request_rejected。
+
+    真实场景：聊天上下文拼了人设/记忆/知识库/技能等 6~9 条 system，
+    discovery-api 从第二条起直接拒绝，单聊每轮都回「（没有收到内容）」。
+    """
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        if sum(1 for m in body["messages"] if m["role"] == "system") > 1:
+            return httpx.Response(400, json={"error": {
+                "code": "upstream_request_rejected", "message": "Bad Request",
+                "type": "invalid_request_error"}})
+        return _completion("我是战略研究员")
+
+    _use_transport(monkeypatch, handler)
+    provider = model_gateway.OpenAICompatProvider(
+        "http://127.0.0.1:8787/v1", "", "Sage-A1.5")
+
+    result = await provider.chat(_MULTI_SYSTEM_MSGS)
+
+    assert result["content"] == "我是战略研究员"
+    sent = bodies[0]["messages"]
+    assert [m["role"] for m in sent] == ["system", "user", "assistant", "user"]
+    merged = sent[0]["content"]
+    # 每条 system 原文都在，且先后顺序不变
+    assert "你是「战略研究员」。" in merged
+    assert "【文档产出能力】……" in merged
+    assert merged.index("你是「战略研究员」。") < merged.index("回答长度要求")
+    # 对话消息原样保留
+    assert sent[3] == {"role": "user", "content": "你好，请用一句话介绍你自己"}
+
+
+async def test_stream_sends_a_single_system_message(monkeypatch):
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        if sum(1 for m in body["messages"] if m["role"] == "system") > 1:
+            return httpx.Response(400, json={"error": {
+                "code": "upstream_request_rejected", "message": "Bad Request",
+                "type": "invalid_request_error"}})
+        return _sse("你好")
+
+    _use_transport(monkeypatch, handler)
+    provider = model_gateway.OpenAICompatProvider(
+        "http://127.0.0.1:8787/v1", "", "Sage-A1.5")
+
+    events = [ev async for ev in provider.stream(_MULTI_SYSTEM_MSGS)]
+
+    assert [ev["type"] for ev in events if ev["type"] == "delta"] == ["delta"]
+    assert sum(1 for m in bodies[0]["messages"] if m["role"] == "system") == 1
+
+
+async def test_single_system_message_is_left_untouched(monkeypatch):
+    """只有一条 system 时不重排消息：避免给正常网关改请求体。"""
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return _completion()
+
+    _use_transport(monkeypatch, handler)
+    provider = model_gateway.OpenAICompatProvider(
+        "http://127.0.0.1:8787/v1", "", "Sage-A1.5")
+    messages = [{"role": "system", "content": "人设"},
+                {"role": "user", "content": "你好"}]
+
+    await provider.chat(messages)
+
+    assert bodies[0]["messages"] == messages
+
+
 async def test_chat_drops_max_tokens_on_context_length_error(monkeypatch):
     bodies: list[dict] = []
 

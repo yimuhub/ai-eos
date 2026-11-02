@@ -146,6 +146,30 @@ def _drop_unsupported_param(body: dict, status: int, raw: str) -> str | None:
     return None
 
 
+def _merge_system_messages(messages: list[dict]) -> list[dict]:
+    """把多条 system 合成一条放在开头。
+
+    聊天/会议/作战的上下文会拼进人设、摘要、长期记忆、知识库、技能、
+    长度要求、文档能力、工具纪律等多条 system。OpenAI 官方接口接受这种
+    写法，但兼容网关普遍只认一条：实测 discovery-api 从第二条 system
+    起直接 400 `upstream_request_rejected`（响应体只有 "Bad Request"，
+    不指向任何参数），于是每轮对话都失败。合成一条是所有兼容网关都能
+    接受的写法，也不改变指令本身的内容与先后顺序。
+    """
+    parts: list[str] = []
+    rest: list[dict] = []
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "system":
+            text = (m.get("content") or "").strip()
+            if text:
+                parts.append(text)
+        else:
+            rest.append(m)
+    if len(parts) <= 1:
+        return messages
+    return [{"role": "system", "content": "\n\n".join(parts)}, *rest]
+
+
 def _retry_delay(attempt: int, status: int | None = None,
                  retry_after: float | None = None) -> float:
     """指数退避 + jitter；attempt 从 0 开始。
@@ -416,7 +440,7 @@ class OpenAICompatProvider(BaseModelProvider):
         cfg = config or {}
         body = {
             "model": self.model_id,
-            "messages": messages,
+            "messages": _merge_system_messages(messages),
             "temperature": cfg.get("temperature", 0.7),
             "max_tokens": cfg.get("max_tokens", 8192),
         }
@@ -463,7 +487,7 @@ class OpenAICompatProvider(BaseModelProvider):
         cfg = config or {}
         base_body = {
             "model": self.model_id,
-            "messages": messages,
+            "messages": _merge_system_messages(messages),
             "temperature": cfg.get("temperature", 0.7),
             "max_tokens": cfg.get("max_tokens", 8192),
             "stream": True,
