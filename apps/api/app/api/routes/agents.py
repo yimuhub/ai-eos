@@ -43,7 +43,7 @@ from app.schemas.responses import (AgentBatchAssignManagerOut,
                                    AgentCardOut, AgentListItemOut,
                                    AgentManagerOut, AgentModelBindingOut,
                                    AgentModelConfigOut, AgentOut,
-                                   AgentSkillProvisionOut,
+                                   AgentSkillItemOut, AgentSkillProvisionOut,
                                    AgentSubordinateOut, AgentSwitchModelOut,
                                    CapabilityPacksOut)
 from app.services import license_service
@@ -966,3 +966,29 @@ async def list_models_for_agent(aid: str, db: AsyncSession = Depends(get_db),
     q = await db.execute(
         select(AgentModelConfig).where(AgentModelConfig.agent_id == aid))
     return [{"role": b.role, "model_id": b.model_id} for b in q.scalars()]
+
+
+@router.get("/{aid}/skills", response_model=list[AgentSkillItemOut])
+async def list_skills_for_agent(aid: str, db: AsyncSession = Depends(get_db),
+                                user=Depends(get_current_user)):
+    """员工当前绑定的技能（含绑定来源）。
+
+    CEO 对话框需要知道"哪些技能已经勾上"；绑定/解绑仍走
+    ``/skills/{slug}/install|uninstall``，不另造写接口。
+    """
+    from app.models.skill import AgentSkill, Skill as SkillRow
+
+    a = await _load_agent(db, aid)
+    await ensure_agent_access(db, user, a, Capability.VIEW)
+    rows = (await db.execute(
+        select(SkillRow.id, SkillRow.slug, SkillRow.name, SkillRow.description,
+               SkillRow.scope, SkillRow.source, AgentSkill.source)
+        .join(AgentSkill, AgentSkill.skill_id == SkillRow.id)
+        .where(AgentSkill.agent_id == str(a.id))
+        .order_by(SkillRow.name))).all()
+    return [
+        {"id": sid, "slug": slug, "name": name, "description": desc,
+         "scope": scope, "source": source,
+         "binding_source": binding_source or "manual"}
+        for sid, slug, name, desc, scope, source, binding_source in rows
+    ]

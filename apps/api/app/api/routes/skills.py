@@ -25,17 +25,18 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/skills", tags=["skills"],
                    dependencies=[Depends(require_company_scope())])
-_seeded = False
 
 
 async def ensure_skills_seeded(db: AsyncSession):
-    """Sync builtin skill manifests into DB once."""
-    global _seeded
-    if _seeded:
-        return
+    """Sync builtin skill manifests into DB.
+
+    不能再用进程级 `_seeded` 短路：数据库可能被独立于本进程地重建
+    （测试逐例清表、换库恢复），标志位一旦残留就会让后续请求
+    对着空表报 "Skill not found"。幂等 upsert 的查询成本远低于
+    "技能神秘消失"的排查成本。
+    """
     await ensure_builtin_skills(db)
     await db.commit()
-    _seeded = True
 
 
 def _accessible_company_ids(user_id: str):

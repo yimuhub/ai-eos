@@ -15,12 +15,15 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.ceo_companion import DEFAULT_THREAD_TITLE, ensure_default_thread
+from app.core.chat_attachments import (ChatAttachment,
+                                       build_attachments_context,
+                                       resolve_attachments)
 from app.core.logging_config import get_logger
 from app.core.permissions import Capability
 from app.core.scope import ensure_agent_access
@@ -165,6 +168,18 @@ async def _visible_agent(db: AsyncSession, user, agent_id: str) -> Agent:
         raise HTTPException(404, "Agent not found")
     await ensure_agent_access(db, user, a, Capability.VIEW)
     return a
+
+
+async def _resolve_requested_model(db: AsyncSession, a: Agent,
+                                   model_id: str | None) -> str | None:
+    """对话框显式选择的模型：必须存在且属于本公司（或未归属的共享配置）。"""
+    if not model_id:
+        return None
+    from app.models.agent import Model
+    row = await db.get(Model, model_id)
+    if row is None or row.company_id not in (None, str(a.company_id)):
+        raise HTTPException(400, "模型不存在或不属于本公司")
+    return str(row.id)
 
 
 # 滚动摘要：攒够 16 条再压一次，最近 6 条始终保留原文。
@@ -371,7 +386,8 @@ def _model_ids_for_text(model_ids: list[str], text: str) -> list[str]:
 
 
 async def _build_qa_messages(db: AsyncSession, a: Agent, text: str,
-                             thread: CeoThread | None = None) -> list[dict]:
+                             thread: CeoThread | None = None,
+                             attachments_text: str | None = None) -> list[dict]:
     """问答上下文的完整拼装：人设 + 摘要 + 长期记忆 + 知识库 + 技能 + 最近对话。"""
     from app.kb_engine import cost_optimized_rag
     from app.memory_engine import recall
@@ -459,6 +475,9 @@ async def _build_qa_messages(db: AsyncSession, a: Agent, text: str,
             "（天气用 weather.com.cn / nmc.cn），再基于正文作答。"
             "最多搜索 2 次，不要反复换关键词搜索；"
             "搜索/抓取失败要如实说明，严禁凭记忆或猜测给出数字。"})
+    # 本轮附件：放在用户消息前，模型能明确知道"这些资料是这次带来的"
+    if attachments_text:
+        messages.append({"role": "system", "content": attachments_text})
     # 当前用户消息（必须显式加入）
     messages.append({"role": "user", "content": text})
     return messages
@@ -869,9 +888,18 @@ async def boss_chat(aid: str, data: ChatIn,
 _CHAT_TOOLS = [WEB_SEARCH_TOOL, WEB_FETCH_TOOL, *COMPUTER_TOOLS]
 
 
+class ChatAttachmentIn(BaseModel):
+    id: str
+    name: str | None = None
+
+
 class ChatStreamIn(BaseModel):
     message: str
     thread_id: str | None = None
+    # 老板在对话框里选的附件（先走 /assets/upload，这里只传资产 id）
+    attachments: list[ChatAttachmentIn] = Field(default_factory=list)
+    # 老板在对话框里显式选的模型；缺省仍走 Agent 的 primary/降级顺序
+    model_id: str | None = None
 
 
 def _sse(payload: dict) -> str:
@@ -931,7 +959,9 @@ class DocMarkerFilter:
 
 
 async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
-                       thread_id: str | None = None):
+                       thread_id: str | None = None,
+                       attachments: list[ChatAttachment] | None = None,
+                       requested_model_id: str | None = None):
     """SSE 生成器。
 
     自建 session：请求级依赖的回收时机与长连接无关，
@@ -939,6 +969,7 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
     """
     from app.model_gateway import ModelGateway, usage_context
 
+    attachments = attachments or []
     async with AsyncSessionLocal() as db:
         try:
             # 鉴权已在 handler 里做完（_visible_agent → 未通过时直接 404）。
@@ -949,7 +980,9 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
                 return
             thread = await db.get(CeoThread, thread_id) if thread_id else None
 
-            short = await _try_short_intents(db, a, user_id, text)
+            # 带附件时不能走"安排任务"等短路径：那会把文件当没看见
+            short = None if attachments else await _try_short_intents(
+                db, a, user_id, text)
             if short:
                 await _save_msg(db, a, "agent", short["reply"], short["meta"],
                                 thread=thread)
@@ -961,10 +994,20 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
                             "thread_id": thread_id})
                 return
 
+            attachments_text = ""
+            if attachments:
+                yield _sse({"type": "status", "text": "正在读取附件…"})
+                attachments_text = await build_attachments_context(attachments)
             yield _sse({"type": "status", "text": "正在检索记忆与知识库…"})
-            messages = await _build_qa_messages(db, a, text, thread=thread)
-            model_ids = _model_ids_for_text(
-                await _agent_model_ids(db, a), text)
+            messages = await _build_qa_messages(
+                db, a, text, thread=thread, attachments_text=attachments_text)
+            model_ids = await _agent_model_ids(db, a)
+            if requested_model_id:
+                # 老板在对话框里显式选的模型优先，且不参与"短问题走便宜模型"的重排
+                model_ids = [requested_model_id] + [
+                    m for m in model_ids if m != requested_model_id]
+            else:
+                model_ids = _model_ids_for_text(model_ids, text)
             gw = ModelGateway(db)
             flt = DocMarkerFilter()
             actions: list[dict] = []
@@ -1097,13 +1140,22 @@ async def boss_chat_stream(aid: str, data: ChatStreamIn,
     if not text:
         raise HTTPException(400, "empty message")
     thread = await _resolve_thread(db, a, data.thread_id)
-    # 先落老板这句：即使后面模型挂了，历史里也留有他的指令
-    await _save_msg(db, a, "boss", text, thread=thread)
+    requested_model = await _resolve_requested_model(db, a, data.model_id)
+    attachments = await resolve_attachments(
+        db, str(a.company_id), [x.model_dump() for x in data.attachments])
+    # 先落老板这句：即使后面模型挂了，历史里也留有他的指令与附件名
+    await _save_msg(
+        db, a, "boss", text,
+        meta={"attachments": [x.meta() for x in attachments]}
+        if attachments else None,
+        thread=thread)
     await db.commit()
 
     return StreamingResponse(
         _chat_stream(str(a.id), str(a.company_id), str(user.id), text,
-                     str(thread.id) if thread is not None else None),
+                     str(thread.id) if thread is not None else None,
+                     attachments=attachments,
+                     requested_model_id=requested_model),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -300,6 +300,18 @@ class AgentSkillProvisionOut(BaseModel):
     errors: list[str]
 
 
+class AgentSkillItemOut(BaseModel):
+    """员工当前绑定的技能（对话框勾选状态用）。"""
+
+    id: str
+    slug: str
+    name: str
+    description: str | None
+    scope: str
+    source: str            # 技能来源：builtin | custom | imported
+    binding_source: str    # 绑定来源：manual | auto | ceo_bundle
+
+
 class AgentBatchDeleteFailureOut(BaseModel):
     id: str
     reason: str
