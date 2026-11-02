@@ -36,6 +36,7 @@ import {
 import { confirmAction } from "@/components/ConfirmDialog";
 import { notify } from "@/components/Toast";
 import CeoPet from "@/components/CeoPet";
+import { desktopBridge } from "@/lib/desktopBridge";
 
 type Companion = {
   has_ceo: boolean;
@@ -117,6 +118,8 @@ export default function CeoDock() {
   const [isMac, setIsMac] = useState(false);
   const [unread, setUnread] = useState(false);
   const [hop, setHop] = useState(false);
+  const [isDesktopApp, setIsDesktopApp] = useState(false);
+  const [desktopShortcutError, setDesktopShortcutError] = useState("");
 
   const [pos, setPos] = useState<Pos>({ right: 20, bottom: 24 });
   const [dragging, setDragging] = useState(false);
@@ -310,6 +313,58 @@ export default function CeoDock() {
     window.addEventListener("aieos:ceo-toggle", onToggle);
     return () => window.removeEventListener("aieos:ceo-toggle", onToggle);
   }, [hasCeo]);
+
+  /* ---------- 桌面壳：常驻小人窗 + 系统级快捷键 ---------- */
+
+  useEffect(() => {
+    setIsDesktopApp(!!desktopBridge());
+  }, []);
+
+  // 是否任命 CEO 决定桌面小人窗是否存在。等 companion 真正返回后再动：
+  // 首帧 hasCeo=false 会把已有的小人窗关掉再重开，桌面上一闪一闪。
+  useEffect(() => {
+    const b = desktopBridge();
+    if (!b || !data) return;
+    if (data.has_ceo) void b.ensurePet?.();
+    else void b.removePet?.();
+  }, [data]);
+
+  // 小人被点击 / 系统级快捷键：跨文档不能用 CustomEvent，由主进程转发
+  useEffect(() => {
+    const b = desktopBridge();
+    if (!b) return;
+    const offOpen = b.onCeoOpen?.(() => {
+      if (hasCeo) setOpen(true);
+    });
+    const offToggle = b.onCeoToggle?.(() => {
+      if (hasCeo) setOpen((v) => !v);
+    });
+    return () => {
+      if (typeof offOpen === "function") offOpen();
+      if (typeof offToggle === "function") offToggle();
+    };
+  }, [hasCeo]);
+
+  // 网页里改的组合键同步成系统级快捷键；注册失败时在设置面板里说明
+  useEffect(() => {
+    if (!shortcut) return;
+    const b = desktopBridge();
+    if (!b?.setCeoShortcut) return;
+    let alive = true;
+    void b.setCeoShortcut(shortcut)
+      .then((r) => {
+        if (!alive) return;
+        setDesktopShortcutError(
+          r && r.ok === false ? String(r.error || "系统级快捷键注册失败") : "",
+        );
+      })
+      .catch(() => {
+        if (alive) setDesktopShortcutError("系统级快捷键注册失败");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [shortcut]);
 
   useEffect(() => {
     if (!recording) return;
@@ -774,6 +829,11 @@ export default function CeoDock() {
               <p style={{ color: "var(--muted)" }}>
                 快捷键需含 ⌘ / Ctrl / Alt。对话原文永久保存，老段落会被压缩成摘要以节省 token。
               </p>
+              {isDesktopApp && (
+                <p style={{ color: desktopShortcutError ? "#fca5a5" : "var(--muted)" }}>
+                  {desktopShortcutError || "已注册为系统级快捷键：在别的应用里也能唤起 CEO。"}
+                </p>
+              )}
             </div>
           )}
 

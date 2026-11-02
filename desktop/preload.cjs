@@ -32,5 +32,32 @@ contextBridge.exposeInMainWorld("aieosDesktop", {
   // 局域网共享开关（V5.10：默认只监听 127.0.0.1，开启后才绑定 0.0.0.0）
   getLanShare: () => ipcRenderer.invoke("desktop:getLanShare"),
   setLanShare: (on) => ipcRenderer.invoke("desktop:setLanShare", on),
+
+  // ---------- 常驻 CEO 小人（D 包） ----------
+  // 主窗口（CeoDock）用 ensure/remove 跟随「是否已任命 CEO」；
+  // 小人窗口（/pet）只负责上报状态、拖动与唤起对话，不接触服务器配置。
+  ensurePet: () => ipcRenderer.invoke("desktop:ensurePet"),
+  removePet: () => ipcRenderer.invoke("desktop:removePet"),
+  petState: (state) => ipcRenderer.invoke("desktop:petState", {
+    hasCeo: !!(state && state.hasCeo),
+  }),
+  petDragStart: () => ipcRenderer.invoke("desktop:petDragStart"),
+  petDragEnd: () => ipcRenderer.invoke("desktop:petDragEnd"),
+  openCeoChat: () => ipcRenderer.invoke("desktop:openCeoChat"),
+  showMain: () => ipcRenderer.invoke("desktop:showMain"),
+  // 网页里改快捷键后同步到系统级注册；combo 形如 meta+shift+k
+  setCeoShortcut: (combo) => ipcRenderer.invoke("desktop:setCeoShortcut", String(combo || "")),
+  getCeoShortcut: () => ipcRenderer.invoke("desktop:getCeoShortcut"),
+  // 小人窗口点击 → 主进程把事件转给主窗口的 CeoDock（跨窗不能用 CustomEvent）
+  onCeoOpen: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("ceo:open", handler);
+    return () => ipcRenderer.removeListener("ceo:open", handler);
+  },
+  onCeoToggle: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("ceo:toggle", handler);
+    return () => ipcRenderer.removeListener("ceo:toggle", handler);
+  },
   platform: process.platform,
 });

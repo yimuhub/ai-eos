@@ -11,7 +11,9 @@
  * 服务器地址持久化在 userData/settings.json（可指向本机便携 8000/8001，
  * 也可指向远程自托管服务器 http://192.168.x.x:8000 等）。
  */
-const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require("electron");
+const {
+  app, BrowserWindow, Menu, shell, dialog, ipcMain, globalShortcut, screen,
+} = require("electron");
 const path = require("path");
 const http = require("http");
 const { spawn } = require("child_process");
@@ -28,9 +30,19 @@ const LOG_DIR = path.join(ROOT, "logs");
 const DEFAULT_API_PORT = 8001;   // 便携后端（SQLite）
 const DEFAULT_FRONT_PORT = 8000; // Web 前端
 
+// 常驻 CEO 小人的窗口尺寸：只留出小人 + 名字 + 悬停气泡，尽量少挡桌面
+const PET_W = 180;
+const PET_H = 232;
+const DEFAULT_CEO_COMBO = isMac ? "meta+shift+k" : "ctrl+shift+k";
+
 let apiProc = null;
 let frontProc = null;
 let mainWindow = null;
+let petWindow = null;
+let petEligible = false;   // 网页确认「已任命 CEO」后才显示，避免空窗
+let petDragTimer = null;
+let petDragOffset = null;
+let ceoAccelerator = "";   // 当前成功注册的系统级组合键
 let quitting = false;
 let _shuttingDown = false;
 let _updating = false;
@@ -312,6 +324,8 @@ function guideHtml() {
 // 统一入口：加载引导页（连接失败 / 子进程 spawn 失败都走这里）
 function showGuide(reason) {
   if (reason) log(`显示引导页：${reason}`);
+  // 服务不可达时小人页也打不开，留在桌面上只会是一个空白方块
+  destroyPetWindow();
   if (!mainWindow) return; // 首次启动时 connectAndLoad 自己会兜底
   try {
     mainWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(guideHtml()));
@@ -389,8 +403,255 @@ function createWindow() {
   });
   guardNavigation(w);
   w.once("ready-to-show", () => { w.show(); });
+  w.on("closed", () => {
+    if (mainWindow === w) mainWindow = null;
+    // 主窗口关掉后不再留一个无人管的小人窗：否则 Windows/Linux 上会变成
+    // 「看不见界面但进程还在」，用户只能去任务管理器结束。
+    destroyPetWindow();
+  });
   mainWindow = w;
   return w;
+}
+
+// ---------- 常驻 CEO 小人（桌面宠物窗） ----------
+
+function clampPetPos(p) {
+  const x = Number.isFinite(p?.x) ? Math.round(p.x) : 0;
+  const y = Number.isFinite(p?.y) ? Math.round(p.y) : 0;
+  let display;
+  try {
+    display = screen.getDisplayNearestPoint({
+      x: x + Math.round(PET_W / 2),
+      y: y + Math.round(PET_H / 2),
+    });
+  } catch {
+    display = screen.getPrimaryDisplay();
+  }
+  const a = display.workArea;
+  return {
+    x: Math.min(Math.max(a.x, x), Math.max(a.x, a.x + a.width - PET_W)),
+    y: Math.min(Math.max(a.y, y), Math.max(a.y, a.y + a.height - PET_H)),
+  };
+}
+
+function defaultPetPos() {
+  const a = screen.getPrimaryDisplay().workArea;
+  return clampPetPos({ x: a.x + a.width - PET_W - 24, y: a.y + a.height - PET_H - 20 });
+}
+
+function petPosition() {
+  const saved = loadSettings().petPos;
+  return saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)
+    ? clampPetPos(saved)
+    : defaultPetPos();
+}
+
+// 显示器拔插/分辨率变化后把小人拉回可见区域（否则会"消失"在已断开的屏幕上）
+function keepPetOnScreen() {
+  if (!petWindow || petWindow.isDestroyed()) return;
+  const b = petWindow.getBounds();
+  const p = clampPetPos({ x: b.x, y: b.y });
+  if (p.x !== b.x || p.y !== b.y) petWindow.setPosition(p.x, p.y, false);
+}
+
+function createPetWindow() {
+  if (petWindow && !petWindow.isDestroyed()) return petWindow;
+  const pos = petPosition();
+  const w = new BrowserWindow({
+    width: PET_W,
+    height: PET_H,
+    x: pos.x,
+    y: pos.y,
+    frame: false,
+    transparent: true,
+    backgroundColor: "#00000000",
+    hasShadow: false,
+    resizable: false,
+    movable: false, // 位置由主进程跟随光标计算，避免系统拖动和指针事件抢焦点
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    acceptFirstMouse: true, // mac：未激活时第一次点击也落到小人身上
+    show: false,
+    title: "AI-EOS CEO",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  // floating 让小人浮在普通窗口之上，但不会盖住系统弹窗/输入法候选
+  w.setAlwaysOnTop(true, isMac ? "floating" : "normal");
+  if (isMac) w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  w.setMenuBarVisibility(false);
+  w.webContents.setWindowOpenHandler(({ url }) => {
+    openExternalSafe(url);
+    return { action: "deny" };
+  });
+  guardNavigation(w);
+  w.on("blur", () => endPetDrag());
+  w.on("closed", () => {
+    if (petWindow === w) petWindow = null;
+    stopPetDrag();
+  });
+  // 页面自身会再上报一次 has_ceo；这里先按主窗口的已知状态显示，避免空白窗
+  w.webContents.once("did-finish-load", () => {
+    if (petEligible && !w.isDestroyed()) w.showInactive();
+  });
+  petWindow = w;
+  const url = `${currentSettings().frontUrl}/pet?desktop=1`;
+  w.loadURL(url).catch((e) => log(`CEO 小人页加载失败：${e && e.message}`));
+  log(`CEO 小人窗口已创建 → ${url}`);
+  return w;
+}
+
+function destroyPetWindow() {
+  stopPetDrag();
+  petEligible = false;
+  const w = petWindow;
+  petWindow = null;
+  if (w && !w.isDestroyed()) {
+    try { w.destroy(); } catch (e) { log(`关闭 CEO 小人窗口失败：${e && e.message}`); }
+  }
+}
+
+function ensurePetWindow() {
+  if (loadSettings().petHidden === true) return { ok: true, hidden: true };
+  petEligible = true;
+  const w = createPetWindow();
+  if (w && !w.isDestroyed() && !w.webContents.isLoading()) w.showInactive();
+  return { ok: true, hidden: false };
+}
+
+function revealMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    connectAndLoad();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+function openCeoChat() {
+  revealMainWindow();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send("ceo:open"); } catch {}
+  }
+}
+
+function toggleCeoChat() {
+  revealMainWindow();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send("ceo:toggle"); } catch {}
+  }
+}
+
+function startPetDrag() {
+  if (!petWindow || petWindow.isDestroyed()) return;
+  const cursor = screen.getCursorScreenPoint();
+  const b = petWindow.getBounds();
+  petDragOffset = { x: cursor.x - b.x, y: cursor.y - b.y };
+  stopPetDragTimer();
+  // 轮询光标而不是依赖渲染进程的 pointermove：窗口跟着光标走时，
+  // 页面坐标系几乎不变，客户端事件量会骤减，拖动会一顿一顿。
+  petDragTimer = setInterval(() => {
+    if (!petWindow || petWindow.isDestroyed() || !petDragOffset) return stopPetDrag();
+    const c = screen.getCursorScreenPoint();
+    petWindow.setPosition(
+      Math.round(c.x - petDragOffset.x),
+      Math.round(c.y - petDragOffset.y),
+      false,
+    );
+  }, 16);
+}
+
+function stopPetDragTimer() {
+  if (petDragTimer) clearInterval(petDragTimer);
+  petDragTimer = null;
+}
+
+function endPetDrag() {
+  stopPetDragTimer();
+  petDragOffset = null;
+  if (!petWindow || petWindow.isDestroyed()) return;
+  const b = petWindow.getBounds();
+  const p = clampPetPos({ x: b.x, y: b.y });
+  if (p.x !== b.x || p.y !== b.y) petWindow.setPosition(p.x, p.y, false);
+  saveSettings({ petPos: p });
+}
+
+function stopPetDrag() {
+  stopPetDragTimer();
+  petDragOffset = null;
+}
+
+// ---------- 系统级快捷键（网页改了组合键会同步过来） ----------
+const ACCEL_KEYS = {
+  space: "Space",
+  enter: "Return",
+  esc: "Escape",
+  escape: "Escape",
+  tab: "Tab",
+  up: "Up",
+  down: "Down",
+  left: "Left",
+  right: "Right",
+  comma: ",",
+  period: ".",
+  slash: "/",
+  backslash: "\\",
+  minus: "-",
+  equal: "=",
+  backquote: "`",
+};
+
+function acceleratorFromCombo(combo) {
+  const parts = String(combo || "").toLowerCase().split("+").filter(Boolean);
+  if (parts.length < 2) return "";
+  const rawKey = parts.pop();
+  const mods = [];
+  for (const p of parts) {
+    if (p === "meta") mods.push("Command");
+    else if (p === "ctrl") mods.push("Control");
+    else if (p === "alt") mods.push("Alt");
+    else if (p === "shift") mods.push("Shift");
+    else return "";
+  }
+  // 至少一个非 Shift 修饰键：纯 Shift+K 会和正常打字冲突
+  if (!mods.some((m) => m === "Command" || m === "Control" || m === "Alt")) return "";
+  const key = ACCEL_KEYS[rawKey]
+    || (/^[a-z0-9]$/.test(rawKey) ? rawKey.toUpperCase() : "")
+    || (/^f([1-9]|1[0-9]|2[0-4])$/.test(rawKey) ? rawKey.toUpperCase() : "");
+  if (!key) return "";
+  return [...mods, key].join("+");
+}
+
+function onGlobalCeoShortcut() {
+  // 主窗口在前台时由页面自己的 keydown 处理，避免一次按键触发两遍
+  if (mainWindow && !mainWindow.isDestroyed()
+      && mainWindow.isVisible() && mainWindow.isFocused()) return;
+  toggleCeoChat();
+}
+
+function applyCeoShortcut(combo) {
+  const accel = acceleratorFromCombo(combo);
+  if (!accel) return { ok: false, accelerator: "", error: "不支持的组合键" };
+  if (accel === ceoAccelerator) return { ok: true, accelerator: accel };
+  if (ceoAccelerator) {
+    try { globalShortcut.unregister(ceoAccelerator); } catch {}
+    ceoAccelerator = "";
+  }
+  let ok = false;
+  try { ok = globalShortcut.register(accel, onGlobalCeoShortcut); } catch { ok = false; }
+  if (ok) ceoAccelerator = accel;
+  else log(`CEO 全局快捷键注册失败（可能被系统或其他应用占用）：${accel}`);
+  return ok
+    ? { ok: true, accelerator: accel }
+    : { ok: false, accelerator: "", error: `${accel} 被系统或其他应用占用，仅在应用内生效` };
 }
 
 // ---------- 菜单（极简：查看 + 关于） ----------
@@ -434,6 +695,25 @@ function buildMenu() {
       {
         label: "重新连接服务",
         click: () => { connectAndLoad(); },
+      },
+      { type: "separator" },
+      {
+        label: "唤起 CEO",
+        click: () => toggleCeoChat(),
+      },
+      {
+        label: "显示桌面 CEO 小人",
+        type: "checkbox",
+        checked: loadSettings().petHidden !== true,
+        click: (item) => {
+          if (item.checked) {
+            saveSettings({ petHidden: false });
+            ensurePetWindow();
+          } else {
+            saveSettings({ petHidden: true });
+            destroyPetWindow();
+          }
+        },
       },
     ],
   };
@@ -919,6 +1199,76 @@ function registerIpc() {
     }
     return { enabled: on, host: apiBindHost(), restarted, needsRestart: !(REPO_PRESENT && apiProc) };
   });
+
+  // ---------- 常驻 CEO 小人 ----------
+  // 只接受主窗口 / 小人窗口的调用：远程页面即使被注入脚本，也不能借这些接口
+  // 创建窗口、改全局快捷键或切换服务器配置。
+  const trusted = (e) => {
+    const w = BrowserWindow.fromWebContents(e.sender);
+    return !!w && (w === mainWindow || w === petWindow);
+  };
+
+  ipcMain.handle("desktop:ensurePet", (e) => {
+    if (!trusted(e)) return { ok: false, error: "无效的调用来源" };
+    return ensurePetWindow();
+  });
+  ipcMain.handle("desktop:removePet", (e) => {
+    if (!trusted(e)) return { ok: false, error: "无效的调用来源" };
+    destroyPetWindow();
+    return { ok: true };
+  });
+  ipcMain.handle("desktop:petState", (e, state) => {
+    const w = BrowserWindow.fromWebContents(e.sender);
+    if (!petWindow || w !== petWindow) return { ok: false, error: "无效的调用来源" };
+    // 没登录 / 没指定 CEO：直接收掉窗口，别在桌面上留一个不能对话的形象
+    if (!state || state.hasCeo !== true) {
+      destroyPetWindow();
+      return { ok: true, hasCeo: false };
+    }
+    petEligible = true;
+    if (!petWindow.isVisible()) petWindow.showInactive();
+    return { ok: true, hasCeo: true };
+  });
+  ipcMain.handle("desktop:petDragStart", (e) => {
+    if (!trusted(e)) return { ok: false };
+    startPetDrag();
+    return { ok: true };
+  });
+  ipcMain.handle("desktop:petDragEnd", (e) => {
+    if (!trusted(e)) return { ok: false };
+    endPetDrag();
+    return { ok: true };
+  });
+  ipcMain.handle("desktop:openCeoChat", (e) => {
+    if (!trusted(e)) return { ok: false, error: "无效的调用来源" };
+    openCeoChat();
+    return { ok: true };
+  });
+  ipcMain.handle("desktop:showMain", (e) => {
+    if (!trusted(e)) return { ok: false, error: "无效的调用来源" };
+    revealMainWindow();
+    return { ok: true };
+  });
+  ipcMain.handle("desktop:setCeoShortcut", (e, combo) => {
+    // 只有主窗口（CeoDock 设置面板）可以改系统级快捷键
+    if (!mainWindow || BrowserWindow.fromWebContents(e.sender) !== mainWindow) {
+      return { ok: false, error: "无效的调用来源" };
+    }
+    const raw = String(combo || "").trim().toLowerCase();
+    if (!raw) return { ok: false, error: "快捷键不能为空" };
+    const res = applyCeoShortcut(raw);
+    // 每次挂载页面都会同步一次；只有真的变了才落盘，避免无谓写文件
+    if (res.ok && loadSettings().ceoShortcut !== raw) {
+      saveSettings({ ceoShortcut: raw });
+      log(`CEO 全局快捷键已更新：${res.accelerator}`);
+    }
+    return res;
+  });
+  ipcMain.handle("desktop:getCeoShortcut", () => ({
+    combo: loadSettings().ceoShortcut || DEFAULT_CEO_COMBO,
+    accelerator: ceoAccelerator,
+    ok: !!ceoAccelerator,
+  }));
 }
 
 function ipcGetAutoLaunch() {
@@ -992,6 +1342,13 @@ app.whenReady().then(async () => {
   buildMenu();
   registerIpc();
 
+  // 全局快捷键先按默认值注册；网页读到自己保存的组合后会通过 IPC 纠正。
+  // 失败不阻塞启动：应用内快捷键仍然可用。
+  applyCeoShortcut(loadSettings().ceoShortcut || DEFAULT_CEO_COMBO);
+  for (const ev of ["display-added", "display-removed", "display-metrics-changed"]) {
+    screen.on(ev, keepPetOnScreen);
+  }
+
   if (SMOKE) {
     createWindow();
     mainWindow.loadURL("about:blank");
@@ -1016,6 +1373,8 @@ app.on("activate", () => {
 
 app.on("before-quit", () => { quitting = true; });
 app.on("will-quit", (e) => {
+  try { globalShortcut.unregisterAll(); } catch {}
+  destroyPetWindow();
   if (!quitting || _shuttingDown) return;
   _shuttingDown = true;
   e.preventDefault();
