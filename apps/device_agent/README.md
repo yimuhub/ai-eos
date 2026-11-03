@@ -64,6 +64,10 @@ python3 aieos_sidecar.py run
 - **重定向按命令的工作目录判**：`ls > out.txt` 落在哪由执行时的 `cwd` 决定，
   护栏用同一个基准算相对路径，否则判的是一处、写的是另一处。没显式给 `cwd` 时
   用第一个可写根目录，其次才是 sidecar 的当前目录。
+- **文件路径用同一个基准**：`read_file` / `write_file` / `apply_patch` 里的相对
+  写法（页面上直接写「notes.md」）落在上面那个工作目录，不是 sidecar 的启动目录；
+  `enroll` 时 `--allow-root` 一律换算成绝对路径存盘——否则「换个目录启动」
+  等于悄悄换了开放的范围。
 - **命令 substitution 直接拒**：`$(...)`、反引号、`${...}` 让「这条命令到底
   做了什么」无法静态判断。
 - **灾难性片段再拦一次**：`rm -rf /`、`mkfs`、`dd if=`、`shutdown`、

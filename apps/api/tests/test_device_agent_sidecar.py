@@ -219,6 +219,27 @@ def test_read_file_pages_and_lists_dirs(tmp_path, isolated_dirs):
     assert paged["truncated"] is True
 
 
+def test_relative_paths_follow_the_writable_root(tmp_path, isolated_dirs):
+    """老板在页面上写「线上问题清单.md」，指的是那台机器上开放的那个目录。
+
+    以前只 expanduser：文件操作按 sidecar 的**进程目录**找，报「文件不存在」，
+    而同一个相对路径在 run_shell 里却是好用的——两条路一个基准。
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "notes.md").write_text("P0\n", encoding="utf-8")
+    cfg = _cfg(project)
+
+    got = sidecar.read_file({"path": "notes.md"}, cfg)
+    assert got["lines"] == ["P0\n"], got
+    assert got["path"] == str(project / "notes.md")
+
+    # 基准同时给了护栏：越界的相对写法照样拦，而不是「找不到文件」蒙混过去
+    with pytest.raises(PermissionError, match="不在本机允许写入的目录里"):
+        sidecar.write_file({"path": "../escape.txt", "content": "x"}, cfg)
+    assert not (tmp_path / "escape.txt").exists()
+
+
 # ============================================================ 执行与回报
 
 

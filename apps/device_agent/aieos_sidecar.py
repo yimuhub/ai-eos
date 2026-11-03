@@ -361,6 +361,17 @@ def default_workdir(cfg: dict) -> str:
     return str(roots[0]) if roots else os.getcwd()
 
 
+def resolve_path(raw: str, cfg: dict) -> Path:
+    """文件操作里的相对路径按 `default_workdir` 算，和 shell 命令同一个基准。
+
+    之前只 expanduser：老板在页面上写「线上问题清单.md」，sidecar 拿**自己的进程目录**
+    去找，回一句「文件不存在：线上问题清单.md」——那个相对路径在他机器上指向哪，
+    他根本不知道；同一个路径在 run_shell 里却是能用的。
+    """
+    path = Path(str(raw)).expanduser()
+    return path if path.is_absolute() else Path(default_workdir(cfg)) / path
+
+
 def run_shell(params: dict, cfg: dict) -> dict:
     command = str(params.get("command") or params.get("cmd") or "")
     cwd = str(params.get("cwd") or default_workdir(cfg))
@@ -407,7 +418,7 @@ def read_file(params: dict, cfg: dict) -> dict:
     raw = str(params.get("path") or "")
     if not raw.strip():
         raise ValueError("path 不能为空")
-    path = Path(raw).expanduser()
+    path = resolve_path(raw, cfg)
     denied = path_denied(path)
     if denied:
         raise PermissionError(denied)
@@ -483,7 +494,7 @@ def write_file(params: dict, cfg: dict) -> dict:
     raw = str(params.get("path") or "")
     if not raw.strip():
         raise ValueError("path 不能为空")
-    path = Path(raw).expanduser()
+    path = resolve_path(raw, cfg)
     reason = path_writable(path, cfg.get("allow_roots") or [])
     if reason:
         raise PermissionError(reason)
@@ -504,7 +515,7 @@ def apply_patch(params: dict, cfg: dict) -> dict:
     raw = str(params.get("path") or "")
     if not raw.strip():
         raise ValueError("path 不能为空")
-    path = Path(raw).expanduser()
+    path = resolve_path(raw, cfg)
     reason = path_writable(path, cfg.get("allow_roots") or [])
     if reason:
         raise PermissionError(reason)
@@ -548,7 +559,9 @@ def execute(task: dict, cfg: dict) -> dict:
 def _roots_or_exit(values: list[str]) -> list[str] | int:
     roots: list[str] = []
     for value in values:
-        root = str(Path(value).expanduser())
+        # 存绝对路径：相对写法（`--allow-root work`）等于把可写范围绑到
+        # 「下次 `run` 从哪个目录启动」——换个工作目录启动，开放的就是另一个目录。
+        root = os.path.abspath(str(Path(value).expanduser()))
         denied = path_denied(root)
         if denied:
             say(f"可写目录被拒：{denied}")
