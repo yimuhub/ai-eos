@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.sandbox import PROJECT_ROOT
 from app.models.plugin import ComputerPolicy
 
 MODES = ("default", "auto", "full")
@@ -42,6 +43,16 @@ HARD_BLOCK_NAMES = {
     ".env", ".env.local", "id_rsa", "id_ed25519", "id_ecdsa",
     "credentials", "known_hosts", "authorized_keys",
 }
+# 运行期状态：真实数据库与提交历史。文件工具是"全盘可达 + 三档审批"，
+# 但这两个目录被写坏没有第二次机会（库坏了 = 公司所有数据没了），
+# 所以和凭据目录同级写死，任何模式、任何授权都不放行。
+# 两处都要列：仓库根是部署目录，`apps/api/` 是后端进程的工作目录，
+# 同名的 data / .git 在这两层都真实存在。
+RUNTIME_BLOCK_DIRS = [
+    str(root / name)
+    for root in (PROJECT_ROOT, PROJECT_ROOT / "apps" / "api")
+    for name in ("data", ".git")
+]
 HARD_BLOCK_COMMAND_PATTERNS = [
     (r"rm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+/\s*$", "灾难性删除：rm -rf /"),
     (r"rm\s+-[a-zA-Z]*f[a-zA-Z]*r?\s+/\s*$", "灾难性删除：rm -rf /"),
@@ -154,6 +165,8 @@ def hard_blocks() -> list[dict]:
     return [
         {"kind": "dirs", "label": "凭据与系统目录",
          "examples": HARD_BLOCK_DIRS},
+        {"kind": "runtime", "label": "运行期数据与提交历史",
+         "examples": RUNTIME_BLOCK_DIRS},
         {"kind": "files", "label": "密钥与环境变量文件",
          "examples": sorted(HARD_BLOCK_NAMES)},
         {"kind": "commands", "label": "灾难性命令",
@@ -202,13 +215,22 @@ def hard_block_path_reason(path: str) -> str | None:
 
 
 def _hard_block(action_type: str, params: dict) -> str | None:
-    for path in _param_paths(params):
+    for raw_path in _param_paths(params):
+        # 相对路径按仓库根算——文件执行器就是这么解析的。
+        # 两边口径必须一致，否则会出现"策略以为放行、执行器自己拦下"的分裂，
+        # 老板在审批单上看到的和真正发生的不是同一件事。
+        path = (raw_path if os.path.isabs(raw_path) or raw_path.startswith("~")
+                else str(PROJECT_ROOT / raw_path))
         base = os.path.basename(path.rstrip("/")).lower()
         if base in HARD_BLOCK_NAMES or base.startswith(".env"):
             return f"硬拦截：不允许操作密钥 / 环境变量文件 {base}"
         for blocked in HARD_BLOCK_DIRS:
             if _within(path, blocked):
                 return f"硬拦截：不允许操作受保护目录 {blocked}"
+        for blocked in RUNTIME_BLOCK_DIRS:
+            if _within(path, blocked):
+                return (f"硬拦截：{blocked} 是运行期状态（真实数据库 / 提交历史），"
+                        "Agent 一律不可读写")
     command = str(params.get("command") or params.get("cmd") or "")
     if command:
         lowered = command.strip().lower()

@@ -389,6 +389,27 @@ def test_hard_block_survives_every_mode():
         assert verdict["decision"] == "blocked", cap
 
 
+@pytest.mark.parametrize("rel", [
+    "data/aieos.db",                        # 仓库根下的运行期库
+    "apps/api/data/aieos.db",               # 后端进程工作目录下的真实库
+    "apps/api/.git/config",                 # 提交历史与 remote URL
+])
+def test_runtime_state_is_closed_even_in_full_control_mode(rel):
+    """文件能力全盘可达，但真实数据库和 .git 写坏就没有下一次。"""
+    for cap in ("read_file", "write_file", "apply_patch"):
+        verdict = policy.evaluate_action(None, cap, {"path": rel})
+        assert verdict["decision"] == "blocked", f"{cap} 竟能碰 {rel}"
+        assert "运行期" in verdict["reason"] or "git" in verdict["reason"]
+
+
+def test_file_executor_refuses_the_real_database_path():
+    """策略判一遍还不够：执行器解析路径时用的是同一套红线，且不碰磁盘。"""
+    db = str(Path(cf.PROJECT_ROOT) / "apps" / "api" / "data" / "aieos.db")
+    with pytest.raises(cf.FileOpError) as exc:
+        cf._resolve_path(db, must_exist=False)
+    assert "运行期" in str(exc.value)
+
+
 @pytest.mark.parametrize("cap,params,expected", [
     ("read_file", {}, "path 不能为空"),
     ("write_file", {"path": "a.txt"}, "write_file 需要 content"),

@@ -52,6 +52,12 @@ _SENSITIVE_DIR_PARTS = {
     ".ssh", ".aws", ".gnupg", ".kube", ".docker",
 }
 
+# 运行期状态目录：仓库根进了沙箱之后，这两类必须另外关死——
+# `data/` 里是真实数据库（`data/aieos.db`，改坏了没有第二次机会），
+# `.git/` 里是提交历史与凭据化的 remote URL。按"相对所属根的路径片段"判，
+# 所以 data/uploads 自己作为根仍可写。
+_RUNTIME_DIR_PARTS = {"data", ".git"}
+
 # 系统级敏感文件（绝对路径前缀）
 _SENSITIVE_ABS_PREFIXES = (
     "/etc/passwd", "/etc/shadow", "/etc/hosts", "/etc/ssh",
@@ -72,6 +78,16 @@ def sandbox_roots() -> list[Path]:
 
     - storage 根（Agent 交付文件夹、上传资料、知识库文件都在这下面）
     - 截屏目录（computer agent 的产物）
+    - 仓库根本身（放在最后）
+
+    为什么加仓库根：员工要做"代码级修改"，得能 `ls`、`grep`、`cat` 自己
+    正在改的那份代码。文件工具（`read_file`）本来就全盘可达，
+    shell 却连仓库里一个子目录都列不了——同一份文件 `read_file` 能读、
+    `cat` 被拒，模型只能瞎改。加进来的是"工作目录"，不是新的密钥面：
+    `.env` 仍按文件名拦，运行期数据与 git 元数据见 `_RUNTIME_DIR_PARTS`。
+
+    顺序有意义：`_owning_root()` 取第一个命中的根，仓库根必须排在最后，
+    否则 `data/uploads/x.png` 会被算成仓库根下的 `data/...` 而误拦。
     """
     roots: list[Path] = []
 
@@ -90,6 +106,8 @@ def sandbox_roots() -> list[Path]:
     roots.append(PROJECT_ROOT / "data" / "uploads")
     # computer agent 截屏输出目录
     roots.append(Path("/tmp/ai-eos-screens"))
+    # 仓库自身：代码级读写的工作目录（见 docstring 的顺序说明）
+    roots.append(PROJECT_ROOT)
 
     # 去重 + 解析，确保比较时是同一个基准
     seen: list[Path] = []
@@ -127,6 +145,9 @@ def _is_sensitive(path: Path) -> str | None:
         for part in relative_parts:
             if part.lower() in _SENSITIVE_DIR_PARTS:
                 return f"路径包含敏感目录 {part}"
+            if part.lower() in _RUNTIME_DIR_PARTS:
+                return (f"路径包含运行期目录 {part}"
+                        "（真实数据库与 git 元数据不对 Agent 开放）")
 
     path_str = str(path)
     for prefix in _SENSITIVE_ABS_PREFIXES:
@@ -144,7 +165,9 @@ def resolve_safe_path(raw_path: str, *, must_exist: bool = True) -> Path:
     if not raw_path or not str(raw_path).strip():
         raise SandboxViolation("路径不能为空")
 
-    candidate = Path(str(raw_path).strip())
+    # `~` 必须在判断之前展开：不展开时 "~/Documents" 会被当成仓库里一个
+    # 名叫 `~` 的目录，校验放行、执行却是另一个意思（或反过来误拦）。
+    candidate = Path(os.path.expanduser(str(raw_path).strip()))
 
     # 相对路径一律相对仓库根解析，避免受进程工作目录影响
     if not candidate.is_absolute():

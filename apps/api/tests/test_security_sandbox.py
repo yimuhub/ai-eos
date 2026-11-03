@@ -44,6 +44,9 @@ _REJECTED_PATHS = [
     ("~/.ssh/id_rsa", "私钥"),
     ("/Users/shanziya/.ssh/id_rsa", "绝对路径私钥"),
     ("data/aieos.db", "运行期数据库"),
+    ("apps/api/data/aieos.db", "运行期数据库（完整相对路径）"),
+    (".git/config", "git 元数据（remote URL 里可能带凭据）"),
+    ("apps/api/.git/HEAD", "git 元数据"),
 ]
 
 
@@ -78,6 +81,27 @@ def test_sandbox_allows_file_inside_root():
         assert resolve_safe_path(str(probe)) == probe.resolve()
     finally:
         probe.unlink(missing_ok=True)
+
+
+def test_repo_source_is_readable_but_runtime_state_stays_closed():
+    """仓库根进沙箱的两面：代码要能读，运行期数据库与 .git 不能碰。
+
+    `read_file` 本来就全盘可达，shell 再拦着仓库只会让模型"能读不能搜"，
+    改代码变成瞎改。放行的是源码，`data/` 与 `.git/` 由目录片段规则另拦。
+    """
+    ok, reason = is_path_allowed("apps/api/app/computer_files.py")
+    assert ok, f"仓库源码被误拦：{reason}"
+
+    # uploads 自己就是沙箱根，不能被"路径里带 data"这条规则连坐
+    ok, reason = is_path_allowed("data/uploads/report.pdf")
+    assert ok, f"data/uploads 应仍可用（它本身是沙箱根）：{reason}"
+
+
+async def test_shell_can_see_the_code_it_is_editing():
+    """正向对照：`ls 仓库子目录`必须真能跑，否则白名单等于锁死代码工作。"""
+    result = await real_run_shell({"command": "ls apps/api/app"})
+    assert result.get("ok") is True, f"合法命令被拦：{result}"
+    assert "computer_files.py" in result.get("stdout", "")
 
 
 def test_sandbox_relative_path_resolves_against_project_root():

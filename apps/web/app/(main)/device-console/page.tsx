@@ -115,7 +115,7 @@ const PARAM_HINTS: Record<string, string> = {
   click: '{"x": 500, "y": 300}',
   key: '{"key": "enter"}',
   run_app: '{"app": "Calculator"}',
-  run_shell: '{"command": "ls ~/Documents"}',
+  run_shell: '{"command": "ls apps/api/app"}',
   list_windows: '{}',
   accessibility_snapshot: '{"app": "Finder", "window": 1, "max_depth": 2}',
   get_window: '{"app": "Finder", "window": 1}',

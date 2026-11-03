@@ -143,7 +143,7 @@ const TRIAL_ACTIONS = [
   { value: "find_element", label: "找元素", params: '{"app": "Safari", "query": "搜索"}' },
   { value: "click_element", label: "点击元素", params: '{"ref": "Finder|1|3.1"}' },
   { value: "set_value", label: "填入文本", params: '{"ref": "Safari|1|3.1", "value": "hello"}' },
-  { value: "run_shell", label: "执行命令", params: '{"command": "git status"}' },
+  { value: "run_shell", label: "执行命令", params: '{"command": "ls apps/api/app"}' },
   { value: "run_write", label: "移动/删除命令", params: '{"command": "mv ~/Documents/a.md ~/Documents/b.md"}' },
   { value: "run_app", label: "启动应用", params: '{"app": "Calculator"}' },
   { value: "type_text", label: "键入文本", params: '{"text": "hello", "app": "Notes"}' },
