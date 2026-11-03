@@ -28,7 +28,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,7 +38,8 @@ from app.core.config import settings
 from app.core.logging_config import get_logger
 from app.core.security import hash_password, issue_token_pair
 from app.db.session import get_db
-from app.models.company import Company
+from app.models.agent import Agent, AgentModelConfig, Model
+from app.models.company import Company, Department
 from app.models.device import Device, PairingToken
 from app.models.membership import CompanyMember
 from app.models.refresh_token import RefreshToken
@@ -346,21 +347,55 @@ async def rebuild(data: RebuildIn, request: Request,
     if data.company_name.strip() not in names:
         raise HTTPException(400, "公司名称不匹配，未执行重建")
 
+    # user 的属性在 rollback/commit 后会过期，再读就是事务外的懒加载
+    # （异步会话里直接抛 MissingGreenlet，把本该是 409 的结果变成 500），
+    # 所以提前把要用的字段取出来。
+    user_id = str(user.id)
     try:
+        # 组织这几张表的外键**没有级联**：`Department.agents` 没配 cascade，
+        # 而安装向导绑模型、AI 生成组织落地都会写 agent_model_configs。
+        # ORM 删公司时只带走部门，员工行留在原地 → `DELETE FROM departments`
+        # 撞 FOREIGN KEY，表现为「推倒重建」点了没反应。
+        # 先按"模型绑定 → 员工"清掉，部门和公司仍由 ORM 带走；
+        # 其它业务数据（任务/记忆…）若还引用这些员工会抛 IntegrityError，
+        # 由下面的分支如实返回 409。
+        company_ids = [c.id for c in companies]
+        await db.execute(sa_delete(AgentModelConfig).where(or_(
+            AgentModelConfig.agent_id.in_(
+                select(Agent.id).where(Agent.company_id.in_(company_ids))),
+            AgentModelConfig.model_id.in_(
+                select(Model.id).where(Model.company_id.in_(company_ids))),
+        )))
+        await db.execute(sa_delete(Agent).where(Agent.company_id.in_(company_ids)))
+        # 部门之间还有父子关系（AI 生成的组织是「中心 → 部门」两层），
+        # 而 parent_department_id 同样不级联：必须**叶子先删**，
+        # 否则删中心会被挂在下面的部门顶住外键。
+        dept_rows = (await db.execute(
+            select(Department.id, Department.parent_department_id).where(
+                Department.company_id.in_(company_ids)))).all()
+        alive = {d for d, _ in dept_rows}
+        while alive:
+            referenced = {p for d, p in dept_rows if d in alive and p in alive}
+            ready = [d for d in alive if d not in referenced]
+            if not ready:
+                break  # 父子成环：交给下面的 IntegrityError 分支如实报错
+            await db.execute(sa_delete(Department).where(Department.id.in_(ready)))
+            alive -= set(ready)
+
         for c in companies:
             await db.delete(c)
         await db.flush()
 
         # 设备/配对码的外键没有级联，先显式清掉；refresh token 由 users 级联
-        await db.execute(sa_delete(PairingToken).where(PairingToken.user_id == user.id))
-        await db.execute(sa_delete(Device).where(Device.user_id == user.id))
-        await db.execute(sa_delete(CompanyMember).where(CompanyMember.user_id == user.id))
-        await db.execute(sa_delete(RefreshToken).where(RefreshToken.user_id == user.id))
+        await db.execute(sa_delete(PairingToken).where(PairingToken.user_id == user_id))
+        await db.execute(sa_delete(Device).where(Device.user_id == user_id))
+        await db.execute(sa_delete(CompanyMember).where(CompanyMember.user_id == user_id))
+        await db.execute(sa_delete(RefreshToken).where(RefreshToken.user_id == user_id))
         await db.delete(user)
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        logger.warning("重建失败：仍有其它数据引用该账号 user=%s", user.id)
+        logger.warning("重建失败：仍有其它数据引用该账号 user=%s", user_id)
         raise HTTPException(409, "系统里已有与这个账号关联的其它数据，无法整体重建")
 
-    logger.info("推倒重建：已删除超管 user=%s 与公司 %s", user.id, sorted(names))
+    logger.info("推倒重建：已删除超管 user=%s 与公司 %s", user_id, sorted(names))

@@ -18,7 +18,9 @@ import pytest
 from sqlalchemy import func, select
 
 from app.db.session import AsyncSessionLocal
-from app.models.company import Company
+from app.models.agent import (Agent, AgentModelConfig, AgentStatus, Model,
+                              ModelProviderType)
+from app.models.company import Company, Department
 from app.models.membership import CompanyMember
 from app.models.user import User
 
@@ -277,3 +279,48 @@ async def test_rebuild_wipes_install_and_reopens_wizard(client):
     body, _, _ = await _install(client, email="admin@example.com",
                                 username="admin2")
     assert body["email"] == "admin@example.com"
+
+
+async def test_rebuild_clears_org_models_bindings_and_child_departments(client):
+    """装完之后就点「推倒重建」也必须成功。
+
+    向导自己会写下这些"外键没有级联"的行：员工（ departments 的子表）、
+    agent_model_configs（bind-agents / AI 落地组织都写）、以及 AI 生成组织的
+    「中心 → 部门」父子层级。以前直接删公司会撞 FOREIGN KEY——
+    先 500（异步会话里 MissingGreenlet 吞掉了 409），修完顺序后才是现在的 204。
+    """
+    _, installed, headers = await _install(client)
+    cid = installed["company"]["id"]
+
+    async with AsyncSessionLocal() as db:
+        center = Department(company_id=cid, name="产品中心")
+        db.add(center)
+        await db.flush()
+        leaf = Department(company_id=cid, name="产品部", parent_department_id=center.id)
+        db.add(leaf)
+        await db.flush()
+        agent = Agent(company_id=cid, name="产品经理", status=AgentStatus.ACTIVE,
+                      department_id=leaf.id)
+        db.add(agent)
+        await db.flush()
+        model = Model(name="主力模型", provider_type=ModelProviderType.OPENAI_COMPAT,
+                      model_id="demo-model", company_id=cid)
+        db.add(model)
+        await db.flush()
+        db.add(AgentModelConfig(agent_id=agent.id, role="primary", model_id=model.id))
+        await db.commit()
+        agent_id, model_id, dept_ids = agent.id, model.id, (center.id, leaf.id)
+
+    r = await client.post("/setup/rebuild", json={"company_name": "示例公司"},
+                          headers=headers)
+    assert r.status_code == 204, r.text
+
+    async with AsyncSessionLocal() as db:
+        for table, ids in ((Agent, [agent_id]), (Model, [model_id]),
+                           (Department, list(dept_ids))):
+            assert (await db.execute(
+                select(func.count()).select_from(table).where(
+                    table.id.in_(ids)))).scalar_one() == 0, f"{table.__name__} 没被带走"
+        assert (await db.execute(select(func.count()).select_from(
+            AgentModelConfig))).scalar_one() == 0, "模型绑定残留"
+    assert (await client.get("/setup/status")).json() == {"needs_setup": True}
