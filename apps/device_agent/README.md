@@ -96,5 +96,10 @@ v1 上报 `run_shell` / `read_file` / `write_file` / `apply_patch`，即「看�
 ## 测试
 
 护栏逻辑（路径判定、命令白名单、重定向基准、写入备份）由
-`apps/api/tests/test_device_agent_sidecar.py` 覆盖，端到端的双进程验证见
-CHANGELOG 里「远程执行设备」一节。
+`apps/api/tests/test_device_agent_sidecar.py` 覆盖；真实两个进程的端到端验证
+（派单、审批拦截、设备侧拒绝、吊销）在 `tools/e2e_remote_devices.py`：
+
+```bash
+apps/api/.venv/bin/python tools/e2e_remote_devices.py   # 约 40 秒，15 项断言
+```
+
