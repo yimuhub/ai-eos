@@ -28,10 +28,6 @@ from app.core.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-# 需要用户显式授权的能力（默认拒绝）。列在这里是为了让"哪些能力危险"
-# 在代码里一目了然，而不是散落在提示词和文档里。
-HIGH_RISK_CAPABILITIES = frozenset({"run_shell", "run_write"})
-
 
 class ComputerActionDenied(PermissionError):
     """能力未授权。调用方应转成 403 或给 LLM 返回可读的拒绝信息。"""
@@ -49,6 +45,94 @@ async def is_capability_granted(db: AsyncSession, company_id: str,
         ComputerPermission.company_id == company_id,
         ComputerPermission.capability == capability))).scalars().first()
     return bool(row and row.granted)
+
+
+# 需要「先问老板」的能力。判据不是"改不改文件"，而是能否等价于主机命令执行：
+# `open -a Terminal` 之后再 type_text 就是提交命令，所以键鼠注入与 shell 同级；
+# 无障碍树的 click_element / set_value 同理——按下的是「删除」还是「发送」，
+# 差别只在看不看得见鼠标。
+HIGH_RISK_CAPABILITIES = frozenset({
+    "run_shell", "run_write", "run_app",
+    "type_text", "click", "key",
+    "click_element", "set_value",
+})
+
+
+async def _legacy_needs_approval(db: AsyncSession, company_id: str) -> bool:
+    """公司还没配过三档策略时的旧门：干预策略勾了 computer_command 才拦。"""
+    from app.models.intervention import InterventionPolicy
+
+    policy = (await db.execute(
+        select(InterventionPolicy).where(
+            InterventionPolicy.company_id == company_id,
+            InterventionPolicy.project_id.is_(None)))).scalars().first()
+    return bool(policy and "computer_command" in (policy.approval_actions or []))
+
+
+async def approval_gate(db: AsyncSession, *, company_id: str, capability: str,
+                        params: dict | None, agent_id: str | None = None) -> dict:
+    """三档策略 + 免批白名单 + 审批单——REST 与聊天两条入口共用。
+
+    返回四种结论之一，调用方按结论决定要不要真执行：
+
+    - `{"action": "allow"}`：直接执行（只读动作，或旧规则下没开审批门）；
+    - `{"action": "allow_auto", "auto_approved": ...}`：命中白名单，放行但留痕；
+    - `{"action": "block", "reason": ...}`：硬拦截，任何模式都不放行；
+    - `{"action": "hold", "approval_request_id": ..., "reason": ...}`：
+      审批单已建、通知已发，本次不执行。
+
+    为什么必须在 service 层：聊天里的 `computer_*` 工具调用过去只查授权、
+    不查策略，等于「未配置审批的老板在设置页开了三档模式，模型照样能直接点」。
+    """
+    from app.models.whitelist import ApprovalWhitelist
+
+    from app.services import computer_policy as policy_service
+
+    params = params or {}
+    row = await policy_service.get_policy_row(db, company_id)
+    verdict = policy_service.evaluate_action(row, capability, params)
+
+    if verdict["decision"] == "blocked":
+        return {"action": "block", "reason": verdict["reason"],
+                "mode": verdict["mode"]}
+
+    needs_approval = verdict["decision"] == "approval" or (
+        verdict["decision"] == "legacy"
+        and capability in HIGH_RISK_CAPABILITIES
+        and await _legacy_needs_approval(db, company_id))
+    if not needs_approval:
+        auto = (f"policy:{verdict['mode']}"
+                if verdict["decision"] == "allow" and row is not None else None)
+        return {"action": "allow", "auto_approved": auto,
+                "reason": verdict["reason"], "mode": verdict["mode"]}
+
+    wl_rows = (await db.execute(
+        select(ApprovalWhitelist).where(
+            ApprovalWhitelist.company_id == company_id,
+            ApprovalWhitelist.capability == capability))).scalars().all()
+    if ApprovalWhitelist.matches(capability, params, list(wl_rows)):
+        return {"action": "allow_auto", "auto_approved": "whitelist",
+                "reason": "命中免批白名单", "mode": verdict["mode"]}
+
+    import json
+
+    from app.models.intervention import ApprovalRequest, new_id
+    from app.services.notification_service import notify_approval_pending
+
+    reason = (f"高危本机操作 {capability}（{verdict['reason']}）: "
+              f"{json.dumps(params, ensure_ascii=False)[:200]}")
+    req = ApprovalRequest(
+        id=new_id(), company_id=company_id, action_type="computer_command",
+        payload={"capability": capability, "params": params,
+                 "agent_id": agent_id, "awaiting_execution": True},
+        requested_by_agent_id=agent_id, reason=reason)
+    db.add(req)
+    await notify_approval_pending(
+        db, company_id=company_id,
+        title=f"待审批：高危本机操作 {capability}", body=reason)
+    await db.commit()
+    return {"action": "hold", "approval_request_id": req.id,
+            "reason": verdict["reason"], "mode": verdict["mode"]}
 
 
 # V5.7 ⑧ 防呆 ACI（学 SWE-agent）：高危动作执行前"先试错"——
@@ -96,6 +180,16 @@ def _precheck_capability(capability: str, params: dict) -> dict | None:
         if not app:
             return {"ok": False, "precheck": True, "error": "app 不能为空"}
         return None
+    # 无障碍树一路：参数残缺先给可读反馈，不要白花一次 osascript 冷启动
+    if capability == "find_element" and not str(p.get("query") or "").strip():
+        return {"ok": False, "precheck": True,
+                "error": "query 不能为空（要匹配的按钮/字段文字）"}
+    if capability in ("click_element", "set_value") and not str(p.get("ref") or "").strip():
+        return {"ok": False, "precheck": True,
+                "error": "缺少 ref：先用 accessibility_snapshot 或 find_element 拿到元素引用"}
+    if capability == "get_window" and not str(p.get("app") or "").strip():
+        return {"ok": False, "precheck": True,
+                "error": "get_window 需要 app（先用 list_windows 看进程名）"}
     return None
 
 
@@ -115,6 +209,9 @@ async def execute_computer_action(
      "log_id": str, "deny_reason": str|None}
 
     - 能力未知 → 明确报错，不猜；
+    - 硬拦截（凭据目录 / 灾难性命令 / 向终端宿主注入）→ 一律不执行，
+      这里兜底是因为「审批通过后执行」和「聊天工具调用」也走本函数：
+      红线不能只在 REST 入口检查一次；
     - 未授权 → 落审计日志（allowed=False）后抛 ComputerActionDenied；
     - 已授权 → 执行、落审计日志，执行异常也如实记录，不伪造成成功。
     - auto_approved：V5.6.1 白名单放行时传入（如 "whitelist"），审计留痕。
@@ -123,6 +220,24 @@ async def execute_computer_action(
     if capability not in EXTENDED_CAPABILITIES:
         raise ValueError(
             f"未知能力 {capability!r}，可用：{', '.join(EXTENDED_CAPABILITIES)}")
+
+    from app.services import computer_policy as policy_service
+
+    block = policy_service.hard_block_reason(capability, params or {})
+    if block:
+        blocked_log = ComputerActionLog(
+            id=str(uuid.uuid4()), company_id=company_id, agent_id=agent_id,
+            action_type=capability, params=params, allowed=False,
+            deny_reason=block, mock=False, auto_approved=auto_approved,
+            result={"ok": False, "decision": "blocked"})
+        db.add(blocked_log)
+        await db.commit()
+        logger.warning("硬拦截：company=%s capability=%s reason=%s",
+                       company_id, capability, block)
+        return {"ok": False, "allowed": False, "capability": capability,
+                "result": {"ok": False, "blocked": True, "error": block},
+                "log_id": blocked_log.id, "deny_reason": block,
+                "decision": "blocked"}
 
     granted = await is_capability_granted(db, company_id, capability)
 

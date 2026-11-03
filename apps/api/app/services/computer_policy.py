@@ -28,6 +28,9 @@ OBSERVE_ACTIONS = {
 COMMAND_ACTIONS = {"run_shell", "run_command", "execute_command", "shell"}
 WRITE_ACTIONS = {"run_write", "write_file", "file_write", "write"}
 APP_ACTIONS = {"run_app", "open_app", "app_launch"}
+# 界面上的写操作：按引用点击 / 赋值。风险与键鼠注入同级，但目标应用藏在
+# 元素引用里（不在 app 参数上），所以白名单匹配要走 _ref_app。
+UI_WRITE_ACTIONS = {"click_element", "set_value"}
 
 HARD_BLOCK_DIRS = [
     "~/.ssh", "~/.aws", "~/.gnupg", "~/Library/Keychains",
@@ -155,7 +158,7 @@ def hard_blocks() -> list[dict]:
         {"kind": "commands", "label": "灾难性命令",
          "examples": list(dict.fromkeys(
              label for _, label in HARD_BLOCK_COMMAND_PATTERNS))},
-        {"kind": "terminal", "label": "向终端宿主键入",
+        {"kind": "terminal", "label": "向终端宿主键入 / 界面赋值",
          "examples": sorted(TERMINAL_HOSTS)},
     ]
 
@@ -176,6 +179,16 @@ def _param_paths(params: dict) -> list[str]:
             if params.get(key) not in (None, "")]
 
 
+def hard_block_reason(action_type: str, params: dict | None) -> str | None:
+    """硬红线单独可查：审批通过后执行、聊天工具调用也必须在最后一个检查点上问一次。
+
+    只靠入口检查是不够的——`intervention` 批准后会直接调执行服务，
+    一条在创建审批单时合规、在执行时已经越线的操作（比如审批期间被
+    改过的 params）不该因为"曾经放过"就绕过红线。
+    """
+    return _hard_block(action_type, params or {})
+
+
 def _hard_block(action_type: str, params: dict) -> str | None:
     for path in _param_paths(params):
         base = os.path.basename(path.rstrip("/")).lower()
@@ -194,7 +207,23 @@ def _hard_block(action_type: str, params: dict) -> str | None:
         app = str(params.get("app") or params.get("application") or "").lower()
         if any(host in app for host in TERMINAL_HOSTS):
             return "硬拦截：不允许向终端宿主应用键入内容"
+    if action_type == "set_value" and any(
+            host in _ref_app(params) for host in TERMINAL_HOSTS):
+        return ("硬拦截：不允许把内容写进终端宿主应用的界面——"
+                "那等价于提交一条命令，请改走受审批的 run_shell")
     return None
+
+
+def _ref_app(params: dict) -> str:
+    """从元素引用 `应用|窗口|路径` 里取应用名（小写、已解码）。
+
+    引用是 accessibility_snapshot / find_element 生成的，进程名可能含空格或
+    中文，所以只按第一个 `|` 切，不解析整条路径。
+    """
+    from urllib.parse import unquote
+
+    ref = str(params.get("ref") or "")
+    return unquote(ref.split("|", 1)[0]).strip().lower()
 
 
 def _match_auto(row: ComputerPolicy, action_type: str,
@@ -213,9 +242,11 @@ def _match_auto(row: ComputerPolicy, action_type: str,
                 if _within(path, directory):
                     return f"目录白名单：{directory}"
         return None
-    if action_type in APP_ACTIONS:
+    if action_type in APP_ACTIONS or action_type in UI_WRITE_ACTIONS:
         app = str(params.get("app") or params.get("application")
                   or params.get("name") or "").strip().lower()
+        if not app and action_type in UI_WRITE_ACTIONS:
+            app = _ref_app(params)
         for allowed in row.auto_apps or []:
             if app and app == allowed.strip().lower():
                 return f"应用白名单：{allowed}"

@@ -9,7 +9,6 @@ screenshot/type_text/click/key/run_app/run_shell 全部走 macOS 原生工具
 2. 执行路径统一走 app/services/computer_service.py，与聊天里的
    computer_* 工具调用共用同一份权限判断与审计逻辑。
 """
-import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -26,7 +25,6 @@ from app.api.deps import (
 from app.computer_agent import ComputerActionLog, ComputerPermission
 from app.computer_real import EXTENDED_CAPABILITIES
 from app.core.logging_config import get_logger
-from app.models.intervention import ApprovalRequest, InterventionPolicy, new_id
 from app.models.user import User
 from app.schemas.responses_computer import (
     CapabilitiesListOut,
@@ -35,7 +33,7 @@ from app.schemas.responses_computer import (
     ComputerLogOut,
     LatestScreenshotOut,
 )
-from app.services import computer_policy as policy_service
+from app.services import computer_service
 from app.services.computer_service import (
     ComputerActionDenied,
     capability_status,
@@ -131,22 +129,10 @@ async def list_capabilities(
 # "computer_command"（approval_actions）后，这些操作先建审批单，
 # 老板批准后才真正执行（见 intervention /requests/{id}/decide）。
 #
-# 注意：type_text / click / key 同样是高危能力。它们通过 AppleScript
-# 向前台应用注入键鼠事件——先 `open -a Terminal` 再 type_text 就等价于
-# 主机命令执行，完全绕开 core/sandbox.py 的 shell 白名单。
-HIGH_RISK_CAPABILITIES = {
-    "run_shell", "run_write", "run_app",
-    "type_text", "click", "key",
-}
-
-
-async def _high_risk_needs_approval(db: AsyncSession, company_id: str) -> bool:
-    """公司级策略的 approval_actions 是否含 computer_command（老板主动开启）。"""
-    policy = (await db.execute(
-        select(InterventionPolicy).where(
-            InterventionPolicy.company_id == company_id,
-            InterventionPolicy.project_id.is_(None)))).scalars().first()
-    return bool(policy and "computer_command" in (policy.approval_actions or []))
+# 集合本身连同判定逻辑已上移到 computer_service.approval_gate()——
+# 聊天里的 computer_* 工具必须走同一个门，否则「设置页开了审批、
+# 模型在对话里照样能点」。这里保留名字只为兼容既有 import 路径。
+HIGH_RISK_CAPABILITIES = computer_service.HIGH_RISK_CAPABILITIES
 
 
 @router.post("/execute", response_model=ComputerExecuteOut,
@@ -169,61 +155,23 @@ async def execute_action(
         if agent.company_id != company_id:
             raise HTTPException(404, "Agent not found")
 
-    # ---- 三档策略：硬拦截始终生效；配置过策略后由策略决定是否审批 ----
-    policy_row = await policy_service.get_policy_row(db, company_id)
-    verdict = policy_service.evaluate_action(
-        policy_row, data.action_type, data.params)
-    if verdict["decision"] == "blocked":
+    # ---- 三档策略 + 免批白名单 + 审批单：与聊天入口共用同一个门 ----
+    gate = await computer_service.approval_gate(
+        db, company_id=company_id, capability=data.action_type,
+        params=data.params, agent_id=agent_id)
+
+    if gate["action"] == "block":
         db.add(ComputerActionLog(
             id=str(uuid.uuid4()), company_id=company_id, agent_id=agent_id,
             action_type=data.action_type, params=data.params, allowed=False,
-            deny_reason=verdict["reason"], mock=False,
+            deny_reason=gate["reason"], mock=False,
             result={"ok": False, "decision": "blocked"}))
         await db.commit()
-        raise HTTPException(403, verdict["reason"])
+        raise HTTPException(403, gate["reason"])
 
-    policy_approval = verdict["decision"] == "approval"
-    legacy_approval = (
-        policy_row is None
-        and data.action_type in HIGH_RISK_CAPABILITIES
-        and await _high_risk_needs_approval(db, company_id))
-
-    # ---- V5.5 P0：高危操作审批门（未配置三档策略时沿用旧规则）----
-    if policy_approval or legacy_approval:
-        # V5.6.1 工具级免批白名单（学 Cline"始终允许"防审批疲劳）：
-        # 命中白名单 → 直接放行并留审计，不再建审批单
-        from app.models.whitelist import ApprovalWhitelist
-        wl_rows = (await db.execute(
-            select(ApprovalWhitelist).where(
-                ApprovalWhitelist.company_id == company_id,
-                ApprovalWhitelist.capability == data.action_type)
-        )).scalars().all()
-        if ApprovalWhitelist.matches(data.action_type, data.params, list(wl_rows)):
-            outcome = await execute_computer_action(
-                db, company_id=company_id, capability=data.action_type,
-                params=data.params, agent_id=agent_id,
-                auto_approved="whitelist")
-            return {"log_id": outcome["log_id"], "action": outcome["capability"],
-                    "result": outcome["result"], "mode": "REAL",
-                    "auto_approved": "whitelist",
-                    "message": "命中免批白名单，直接放行（已留审计）"}
-        req = ApprovalRequest(
-            id=new_id(), company_id=company_id,
-            action_type="computer_command",
-            payload={"capability": data.action_type, "params": data.params,
-                     "agent_id": agent_id, "awaiting_execution": True},
-            requested_by_agent_id=agent_id,
-            reason=f"高危本机操作 {data.action_type}"
-                   f"（{verdict['reason']}）: "
-                   f"{json.dumps(data.params, ensure_ascii=False)[:200]}")
-        db.add(req)
-        from app.services.notification_service import notify_approval_pending
-        await notify_approval_pending(
-            db, company_id=company_id,
-            title=f"待审批：高危本机操作 {data.action_type}",
-            body=req.reason)
-        await db.commit()
-        return {"status": "awaiting_approval", "approval_request_id": req.id,
+    if gate["action"] == "hold":
+        return {"status": "awaiting_approval",
+                "approval_request_id": gate["approval_request_id"],
                 "message": "该操作为高危动作，已生成审批单。在「干预中心」批准后自动执行，"
                            "拒绝则丢弃。",
                 "mode": "HOLD"}
@@ -236,14 +184,11 @@ async def execute_action(
                 "result": pre or {"ok": True, "precheck": True,
                                   "message": "预检通过，可真实执行"},
                 "precheck_blocked": pre is not None}
-    auto_reason = None
-    if policy_row is not None and verdict["decision"] == "allow":
-        auto_reason = f"policy:{verdict['mode']}"
     try:
         outcome = await execute_computer_action(
             db, company_id=company_id, capability=data.action_type,
             params=data.params, agent_id=agent_id,
-            auto_approved=auto_reason)
+            auto_approved=gate.get("auto_approved"))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except ComputerActionDenied as exc:
@@ -251,6 +196,11 @@ async def execute_action(
         raise HTTPException(403, exc.reason) from exc
 
     result = outcome["result"]
+    if gate["action"] == "allow_auto":
+        return {"log_id": outcome["log_id"], "action": outcome["capability"],
+                "result": result, "mode": "REAL",
+                "auto_approved": gate["auto_approved"],
+                "message": "命中免批白名单，直接放行（已留审计）"}
     return {"log_id": outcome["log_id"], "action": outcome["capability"],
             "result": result,
             "mode": "REAL" if result.get("ok") else "REAL_FAILED"}

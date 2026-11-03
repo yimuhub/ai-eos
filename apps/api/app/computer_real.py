@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.computer_agent import ComputerActionLog
+from app.computer_ax import AX_EXECUTORS
 from app.core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -404,6 +405,8 @@ REAL_EXECUTORS = {
     "key": real_key,
     "run_app": real_run_app,
     "run_shell": real_run_shell,
+    # 无障碍树一路：读界面结构、按元素引用操作，不看像素
+    **AX_EXECUTORS,
 }
 
 # 扩展后的能力清单（computer_agent.KNOWN_CAPABILITIES 的超集）

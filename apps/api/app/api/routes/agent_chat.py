@@ -79,6 +79,13 @@ COMPUTER_TOOLS = [
     {"type": "function", "function": {"name": "computer_click", "description": "Click at (x, y) on screen.", "parameters": {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}}, "required": ["x", "y"]}}},
     {"type": "function", "function": {"name": "computer_type_text", "description": "Type text into focused field.", "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}},
     {"type": "function", "function": {"name": "computer_run_app", "description": "Launch an application.", "parameters": {"type": "object", "properties": {"app": {"type": "string"}}, "required": ["app"]}}},
+    # 无障碍树（macOS）：读界面结构、按元素引用操作，不需要截图与坐标猜测。
+    {"type": "function", "function": {"name": "computer_list_windows", "description": "List on-screen apps and their windows (process name + window index/title). Use this before other accessibility tools.", "parameters": {"type": "object", "properties": {"app": {"type": "string", "description": "可选：只看这个进程"}}, "required": []}}},
+    {"type": "function", "function": {"name": "computer_accessibility_snapshot", "description": "Read a window's UI element tree as structured data (ref/role/title/geometry) — no screenshot. Returns refs you can click or write into.", "parameters": {"type": "object", "properties": {"app": {"type": "string", "description": "进程名，省略则取前台应用"}, "window": {"type": "integer", "default": 1}, "max_nodes": {"type": "integer", "default": 80}, "max_depth": {"type": "integer", "default": 2}}, "required": []}}},
+    {"type": "function", "function": {"name": "computer_get_window", "description": "Overview of one window: title, position, size, top-level element count, focused element role.", "parameters": {"type": "object", "properties": {"app": {"type": "string"}, "window": {"type": "integer", "default": 1}}, "required": ["app"]}}},
+    {"type": "function", "function": {"name": "computer_find_element", "description": "Find UI elements whose title/role contains a text query; returns their refs and centers. Prefer this over guessing coordinates.", "parameters": {"type": "object", "properties": {"app": {"type": "string"}, "window": {"type": "integer", "default": 1}, "query": {"type": "string"}, "role": {"type": "string", "description": "可选：按 AX 角色过滤，如 AXButton"}}, "required": ["query"]}}},
+    {"type": "function", "function": {"name": "computer_click_element", "description": "Press a UI element by its ref (from accessibility_snapshot/find_element). Does not move the mouse and does not need a screenshot.", "parameters": {"type": "object", "properties": {"ref": {"type": "string"}, "action": {"type": "string", "enum": ["AXPress", "AXPick"], "default": "AXPress"}}, "required": ["ref"]}}},
+    {"type": "function", "function": {"name": "computer_set_value", "description": "Write text into a UI element by its ref (AXValue) — safer and more reliable than typing, and it cannot land in a terminal.", "parameters": {"type": "object", "properties": {"ref": {"type": "string"}, "value": {"type": "string"}}, "required": ["ref", "value"]}}},
 ]
 
 def _parse_text_tool_calls(content: str) -> list[dict]:
@@ -126,19 +133,36 @@ async def _computer_action(db: AsyncSession, capability: str, args: dict,
     就等于给 LLM 开了一条**绕过 ComputerPermission 权限模型**、
     直通主机 shell 的通道。因此这里强制走 computer_service——
     未授权能力一律拒绝，且每次调用（含被拒绝的）都落审计日志。
+
+    审批门同理：三档策略（默认审批 / 自动审批 / 完全控制）是在
+    `computer_service.approval_gate()` 里判的，聊天必须问同一个函数，
+    否则「老板把模式设成默认审批、模型在对话里照样能直接点删除」。
     """
     from app.services.computer_service import (
         ComputerActionDenied,
+        approval_gate,
         execute_computer_action,
     )
 
     logger.info("聊天触发本机操作 user=%s company=%s capability=%s",
                 user_id, company_id, capability)
 
+    gate = await approval_gate(db, company_id=company_id, capability=capability,
+                               params=args if isinstance(args, dict) else {})
+    if gate["action"] == "block":
+        return {"ok": False, "blocked": True, "capability": capability,
+                "error": gate["reason"]}
+    if gate["action"] == "hold":
+        return {"ok": False, "awaiting_approval": True, "capability": capability,
+                "approval_request_id": gate["approval_request_id"],
+                "message": "该操作需要你批准后才会执行，审批单已建。"
+                           "请告诉老板去「干预中心」确认，不要重复发起同一个操作。"}
+
     try:
         outcome = await execute_computer_action(
             db, company_id=company_id, capability=capability,
-            params=args if isinstance(args, dict) else {})
+            params=args if isinstance(args, dict) else {},
+            auto_approved=gate.get("auto_approved"))
     except ComputerActionDenied as exc:
         # 给模型一句可读的拒绝原因，让它能向老板解释而不是"操作失败"
         return {"ok": False, "denied": True, "capability": capability,
