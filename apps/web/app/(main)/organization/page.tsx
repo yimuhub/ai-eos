@@ -5,6 +5,7 @@ import { api, describeError } from "@/lib/api";
 import { invalidate, useActiveCompanyId, useResource } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
 import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
+import OrgSynthesisDrawer from "@/components/OrgSynthesisDrawer";
 
 /* ============================================================
    组织架构 v3：卡片排序/置顶 · 部门技能 · 部门专属知识库
@@ -76,6 +77,7 @@ export default function OrganizationPage() {
   const [msg, setMsg] = useState("");
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
+  const [showSynthesis, setShowSynthesis] = useState(false);
 
   const [editing, setEditing] = useState<Dept | null>(null);
   const [editForm, setEditForm] = useState({
@@ -313,6 +315,10 @@ export default function OrganizationPage() {
             </p>
           </div>
           <div className="flex gap-2">
+            <button onClick={() => setShowSynthesis(true)} className="btn-primary"
+              style={{ background: "linear-gradient(135deg,#6366f1,#8b5cf6)" }}>
+              ✦ AI 生成组织
+            </button>
             <button onClick={() => setShowPresets(!showPresets)} className="btn-ghost">🏢 组织形态</button>
             <button onClick={sortMode ? saveSort : startSort}
               className={sortMode ? "btn-primary" : "btn-ghost"}>
@@ -908,6 +914,13 @@ export default function OrganizationPage() {
         </div>,
         document.body
       )}
+
+      <OrgSynthesisDrawer
+        open={showSynthesis}
+        companyId={cid ?? null}
+        onClose={() => setShowSynthesis(false)}
+        onApplied={() => { void reloadOrg(); }}
+      />
     </div>
   );
 }
