@@ -9,11 +9,15 @@
 //
 // ## 四步
 //   ① 管理员账号：创建唯一的 superadmin（契约 POST /setup）
-//   ② 你的公司：名称 / 简介 / 行业（12 个 chip，只影响组织架构推荐）
-//   ③ 组织架构：空公司 vs 按行业推荐，再选规模（个体户 / 工作室 / 中小公司 / 集团大厂）
-//   ④ 接入大模型：登记模型 + 填 Key + 测试连通 + 绑给全部 AI 员工（可跳过）
+//   ② 你的公司：名称 / 简介 / 行业（12 个 chip，只影响组织架构推荐）——这一步结束时真正安装
+//   ③ 接入大模型：登记模型 + 填 Key + 测试连通（可跳过）
+//   ④ 资料与组织：按行业预设 / 空公司搭骨架，或让 AI 读知识库资料生成；生成后把 ③ 的模型绑给全部员工
 //
-// 第 4 步发生在安装成功之后（此时已有 token）：
+// 为什么模型排在组织前面：老顺序是"先搭人、后接大脑"，用户在第 3 步对着还不认识的员工选骨架，
+// 到第 4 步才知道他们长什么样。现在先接模型、最后建人——绑模型这一步顺势挪到第 4 步
+// （bind-agents 依赖员工已经存在，顺序反了就只能绑出 0 个人）。
+//
+// 第 3、4 步发生在安装成功之后（此时已有 token）：
 // 没有模型，员工接任务只会回「尚未绑定任何模型」——这是过去新装系统的默认结局。
 // Key 只写进本机 apps/api/.env（后端原子写入、600 权限、立即生效），
 // 不入库、不上传、不回显。
@@ -21,7 +25,7 @@
 // ## 关键约束
 // - 预设 id 不写死：GET /org-presets 列表 + 行业字段模糊匹配，匹配不到才用 `tech`；
 //   部门名一律取自 GET /org-presets/{pid}，规模只决定"取前几个"。
-// - apply 失败**不阻塞安装**：公司已经建好了，组织架构漏了也能进系统后在「组织架构」里补。
+// - 生成组织失败**不阻塞收尾**：公司已经建好了，组织架构漏了也能进系统后在「组织架构」里补。
 // - 预设目录 GET /org-presets 与详情是公开的（安装前没有账号也能预览部门）；
 //   仍然带 `noAuthRedirect`，避免旧后端返回 401 时 api 层把正在填的表单整页跳走。
 // - 完成页提供「推倒重建」（POST /setup/rebuild）：清掉这次安装的全部数据回到第 1 步。
@@ -42,6 +46,7 @@ import {
 import { V, runRules } from "@/lib/validate";
 import Field from "@/components/Field";
 import DemoMode from "@/components/DemoMode";
+import OrgSynthesisDrawer from "@/components/OrgSynthesisDrawer";
 import {
   FALLBACK_PRESET_ID,
   INDUSTRIES,
@@ -53,6 +58,7 @@ import {
   loadPendingInstall,
   loadSetupDraft,
   matchPresetId,
+  modelBindingSummary,
   passwordStrength,
   presetErrorMessage,
   presetPool,
@@ -85,10 +91,10 @@ type FieldKey = "username" | "email" | "password" | "confirm";
 /** 组织架构结果：类型定义在 lib/setup.ts（草稿/安装标记要复用它） */
 type OrgOutcome = SetupOrgOutcome;
 
-/** 第 4 步的结果：接入成功（含测试是否通过）或用户主动跳过 */
+/** 第 3 步的结果：接入成功（含测试是否通过）或用户主动跳过 */
 type ModelOutcome =
   | { status: "bound"; modelId: string; modelName: string; modelIdOnProvider: string;
-      bound: number; agentCount: number; testOk: boolean; testError?: string }
+      bound: number; alreadyBound: number; agentCount: number; testOk: boolean; testError?: string }
   | { status: "skipped" };
 
 type DoneState = {
@@ -99,21 +105,21 @@ type DoneState = {
   model: ModelOutcome | null;
 };
 
-/** 安装成功后的上下文：第 4 步要用它登记模型、绑员工 */
-type Installed = {
-  companyId: string;
-  companyName: string;
-  username: string;
-  email: string;
-  org: OrgOutcome;
-};
+/** 安装成功的上下文：就是「待续装」标记的内容（第 3 步接模型、第 4 步建组织都靠它） */
+type Installed = SetupInstalledDraft;
 
 const STEPS: { n: Step; title: string; sub: string }[] = [
   { n: 1, title: "管理员账号", sub: "唯一的管理者" },
   { n: 2, title: "你的公司", sub: "名称与业务方向" },
-  { n: 3, title: "组织架构", sub: "预设 · 规模" },
-  { n: 4, title: "接入大模型", sub: "让员工能思考" },
+  { n: 3, title: "接入大模型", sub: "让员工能思考" },
+  { n: 4, title: "资料与组织", sub: "预设 · AI 生成" },
 ];
+
+/**
+ * 写进「待续装」标记里的来源标记：区分预设生成与 AI 生成。
+ * 刷新后靠它判断"AI 那一路已经落过地"，避免收尾时又叠一套预设部门。
+ */
+const AI_ORG_MARK = "AI 按资料生成";
 
 /** 常见模型服务预设：降低"我该填什么"的门槛；key_hint 说明 Key 从哪来 */
 const MODEL_PRESETS = [
@@ -180,15 +186,15 @@ const HEAD: Record<Step, { title: string; desc: string }> = {
   },
   2: {
     title: "给你的 AI 公司起个名字",
-    desc: "公司是员工、项目、任务、成果、知识库的归属单元。之后还可以创建更多公司，并在工作台随时切换。",
+    desc: "公司是员工、项目、任务、成果、知识库的归属单元。填完这一步就会真正开始创建（账号 + 公司），之后还能创建更多公司并在工作台随时切换。",
   },
   3: {
-    title: "组织架构",
-    desc: "先定骨架，AI 员工随后自动配齐；也可以 0 部门空公司进入，之后再搭。",
+    title: "给 AI 员工接上大脑",
+    desc: "员工的思考来自大模型服务。选一个服务商、粘贴 API Key，系统会自动登记模型、保存密钥并测试连通；员工还没建，绑定放到第 4 步组织生成之后一起做。",
   },
   4: {
-    title: "给 AI 员工接上大脑",
-    desc: "员工的思考来自大模型服务。选一个服务商、粘贴 API Key，系统会自动登记模型、保存密钥、测试连通，并绑定给公司里全部 AI 员工。",
+    title: "搭建你的组织",
+    desc: "按行业预设配齐部门与 AI 员工，也可以 0 部门空公司进入、之后再搭。资料多一点的老板可以让 AI 读完知识库再设计——岗位更贴合你实际在做的业务。",
   },
 };
 
@@ -214,13 +220,40 @@ export default function SetupPage() {
       if (!alive.current) return;
       if (s?.needs_setup === false) {
         // 系统已初始化：通常是用户装完刷新了页面。
-        // 若「已安装、待接模型」标记与 token 都还在，说明第 4 步还没收尾——
-        // 此时踢回 /login 会丢掉模型上下文（用户还得自己再找一遍入口），
-        // 所以恢复安装上下文，原地停在第 4 步。
+        // 若「已安装、待续装」标记与 token 都还在，说明第 3/4 步还没收尾——
+        // 此时踢回 /login 会丢掉上下文（用户还得自己再找一遍入口），
+        // 所以恢复安装上下文，原地停在没做完的那一步。
         const pending = loadPendingInstall();
         if (pending && getToken()) {
           setInstalled(pending);
-          setStep(4);
+          if (pending.model) {
+            // 模型已经登记过：恢复成"已接入"，续到第 4 步建组织，不会再创建第二条配置
+            const m = pending.model;
+            setModelCreatedId(m.modelId);
+            setModelOutcome({
+              status: "bound",
+              modelId: m.modelId,
+              modelName: m.modelName,
+              modelIdOnProvider: m.modelIdOnProvider,
+              bound: 0,
+              alreadyBound: 0,
+              agentCount: 0,
+              testOk: m.testOk,
+              testError: m.testError,
+            });
+            setStep(4);
+          } else {
+            setStep(3);
+          }
+          if (pending.org.status === "created" && pending.org.presetIndustry === AI_ORG_MARK) {
+            // AI 那一路已经落过地：停在第 4 步只做收尾，再点一次不会又叠一套预设部门
+            setAiOrgResult({
+              centers: 0,
+              departments: pending.org.departments,
+              agents: pending.org.agents,
+            });
+            setStep(4);
+          }
           setGate("ready");
           return;
         }
@@ -291,7 +324,7 @@ export default function SetupPage() {
   const [rebuildError, setRebuildError] = useState("");
   const [resetNotice, setResetNotice] = useState("");
 
-  /* ---------------- 第 4 步：接入大模型（发生在安装成功之后） ---------------- */
+  /* ---------------- 第 3 步：接入大模型（发生在安装成功之后） ---------------- */
   const [installed, setInstalled] = useState<Installed | null>(null);
   const [modelPresetIdx, setModelPresetIdx] = useState(0);
   const [modelForm, setModelForm] = useState(() => ({ ...MODEL_PRESETS[0] }));
@@ -305,14 +338,23 @@ export default function SetupPage() {
   // 显示名称跟随所选模型自动更新，用户改过之后就不再覆盖
   const [nameAuto, setNameAuto] = useState(true);
   const [modelBusy, setModelBusy] = useState(false);
-  // 0=未开始，1..4=正在做第几件事（登记→存密钥→测连通→绑员工），5=全部完成
+  // 0=未开始，1..3=正在做第几件事（登记→存密钥→测连通），4=全部完成
   const [modelStage, setModelStage] = useState(0);
   const [modelError, setModelError] = useState("");
   const [modelOutcome, setModelOutcome] = useState<ModelOutcome | null>(null);
   // 已经登记过的模型 id：失败重试时不再重复创建，避免一次失败留下两条配置
   const [modelCreatedId, setModelCreatedId] = useState<string | null>(null);
+  // 没接模型就想进第 4 步：先问一句，别让人带着"员工干不了活"的系统离开向导
+  const [skipModelAsking, setSkipModelAsking] = useState(false);
 
-  const installedAgents = installed?.org.status === "created" ? installed.org.agents : 0;
+  /* ---------------- 第 4 步：资料与组织（生成骨架 + 绑定模型） ---------------- */
+  const [orgBusy, setOrgBusy] = useState(false);
+  const [orgError, setOrgError] = useState("");
+  const [orgStage, setOrgStage] = useState(0); // 1=生成部门与员工，2=绑定模型
+  // 「AI 读资料生成组织」抽屉（复用 components/OrgSynthesisDrawer.tsx）
+  const [aiOrgOpen, setAiOrgOpen] = useState(false);
+  // 抽屉里已经落地的组织：主按钮这时不再跑预设，只做"绑模型 + 收尾"
+  const [aiOrgResult, setAiOrgResult] = useState<{ centers: number; departments: number; agents: number } | null>(null);
 
   /* ---------------- 可续装：草稿恢复 / 保存（只存非敏感字段） ---------------- */
   // 演示模式弹层（复用 components/DemoMode.tsx，不另写一套演示逻辑）
@@ -334,8 +376,8 @@ export default function SetupPage() {
       setOrgMode(d.orgMode);
       setScale(d.scale);
       setPresetManual(d.presetManual);
-      // 第 4 步不能只凭草稿：必须同时有「待接模型」标记与登录态，由 checkStatus 决定
-      if (d.step < 4) setStep(d.step);
+      // 第 3、4 步不能只凭草稿：必须同时有「待续装」标记与登录态，由 checkStatus 决定
+      if (d.step <= 2) setStep(d.step);
       if (d.model) {
         const m = d.model;
         const idx = MODEL_PRESETS.findIndex(
@@ -455,11 +497,12 @@ export default function SetupPage() {
   }
 
   /**
-   * 第 4 步：登记模型 → 保存密钥 → 测试连通 → 绑定全部员工。
+   * 第 3 步：登记模型 → 保存密钥 → 测试连通。
    *
-   * 绑定必须做：运行时只认 agent_model_configs，缺了它员工仍会报
-   * 「尚未绑定任何模型」。连通测试失败不阻塞——Key 可能有效但该模型
-   * 暂时不可用，先绑定、进系统后换模型即可；结果里如实标出测试失败。
+   * 这一步**不绑员工**：员工要到第 4 步才存在（bind-agents 找不到人只会绑出 0）。
+   * 绑定由第 4 步生成组织后统一做一次，运行时只认 agent_model_configs，
+   * 缺了它员工仍会报「尚未绑定任何模型」。连通测试失败不阻塞——Key 可能有效
+   * 但该模型暂时不可用，先记下、进系统后换模型即可；结果里如实标出测试失败。
    */
   async function handleConnectModel() {
     if (!installed || modelBusy) return;
@@ -541,30 +584,26 @@ export default function SetupPage() {
       }
 
       setModelStage(4);
-      await sleep(250);
-      let bound = 0;
-      let total = installedAgents;
-      if (installedAgents > 0) {
-        const b = await api.post<{ bound: number; agent_count: number }>(
-          `/models/${mid}/bind-agents`,
-          { company_id: installed.companyId },
-          { silent: true, timeoutMs: 30_000 },
-        );
-        bound = b?.bound ?? 0;
-        total = b?.agent_count ?? installedAgents;
-      }
-
-      setModelStage(5);
-      setModelOutcome({
+      const outcome: ModelOutcome = {
         status: "bound",
         modelId: mid,
         modelName: name,
         modelIdOnProvider: modelId,
-        bound,
-        agentCount: total,
+        bound: 0,
+        alreadyBound: 0,
+        agentCount: 0,
         testOk,
         testError: testError || undefined,
-      });
+      };
+      setModelOutcome(outcome);
+      // 立刻写回「待续装」标记：刷新后停在第 4 步，而不是把同一个模型再登记一遍
+      updateInstalled({ model: {
+        modelId: mid,
+        modelName: name,
+        modelIdOnProvider: modelId,
+        testOk,
+        testError: testError || undefined,
+      } });
       setKeyInput("");
     } catch (e) {
       setModelError(describeError(e, "接入大模型失败"));
@@ -573,16 +612,30 @@ export default function SetupPage() {
     }
   }
 
-  function finishSetup(model: ModelOutcome | null = modelOutcome) {
-    if (!installed) return;
+  /**
+   * 更新安装上下文并同步「待续装」标记。
+   *
+   * 返回值是给调用方当场用的：setState 是异步的，紧接着的 finishSetup
+   * 若继续读 `installed` 会拿到旧值（组织架构/模型就白写了）。
+   */
+  function updateInstalled(patch: Partial<Installed>): Installed | null {
+    if (!installed) return null;
+    const next: Installed = { ...installed, ...patch };
+    setInstalled(next);
+    savePendingInstall(next);
+    return next;
+  }
+
+  function finishSetup(model: ModelOutcome | null = modelOutcome, info: Installed | null = installed) {
+    if (!info) return;
     // 收尾后不再"待接模型"：草稿与标记都清掉，刷新/再打开只会走正常登录
     clearSetupDraft();
     clearPendingInstall();
     setDone({
-      username: installed.username,
-      email: installed.email,
-      companyName: installed.companyName,
-      org: installed.org,
+      username: info.username,
+      email: info.email,
+      companyName: info.companyName,
+      org: info.org,
       model,
     });
   }
@@ -639,14 +692,14 @@ export default function SetupPage() {
     } catch (e) {
       if (!alive.current) return;
       setPresetsError(presetErrorMessage(e));
-      listLoaded.current = false; // 下次进入第 3 步再试一次
+      listLoaded.current = false; // 下次进入第 4 步再试一次
     } finally {
       if (alive.current) setListLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    if (step !== 3 || listLoaded.current) return;
+    if (step !== 4 || listLoaded.current) return;
     void loadPresets();
   }, [step, loadPresets]);
 
@@ -657,7 +710,7 @@ export default function SetupPage() {
   const presetId = presetManual ?? autoPresetId;
 
   useEffect(() => {
-    if (step !== 3 || orgMode !== "preset" || !presetId) return;
+    if (step !== 4 || orgMode !== "preset" || !presetId) return;
     if (detail && detail.id === presetId) return; // 已缓存
     let cancelled = false;
     setDetailLoading(true);
@@ -704,27 +757,18 @@ export default function SetupPage() {
   /**
    * 创建过程的阶段清单：与真实请求一一对应，不是纯装饰。
    *
-   * 后端把"账号 + 公司 + owner 成员关系"放在同一个事务里，部门与 AI 员工
-   * 由 /org-presets/{pid}/apply 一次建完。因此这里把两次真实请求拆成
-   * 可见的几段，每段**至少停留一小会儿**，让用户看清正在发生什么；
-   * 完成与否只由真实响应决定，失败就退回表单并给出原因。
+   * 后端把"账号 + 公司 + owner 成员关系"放在同一个事务里，所以这里只有这两段
+   * 是真的（POST /setup 一次写完），最后一段是给"马上带你进第 3 步"一个落脚点。
+   * 部门与 AI 员工已经挪到第 4 步，不再混在安装过程里。
    */
-  const creatingStages = useMemo(() => {
-    const list: { key: string; title: string; hint: string }[] = [
+  const creatingStages = useMemo(
+    () => [
       { key: "account", title: "创建管理员账号", hint: "写入超级管理员，建立登录身份" },
       { key: "company", title: "建立公司档案", hint: `为「${companyName.trim() || "你的公司"}」准备数据空间` },
-    ];
-    if (orgMode === "preset" && scale !== "solo") {
-      list.push({
-        key: "org",
-        title: "搭建部门骨架",
-        hint: `按「${presetIndustry || industryLabel(industry)}」蓝图生成部门`,
-      });
-      list.push({ key: "agents", title: "配置 AI 员工", hint: "给每个岗位配上专家人设" });
-    }
-    list.push({ key: "finish", title: "初始化工作台", hint: "准备就绪，马上带你进去" });
-    return list;
-  }, [orgMode, scale, companyName, presetIndustry, industry]);
+      { key: "finish", title: "准备就绪", hint: "接着接大脑（第 3 步）、搭组织（第 4 步）" },
+    ],
+    [companyName],
+  );
 
   const advanceTo = useCallback(
     (key: string) => {
@@ -737,8 +781,8 @@ export default function SetupPage() {
   /**
    * 落 apply 用的预设 id。
    *
-   * 安装前页面里拿不到预设列表（接口要鉴权），此时 presetId 只是兜底值；
-   * POST /setup 成功后已有 token，这里再按行业重新匹配一次——
+   * 第 4 步已经会自己拉一次预设列表，但用户可能在列表还没读回来时就点了完成，
+   * 这时 presetId 只是兜底值；这里再按行业重新匹配一次——
    * 否则第一次安装会永远落到 tech，用户在步骤 2 选的行业就白选了。
    */
   async function resolvePresetId(): Promise<string> {
@@ -771,7 +815,8 @@ export default function SetupPage() {
       const d =
         activeDetail && activeDetail.id === pid
           ? activeDetail
-          : await api.get<PresetDetail>(`/org-presets/${encodeURIComponent(pid)}`, PRESET_OPTS);      const names = departmentSubset(d, scale);
+          : await api.get<PresetDetail>(`/org-presets/${encodeURIComponent(pid)}`, PRESET_OPTS);
+      const names = departmentSubset(d, scale);
       if (!names.length) {
         return { status: "skipped", departments: 0, agents: 0, note: `预设「${d.industry}」没有可引入的部门` };
       }
@@ -840,62 +885,115 @@ export default function SetupPage() {
     setToken(res.access_token);
     if (res.refresh_token) setRefreshToken(res.refresh_token);
     setActiveCompanyId(res.company.id);
-    // 账号与公司已经落库：立刻写「已安装、待接模型」标记。
-    // 这样即使组织架构还在生成时刷新，也停在第 4 步而不是被踢回 /login。
-    // （此时组织架构尚未确定，先按"未生成"记，生成完成后再覆盖一次。）
-    savePendingInstall({
+
+    // 账号与公司已经落库：立刻写「已安装、待续装」标记。
+    // 第 3 步登记模型、第 4 步生成组织都要靠这个上下文；中途刷新也能停在原步骤，
+    // 而不是被 needs_setup=false 踢回登录页。组织架构此时还不存在，先记"未生成"。
+    const installedInfo: Installed = {
       companyId: res.company.id,
       companyName: res.company?.name || companyName.trim(),
       username: res.user?.username || username.trim(),
       email: res.user?.email || email.trim(),
-      org: { status: "skipped", departments: 0, agents: 0, note: "组织架构状态未记录" },
-    });
+      org: { status: "skipped", departments: 0, agents: 0, note: "组织架构尚未生成" },
+      model: null,
+    };
 
     // 账号与公司 + owner 成员在同一个事务里落库，界面上分两段呈现，
     // 让"建了什么"可见；真实失败只可能发生在 POST /setup 那一步（上面已处理）。
     advanceTo("company");
     await sleep(700);
     if (!alive.current) return;
-
-    const hasOrgStage = creatingStages.some((s) => s.key === "org");
-    if (hasOrgStage) advanceTo("org");
-    const orgStart = Date.now();
-    // apply 的任何异常都在这里被兜住，绝不让"公司已建好"这一步白费
-    let org: OrgOutcome;
-    try {
-      org = await createOrg(res.company.id);
-    } catch (e) {
-      org = { status: "failed", departments: 0, agents: 0, reason: describeError(e, "组织架构生成失败") };
-    }
-    if (hasOrgStage) {
-      await sleep(Math.max(0, 1100 - (Date.now() - orgStart)));
-      if (!alive.current) return;
-      // 组织架构没建成就不假装配好了 AI 员工，直接进入收尾
-      if (org.status === "created") {
-        advanceTo("agents");
-        await sleep(900);
-        if (!alive.current) return;
-      }
-    }
     advanceTo("finish");
     await sleep(600);
     if (!alive.current) return;
-    // 不直接收尾：先落到第 4 步接模型。没有模型的系统进去后每个员工都"无法执行任务"。
-    const installedInfo: SetupInstalledDraft = {
-      companyId: res.company.id,
-      companyName: res.company?.name || companyName.trim(),
-      username: res.user?.username || username.trim(),
-      email: res.user?.email || email.trim(),
-      org,
-    };
+
     setInstalled(installedInfo);
-    // 刷新后靠这个标记 + token 判断"已安装、待接模型"，从而停在第 4 步
     savePendingInstall(installedInfo);
     setModelStage(0);
     setModelError("");
     setModelOutcome(null);
+    setSkipModelAsking(false);
     setSubmitting(false);
-    setStep(4);
+    // 不直接收尾：先落到第 3 步接模型。没有模型的系统进去后每个员工都"无法执行任务"。
+    setStep(3);
+  }
+
+  /**
+   * 把第 3 步接好的模型绑给刚生成的员工。
+   *
+   * 顺序不能反：运行时只认 agent_model_configs，而 bind-agents 是按公司找人的，
+   * 员工还不存在时绑出 0 个，进系统后每个任务都会报「尚未绑定任何模型」。
+   */
+  async function bindModelToAgents(model: Extract<ModelOutcome, { status: "bound" }>) {
+    if (!installed) return model;
+    const b = await api.post<{ bound: number; skipped: number; agent_count: number }>(
+      `/models/${model.modelId}/bind-agents`,
+      { company_id: installed.companyId },
+      { silent: true, timeoutMs: 60_000 },
+    );
+    return {
+      ...model,
+      bound: b?.bound ?? 0,
+      alreadyBound: b?.skipped ?? 0,
+      agentCount: b?.agent_count ?? 0,
+    };
+  }
+
+  /**
+   * 第 4 步主按钮：生成组织 →（有模型就）绑员工 → 收尾。
+   *
+   * 组织失败不阻塞收尾：公司已建好，带着 0 部门进系统比卡在向导里强，
+   * 完成页会如实写明并指路「组织架构」页。绑定失败同理。
+   */
+  async function handleApplyOrg() {
+    if (!installed || orgBusy || submitting) return;
+    setOrgBusy(true);
+    setOrgError("");
+    setOrgStage(1);
+
+    let org: OrgOutcome;
+    try {
+      org = aiOrgResult
+        ? { status: "created", departments: aiOrgResult.departments, agents: aiOrgResult.agents, presetIndustry: AI_ORG_MARK }
+        : await createOrg(installed.companyId);
+    } catch (e) {
+      org = { status: "failed", departments: 0, agents: 0, reason: describeError(e, "组织架构生成失败") };
+    }
+    if (!alive.current) return;
+
+    let model = modelOutcome;
+    if (model?.status === "bound" && org.status === "created" && org.agents > 0) {
+      setOrgStage(2);
+      const bound = await bindModelToAgents(model).catch((e) => {
+        setOrgError(
+          `部门与员工已生成，但模型自动绑定失败：${describeError(e, "接口没有返回原因")}。进系统后在「模型配置」里点「绑定给全部员工」即可。`,
+        );
+        return null;
+      });
+      if (bound && alive.current) {
+        model = bound;
+        setModelOutcome(bound);
+      }
+    }
+    if (!alive.current) return;
+
+    await sleep(300);
+    if (!alive.current) return;
+    setOrgStage(0);
+    setOrgBusy(false);
+    finishSetup(model, updateInstalled({ org }));
+  }
+
+  /** 第 4 步的退路：不建组织也让人走得掉，避免向导变成死胡同 */
+  function handleSkipOrg() {
+    if (!installed || orgBusy) return;
+    const org: OrgOutcome = {
+      status: "skipped",
+      departments: 0,
+      agents: 0,
+      note: "跳过组织架构，进系统后可在「组织架构」里补",
+    };
+    finishSetup(modelOutcome, updateInstalled({ org }));
   }
 
   /**
@@ -958,6 +1056,12 @@ export default function SetupPage() {
     setModelError("");
     setModelOutcome(null);
     setModelCreatedId(null);
+    setSkipModelAsking(false);
+    setOrgBusy(false);
+    setOrgError("");
+    setOrgStage(0);
+    setAiOrgOpen(false);
+    setAiOrgResult(null);
     setResetNotice("已清空这次安装（账号、公司与组织架构都已删除），可以从第 1 步重新创建。");
     void checkStatus();
   }
@@ -1002,7 +1106,7 @@ export default function SetupPage() {
     const m = done.model;
     const modelText =
       m?.status === "bound"
-        ? `${m.modelName}（${m.modelIdOnProvider}）· 已绑定 ${m.bound}/${m.agentCount} 位员工${
+        ? `${m.modelName}（${m.modelIdOnProvider}）· ${modelBindingSummary(m)}${
             m.testOk ? "" : " · 连通测试未通过"
           }`
         : "未接入 · 进入系统后可在「模型配置」完成";
@@ -1208,22 +1312,36 @@ export default function SetupPage() {
   }
 
   /* ---------------- 渲染：四步向导 ---------------- */
+  // 中心是部门的上级，不是部门：把两者相加会说成「8 个部门」，数字对不上组织树。
+  const aiOrgLabel = aiOrgResult
+    ? `${aiOrgResult.centers > 0 ? `${aiOrgResult.centers} 个中心 · ` : ""}` +
+      `${aiOrgResult.departments} 个部门 / ${aiOrgResult.agents} 位 AI`
+    : "";
+
   const footHint =
     step === 1
       ? "这个账号将自动成为「超级管理员」。"
       : step === 2
-        ? "行业只影响推荐的组织架构，不限制后续能力。"
+        ? "行业只影响推荐的组织架构；这一步点完就开始真正创建账号与公司。"
         : step === 3
-          ? orgCounts
-            ? `将创建 ${orgCounts.departments} 个部门 / ${orgCounts.agents} 位 AI`
-            : "预设数据取不到时，安装仍会继续。"
-          : modelOutcome?.status === "bound"
+          ? modelOutcome?.status === "bound"
             ? modelOutcome.testOk
-              ? `已为 ${modelOutcome.bound}/${modelOutcome.agentCount} 位员工接上模型，点「完成，进入工作台」即可开始`
+              ? "模型已连通；第 4 步生成组织后会自动绑定给全部 AI 员工"
               : "模型已保存但未连通：建议先修好 Key，否则员工接任务会失败"
-            : installedAgents > 0
-              ? `接入后会把公司现有 ${installedAgents} 位 AI 员工一起绑定`
-              : "暂时没有 AI 员工；接入后可随时在「模型配置」里绑定。";
+            : "接不上也没关系，可以先往下走，进系统后在「模型配置」里随时补。"
+          : aiOrgResult
+            ? `AI 已生成 ${aiOrgLabel}，点「完成」即可`
+            : orgMode === "empty" || scale === "solo"
+              ? "不生成部门与员工，进去后随时能在「组织架构」里补。"
+              : !orgCounts
+                ? "正在统计推荐的部门与员工…"
+                : modelOutcome?.status === "bound"
+                  ? `将创建 ${orgCounts.departments} 个部门 / ${orgCounts.agents} 位 AI，并把模型绑给它们`
+                  : `将创建 ${orgCounts.departments} 个部门 / ${orgCounts.agents} 位 AI`;
+
+  // 第 4 步这颗按钮到底会不会真的建部门与员工：
+  // 空公司 / 个体户只是收尾，AI 已经生成过也不需要再生成——按钮文案不能还写「生成组织」。
+  const willGenerateOrg = !aiOrgResult && orgMode === "preset" && scale !== "solo";
 
   return (
     <div className="min-h-screen flex items-start md:items-center justify-center px-3 py-5 sm:px-5 sm:py-8">
@@ -1584,9 +1702,35 @@ export default function SetupPage() {
               </div>
             )}
 
-            {/* ---------------- 步骤 3 ---------------- */}
-            {step === 3 && (
+            {/* ---------------- 步骤 4：资料与组织 ---------------- */}
+            {step === 4 && (
               <div className="space-y-4">
+                {!installed ? (
+                  <p className="text-[12px] leading-relaxed" style={{ color: "var(--muted)" }}>
+                    账号与公司还没创建成功，请回到第 1 步把前两步走完。
+                  </p>
+                ) : aiOrgResult ? (
+                  <div
+                    className="rounded-[13px] px-4 py-4 text-[12.5px] leading-relaxed"
+                    style={{
+                      border: "1px solid rgba(52,211,153,0.4)",
+                      background: "rgba(52,211,153,0.08)",
+                    }}
+                    role="status"
+                  >
+                    <div className="font-semibold" style={{ color: "var(--success)" }}>
+                      ✦ AI 已按你的资料生成并落地了组织
+                    </div>
+                    <p className="mt-1.5" style={{ color: "#c9c9d6" }}>
+                      {aiOrgLabel} 员工已经建好。
+                    </p>
+                    <p className="mt-1 text-[11.5px]" style={{ color: "var(--muted)" }}>
+                      点右下角「完成，进入工作台」收尾{modelOutcome?.status === "bound" ? "，系统会把刚接入的模型绑给这些员工" : ""}。
+                      想再调整部门与岗位，进系统后打开「组织架构」随时可以重新生成。
+                    </p>
+                  </div>
+                ) : (
+                  <>
                 <div>
                   <SectionLabel idx="A" title="组织起点" note="二选一" />
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -1753,10 +1897,57 @@ export default function SetupPage() {
                     </div>
                   </div>
                 </div>
+
+                {orgError && (
+                  <div
+                    className="rounded-[10px] px-3 py-2.5 text-[11.5px] leading-relaxed"
+                    style={{
+                      background: "rgba(248,113,113,0.12)",
+                      border: "1px solid rgba(248,113,113,0.4)",
+                      color: "#fca5a5",
+                    }}
+                    role="alert"
+                  >
+                    {orgError}
+                  </div>
+                )}
+
+                {/* E：可选的第二条路——让 AI 读知识库资料自己设计组织 */}
+                <div
+                  className="rounded-[13px] px-4 py-3.5"
+                  style={{
+                    border: "1px solid rgba(139,92,246,0.35)",
+                    background: "linear-gradient(120deg, rgba(139,92,246,0.10), rgba(34,211,238,0.05))",
+                  }}
+                >
+                  <SectionLabel idx="E" title="让 AI 读你的资料设计组织" note="可选 · 比预设更贴合实际业务" />
+                  <p className="text-[11.5px] leading-relaxed" style={{ color: "var(--muted)" }}>
+                    把公司介绍、业务手册、SOP、正在做的项目放进知识库，AI 读完会自己判断该设哪些部门与岗位；
+                    每个岗位都写明理由和依据的资料，落地前编制可调、岗位可去掉，落地后还能一键撤销。
+                  </p>
+                  <div className="mt-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setAiOrgOpen(true)}
+                      disabled={orgBusy}
+                      className="btn-ghost !py-1.5 text-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                      style={{ color: "inherit" }}
+                    >
+                      ✦ 用 AI 生成组织 →
+                    </button>
+                  </div>
+                  <p className="mt-1.5 text-[10.5px] leading-relaxed" style={{ color: "var(--muted)" }}>
+                    {modelOutcome?.status === "bound"
+                      ? "AI 分析用第 3 步接入的模型；生成完成后会自动把模型绑给新岗位。"
+                      : "这条路要先有可用模型（AI 分析也用它）；没接成也没关系，回到第 3 步修 Key，或先用预设完成。"}
+                  </p>
+                </div>
+                  </>
+                )}
               </div>
             )}
-            {/* ---------------- 步骤 4 ---------------- */}
-            {step === 4 && (
+            {/* ---------------- 步骤 3：接入大模型 ---------------- */}
+            {step === 3 && (
               <div className="space-y-4">
                 {!installed ? (
                   <p className="text-[12px] leading-relaxed" style={{ color: "var(--muted)" }}>
@@ -1776,13 +1967,15 @@ export default function SetupPage() {
                     </div>
                     <p className="mt-1.5" style={{ color: "#c9c9d6" }}>
                       {modelOutcome.modelName}（{modelOutcome.modelIdOnProvider}）
-                      · 已绑定 {modelOutcome.bound}/{modelOutcome.agentCount} 位 AI 员工
+                      {modelOutcome.agentCount > 0
+                        ? ` · ${modelBindingSummary(modelOutcome)}`
+                        : " · 等第 4 步生成员工后一起绑定"}
                     </p>
                     <p className="mt-1 text-[11.5px]" style={{ color: "var(--muted)" }}>
-                      连通测试通过，员工现在就能接任务。
+                      连通测试通过，大脑已经就位。
                     </p>
                     <p className="mt-1 text-[11px]" style={{ color: "var(--muted)" }}>
-                      点右下角「完成，进入工作台」即可开始。
+                      点右下角「下一步：搭建组织 →」开始建部门与 AI 员工。
                     </p>
                   </div>
                 ) : modelOutcome?.status === "bound" ? (
@@ -1801,7 +1994,9 @@ export default function SetupPage() {
                     </div>
                     <p className="mt-1.5" style={{ color: "#e8d9a8" }}>
                       {modelOutcome.modelName}（{modelOutcome.modelIdOnProvider}）
-                      · 已绑定 {modelOutcome.bound}/{modelOutcome.agentCount} 位 AI 员工
+                      {modelOutcome.agentCount > 0
+                        ? ` · ${modelBindingSummary(modelOutcome)}`
+                        : " · 等第 4 步生成员工后一起绑定"}
                     </p>
                     <p className="mt-1.5" style={{ color: "#e8d9a8" }}>
                       连通测试没有通过，员工现在接任务会失败。常见原因：Key 复制不完整或已失效、
@@ -1835,12 +2030,12 @@ export default function SetupPage() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => finishSetup()}
+                        onClick={() => setStep(4)}
                         disabled={modelBusy}
                         className="btn-ghost w-full sm:w-auto"
                         style={{ color: "inherit" }}
                       >
-                        仍然完成，进入工作台
+                        先继续搭组织，进系统后再修
                       </button>
                     </div>
                     <p className="mt-1.5 text-[11px]" style={{ color: "#fca5a5" }}>
@@ -1860,7 +2055,8 @@ export default function SetupPage() {
                       <span className="font-semibold" style={{ color: "var(--foreground)" }}>
                         公司「{installed.companyName}」已创建成功
                       </span>
-                      ，最后一步是给它接上「大脑」。没有模型，员工接任务只会回复「尚未绑定任何模型」。
+                      ，这一步先给它接上「大脑」；部门与 AI 员工放到第 4 步，生成后系统会自动把模型绑给它们。
+                      没有模型，员工接任务只会回复「尚未绑定任何模型」。
                       <br />
                       Key 只写入本机 <code>apps/api/.env</code>（权限 600），
                       <b>不上传、不入库、不回显</b>；保存后立即生效，无需重启。
@@ -2066,7 +2262,6 @@ export default function SetupPage() {
                           { key: "model", label: "登记模型到本机" },
                           { key: "key", label: keyInput.trim() ? "保存密钥到 .env（600 权限）" : "本机服务：无需密钥" },
                           { key: "test", label: "测试与模型的连通性" },
-                          { key: "bind", label: `绑定给 ${installedAgents} 位 AI 员工` },
                         ].map((s, i) => {
                           const state =
                             i + 1 < modelStage ? "done" : i + 1 === modelStage ? "active" : "todo";
@@ -2101,6 +2296,10 @@ export default function SetupPage() {
                       </ol>
                     )}
 
+                    <p className="text-[10.5px] leading-relaxed" style={{ color: "var(--muted)" }}>
+                      AI 员工在第 4 步才生成，绑定动作那时自动做完——这里不需要额外操作。
+                    </p>
+
                     {modelError && (
                       <div
                         className="rounded-[10px] px-3 py-2.5 text-[11.5px] leading-relaxed"
@@ -2131,8 +2330,49 @@ export default function SetupPage() {
                         ? "正在接入…"
                         : modelCreatedId
                           ? "重试接入 →"
-                          : "接入并绑定全部员工 →"}
+                          : "接入模型 →"}
                     </button>
+
+                    {skipModelAsking && (
+                      <div
+                        className="rounded-[11px] px-3.5 py-3 text-[11.5px] leading-relaxed"
+                        style={{
+                          border: "1px solid rgba(251,191,36,0.4)",
+                          background: "rgba(251,191,36,0.08)",
+                        }}
+                        role="alert"
+                      >
+                        <div className="font-medium" style={{ color: "var(--warning)" }}>
+                          这一步还没接入模型
+                        </div>
+                        <p className="mt-1" style={{ color: "var(--muted)" }}>
+                          跳过之后，第 4 步生成的 AI 员工接任务会回复「尚未绑定任何模型」；
+                          进系统后在「模型配置」里也能补上。
+                        </p>
+                        <div className="mt-2.5 flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setModelOutcome({ status: "skipped" });
+                              setSkipModelAsking(false);
+                              setStep(4);
+                            }}
+                            className="btn-primary px-4 py-2"
+                            style={{ color: "inherit" }}
+                          >
+                            确定跳过，去搭组织 →
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setSkipModelAsking(false)}
+                            className="btn-ghost"
+                            style={{ color: "inherit" }}
+                          >
+                            回去接模型
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </>
                 )}
               </div>
@@ -2147,12 +2387,14 @@ export default function SetupPage() {
               {footHint}
             </div>
             <div className="flex flex-col sm:flex-row gap-2.5 w-full sm:w-auto">
-              {step > 1 && step < 4 && (
+              {/* 安装发生在第 2 步结束时：那之后账号与公司已落库，回不去第 1、2 步了，
+                  所以只有第 4 步允许退回第 3 步（改模型），第 3 步不再给"上一步"。 */}
+              {(step === 2 || (step === 4 && !!installed)) && (
                 <span style={{ color: "var(--muted)" }}>
                   <button
                     type="button"
                     onClick={() => setStep((s) => (s > 1 ? ((s - 1) as Step) : s))}
-                    disabled={submitting}
+                    disabled={submitting || orgBusy}
                     className="btn-ghost w-full sm:w-auto"
                     style={{ color: "inherit" }}
                   >
@@ -2161,114 +2403,96 @@ export default function SetupPage() {
                 </span>
               )}
 
-              {step < 3 ? (
+              {step === 1 && (
                 <button
                   type="button"
                   onClick={() => {
-                    if (step === 1) {
-                      setAttempted1(true);
-                      if (step1Valid) {
-                        setStep(2);
-                        return;
-                      }
-                      // 按钮可点，但校验不通过时给出**全部**原因，并滚到第一个错误字段：
-                      // 之前的 disabled 按钮只会让用户看到"点不动"，不知道缺什么。
-                      setTouched({ username: true, email: true, password: true, confirm: true });
-                      const first = (["username", "email", "password", "confirm"] as FieldKey[]).find(
-                        (k) => errors[k],
-                      );
-                      const el = first
-                        ? document.getElementById(`su-${first}`)
-                        : null;
-                      el?.scrollIntoView({ block: "center", behavior: "smooth" });
-                      (el as HTMLInputElement | null)?.focus();
+                    setAttempted1(true);
+                    if (step1Valid) {
+                      setStep(2);
                       return;
                     }
-                    setAttempted2(true);
-                    if (!companyError) setStep(3);
+                    // 按钮可点，但校验不通过时给出**全部**原因，并滚到第一个错误字段：
+                    // 之前的 disabled 按钮只会让用户看到"点不动"，不知道缺什么。
+                    setTouched({ username: true, email: true, password: true, confirm: true });
+                    const first = (["username", "email", "password", "confirm"] as FieldKey[]).find(
+                      (k) => errors[k],
+                    );
+                    const el = first ? document.getElementById(`su-${first}`) : null;
+                    el?.scrollIntoView({ block: "center", behavior: "smooth" });
+                    (el as HTMLInputElement | null)?.focus();
                   }}
-                  disabled={submitting || (step === 2 && !!companyError)}
+                  disabled={submitting}
                   className="btn-primary w-full sm:w-auto px-5 py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
                   style={{ color: "inherit" }}
                 >
                   下一步 →
                 </button>
-              ) : step === 3 ? (
+              )}
+
+              {step === 2 && (
                 <button
                   type="button"
-                  onClick={() => void handleInstall()}
-                  disabled={submitting}
+                  onClick={() => {
+                    setAttempted2(true);
+                    if (!companyError) void handleInstall();
+                  }}
+                  disabled={submitting || !!companyError}
                   className="btn-primary w-full sm:w-auto px-5 py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
                   style={{ color: "inherit" }}
                 >
-                  {submitting ? "正在安装…" : "创建并进入系统 →"}
+                  {submitting ? "正在创建…" : "创建账号与公司 →"}
                 </button>
-              ) : (
+              )}
+
+              {step === 3 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (modelOutcome?.status === "bound") {
+                      setStep(4);
+                      return;
+                    }
+                    setSkipModelAsking(true);
+                  }}
+                  disabled={modelBusy || !installed}
+                  className="btn-primary w-full sm:w-auto px-5 py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                  style={{ color: "inherit" }}
+                >
+                  下一步：搭建组织 →
+                </button>
+              )}
+
+              {step === 4 && (
                 <>
-                  {modelOutcome?.status === "bound" && modelOutcome.testOk ? (
-                    <button
-                      type="button"
-                      onClick={() => finishSetup()}
-                      disabled={modelBusy}
-                      className="btn-primary w-full sm:w-auto px-5 py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
-                      style={{ color: "inherit" }}
-                    >
-                      完成，进入工作台 →
-                    </button>
-                  ) : modelOutcome?.status === "bound" ? (
-                    <>
+                  {willGenerateOrg && (
+                    <span style={{ color: "var(--muted)" }}>
                       <button
                         type="button"
-                        onClick={goFixKey}
-                        disabled={modelBusy}
-                        className="btn-primary w-full sm:w-auto px-5 py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                        onClick={handleSkipOrg}
+                        disabled={orgBusy}
+                        className="btn-ghost w-full sm:w-auto"
                         style={{ color: "inherit" }}
                       >
-                        去修复 Key →
+                        不建组织，直接进入
                       </button>
-                      <span className="flex flex-col gap-0.5" style={{ color: "var(--muted)" }}>
-                        <button
-                          type="button"
-                          onClick={() => finishSetup()}
-                          disabled={modelBusy}
-                          className="btn-ghost w-full sm:w-auto"
-                          style={{ color: "inherit" }}
-                        >
-                          完成，进入工作台
-                        </button>
-                        <span className="text-[10.5px] leading-relaxed" style={{ color: "var(--warning)" }}>
-                          未连通，进入后任务会失败
-                        </span>
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <span style={{ color: "var(--muted)" }}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const skipped: ModelOutcome = { status: "skipped" };
-                            setModelOutcome(skipped);
-                            finishSetup(skipped);
-                          }}
-                          disabled={modelBusy}
-                          className="btn-ghost w-full sm:w-auto"
-                          style={{ color: "inherit" }}
-                        >
-                          跳过，先进入 →
-                        </button>
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => finishSetup()}
-                        disabled
-                        className="btn-primary w-full sm:w-auto px-5 py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
-                        style={{ color: "inherit" }}
-                      >
-                        完成，进入工作台 →
-                      </button>
-                    </>
+                    </span>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => void handleApplyOrg()}
+                    disabled={orgBusy || !installed}
+                    className="btn-primary w-full sm:w-auto px-5 py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                    style={{ color: "inherit" }}
+                  >
+                    {orgBusy
+                      ? orgStage === 2
+                        ? "正在绑定模型…"
+                        : "正在生成组织…"
+                      : willGenerateOrg
+                        ? "生成组织并完成 →"
+                        : "完成，进入工作台 →"}
+                  </button>
                 </>
               )}
             </div>
@@ -2278,6 +2502,36 @@ export default function SetupPage() {
 
       {/* 免 Key 演示：直接复用 components/DemoMode.tsx（与旧向导同一套逻辑） */}
       {demoOpen && <DemoMode onClose={() => setDemoOpen(false)} />}
+
+      {/* AI 读资料生成组织：与「组织架构」页同一个抽屉，落地后由本页面负责绑模型并收尾 */}
+      {aiOrgOpen && (
+        <OrgSynthesisDrawer
+          open={aiOrgOpen}
+          companyId={installed?.companyId ?? null}
+          onClose={() => setAiOrgOpen(false)}
+          onApplied={(r) => {
+            if (!r) {
+              // 撤销落地：组织回到"还没生成"，收尾时按第 4 步的选择重新走一遍
+              setAiOrgResult(null);
+              updateInstalled({
+                org: { status: "skipped", departments: 0, agents: 0, note: "已撤销 AI 生成的组织" },
+              });
+              return;
+            }
+            const result = { centers: r.created_centers, departments: r.created_departments, agents: r.created_agents };
+            setAiOrgResult(result);
+            // 立刻写进「待续装」标记：落地之后刷新页面不会又去叠加一套预设部门
+            updateInstalled({
+              org: {
+                status: "created",
+                departments: result.departments,
+                agents: result.agents,
+                presetIndustry: AI_ORG_MARK,
+              },
+            });
+          }}
+        />
+      )}
     </div>
   );
 }

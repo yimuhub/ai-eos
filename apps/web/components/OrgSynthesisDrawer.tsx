@@ -128,7 +128,8 @@ export default function OrgSynthesisDrawer({
   open: boolean;
   companyId: string | null;
   onClose: () => void;
-  onApplied: () => void;
+  /** 落地/撤销完成后回调；带上落地结果，安装向导要靠它知道生成了多少部门与员工 */
+  onApplied: (result?: ApplyResult) => void;
 }) {
   const router = useRouter();
   const [mounted, setMounted] = useState(false);
@@ -320,7 +321,7 @@ export default function OrgSynthesisDrawer({
       setApplyResult(result);
       setRun((prev) => prev ? { ...prev, status: "APPLIED", snapshot: result as unknown as Record<string, unknown> } : prev);
       setPhase("done");
-      onApplied();
+      onApplied(result);
       loadRuns();
     } catch (e) {
       setError(describeError(e, "落地组织架构失败"));

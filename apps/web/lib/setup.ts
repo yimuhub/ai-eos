@@ -178,6 +178,27 @@ export function previewCounts(
   return { departments: names.length, agents, names };
 }
 
+/* ---------------- 模型绑定情况的一句话措辞 ---------------- */
+
+/**
+ * 把 bind-agents 的返回读成人话。
+ *
+ * `bound` 是**本次新增**绑定的人数，不是"能用模型的人数"：AI 生成组织那一路
+ * 落地时就把模型绑好了，收尾的批量绑定只会跳过已有首选模型的员工，返回
+ * `bound=0, skipped=10`。直接说「已绑定 0/10 位员工」会让老板以为系统坏了。
+ */
+export function modelBindingSummary(
+  m: { bound: number; alreadyBound: number; agentCount: number },
+): string {
+  if (m.bound > 0) {
+    return `已绑定 ${m.bound}/${m.agentCount} 位员工` +
+      (m.alreadyBound > 0 ? `，${m.alreadyBound} 位已有首选模型未改动` : "");
+  }
+  if (m.alreadyBound > 0) return `${m.alreadyBound}/${m.agentCount} 位员工的首选模型已就绪`;
+  if (m.agentCount > 0) return `${m.agentCount} 位员工还没绑上首选模型`;
+  return "还没有 AI 员工，建好后在「模型配置」里绑定";
+}
+
 /* ---------------- 密码强度（仅用于进度条，规则仍以 validate.ts 为准） ---------------- */
 
 export function passwordStrength(pw: string): 0 | 1 | 2 | 3 {
@@ -194,20 +215,23 @@ export function passwordStrength(pw: string): 0 | 1 | 2 | 3 {
  * 草稿版本。key 与 payload 都带版本号：旧版本的残留草稿直接丢弃，
  * 不做兼容迁移（安装向导的字段改动很小，迁移的复杂度不划算）。
  */
-export const SETUP_DRAFT_VERSION = 1;
+export const SETUP_DRAFT_VERSION = 2;
 export const SETUP_DRAFT_KEY = `aieos_setup_draft_v${SETUP_DRAFT_VERSION}`;
 
 /**
- * 「已安装、待接模型」标记（localStorage，和 token 同生命周期）。
+ * 「已安装、待续装」标记（localStorage，和 token 同生命周期）。
  *
  * 为什么不在草稿里：草稿在 sessionStorage（只活在这个标签页），
- * 而"账号与公司已经建好、只差模型"是**跨标签页/跨刷新**都该保留的事实。
+ * 而"账号与公司已经建好、只差模型与组织"是**跨标签页/跨刷新**都该保留的事实。
  * 刷新后 `needs_setup=false`，若没有这个标记就只能把用户踢回登录页，
- * 第 4 步的上下文（公司、员工数）就丢了。
+ * 第 3、4 步的上下文（公司、已接入的模型）就丢了。
+ *
+ * 版本 2 起：安装发生在第 2 步结束时，第 3 步接模型、第 4 步才生成组织，
+ * 因此标记里要多记一条"模型是否已接入"，否则刷新会把模型重新登记一遍。
  */
-export const SETUP_PENDING_KEY = "aieos_setup_pending_model_v1";
+export const SETUP_PENDING_KEY = "aieos_setup_pending_install_v2";
 
-/** 第 4 步表单里可以回填的非敏感字段（Key 永远不进来） */
+/** 第 3 步表单里可以回填的非敏感字段（Key 永远不进来） */
 export type SetupModelDraft = {
   providerType: string;
   name: string;
@@ -215,19 +239,34 @@ export type SetupModelDraft = {
   modelId: string;
 };
 
-/** 组织架构结果摘要（第 4 步恢复时用来展示"会绑定多少员工"） */
+/** 组织架构结果摘要（第 4 步生成后写回标记，完成页与刷新都靠它） */
 export type SetupOrgOutcome =
   | { status: "skipped"; departments: 0; agents: 0; note: string }
   | { status: "created"; departments: number; agents: number; presetIndustry: string }
   | { status: "failed"; departments: 0; agents: 0; reason: string };
 
-/** 安装成功的上下文（写进「待接模型」标记） */
+/**
+ * 第 3 步已接入的模型（写进「待续装」标记，用于刷新后续装）。
+ *
+ * 只有本机配置 id 与展示用的名称，**没有** Key / base_url 之外的敏感信息；
+ * 有它就够了：向导据此判断"模型已经登记过"，重试不会创建第二条配置。
+ */
+export type SetupInstalledModel = {
+  modelId: string;
+  modelName: string;
+  modelIdOnProvider: string;
+  testOk: boolean;
+  testError?: string;
+};
+
+/** 安装成功的上下文（写进「待续装」标记） */
 export type SetupInstalledDraft = {
   companyId: string;
   companyName: string;
   username: string;
   email: string;
   org: SetupOrgOutcome;
+  model: SetupInstalledModel | null;
 };
 
 /**
@@ -399,7 +438,7 @@ export function clearSetupDraft(): void {
   }
 }
 
-/** 写入「已安装、待接模型」标记（不含任何密钥） */
+/** 写入「已安装、待续装」标记（不含任何密钥） */
 export function savePendingInstall(info: SetupInstalledDraft): void {
   if (typeof window === "undefined") return;
   try {
@@ -412,12 +451,30 @@ export function savePendingInstall(info: SetupInstalledDraft): void {
   }
 }
 
-export function loadPendingInstall(): SetupInstalledDraft | null {
-  if (typeof window === "undefined") return null;
+function parseInstalledModel(v: unknown): SetupInstalledModel | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  const modelId = asStr(o.modelId);
+  if (!modelId) return null;
+  return {
+    modelId,
+    modelName: asStr(o.modelName),
+    modelIdOnProvider: asStr(o.modelIdOnProvider),
+    testOk: o.testOk === true,
+    testError: asStr(o.testError) || undefined,
+  };
+}
+
+/**
+ * 字符串 → 「已安装、待续装」标记。纯函数，便于在 node 里测。
+ *
+ * 缺失 companyId 或组织结果都返回 null：宁可让刷新回到登录页，
+ * 也不要拿着半条信息继续装，那会在错误的公司上建组织。
+ */
+export function parsePendingInstall(raw: unknown): SetupInstalledDraft | null {
+  if (typeof raw !== "string" || !raw) return null;
   let obj: unknown;
   try {
-    const raw = window.localStorage.getItem(SETUP_PENDING_KEY);
-    if (!raw) return null;
     obj = JSON.parse(raw);
   } catch {
     return null;
@@ -434,7 +491,17 @@ export function loadPendingInstall(): SetupInstalledDraft | null {
     username: asStr(o.username),
     email: asStr(o.email),
     org,
+    model: parseInstalledModel(o.model),
   };
+}
+
+export function loadPendingInstall(): SetupInstalledDraft | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return parsePendingInstall(window.localStorage.getItem(SETUP_PENDING_KEY));
+  } catch {
+    return null; // 隐私模式下 localStorage 本身会抛
+  }
 }
 
 export function clearPendingInstall(): void {

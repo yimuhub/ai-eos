@@ -1,4 +1,5 @@
-// lib/setup.ts 纯函数测试：行业 → 预设模糊匹配、规模 → 部门子集、预览计数、密码强度。
+// lib/setup.ts 纯函数测试：行业 → 预设模糊匹配、规模 → 部门子集、预览计数、密码强度、
+// 安装草稿与「已安装、待续装」标记的序列化。
 //
 // 这些规则直接决定"安装后会建出什么组织"，且刻意不依赖后端（后端未上线也能验）。
 import { describe, expect, it } from "vitest";
@@ -7,7 +8,9 @@ import {
   SETUP_DRAFT_VERSION,
   departmentSubset,
   matchPresetId,
+  modelBindingSummary,
   parseDraft,
+  parsePendingInstall,
   passwordStrength,
   presetPool,
   previewCounts,
@@ -212,5 +215,100 @@ describe("安装草稿：序列化 / 反序列化（可续装）", () => {
 
   it("第 4 步的 step 能原样往返（是否真的停在 4 由页面结合登录态判定）", () => {
     expect(parseDraft(serializeDraft({ ...DRAFT, step: 4 }))?.step).toBe(4);
+  });
+});
+
+describe("「已安装、待续装」标记：反序列化", () => {
+  const INSTALLED = {
+    companyId: "co-1",
+    companyName: "拾光科技",
+    username: "boss",
+    email: "boss@example.com",
+    org: { status: "skipped", departments: 0, agents: 0, note: "组织架构尚未生成" },
+    model: null,
+  };
+
+  const raw = (payload: Record<string, unknown>) =>
+    JSON.stringify({ version: SETUP_DRAFT_VERSION, ...payload });
+
+  it("第 2 步刚装完：没有模型、组织未生成，续装要从第 3 步接上", () => {
+    expect(parsePendingInstall(raw(INSTALLED))).toEqual({
+      companyId: "co-1",
+      companyName: "拾光科技",
+      username: "boss",
+      email: "boss@example.com",
+      org: { status: "skipped", departments: 0, agents: 0, note: "组织架构尚未生成" },
+      model: null,
+    });
+  });
+
+  it("第 3 步接好模型后刷新：带上 model，不会把同一条配置再登记一遍", () => {
+    const parsed = parsePendingInstall(
+      raw({
+        ...INSTALLED,
+        model: {
+          modelId: "m-1",
+          modelName: "我的模型",
+          modelIdOnProvider: "gpt-5-mini",
+          testOk: true,
+        },
+      }),
+    );
+    expect(parsed?.model).toEqual({
+      modelId: "m-1",
+      modelName: "我的模型",
+      modelIdOnProvider: "gpt-5-mini",
+      testOk: true,
+      testError: undefined,
+    });
+  });
+
+  it("model 里没有配置 id 就当没接过（重试会重新登记，而不是拿空 id 去绑）", () => {
+    expect(parsePendingInstall(raw({ ...INSTALLED, model: { modelName: "半成品" } }))?.model).toBeNull();
+    expect(parsePendingInstall(raw({ ...INSTALLED, model: "nope" }))?.model).toBeNull();
+  });
+
+  it("缺公司 / 组织结果不合法 → 整条丢弃，宁回登录页也不在错的公司上建组织", () => {
+    expect(parsePendingInstall(raw({ ...INSTALLED, companyId: "" }))).toBeNull();
+    expect(parsePendingInstall(raw({ ...INSTALLED, org: { status: "weird" } }))).toBeNull();
+    expect(parsePendingInstall(raw({ ...INSTALLED, org: null }))).toBeNull();
+  });
+
+  it("版本不符 / 非 JSON / 空串一律当没有标记", () => {
+    expect(parsePendingInstall(raw({ ...INSTALLED, version: 1 }))).toBeNull();
+    expect(parsePendingInstall("not json")).toBeNull();
+    expect(parsePendingInstall("")).toBeNull();
+    expect(parsePendingInstall(null)).toBeNull();
+  });
+
+  it("标记里不会出现密钥字段", () => {
+    const withSecret = {
+      ...INSTALLED,
+      apiKey: "sk-live-abcdefgh12345678",
+      model: { modelId: "m-1", modelName: "n", modelIdOnProvider: "m", testOk: false, apiKey: "sk-live-abcdefgh12345678" },
+    };
+    const parsed = parsePendingInstall(raw(withSecret));
+    expect(JSON.stringify(parsed)).not.toContain("sk-live-abcdefgh12345678");
+    expect(Object.keys(parsed?.model ?? {})).toEqual([
+      "modelId", "modelName", "modelIdOnProvider", "testOk", "testError",
+    ]);
+  });
+});
+
+describe("模型绑定情况的一句话措辞", () => {
+  it("批量绑定只算新增：跳过的人不能说成「没绑上」", () => {
+    expect(modelBindingSummary({ bound: 10, alreadyBound: 0, agentCount: 10 }))
+      .toBe("已绑定 10/10 位员工");
+    expect(modelBindingSummary({ bound: 6, alreadyBound: 4, agentCount: 10 }))
+      .toBe("已绑定 6/10 位员工，4 位已有首选模型未改动");
+  });
+
+  it("AI 生成组织落地时已绑好：bound=0 要说「已就绪」，不能写 0/10", () => {
+    expect(modelBindingSummary({ bound: 0, alreadyBound: 10, agentCount: 10 }))
+      .toBe("10/10 位员工的首选模型已就绪");
+    expect(modelBindingSummary({ bound: 0, alreadyBound: 0, agentCount: 10 }))
+      .toBe("10 位员工还没绑上首选模型");
+    expect(modelBindingSummary({ bound: 0, alreadyBound: 0, agentCount: 0 }))
+      .toContain("还没有 AI 员工");
   });
 });
