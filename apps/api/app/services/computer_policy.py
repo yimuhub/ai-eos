@@ -26,7 +26,8 @@ OBSERVE_ACTIONS = {
     "get_window", "find_element",
 }
 COMMAND_ACTIONS = {"run_shell", "run_command", "execute_command", "shell"}
-WRITE_ACTIONS = {"run_write", "write_file", "file_write", "write"}
+WRITE_ACTIONS = {"run_write", "write_file", "file_write", "write",
+                 "apply_patch"}
 APP_ACTIONS = {"run_app", "open_app", "app_launch"}
 # 界面上的写操作：按引用点击 / 赋值。风险与键鼠注入同级，但目标应用藏在
 # 元素引用里（不在 app 参数上），所以白名单匹配要走 _ref_app。
@@ -187,6 +188,17 @@ def hard_block_reason(action_type: str, params: dict | None) -> str | None:
     改过的 params）不该因为"曾经放过"就绕过红线。
     """
     return _hard_block(action_type, params or {})
+
+
+def hard_block_path_reason(path: str) -> str | None:
+    """单独问一个路径能不能碰——文件执行器要在解析阶段自己判一次。
+
+    执行器拿不到 action_type，而红线只看路径本身，所以这里用 write_file
+    走一遍规则；改名的风险（`.env`、`id_rsa`）与受保护目录是同一套清单。
+    """
+    if not path:
+        return None
+    return _hard_block("write_file", {"path": path})
 
 
 def _hard_block(action_type: str, params: dict) -> str | None:

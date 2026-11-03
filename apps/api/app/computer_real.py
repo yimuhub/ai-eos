@@ -17,6 +17,7 @@ from pathlib import Path
 
 from app.computer_agent import ComputerActionLog
 from app.computer_ax import AX_EXECUTORS
+from app.computer_files import FILE_EXECUTORS
 from app.core.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -407,6 +408,8 @@ REAL_EXECUTORS = {
     "run_shell": real_run_shell,
     # 无障碍树一路：读界面结构、按元素引用操作，不看像素
     **AX_EXECUTORS,
+    # 文件一路：读代码、写文件、按锚点打补丁（写盘前自动留备份 + 返回 diff）
+    **FILE_EXECUTORS,
 }
 
 # 扩展后的能力清单（computer_agent.KNOWN_CAPABILITIES 的超集）

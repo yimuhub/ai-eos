@@ -50,11 +50,13 @@ async def is_capability_granted(db: AsyncSession, company_id: str,
 # 需要「先问老板」的能力。判据不是"改不改文件"，而是能否等价于主机命令执行：
 # `open -a Terminal` 之后再 type_text 就是提交命令，所以键鼠注入与 shell 同级；
 # 无障碍树的 click_element / set_value 同理——按下的是「删除」还是「发送」，
-# 差别只在看不看得见鼠标。
+# 差别只在看不看得见鼠标。文件写与补丁同样是"改主机上的字节"，同级处理；
+# read_file 不在这里（只读，策略里归 observe）。
 HIGH_RISK_CAPABILITIES = frozenset({
     "run_shell", "run_write", "run_app",
     "type_text", "click", "key",
     "click_element", "set_value",
+    "write_file", "apply_patch",
 })
 
 
@@ -190,6 +192,28 @@ def _precheck_capability(capability: str, params: dict) -> dict | None:
     if capability == "get_window" and not str(p.get("app") or "").strip():
         return {"ok": False, "precheck": True,
                 "error": "get_window 需要 app（先用 list_windows 看进程名）"}
+    # 文件一路：路径缺失/内容类型错，先给可读反馈，不要等到执行器抛栈
+    if capability in ("read_file", "write_file", "apply_patch"):
+        if not str(p.get("path") or "").strip():
+            return {"ok": False, "precheck": True,
+                    "error": "path 不能为空（绝对路径或相对仓库根的路径）"}
+        if capability == "read_file":
+            return None
+        if capability == "write_file" and not isinstance(p.get("content"), str):
+            return {"ok": False, "precheck": True,
+                    "error": 'write_file 需要 content（字符串，清空文件传 ""）'}
+        if capability == "apply_patch":
+            edits = p.get("edits")
+            if not isinstance(edits, list) or not edits:
+                return {"ok": False, "precheck": True,
+                        "error": 'apply_patch 需要 edits：[{"old": "原文", "new": "新文"}]'}
+            for i, edit in enumerate(edits):
+                if not isinstance(edit, dict) or not isinstance(edit.get("old"), str) \
+                        or not edit.get("old") or not isinstance(edit.get("new"), str):
+                    return {"ok": False, "precheck": True,
+                            "error": f"第 {i + 1} 处 edits 不合法：old 必须是非空原文字符串，"
+                                     "new 必须是字符串（删除传空串）"}
+        return None
     return None
 
 

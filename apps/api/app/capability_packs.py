@@ -21,11 +21,17 @@ CAPABILITY_PACKS: dict[str, dict] = {
                   "computer_run_shell", "computer_run_write", "computer_run_app",
                   "computer_list_windows", "computer_accessibility_snapshot",
                   "computer_get_window", "computer_find_element",
-                  "computer_click_element", "computer_set_value"],
+                  "computer_click_element", "computer_set_value",
+                  "computer_read_file", "computer_write_file",
+                  "computer_apply_patch"],
         "system_prompt": (
-            "你具备【电脑操作】能力：可以通过 computer-agent 工具集读取界面结构、"
-            "点击、输入文字、启动应用、执行命令来完成需要真实计算机操作的任务。"
-            "顺序约定：先用 list_windows 找到进程名与窗口序号，再用 "
+            "你具备【电脑操作】能力：可以通过 computer-agent 工具集读文件、改代码、"
+            "读取界面结构、点击、输入文字、启动应用、执行命令来完成需要真实计算机操作的任务。"
+            "改文件走文件工具，不要走键鼠：先 read_file 看清原文，再用 apply_patch "
+            "带逐字复制的锚点改（锚点必须唯一，否则整批改动会被拒绝），"
+            "只有新建文件或整体重写才用 write_file。两者都会先备份原件并返回 diff；"
+            "不确定就先传 dry_run=true 只看 diff。"
+            "操作界面顺序：先用 list_windows 找到进程名与窗口序号，再用 "
             "accessibility_snapshot / find_element 拿到元素 ref，然后按 ref "
             "click_element / set_value——这条路不依赖截图，也不会因为分辨率或弹窗"
             "偏移而点错。只有目标应用读不到无障碍信息时才回退 screenshot + click 坐标。"
