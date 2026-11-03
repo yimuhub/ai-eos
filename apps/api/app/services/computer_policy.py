@@ -84,6 +84,7 @@ def default_policy() -> dict:
         "auto_apps": [],
         "full_control_until": None,
         "notify_on_finish": True,
+        "default_device_id": None,
         "updated_by": None,
     }
 
@@ -100,6 +101,7 @@ def serialize_policy(row: ComputerPolicy | None) -> dict:
         "full_control_until": (row.full_control_until.isoformat()
                                if row.full_control_until else None),
         "notify_on_finish": row.notify_on_finish,
+        "default_device_id": row.default_device_id,
         "updated_by": row.updated_by,
         "configured": True,
     }
@@ -141,6 +143,44 @@ async def upsert_policy(db: AsyncSession, company_id: str, user_id: str,
     await db.commit()
     await db.refresh(row)
     return row
+
+
+async def set_default_device(db: AsyncSession, *, company_id: str,
+                             device_id: str,
+                             updated_by: str | None = None) -> ComputerPolicy:
+    """把远程设备设为公司默认执行机。没配过策略的公司也要能设，所以按需建行。"""
+    row = await get_policy_row(db, company_id)
+    if not row:
+        row = ComputerPolicy(company_id=company_id, mode="default",
+                             auto_dirs=[], auto_commands=[], auto_apps=[],
+                             notify_on_finish=True)
+        db.add(row)
+        await db.flush()
+    row.default_device_id = device_id
+    if updated_by:
+        row.updated_by = updated_by
+    await db.commit()
+    return row
+
+
+async def clear_default_device(db: AsyncSession, company_id: str,
+                               device_id: str | None = None, *,
+                               updated_by: str | None = None) -> bool:
+    """取消默认执行机（回到本机直连）。
+
+    传了 `device_id` 就只在「当前默认确实是这台」时生效——A 设备的页签
+    不该把刚切过去的 B 设备顶掉。返回是否真的清了。
+    """
+    row = await get_policy_row(db, company_id)
+    if not row or not row.default_device_id:
+        return False
+    if device_id and row.default_device_id != device_id:
+        return False
+    row.default_device_id = None
+    if updated_by:
+        row.updated_by = updated_by
+    await db.commit()
+    return True
 
 
 def start_full_control(row: ComputerPolicy, minutes: int) -> ComputerPolicy:

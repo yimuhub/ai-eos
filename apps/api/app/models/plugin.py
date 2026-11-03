@@ -55,4 +55,6 @@ class ComputerPolicy(TimestampMixin, Base):
     auto_apps: Mapped[list | None] = mapped_column(JSON, default=list)
     full_control_until: Mapped[datetime | None] = mapped_column(DateTime)
     notify_on_finish: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # 员工的电脑操作默认落到哪台机器；为空 = 后端自己这台（本机直连，改造前行为）
+    default_device_id: Mapped[str | None] = mapped_column(String(36))
     updated_by: Mapped[str | None] = mapped_column(String(36))

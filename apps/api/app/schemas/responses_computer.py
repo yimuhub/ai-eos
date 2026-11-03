@@ -169,6 +169,8 @@ class ComputerExecuteOut(BaseModel):
     approval_request_id: str | None = None
     dry_run: bool | None = None
     precheck_blocked: bool | None = None
+    # 只在落到别的机器时出现（本机操作不带这个键），值是 {id, name, platform}
+    device: dict[str, Any] | None = None
 
 
 class ComputerLogOut(BaseModel):
@@ -194,3 +196,120 @@ class LatestScreenshotOut(BaseModel):
     image_base64: str
     taken_at: str
     path: str
+
+
+# ------------------------------------------------- /computer-devices（远程执行设备）
+#
+# 老板侧的字段全部对得上 `computer_dispatch.device_out()`；`online` 是心跳推导
+# 出来的，库里没有这一列，所以别去数据库找它。设备侧的 `task` / `result`
+# 保持自由 dict：里面是各能力自己的返回结构（run_shell 给 stdout/exit_code，
+# 文件写给 diff/备份路径），钉死会让任何新执行器把 200 变成 500。
+
+
+class ComputerDeviceOut(BaseModel):
+    model_config = _free()
+
+    id: str
+    name: str
+    platform: str | None = None
+    hostname: str | None = None
+    agent_version: str | None = None
+    capabilities: list[str] = []
+    enrolled: bool
+    enrollment_ready: bool
+    enrollment_expires_at: str | None = None
+    online: bool
+    last_seen_at: str | None = None
+    revoked: bool
+
+
+class DeviceListOut(BaseModel):
+    model_config = _free()
+
+    devices: list[ComputerDeviceOut]
+    default_device_id: str | None = None
+    online_window_seconds: int
+
+
+class DeviceCreateOut(BaseModel):
+    model_config = _free()
+
+    device: ComputerDeviceOut
+    enroll_code: str
+    hint: str
+
+
+class DeviceRenewOut(BaseModel):
+    model_config = _free()
+
+    enroll_code: str
+    expires_at: str
+
+
+class DeviceRevokeOut(BaseModel):
+    model_config = _free()
+
+    revoked: bool
+    cancelled_dispatches: int
+
+
+class DeviceDefaultOut(BaseModel):
+    """set-default 带 name，clear-default 带 cleared——两条分支共用一个模型。"""
+
+    model_config = _free()
+
+    default_device_id: str | None = None
+    name: str | None = None
+    cleared: bool = False
+
+
+class DeviceDispatchOut(BaseModel):
+    model_config = _free()
+
+    id: str
+    device_id: str
+    capability: str
+    status: str
+    error: str | None = None
+    created_at: str | None = None
+    finished_at: str | None = None
+
+
+class DeviceDispatchListOut(BaseModel):
+    model_config = _free()
+
+    dispatches: list[DeviceDispatchOut]
+
+
+class DeviceEnrollOut(BaseModel):
+    """`secret` 只在接入成功这一次返回，库里只存 SHA-256。"""
+
+    model_config = _free()
+
+    device_id: str
+    secret: str
+    name: str
+    capabilities: list[str] = []
+
+
+class DeviceHeartbeatOut(BaseModel):
+    model_config = _free()
+
+    online: bool
+    server_time: str
+    capabilities: list[str] = []
+
+
+class DeviceClaimOut(BaseModel):
+    model_config = _free()
+
+    task: dict[str, Any] | None = None
+
+
+class DeviceReportOut(BaseModel):
+    model_config = _free()
+
+    dispatch_id: str
+    status: str
+    accepted: bool
+    reason: str | None = None

@@ -385,7 +385,8 @@ async def test_execute_dry_run_precheck(client, tenants):
     blocked = r.json()
     assert set(blocked) == _keys(comp.ComputerExecuteOut) - {
         "log_id", "action", "mode", "auto_approved", "message", "status",
-        "approval_request_id"}, blocked
+        # device 只在落到别的机器时出现，本机分支不会凭空多出这个键
+        "approval_request_id", "device"}, blocked
     assert blocked["dry_run"] is True and blocked["precheck_blocked"] is True
     assert "坐标缺失" in blocked["result"]["error"]
 
@@ -427,7 +428,8 @@ async def test_execute_approval_gate_then_whitelist(client, tenants,
     assert r.status_code == 200, r.text
     passed = r.json()
     assert set(passed) == _keys(comp.ComputerExecuteOut) - {
-        "status", "approval_request_id", "dry_run", "precheck_blocked"}, passed
+        "status", "approval_request_id", "dry_run", "precheck_blocked",
+        "device"}, passed
     assert passed["auto_approved"] == "whitelist"
     assert passed["mode"] == "REAL" and passed["result"]["stdout"] == "hello"
 

@@ -50,6 +50,8 @@ class ActionIn(BaseModel):
     # V5.7 ⑧ 防呆 ACI：dry_run 只跑限行/参数预检，不真正执行
     dry_run: bool = False
     params: dict | None = None
+    # 在哪台机器上执行。为空 = 公司默认（未设默认时仍是后端本机，改造前行为）
+    device_id: str | None = None
 
 
 @router.post("/grant", response_model=CapabilityGrantOut)
@@ -158,7 +160,7 @@ async def execute_action(
     # ---- 三档策略 + 免批白名单 + 审批单：与聊天入口共用同一个门 ----
     gate = await computer_service.approval_gate(
         db, company_id=company_id, capability=data.action_type,
-        params=data.params, agent_id=agent_id)
+        params=data.params, agent_id=agent_id, device_id=data.device_id)
 
     if gate["action"] == "block":
         db.add(ComputerActionLog(
@@ -170,11 +172,16 @@ async def execute_action(
         raise HTTPException(403, gate["reason"])
 
     if gate["action"] == "hold":
-        return {"status": "awaiting_approval",
+        held = {"status": "awaiting_approval",
                 "approval_request_id": gate["approval_request_id"],
                 "message": "该操作为高危动作，已生成审批单。在「干预中心」批准后自动执行，"
                            "拒绝则丢弃。",
                 "mode": "HOLD"}
+        # 本机操作不带 device 键：老调用方的 `set(response) == {...}` 契约判断
+        # 不该因为一个恒为 null 的字段而变，只在确实落到别的机器时才多这一项
+        if gate.get("device"):
+            held["device"] = gate["device"]
+        return held
 
     # V5.7 ⑧ 防呆 ACI：dry_run 模式——只跑限行/参数预检，不执行
     if data.dry_run:
@@ -185,10 +192,13 @@ async def execute_action(
                                   "message": "预检通过，可真实执行"},
                 "precheck_blocked": pre is not None}
     try:
+        # device_id 必须一路带到执行：审批门按「那台机器」判过高危与白名单，
+        # 执行时忘了传就会默默在**后端本机**跑——老板以为改的是员工的电脑。
         outcome = await execute_computer_action(
             db, company_id=company_id, capability=data.action_type,
             params=data.params, agent_id=agent_id,
-            auto_approved=gate.get("auto_approved"))
+            auto_approved=gate.get("auto_approved"),
+            device_id=data.device_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except ComputerActionDenied as exc:
@@ -196,14 +206,18 @@ async def execute_action(
         raise HTTPException(403, exc.reason) from exc
 
     result = outcome["result"]
+    payload = {"log_id": outcome["log_id"], "action": outcome["capability"],
+               "result": result}
     if gate["action"] == "allow_auto":
-        return {"log_id": outcome["log_id"], "action": outcome["capability"],
-                "result": result, "mode": "REAL",
-                "auto_approved": gate["auto_approved"],
-                "message": "命中免批白名单，直接放行（已留审计）"}
-    return {"log_id": outcome["log_id"], "action": outcome["capability"],
-            "result": result,
-            "mode": "REAL" if result.get("ok") else "REAL_FAILED"}
+        payload.update(mode="REAL", auto_approved=gate["auto_approved"],
+                       message="命中免批白名单，直接放行（已留审计）")
+    else:
+        payload["mode"] = "REAL" if result.get("ok") else "REAL_FAILED"
+    # 本机操作不带 device 键（与审批挂起分支同一口径）：既有调用方按
+    # `set(response) == {...}` 判断契约，多一个恒为 null 的字段就是破坏契约。
+    if outcome.get("device"):
+        payload["device"] = outcome["device"]
+    return payload
 
 
 @router.get("/logs", response_model=list[ComputerLogOut])

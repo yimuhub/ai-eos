@@ -312,7 +312,8 @@ async def _perform_approved_action(db: AsyncSession, req: ApprovalRequest,
                 db, company_id=req.company_id,
                 capability=payload.get("capability", ""),
                 params=payload.get("params"),
-                agent_id=payload.get("agent_id"))
+                agent_id=payload.get("agent_id"),
+                device_id=payload.get("device_id"))
             return {"ok": True, "result": outcome.get("result")}
         except (ComputerActionDenied, ValueError) as exc:
             return {"ok": False, "error": str(exc)}

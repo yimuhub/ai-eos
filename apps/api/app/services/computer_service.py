@@ -40,6 +40,14 @@ class ComputerActionDenied(PermissionError):
         super().__init__(self.reason)
 
 
+class DeviceUnavailable(ValueError):
+    """指定的执行设备不存在 / 未接入 / 已吊销 / 离线 / 不认这个能力。
+
+    之所以是**异常**而不是"返回 None 走本机"：老板或员工指名要打某台机器时，
+    静默回落到后端本机 = 在另一台电脑上改了另一个文件，比失败严重得多。
+    """
+
+
 async def is_capability_granted(db: AsyncSession, company_id: str,
                                 capability: str) -> bool:
     """查询公司是否已授权某能力。未授权一律视为 False（默认拒绝）。"""
@@ -79,6 +87,49 @@ def whitelist_pattern_for(capability: str, params: dict) -> str:
                or p.get("task_input") or "")[:300]
 
 
+async def resolve_device(db: AsyncSession, company_id: str,
+                         device_id: str | None = None, *,
+                         capability: str | None = None):
+    """把「在哪台机器上执行」解析成设备行；返回 None = 后端本机直连。
+
+    没指名且公司没设默认执行机时，行为与改造前完全一致（在本机跑执行器）。
+    一旦指名（显式传，或公司默认），**解析不出来就报错，绝不回落到本机**：
+    在错误的电脑上改文件比这次操作没做成严重得多。
+    """
+    from app.services import computer_dispatch
+    from app.services import computer_policy as policy_service
+
+    explicit = bool((device_id or "").strip())
+    target = (device_id or "").strip()
+    if not explicit:
+        row = await policy_service.get_policy_row(db, company_id)
+        target = (row.default_device_id if row else None) or ""
+        if not target:
+            return None
+    device = await computer_dispatch.get_device(db, company_id, target)
+    if device is None:
+        raise DeviceUnavailable(
+            f"执行设备不存在（或不属于当前公司）：{target}"
+            if explicit else
+            f"公司默认执行设备已不存在（{target}），请到设备操作台重新指定")
+    if device.revoked:
+        raise DeviceUnavailable(f"设备「{device.name}」已被吊销，不能执行")
+    if device.enrolled_at is None:
+        raise DeviceUnavailable(
+            f"设备「{device.name}」还没接入：在那台机器上跑一次 sidecar")
+    if not device.is_online():
+        seen = (device.last_seen_at.strftime("%H:%M:%S") if device.last_seen_at
+                else "从未")
+        raise DeviceUnavailable(
+            f"设备「{device.name}」当前离线（最近心跳 {seen}），"
+            "请确认 sidecar 还在跑、这台机器没睡眠")
+    if capability and capability not in (device.capabilities or []):
+        raise DeviceUnavailable(
+            f"设备「{device.name}」不支持 {capability}"
+            f"（它上报的能力：{'、'.join(device.capabilities or []) or '无'}）")
+    return device
+
+
 async def _legacy_needs_approval(db: AsyncSession, company_id: str) -> bool:
     """公司还没配过三档策略时的旧门：干预策略勾了 computer_command 才拦。"""
     from app.models.intervention import InterventionPolicy
@@ -109,7 +160,8 @@ def _preview_summary(preview: dict) -> str:
 
 
 async def approval_gate(db: AsyncSession, *, company_id: str, capability: str,
-                        params: dict | None, agent_id: str | None = None) -> dict:
+                        params: dict | None, agent_id: str | None = None,
+                        device_id: str | None = None) -> dict:
     """三档策略 + 免批白名单 + 审批单——REST 与聊天两条入口共用。
 
     返回四种结论之一，调用方按结论决定要不要真执行：
@@ -158,28 +210,45 @@ async def approval_gate(db: AsyncSession, *, company_id: str, capability: str,
     from app.models.intervention import ApprovalRequest, new_id
     from app.services.notification_service import notify_approval_pending
 
+    # 落到哪台机器：现在就把设备解析出来并冻进审批单。批准时执行的是
+    # payload 里这台，而不是"当时那台现在怎么样了"——老板看到的设备名字
+    # 和真正被操作的机器必须一致。
+    device = await resolve_device(db, company_id, device_id,
+                                  capability=capability)
+
     # 文件写/补丁：建单前先只演不写算一次 diff。老板点「批准」时看到的必须
     # 是「哪个文件、加几行删几行」，而不是被截断成正好 200 字的文件正文。
+    # 远程设备跳过预演——执行器跑在另一台机器上，用本机的同名文件算出来的
+    # diff 是假的，宁可明说"没法预先演算"。
     preview: dict | None = None
     if capability in PREVIEW_CAPABILITIES:
-        preview = await asyncio.to_thread(preview_file_op, capability, params)
+        if device is not None:
+            preview = {"available": False,
+                       "path": str((params or {}).get("path") or ""),
+                       "reason": f"改动将发生在设备「{device.name}」上，本机演算的 diff 不可信"}
+        else:
+            preview = await asyncio.to_thread(preview_file_op, capability, params)
 
     detail = (f"改动预览：{_preview_summary(preview)}" if preview is not None
               else json.dumps(params, ensure_ascii=False)[:200])
-    reason = f"高危本机操作 {capability}（{verdict['reason']}）: {detail}"
+    where = f"设备「{device.name}」" if device is not None else "本机"
+    reason = f"高危操作 {capability}（{where}，{verdict['reason']}）: {detail}"
     req = ApprovalRequest(
         id=new_id(), company_id=company_id, action_type="computer_command",
         payload={"capability": capability, "params": params,
                  "agent_id": agent_id, "awaiting_execution": True,
-                 "preview": preview},
+                 "preview": preview,
+                 "device_id": device.id if device is not None else None,
+                 "device_name": device.name if device is not None else None},
         requested_by_agent_id=agent_id, reason=reason)
     db.add(req)
     await notify_approval_pending(
         db, company_id=company_id,
-        title=f"待审批：高危本机操作 {capability}", body=reason)
+        title=f"待审批：高危操作 {capability}（{where}）", body=reason)
     await db.commit()
     return {"action": "hold", "approval_request_id": req.id,
-            "reason": verdict["reason"], "mode": verdict["mode"]}
+            "reason": verdict["reason"], "mode": verdict["mode"],
+            "device": _device_ref(device) if device is not None else None}
 
 
 # V5.7 ⑧ 防呆 ACI（学 SWE-agent）：高危动作执行前"先试错"——
@@ -262,6 +331,30 @@ def _precheck_capability(capability: str, params: dict) -> dict | None:
     return None
 
 
+def _device_ref(device) -> dict:
+    return {"id": device.id, "name": device.name, "platform": device.platform}
+
+
+async def _dispatch_to_device(db: AsyncSession, *, device, log, capability: str,
+                              params: dict) -> dict:
+    """命令交给设备端执行，等它回报结果。
+
+    审计行**先落库再派发**：设备可能永远不回来（掉线、被 Ctrl-C、卡在系统
+    授权弹窗），那时日志里也得留下「这条命令确实派给了 X」，而不是事后
+    凭内存补写一条时间戳造假的记录。
+    """
+    from app.services import computer_dispatch
+
+    db.add(log)
+    await db.commit()
+    row = await computer_dispatch.dispatch(
+        db, device=device, company_id=log.company_id, capability=capability,
+        params=params, agent_id=log.agent_id, log_id=log.id)
+    result = await computer_dispatch.await_result(row.id)
+    result["device"] = _device_ref(device)
+    return result
+
+
 async def execute_computer_action(
     db: AsyncSession,
     *,
@@ -271,6 +364,7 @@ async def execute_computer_action(
     agent_id: str | None = None,
     auto_approved: str | None = None,
     skip_precheck: bool = False,
+    device_id: str | None = None,
 ) -> dict:
     """执行一次电脑操作。返回统一结构：
 
@@ -324,9 +418,29 @@ async def execute_computer_action(
         raise ComputerActionDenied(capability, log.deny_reason)
 
     executor = REAL_EXECUTORS[capability]
+    try:
+        device = await resolve_device(db, company_id, device_id,
+                                      capability=capability)
+    except DeviceUnavailable as exc:
+        # 指名要远程机器但那台机器不在：这次操作**没有**在任何机器上发生，
+        # 也不回落到本机执行。审计里如实记一条未放行。
+        log.allowed = False
+        log.deny_reason = str(exc)
+        log.result = {"ok": False, "device_unavailable": True, "error": str(exc)}
+        db.add(log)
+        await db.commit()
+        logger.warning("执行设备不可用：company=%s capability=%s err=%s",
+                       company_id, capability, exc)
+        return {"ok": False, "allowed": False, "capability": capability,
+                "result": log.result, "log_id": log.id,
+                "deny_reason": str(exc)}
+
     # V5.7 ⑧ 防呆 ACI：执行前先试错——参数/限行预检不通过直接返回
-    # 防呆反馈（不进执行器、不烧 token、不落脏操作）
-    if not skip_precheck:
+    # 防呆反馈（不进执行器、不烧 token、不落脏操作）。
+    # 只有落到本机才预检：预检查的是「这台后端的机器上这个路径存不存在、
+    # 能不能写」，同样的路径在别的机器上可能完全合法；远程那侧由 sidecar
+    # 用它自己的可写根目录再判一遍（两把锁）。
+    if device is None and not skip_precheck:
         pre = _precheck_capability(capability, params or {})
         if pre:
             log.result = pre
@@ -336,6 +450,19 @@ async def execute_computer_action(
             return {"ok": False, "allowed": True, "capability": capability,
                     "result": pre, "log_id": log.id, "deny_reason": None,
                     "precheck_blocked": True}
+
+    if device is not None:
+        result = await _dispatch_to_device(db, device=device, log=log,
+                                           capability=capability,
+                                           params=params or {})
+        log.result = result
+        db.add(log)
+        await db.commit()
+        return {"ok": bool(result.get("ok")), "allowed": True,
+                "capability": capability, "result": result,
+                "log_id": log.id, "deny_reason": None,
+                "device": _device_ref(device)}
+
     try:
         result = await executor(params or {})
     except Exception as exc:

@@ -90,6 +90,8 @@ class ComputerPolicyOut(BaseModel):
     auto_apps: list[str]
     full_control_until: str | None = None
     notify_on_finish: bool
+    # 公司默认执行机；为空 = 后端本机直连（改造前行为）
+    default_device_id: str | None = None
     updated_by: str | None = None
     configured: bool
 
