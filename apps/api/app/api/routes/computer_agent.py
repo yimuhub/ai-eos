@@ -11,7 +11,6 @@ screenshot/type_text/click/key/run_app/run_shell 全部走 macOS 原生工具
 """
 import json
 import uuid
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -36,6 +35,7 @@ from app.schemas.responses_computer import (
     ComputerLogOut,
     LatestScreenshotOut,
 )
+from app.services import computer_policy as policy_service
 from app.services.computer_service import (
     ComputerActionDenied,
     capability_status,
@@ -169,8 +169,27 @@ async def execute_action(
         if agent.company_id != company_id:
             raise HTTPException(404, "Agent not found")
 
-    # ---- V5.5 P0：高危操作审批门 ----
-    if data.action_type in HIGH_RISK_CAPABILITIES and await _high_risk_needs_approval(db, company_id):
+    # ---- 三档策略：硬拦截始终生效；配置过策略后由策略决定是否审批 ----
+    policy_row = await policy_service.get_policy_row(db, company_id)
+    verdict = policy_service.evaluate_action(
+        policy_row, data.action_type, data.params)
+    if verdict["decision"] == "blocked":
+        db.add(ComputerActionLog(
+            id=str(uuid.uuid4()), company_id=company_id, agent_id=agent_id,
+            action_type=data.action_type, params=data.params, allowed=False,
+            deny_reason=verdict["reason"], mock=False,
+            result={"ok": False, "decision": "blocked"}))
+        await db.commit()
+        raise HTTPException(403, verdict["reason"])
+
+    policy_approval = verdict["decision"] == "approval"
+    legacy_approval = (
+        policy_row is None
+        and data.action_type in HIGH_RISK_CAPABILITIES
+        and await _high_risk_needs_approval(db, company_id))
+
+    # ---- V5.5 P0：高危操作审批门（未配置三档策略时沿用旧规则）----
+    if policy_approval or legacy_approval:
         # V5.6.1 工具级免批白名单（学 Cline"始终允许"防审批疲劳）：
         # 命中白名单 → 直接放行并留审计，不再建审批单
         from app.models.whitelist import ApprovalWhitelist
@@ -194,7 +213,8 @@ async def execute_action(
             payload={"capability": data.action_type, "params": data.params,
                      "agent_id": agent_id, "awaiting_execution": True},
             requested_by_agent_id=agent_id,
-            reason=f"高危本机操作 {data.action_type}: "
+            reason=f"高危本机操作 {data.action_type}"
+                   f"（{verdict['reason']}）: "
                    f"{json.dumps(data.params, ensure_ascii=False)[:200]}")
         db.add(req)
         from app.services.notification_service import notify_approval_pending
@@ -216,10 +236,14 @@ async def execute_action(
                 "result": pre or {"ok": True, "precheck": True,
                                   "message": "预检通过，可真实执行"},
                 "precheck_blocked": pre is not None}
+    auto_reason = None
+    if policy_row is not None and verdict["decision"] == "allow":
+        auto_reason = f"policy:{verdict['mode']}"
     try:
         outcome = await execute_computer_action(
             db, company_id=company_id, capability=data.action_type,
-            params=data.params, agent_id=agent_id)
+            params=data.params, agent_id=agent_id,
+            auto_approved=auto_reason)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except ComputerActionDenied as exc:

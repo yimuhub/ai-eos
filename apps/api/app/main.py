@@ -29,7 +29,7 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             schedules, skill_growth,
                             app_alias, skills, tasks, team_builder, training, workflows, war_room, team_generator, company_manage,
                             tokens, experts, command, org_presets, prometheus_metrics, setup,
-                            org_synthesis,
+                            org_synthesis, plugins, computer_policy,
                             members, licensing, subscription, byok)
 from app.api.routes import notifications
 from app.api.routes import thread_reads
@@ -490,5 +490,5 @@ for r in (health, auth, companies, company_search, agents, agent_chat, models_ap
           access, prometheus_metrics, clients, pairing, diagnostics, briefing,
           budgets, mcp, mailboxes, worklogs, setup, members, notifications,
           thread_reads, licensing, queue_routes, subscription, byok,
-          org_synthesis):
+          org_synthesis, plugins, computer_policy):
     app.include_router(r.router)
