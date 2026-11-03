@@ -38,9 +38,19 @@ type BrowserFetchResult = {
 
 type ActionDef = { type: string; label: string; icon: string };
 
-/** 分组渲染：先「读界面」，再「按引用操作」，最后才是传统的截图/键鼠。
-    顺序本身就是推荐用法——能读结构就别猜坐标。 */
+/** 分组渲染：先「读写文件」（改代码走这里），再「读界面」，再「按引用操作」，
+    最后才是传统的截图/键鼠。顺序本身就是推荐用法——能读结构就别猜坐标，
+    能改文件就别去敲编辑器。 */
 const ACTION_GROUPS: { title: string; note: string; items: ActionDef[] }[] = [
+  {
+    title: "读写文件",
+    note: "改代码走这条路：先读原文，再按锚点打补丁；每次写盘前自动留备份，返回 diff",
+    items: [
+      { type: "read_file", label: "读文件", icon: "📄" },
+      { type: "write_file", label: "写文件", icon: "🖊" },
+      { type: "apply_patch", label: "打补丁", icon: "🩹" },
+    ],
+  },
   {
     title: "读界面结构",
     note: "不看像素：直接拿窗口里的元素清单（角色 / 文字 / 位置）",
@@ -87,12 +97,16 @@ const CAP_LABELS: Record<string, string> = {
   key: "按键",
   run_app: "启动应用",
   run_shell: "Shell 命令",
-  run_write: "写文件",
+  run_write: "写文件命令",
+  read_file: "读文件",
+  write_file: "写文件",
+  apply_patch: "打补丁",
 };
 
 /** 只读能力：默认审批模式下也不会弹审批单，面板上标出来省得误以为「开了还不执行」。 */
 const READ_ONLY_CAPS = new Set([
-  "list_windows", "accessibility_snapshot", "get_window", "find_element", "screenshot",
+  "list_windows", "accessibility_snapshot", "get_window", "find_element",
+  "screenshot", "read_file",
 ]);
 
 const PARAM_HINTS: Record<string, string> = {
@@ -108,6 +122,9 @@ const PARAM_HINTS: Record<string, string> = {
   find_element: '{"app": "Safari", "query": "搜索"}',
   click_element: '{"ref": "Safari|1|3.1", "action": "AXPress"}',
   set_value: '{"ref": "Safari|1|3.1", "value": "要填的内容"}',
+  read_file: '{"path": "apps/api/app/main.py", "offset": 1, "limit": 120}',
+  write_file: '{"path": "notes/todo.txt", "content": "新内容", "dry_run": true}',
+  apply_patch: '{"path": "apps/api/app/main.py", "edits": [{"old": "原文片段", "new": "改后片段"}], "dry_run": true}',
 };
 
 export default function DeviceConsolePage() {
@@ -115,7 +132,7 @@ export default function DeviceConsolePage() {
   const cid = useActiveCompanyId();
   // 契约扫描器无法解析模板里的三元表达式；先落成普通变量
   const cidParam = cid ?? "";
-  const [action, setAction] = useState("screenshot");
+  const [action, setAction] = useState("read_file");
   const [paramsText, setParamsText] = useState("{}");
   const [result, setResult] = useState<ExecResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -367,6 +384,8 @@ export default function DeviceConsolePage() {
               屏幕录制（截屏）和辅助功能（读界面结构、点击、赋值）。
               点元素 / 填文本要先用「界面快照」或「找元素」拿到 ref，
               界面一变 ref 就可能失效，重新取一次即可。
+              改代码请用「读写文件」：先用 dry_run=true 看 diff，确认后才落盘，
+              落盘前原件会备份到 storage/computer-file-backups。
             </p>
           </div>
 
