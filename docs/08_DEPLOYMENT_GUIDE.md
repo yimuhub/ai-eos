@@ -29,6 +29,19 @@ cd ../web && npm install && npm run dev   # http://localhost:3000
 DATABASE_URL / REDIS_URL / JWT_SECRET /
 OPENAI_COMPAT_API_KEY / OPENAI_COMPAT_BASE_URL / OPENAI_COMPAT_MODEL
 
+## 让 AI 员工操作另一台电脑（远程执行设备）
+
+后端这台机器之外想再挂一台（比如老板的 MacBook），在「设备操作台」建设备拿接入码，
+目标机器上跑 sidecar——单文件、纯标准库，不用装依赖也不用 clone 仓库：
+
+```bash
+python3 apps/device_agent/aieos_sidecar.py enroll \
+    --server http://<后端机器内网IP>:8000 --code <接入码> --allow-root ~/work/project
+python3 apps/device_agent/aieos_sidecar.py run
+```
+
+参数、两把锁（服务端策略 + 本机护栏）与排错见 [apps/device_agent/README.md](../apps/device_agent/README.md)。
+
 ## 注意事项
 - 国内网络拉取镜像用 docker.m.daocloud.io 前缀
 - bcrypt 需锁 <4 版本（passlib 兼容）
