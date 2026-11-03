@@ -6,6 +6,7 @@ import {
   deviceTone,
   dispatchStatusLabel,
   formatHeartbeat,
+  formatLocalStamp,
   remoteDeviceName,
   type RemoteDevice,
 } from "./remoteDevices";
@@ -62,6 +63,40 @@ describe("formatHeartbeat", () => {
   it("超过一小时落到具体时刻（挂了几天的设备说「2 天前」没法定位）", () => {
     const text = formatHeartbeat("2026-10-31T09:00:00Z", NOW);
     expect(text).toMatch(/^10-31 /);
+  });
+
+  // 线上真实形状：DateTime 列是 naive UTC，isoformat() 不带 Z 也不带偏移，
+  // 早先 Date.parse 按本地时区读它 → 平白多算 8 小时 → 心跳永远显示绝对时刻。
+  it("后端给的 naive UTC 也按 UTC 算", () => {
+    expect(formatHeartbeat("2026-11-03T09:59:40", NOW)).toBe("20 秒前");
+    expect(formatHeartbeat("2026-11-03T09:30:00", NOW)).toBe("30 分钟前");
+  });
+
+  it("带微秒的 naive UTC 一样认（utcnow().isoformat() 就长这样）", () => {
+    // 差值向下取整：09:59:40.123456 → 19.876 秒 → 「19 秒前」
+    expect(formatHeartbeat("2026-11-03T09:59:40.123456", NOW)).toBe("19 秒前");
+  });
+
+  it("已经带时区的串不再补 Z（补了会变成「时间未知」）", () => {
+    expect(formatHeartbeat("2026-11-03T17:59:40+08:00", NOW)).toBe("20 秒前");
+    expect(formatHeartbeat("2026-11-03T09:59:40.123456Z", NOW)).toBe("19 秒前");
+  });
+});
+
+// 审计行原来是 created_at.slice(5,16)：把后端那串 naive UTC 直接当本地时间贴出来，
+// 老板看到的「10:07」和他墙上的钟差一整屏。断言只关心「切出来的不是原始串」。
+describe("formatLocalStamp", () => {
+  it("按本地时区换算，不是把 UTC 的时分贴上去", () => {
+    const text = formatLocalStamp("2026-11-03T09:59:40.123456");
+    const asLocal = new Date("2026-11-03T09:59:40.123456Z");
+    const pad = (n: number) => String(n).padStart(2, "0");
+    expect(text).toBe(`${pad(asLocal.getMonth() + 1)}-${pad(asLocal.getDate())} `
+      + `${pad(asLocal.getHours())}:${pad(asLocal.getMinutes())}`);
+  });
+
+  it("缺时间与脏数据各给一句人话", () => {
+    expect(formatLocalStamp(null)).toBe("—");
+    expect(formatLocalStamp("not-a-date")).toBe("not-a-date");
   });
 });
 

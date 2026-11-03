@@ -5,7 +5,7 @@ import { api, describeError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import AppAliasSection from "@/components/AppAliasSection";
 import RemoteDevicePanel, { type DeviceList } from "@/components/RemoteDevicePanel";
-import { deviceOptionLabel, remoteDeviceName, type RemoteDevice } from "@/lib/remoteDevices";
+import { deviceOptionLabel, formatLocalStamp, remoteDeviceName, type RemoteDevice } from "@/lib/remoteDevices";
 
 /* ============================================================
    设备操作台：Agent 真实操作电脑（截屏/键入/点击/按键/启应用/Shell）
@@ -485,7 +485,7 @@ export default function DeviceConsolePage() {
                     )}
                     <span className="ml-auto text-[10px] tabular-nums shrink-0"
                       style={{ color: "var(--muted)" }}>
-                      {l.created_at.slice(5, 16).replace("T", " ")}
+                      {formatLocalStamp(l.created_at)}
                     </span>
                   </summary>
                   <pre className="text-[10px] mt-1 whitespace-pre-wrap overflow-auto max-h-32"

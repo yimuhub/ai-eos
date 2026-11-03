@@ -45,20 +45,38 @@ export function deviceTone(device: RemoteDevice): DeviceTone {
   return { label: "离线", className: "text-slate-400", dot: "offline" };
 }
 
+/** 后端的心跳是 naive UTC（`datetime.utcnow().isoformat()`，不带 Z 也不带偏移）。
+    `Date.parse` 对这种串按**本地时区**解释，东八区会凭空多算 8 小时，
+    于是「N 秒前」永远走不到，列表里全变成绝对时间。补 Z 才是它们的真实含义。 */
+export function parseUtcIso(iso: string): number {
+  const withZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso.trim()) ? iso : `${iso.trim()}Z`;
+  return Date.parse(withZone);
+}
+
+/** 审计行那种「几点几分发生的」：给本地时刻，不能直接切字符串。
+    后端串是 naive UTC，`slice(5,16)` 切出来的就是 UTC 的时分，
+    老板对不上自己墙上的钟（他也想不起来是时区的问题）。 */
+export function formatLocalStamp(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const ms = parseUtcIso(iso);
+  if (Number.isNaN(ms)) return iso.slice(0, 16);
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
+    + `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 /** 最近心跳：只说「刚刚/N 分钟前」没意义——sidecar 挂没挂住是运维问题，
     老板需要知道确切时刻才能和「我几点关的电脑」对上。 */
 export function formatHeartbeat(iso: string | null | undefined,
                                 nowMs: number): string {
   if (!iso) return "从未心跳";
-  const seen = Date.parse(iso);
+  const seen = parseUtcIso(iso);
   if (Number.isNaN(seen)) return "时间未知";
   const diff = Math.max(0, Math.floor((nowMs - seen) / 1000));
   if (diff < 60) return `${diff} 秒前`;
   if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
-  const local = new Date(seen);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(local.getMonth() + 1)}-${pad(local.getDate())} `
-    + `${pad(local.getHours())}:${pad(local.getMinutes())}`;
+  return formatLocalStamp(iso);
 }
 
 /** 执行区下拉里的名字：把「能不能用这次操作」前置到选择时，
