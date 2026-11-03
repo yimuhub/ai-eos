@@ -4,6 +4,8 @@ import Link from "next/link";
 import { api, describeError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import AppAliasSection from "@/components/AppAliasSection";
+import RemoteDevicePanel, { type DeviceList } from "@/components/RemoteDevicePanel";
+import { deviceOptionLabel, remoteDeviceName, type RemoteDevice } from "@/lib/remoteDevices";
 
 /* ============================================================
    设备操作台：Agent 真实操作电脑（截屏/键入/点击/按键/启应用/Shell）
@@ -22,9 +24,13 @@ type Perms = Record<string, boolean>;
 
 /** 电脑操作执行结果 */
 type ExecResult = {
-  /** 实际执行模式：real = 真的操作了本机；mock = 未授权下的模拟 */
+  /** 实际执行模式：REAL = 真的执行了；REAL_FAILED = 执行了但失败；HOLD = 转审批 */
   mode: string;
-  result?: { ok?: boolean; [k: string]: unknown };
+  /** HOLD 分支才有：awaiting_approval */
+  status?: string;
+  /** 只有落到别的机器时才出现（本机操作不带这个键） */
+  device?: { id?: string; name?: string; platform?: string };
+  result?: { ok?: boolean; error?: string; denied?: boolean; [k: string]: unknown };
   [k: string]: unknown;
 };
 
@@ -156,7 +162,25 @@ export default function DeviceConsolePage() {
     () => api.get<LogRow[]>(`/computer-agent/logs?company_id=${cid}&limit=30`),
   );
   const logs = logData ?? [];
-  const reload = () => { refreshPerms(); refreshLogs(); };
+
+  // 远程执行设备：设备列表 + 公司默认执行机。选「本机」时不带 device_id，
+  // 由后端按老路径直接执行；选设备则命令只可能派到那台机器（离线不回落）。
+  const { data: deviceData, refresh: refreshDevices } = useResource<DeviceList>(
+    cid ? `device-console:devices:${cid}` : null,
+    () => api.get<DeviceList>(`/computer-devices?company_id=${cid}`),
+  );
+  const devices: RemoteDevice[] = deviceData?.devices ?? [];
+  const defaultDeviceId = deviceData?.default_device_id ?? null;
+  const [targetDevice, setTargetDevice] = useState("");
+  // 设备可能刚被吊销/删除：选中的那台不在列表里就按「公司默认」走，
+  // 否则会把一个已经不存在的 device_id 发出去，后端只会回「设备不存在」。
+  const chosen = devices.find((d) => d.id === targetDevice && !d.revoked) ?? null;
+  const defaultDeviceName = defaultDeviceId
+    ? (devices.find((d) => d.id === defaultDeviceId)?.name ?? "（该默认设备已不存在）")
+    : null;
+
+  // 执行完顺带刷新设备：sidecar 心跳会改变在线态与能力清单
+  const reload = () => { refreshPerms(); refreshLogs(); refreshDevices(); };
 
   async function grant(cap: string) {
     try {
@@ -181,7 +205,7 @@ export default function DeviceConsolePage() {
     catch { setMsg("❌ 参数不是合法 JSON"); setBusy(false); return; }
     try {
       const data = await api.post<ExecResult>(`/computer-agent/execute?company_id=${cidParam}`,
-        { action_type: action, params });
+        { action_type: action, params, device_id: chosen ? chosen.id : null });
       setResult(data);
       if (action === "screenshot" && data.result?.ok) {
         // 拉取最新截屏 base64
@@ -189,7 +213,18 @@ export default function DeviceConsolePage() {
           `/computer-agent/screenshots/latest?company_id=${cidParam}`).catch(() => null);
         if (imgData?.image_base64) setScreenshotUrl(imgData.image_base64);
       }
-      setMsg(`✅ 执行完成（${data.mode}）`);
+      // 三种收尾必须分得开：审批挂起（还没执行）、设备侧失败（执行了但没成）、
+      // 真成功。含糊的「执行完成」会让老板以为另一台电脑上的文件已经改了。
+      const ran = remoteDeviceName(data);
+      const where = ran ? `「${ran}」` : "这台后端机器";
+      if (data.status === "awaiting_approval") {
+        setMsg(`⏸ 已生成审批单，批准后在${where}执行`);
+      } else if (data.result?.ok === false) {
+        setMsg(`⚠️ 未成功（${data.mode}）${ran ? ` · ${where}` : ""}：`
+          + String(data.result?.error || data.result?.denied || "见下方结果"));
+      } else {
+        setMsg(`✅ 执行完成（${data.mode}） · 在${where}上`);
+      }
       reload();
     } catch (e) { setMsg(`❌ ${describeError(e, "执行失败")}`); }
     setBusy(false);
@@ -254,6 +289,41 @@ export default function DeviceConsolePage() {
                 </div>
               ))}
             </div>
+
+            {/* 执行机器：留空 = 按公司默认（没设默认就是这台后端机器）。
+                选了设备就不会回落到本机——路径在两台机器上含义不同，
+                在错的电脑上写文件比这次没做成严重得多。 */}
+            <div className="flex items-center gap-2 mb-1">
+              <label className="text-xs shrink-0" style={{ color: "var(--muted)" }}>执行机器</label>
+              <select value={targetDevice} onChange={(e) => setTargetDevice(e.target.value)}
+                className="input !py-1.5 text-xs flex-1 min-w-0">
+                <option value="">{defaultDeviceName
+                  ? `公司默认：${defaultDeviceName}`
+                  : "这台后端机器（本机直连）"}</option>
+                {devices.filter((d) => !d.revoked).map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {deviceOptionLabel(d, d.id === defaultDeviceId)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {chosen && (
+              <div className="mb-2 space-y-1">
+                {!chosen.online && (
+                  <p className="text-[10px]" style={{ color: "#f87171" }}>
+                    ⚠️ 「{chosen.name}」当前离线：这次执行会被拒绝，不会改到本机。
+                    去那台机器确认 sidecar 还在跑。
+                  </p>
+                )}
+                {!(chosen.capabilities ?? []).includes(action) && (
+                  <p className="text-[10px]" style={{ color: "#f87171" }}>
+                    ⚠️ 「{chosen.name}」没上报 {action} 能力（它支持：
+                    {(chosen.capabilities ?? []).join("、") || "无"}）。
+                    那条命令在那台机器上会被自己的护栏拒绝。
+                  </p>
+                )}
+              </div>
+            )}
 
             <label className="text-xs block mb-1.5" style={{ color: "var(--muted)" }}>参数（JSON）</label>
             <textarea rows={3} value={paramsText}
@@ -343,8 +413,12 @@ export default function DeviceConsolePage() {
           </div>
         </div>
 
-        {/* 右栏：权限 + 审计日志 */}
+        {/* 右栏：远程设备 + 权限 + 审计日志 */}
         <div className="space-y-5 min-w-0">
+          <RemoteDevicePanel cid={cidParam} devices={devices}
+            defaultDeviceId={defaultDeviceId}
+            onlineWindowSeconds={deviceData?.online_window_seconds}
+            refresh={reload} />
           <AppAliasSection cid={cid ?? ""} />
 
           {/* 权限管理 */}
@@ -393,7 +467,9 @@ export default function DeviceConsolePage() {
           <div className="card card-static">
             <h2 className="font-semibold text-sm mb-3">📜 操作审计（{logs.length}）</h2>
             <div className="space-y-1 max-h-96 overflow-y-auto">
-              {logs.map((l) => (
+              {logs.map((l) => {
+                const ran = remoteDeviceName(l.result);
+                return (
                 <details key={l.id} className="rounded-xl px-3 py-2 transition-colors"
                   style={{ background: "var(--surface-2)" }}>
                   <summary className="text-xs cursor-pointer flex items-center gap-2 list-none">
@@ -401,6 +477,12 @@ export default function DeviceConsolePage() {
                       {l.allowed ? "✓" : "✕"}
                     </span>
                     <span className="font-medium">{CAP_LABELS[l.action] ?? l.action}</span>
+                    {/* 在哪台机器上跑的：远程执行才带 device 引用，本机不显示 */}
+                    {ran && (
+                      <span className="text-[10px] shrink-0" style={{ color: "var(--muted)" }}>
+                        · {ran}
+                      </span>
+                    )}
                     <span className="ml-auto text-[10px] tabular-nums shrink-0"
                       style={{ color: "var(--muted)" }}>
                       {l.created_at.slice(5, 16).replace("T", " ")}
@@ -411,7 +493,8 @@ export default function DeviceConsolePage() {
                     {l.deny_reason || JSON.stringify(l.result, null, 2)}
                   </pre>
                 </details>
-              ))}
+                );
+              })}
               {!logs.length && (
                 <p className="text-xs text-center py-4" style={{ color: "var(--muted)" }}>暂无记录</p>
               )}
