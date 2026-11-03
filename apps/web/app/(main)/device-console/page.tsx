@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import Link from "next/link";
 import { api, describeError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import AppAliasSection from "@/components/AppAliasSection";
@@ -137,6 +138,10 @@ export default function DeviceConsolePage() {
           <p className="text-sm mt-1.5" style={{ color: "var(--muted)" }}>
             Agent 真实操作电脑 · 浏览器抓取 · 全程审计
           </p>
+          <Link href="/plugins"
+            className="btn-ghost !py-1.5 !px-3 text-xs inline-flex mt-3">
+            ⊞ 打开插件库与电脑权限
+          </Link>
         </div>
       </div>
 
