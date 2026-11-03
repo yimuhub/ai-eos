@@ -136,6 +136,10 @@ const MODE_META: Record<PolicyMode, {
 };
 
 const TRIAL_ACTIONS = [
+  { value: "accessibility_snapshot", label: "读界面结构", params: '{"app": "Finder", "window": 1}' },
+  { value: "find_element", label: "找元素", params: '{"app": "Safari", "query": "搜索"}' },
+  { value: "click_element", label: "点击元素", params: '{"ref": "Finder|1|3.1"}' },
+  { value: "set_value", label: "填入文本", params: '{"ref": "Safari|1|3.1", "value": "hello"}' },
   { value: "run_shell", label: "执行命令", params: '{"command": "git status"}' },
   { value: "run_write", label: "写文件", params: '{"path": "~/Documents/report.md"}' },
   { value: "run_app", label: "启动应用", params: '{"app": "Calculator"}' },

@@ -36,14 +36,79 @@ type BrowserFetchResult = {
   rendered?: boolean;
 };
 
-const ACTIONS: { type: string; label: string; icon: string }[] = [
-  { type: "screenshot", label: "截屏", icon: "📸" },
-  { type: "type_text", label: "键入文本", icon: "⌨️" },
-  { type: "click", label: "点击坐标", icon: "🖱" },
-  { type: "key", label: "按键", icon: "⏎" },
-  { type: "run_app", label: "启动应用", icon: "🚀" },
-  { type: "run_shell", label: "Shell(白名单)", icon: "💻" },
+type ActionDef = { type: string; label: string; icon: string };
+
+/** 分组渲染：先「读界面」，再「按引用操作」，最后才是传统的截图/键鼠。
+    顺序本身就是推荐用法——能读结构就别猜坐标。 */
+const ACTION_GROUPS: { title: string; note: string; items: ActionDef[] }[] = [
+  {
+    title: "读界面结构",
+    note: "不看像素：直接拿窗口里的元素清单（角色 / 文字 / 位置）",
+    items: [
+      { type: "list_windows", label: "列出窗口", icon: "🪟" },
+      { type: "accessibility_snapshot", label: "界面快照", icon: "🧬" },
+      { type: "get_window", label: "窗口概览", icon: "🔍" },
+      { type: "find_element", label: "找元素", icon: "🎯" },
+    ],
+  },
+  {
+    title: "按引用操作",
+    note: "用快照里的 ref 点按钮 / 填输入框，不移动光标、不抢焦点",
+    items: [
+      { type: "click_element", label: "点击元素", icon: "👆" },
+      { type: "set_value", label: "填入文本", icon: "✍️" },
+    ],
+  },
+  {
+    title: "截图与键鼠",
+    note: "兜底路径：没有无障碍树的界面才用坐标",
+    items: [
+      { type: "screenshot", label: "截屏", icon: "📸" },
+      { type: "type_text", label: "键入文本", icon: "⌨️" },
+      { type: "click", label: "点击坐标", icon: "🖱" },
+      { type: "key", label: "按键", icon: "⏎" },
+      { type: "run_app", label: "启动应用", icon: "🚀" },
+      { type: "run_shell", label: "Shell(白名单)", icon: "💻" },
+    ],
+  },
 ];
+
+/** 能力中文名：授权面板与审计日志都靠它，否则一堆英文键看不出开了什么。 */
+const CAP_LABELS: Record<string, string> = {
+  list_windows: "列出窗口",
+  accessibility_snapshot: "读界面结构",
+  get_window: "窗口概览",
+  find_element: "找元素",
+  click_element: "点击元素",
+  set_value: "填入文本",
+  screenshot: "截屏",
+  type_text: "键入文本",
+  click: "点击坐标",
+  key: "按键",
+  run_app: "启动应用",
+  run_shell: "Shell 命令",
+  run_write: "写文件",
+};
+
+/** 只读能力：默认审批模式下也不会弹审批单，面板上标出来省得误以为「开了还不执行」。 */
+const READ_ONLY_CAPS = new Set([
+  "list_windows", "accessibility_snapshot", "get_window", "find_element", "screenshot",
+]);
+
+const PARAM_HINTS: Record<string, string> = {
+  screenshot: "{}",
+  type_text: '{"text": "要输入的文字"}',
+  click: '{"x": 500, "y": 300}',
+  key: '{"key": "enter"}',
+  run_app: '{"app": "Calculator"}',
+  run_shell: '{"command": "ls ~/Documents"}',
+  list_windows: '{}',
+  accessibility_snapshot: '{"app": "Finder", "window": 1, "max_depth": 2}',
+  get_window: '{"app": "Finder", "window": 1}',
+  find_element: '{"app": "Safari", "query": "搜索"}',
+  click_element: '{"ref": "Safari|1|3.1", "action": "AXPress"}',
+  set_value: '{"ref": "Safari|1|3.1", "value": "要填的内容"}',
+};
 
 export default function DeviceConsolePage() {
   // 激活公司：可订阅 —— 顶栏切公司后权限/审计自动换数据
@@ -151,29 +216,32 @@ export default function DeviceConsolePage() {
           {/* 操作面板 */}
           <div className="card card-static">
             <h2 className="font-semibold text-sm mb-3">本机操作</h2>
-            <div className="flex flex-wrap gap-2 mb-3">
-              {ACTIONS.map((a) => (
-                <button key={a.type} onClick={() => { setAction(a.type); setResult(null); }}
-                  className={`px-3 py-1.5 rounded-full text-xs transition-all border ${
-                    action === a.type ? "border-indigo-500 bg-indigo-500/15 text-indigo-200 font-medium"
-                                      : "hover:bg-white/[0.04]"}`}
-                  style={action === a.type ? {} : { borderColor: "var(--border)", color: "var(--muted)" }}>
-                  {a.icon} {a.label}
-                </button>
+            <div className="space-y-3 mb-3">
+              {ACTION_GROUPS.map((g) => (
+                <div key={g.title}>
+                  <p className="text-[10px] mb-1.5" style={{ color: "var(--muted)" }}>
+                    {g.title} · {g.note}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {g.items.map((a) => (
+                      <button key={a.type}
+                        onClick={() => { setAction(a.type); setResult(null); }}
+                        className={`px-3 py-1.5 rounded-full text-xs transition-all border ${
+                          action === a.type ? "border-indigo-500 bg-indigo-500/15 text-indigo-200 font-medium"
+                                            : "hover:bg-white/[0.04]"}`}
+                        style={action === a.type ? {} : { borderColor: "var(--border)", color: "var(--muted)" }}>
+                        {a.icon} {a.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               ))}
             </div>
 
             <label className="text-xs block mb-1.5" style={{ color: "var(--muted)" }}>参数（JSON）</label>
             <textarea rows={3} value={paramsText}
               onChange={(e) => setParamsText(e.target.value)}
-              placeholder={{
-                screenshot: "{}",
-                type_text: '{"text": "要输入的文字"}',
-                click: '{"x": 500, "y": 300}',
-                key: '{"key": "enter"}',
-                run_app: '{"app": "Calculator"}',
-                run_shell: '{"command": "ls ~/Documents"}',
-              }[action]}
+              placeholder={PARAM_HINTS[action]}
               className="input font-mono text-xs" />
             <div className="mt-2 flex items-center gap-3">
               <button onClick={execute} disabled={busy}
@@ -183,6 +251,11 @@ export default function DeviceConsolePage() {
               {!perms[action] && perms && Object.keys(perms).length > 0 && (
                 <span className="text-[11px] text-amber-400">
                   ⚠️ 此能力未授权，将返回403 —— 请在右侧授权
+                </span>
+              )}
+              {perms[action] && !READ_ONLY_CAPS.has(action) && (
+                <span className="text-[11px]" style={{ color: "var(--muted)" }}>
+                  已授权 · 写操作仍按「插件库 → 电脑权限」的审批模式处理
                 </span>
               )}
             </div>
@@ -262,9 +335,14 @@ export default function DeviceConsolePage() {
             <h2 className="font-semibold text-sm mb-3">🔐 能力授权</h2>
             <div className="space-y-2">
               {Object.entries(perms).map(([cap, granted]) => (
-                <div key={cap} className="flex items-center justify-between px-3 py-2 rounded-xl"
+                <div key={cap} className="flex items-center justify-between px-3 py-2 rounded-xl gap-2"
                   style={{ background: "var(--surface-2)" }}>
-                  <span className="text-xs">{cap}</span>
+                  <span className="text-xs truncate">
+                    {CAP_LABELS[cap] ?? cap}
+                    <span className="ml-1.5 text-[10px] opacity-60">
+                      {READ_ONLY_CAPS.has(cap) ? "只读" : "写"}
+                    </span>
+                  </span>
                   {granted ? (
                     <button onClick={() => revoke(cap)}
                       className="text-[11px] px-2 py-1 rounded-lg hover:bg-red-500/12 text-emerald-300 transition-colors"
@@ -285,7 +363,10 @@ export default function DeviceConsolePage() {
               )}
             </div>
             <p className="text-[10px] mt-3 leading-relaxed" style={{ color: "var(--muted)" }}>
-              ⚠️ 首次使用截屏/键鼠需在 macOS「系统设置 → 隐私与安全性」中为终端 App 开启屏幕录制和辅助功能权限。
+              ⚠️ 首次使用需在 macOS「系统设置 → 隐私与安全性」中为终端 App 开启
+              屏幕录制（截屏）和辅助功能（读界面结构、点击、赋值）。
+              点元素 / 填文本要先用「界面快照」或「找元素」拿到 ref，
+              界面一变 ref 就可能失效，重新取一次即可。
             </p>
           </div>
 
@@ -300,7 +381,7 @@ export default function DeviceConsolePage() {
                     <span className={l.allowed ? "text-emerald-400" : "text-red-400"}>
                       {l.allowed ? "✓" : "✕"}
                     </span>
-                    <span className="font-medium">{l.action}</span>
+                    <span className="font-medium">{CAP_LABELS[l.action] ?? l.action}</span>
                     <span className="ml-auto text-[10px] tabular-nums shrink-0"
                       style={{ color: "var(--muted)" }}>
                       {l.created_at.slice(5, 16).replace("T", " ")}

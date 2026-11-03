@@ -363,7 +363,7 @@ export default function InterventionPage() {
                 {ccEnabled ? "✓ 高危操作需你批准" : "× 直接执行（不拦截）"}
               </div>
               <p className="text-xs mt-0.5 text-[var(--muted)]">
-                覆盖能力：run_shell · run_write · run_app
+                覆盖能力：run_shell · run_write · run_app · 键鼠注入 · 界面点击/赋值
               </p>
             </div>
             <button
