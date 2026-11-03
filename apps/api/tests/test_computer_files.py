@@ -479,3 +479,241 @@ async def test_execute_service_runs_granted_read_through_the_executor(
             params={"path": str(target)})
     assert outcome["ok"] is True, outcome
     assert "12 万" in outcome["result"]["content"]
+
+
+# ============================================================ 审批单的改动预览
+
+
+def test_preview_reports_line_counts_not_file_content(workspace):
+    """老板在审批单上要看到「改哪几行」，而不是一串被截断的正文。"""
+    target = _write(workspace / "svc.py",
+                    "def f():\n    return 1\n\ndef g():\n    return 2\n")
+    preview = cf.preview_file_op("write_file", {
+        "path": str(target),
+        "content": "def f():\n    return 1\n\ndef g():\n    return 3\n"})
+    assert preview["available"] is True, preview
+    assert preview["path"] == str(target.resolve())
+    assert (preview["added_lines"], preview["removed_lines"]) == (1, 1)
+    assert preview["hunks"] == 1
+    assert preview["create"] is False
+    assert "+    return 3" in preview["diff"]
+    assert "-    return 2" in preview["diff"]
+
+
+def test_preview_never_writes_or_backs_up(workspace):
+    """演算必须是纯只读：审批单还没批，磁盘不该有任何动静。"""
+    target = _write(workspace / "n.txt", "旧\n")
+    preview = cf.preview_file_op("write_file", {"path": str(target),
+                                                "content": "新\n"})
+    assert preview["changed"] is True
+    assert target.read_text(encoding="utf-8") == "旧\n"
+    assert not (workspace.parent / "backups").exists()
+
+
+def test_preview_marks_a_brand_new_file(workspace):
+    """新建文件没有原件可回滚，审批页要能一眼看出这是"从无到有"。"""
+    preview = cf.preview_file_op("write_file", {
+        "path": str(workspace / "fresh.md"), "content": "a\nb\n"})
+    assert preview["create"] is True and preview["changed"] is True
+    assert preview["added_lines"] == 2 and preview["removed_lines"] == 0
+    assert not (workspace / "fresh.md").exists()
+
+
+def test_preview_says_so_when_content_matches_current_file(workspace):
+    target = _write(workspace / "same.txt", "same\n")
+    preview = cf.preview_file_op("write_file", {"path": str(target),
+                                                "content": "same\n"})
+    assert preview["available"] is True and preview["changed"] is False
+    assert preview["diff"] == ""
+
+
+def test_preview_carries_the_reason_a_patch_cannot_land(workspace):
+    """锚点找不到照样该建单——但要把"为什么演算不出来"写进审批单。"""
+    target = _write(workspace / "p.py", "alpha\n")
+    preview = cf.preview_file_op("apply_patch", {
+        "path": str(target), "edits": [{"old": "beta", "new": "gamma"}]})
+    assert preview["available"] is False
+    assert "定位失败" in preview["reason"]
+
+
+def test_preview_counts_patch_replacements(workspace):
+    target = _write(workspace / "q.py", "a = 1\nb = 2\n")
+    preview = cf.preview_file_op("apply_patch", {
+        "path": str(target),
+        "edits": [{"old": "a = 1", "new": "a = 10"},
+                  {"old": "b = 2", "new": "b = 20"}]})
+    assert preview["available"] is True
+    assert preview["edits"] == 2
+    assert (preview["added_lines"], preview["removed_lines"]) == (2, 2)
+
+
+def test_preview_caps_the_diff_it_stores(workspace):
+    """待审批列表一次拉多条，每条塞几十 KB 的 diff 会拖死审批页。"""
+    target = _write(workspace / "big.txt", "old\n")
+    preview = cf.preview_file_op("write_file", {
+        "path": str(target),
+        "content": "".join(f"第 {i} 行新内容\n" for i in range(2000))})
+    assert preview["diff_truncated"] is True
+    assert len(preview["diff"]) <= cf.MAX_PREVIEW_DIFF_CHARS
+
+
+def test_preview_of_blocked_path_degrades_to_a_reason(workspace):
+    """红线在演算阶段就该拒绝，而且是以"预览失败"的形式，不是抛栈。"""
+    preview = cf.preview_file_op("write_file", {"path": "~/.ssh/id_rsa",
+                                               "content": "x\n"})
+    assert preview["available"] is False and "硬拦截" in preview["reason"]
+
+
+async def test_approval_gate_holds_with_diff_and_touches_nothing(client, tenants,
+                                                                 workspace):
+    """建单时演算 diff 存进 payload，且这一步既不写盘也不落执行审计。"""
+    from app.models.intervention import ApprovalRequest
+
+    cid = tenants.alice_co["id"]
+    target = _write(workspace / "notes.md", "# 旧\n")
+    async with AsyncSessionLocal() as s:
+        s.add(ComputerPermission(id=str(uuid.uuid4()), company_id=cid,
+                                 capability="write_file", granted=True))
+        s.add(ComputerPolicy(company_id=cid, mode="default", auto_dirs=[],
+                             auto_commands=[], auto_apps=[],
+                             notify_on_finish=True))
+        await s.commit()
+
+    async with AsyncSessionLocal() as s:
+        gate = await computer_service.approval_gate(
+            s, company_id=cid, capability="write_file",
+            params={"path": str(target), "content": "# 新\n"})
+    assert gate["action"] == "hold", gate
+
+    async with AsyncSessionLocal() as s:
+        req = await s.get(ApprovalRequest, gate["approval_request_id"])
+    preview = req.payload["preview"]
+    assert preview["available"] is True and preview["added_lines"] == 1
+    assert "+# 新" in preview["diff"]
+    # 推送和收件箱只显示 reason：这里必须已经说清改了哪个文件、几行
+    assert "改动预览" in req.reason and "notes.md" in req.reason
+    assert "+1 行" in req.reason
+    assert target.read_text(encoding="utf-8") == "# 旧\n"
+    assert not (workspace.parent / "backups").exists()
+
+
+async def test_approval_gate_records_a_failed_dry_run_instead_of_blind_approval(
+        client, tenants, workspace):
+    """预演失败也要建单，并让老板看到失败原因——静默建一张空白审批单最危险。"""
+    from app.models.intervention import ApprovalRequest
+
+    cid = tenants.alice_co["id"]
+    async with AsyncSessionLocal() as s:
+        s.add(ComputerPermission(id=str(uuid.uuid4()), company_id=cid,
+                                 capability="apply_patch", granted=True))
+        s.add(ComputerPolicy(company_id=cid, mode="default", auto_dirs=[],
+                             auto_commands=[], auto_apps=[],
+                             notify_on_finish=True))
+        await s.commit()
+
+    async with AsyncSessionLocal() as s:
+        gate = await computer_service.approval_gate(
+            s, company_id=cid, capability="apply_patch",
+            params={"path": str(workspace / "gone.py"),
+                    "edits": [{"old": "x", "new": "y"}]})
+    assert gate["action"] == "hold", gate
+
+    async with AsyncSessionLocal() as s:
+        req = await s.get(ApprovalRequest, gate["approval_request_id"])
+    assert req.payload["preview"]["available"] is False
+    assert "预演失败" in req.reason or "不存在" in req.reason
+
+
+async def test_approval_gate_leaves_command_approvals_unchanged(client, tenants):
+    """命令类审批没有文件可演算：preview 为 None，原因仍是原来的命令参数。"""
+    from app.models.intervention import ApprovalRequest
+
+    cid = tenants.alice_co["id"]
+    async with AsyncSessionLocal() as s:
+        s.add(ComputerPolicy(company_id=cid, mode="default", auto_dirs=[],
+                             auto_commands=[], auto_apps=[],
+                             notify_on_finish=True))
+        await s.commit()
+
+    async with AsyncSessionLocal() as s:
+        gate = await computer_service.approval_gate(
+            s, company_id=cid, capability="run_shell",
+            params={"command": "ls"})
+    assert gate["action"] == "hold", gate
+
+    async with AsyncSessionLocal() as s:
+        req = await s.get(ApprovalRequest, gate["approval_request_id"])
+    assert req.payload["preview"] is None
+    assert "ls" in req.reason
+
+
+# ============================================================ 「始终允许」的边界
+
+
+def test_whitelist_pattern_takes_the_command_not_an_empty_string():
+    """run_shell 早先取的是 params["cmd"]，实际字段叫 command → 取不到就是空串，
+    而空串在白名单里意思是「该能力全部放行」。"""
+    assert computer_service.whitelist_pattern_for(
+        "run_shell", {"command": "ls -la"}) == "ls -la"
+    assert computer_service.whitelist_pattern_for(
+        "external_agent", {"task_input": "发周报给客户"}) == "发周报给客户"
+
+
+def test_whitelist_pattern_for_files_is_scoped_to_one_path():
+    pattern = computer_service.whitelist_pattern_for(
+        "write_file", {"path": "/repo/src/a.py", "content": "整份正文\n"})
+    assert pattern == '"/repo/src/a.py"'
+    # 取不到正文，也就不会出现"整份正文都算同类操作"的宽泛命中
+    assert "整份正文" not in pattern
+    assert computer_service.whitelist_pattern_for(
+        "apply_patch", {"path": "src/b.py", "edits": [{"old": "x", "new": "y"}]}) \
+        == '"src/b.py"'
+
+
+async def test_always_allow_for_a_file_only_exempts_that_file(client, tenants,
+                                                              workspace):
+    """批准一次 write_file 并勾「始终允许」：只免这一个文件，换个路径照样拦。"""
+    cid = tenants.alice_co["id"]
+    h = tenants.alice["headers"]
+    async with AsyncSessionLocal() as s:
+        s.add(ComputerPermission(id=str(uuid.uuid4()), company_id=cid,
+                                 capability="write_file", granted=True))
+        s.add(ComputerPolicy(company_id=cid, mode="default", auto_dirs=[],
+                             auto_commands=[], auto_apps=[],
+                             notify_on_finish=True))
+        await s.commit()
+
+    async def _run(path: Path, content: str) -> dict:
+        r = await client.post(f"/computer-agent/execute?company_id={cid}",
+                              json={"action_type": "write_file",
+                                    "params": {"path": str(path),
+                                              "content": content}}, headers=h)
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    first = workspace / "a.py"
+    held = await _run(first, "a = 1\n")
+    assert held["status"] == "awaiting_approval", held
+    assert not first.exists(), "没批准就写盘了"
+
+    r = await client.post(
+        f"/intervention/requests/{held['approval_request_id']}/decide",
+        json={"decision": "approve", "always_allow": True}, headers=h)
+    assert r.status_code == 200, r.text
+    assert first.read_text(encoding="utf-8") == "a = 1\n"
+
+    r = await client.get(f"/intervention/whitelist?company_id={cid}", headers=h)
+    rows = r.json()
+    assert len(rows) == 1, rows
+    assert rows[0]["param_pattern"] == f'"{first}"', rows[0]
+
+    # 同一个文件：命中白名单，直接落盘
+    passed = await _run(first, "a = 2\n")
+    assert passed["auto_approved"] == "whitelist", passed
+    assert first.read_text(encoding="utf-8") == "a = 2\n"
+
+    # 换个文件：仍然要重新审批——白名单没被放大成"整个 write_file 能力"
+    other = workspace / "b.py"
+    again = await _run(other, "b = 1\n")
+    assert again["status"] == "awaiting_approval", again
+    assert not other.exists()

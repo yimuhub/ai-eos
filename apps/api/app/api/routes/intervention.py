@@ -229,25 +229,28 @@ async def decide_request(
     if res.rowcount != 1:
         raise HTTPException(409, "该审批单已被处理（并发/重复提交）")
 
-    # V5.6.1：老板批准时勾"始终允许"→ 写免批白名单（参数模式取本次 params 的
-    # 命令/输入子串；run_shell 取 cmd，其余取关键参数值）
+    # V5.6.1：老板批准时勾"始终允许"→ 写免批白名单。
+    # 取哪个参数由 computer_service.whitelist_pattern_for 决定：命令类取命令串，
+    # 文件读写只取 path——正文每次都不同，取错字段会得到空串，而空串在白名单里
+    # 表示「该能力全部放行」，等于批一次就永久放开整个能力。
     # 白名单与裁定在同一个事务里落库：裁定成功而白名单丢失会让下次同一操作被拦。
     if data.decision == "approve" and data.always_allow and req.action_type in (
             "computer_command", "external_agent"):
         from app.models.whitelist import ApprovalWhitelist
+        from app.services import computer_service
+
         payload0 = req.payload or {}
         cap = payload0.get("capability", "external_agent")
         params = payload0.get("params") or (
             {"task_input": payload0.get("task_input", "")}
             if req.action_type == "external_agent" else {})
-        pattern = str((params or {}).get("cmd")
-                      or (params or {}).get("text")
-                      or (params or {}).get("task_input") or "")[:300]
-        db.add(ApprovalWhitelist(
-            company_id=req.company_id, capability=cap,
-            param_pattern=pattern,
-            note=(data.note or "老板批准时勾「始终允许」")[:300],
-            created_by=user.id))
+        pattern = computer_service.whitelist_pattern_for(cap, params)
+        if pattern or cap not in computer_service.PATH_SCOPED_CAPABILITIES:
+            db.add(ApprovalWhitelist(
+                company_id=req.company_id, capability=cap,
+                param_pattern=pattern,
+                note=(data.note or "老板批准时勾「始终允许」")[:300],
+                created_by=user.id))
     # 抢占结果**立即 commit**：之后的真实副作用（本机命令/对外发送）绝不能在
     # 事务里跑，否则慢操作会长期持锁，而且崩溃回滚会让"已裁定"凭空消失。
     await db.commit()

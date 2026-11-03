@@ -4,6 +4,8 @@ import { useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { notify } from "@/components/Toast";
+import FileChangeCard from "@/components/FileChangePreview";
+import { approvalPayloadForDisplay, filePreviewOf } from "@/lib/approvalPreview";
 
 // ## 改造说明
 //
@@ -26,7 +28,7 @@ type Req = {
   status: string;
   reason?: string;
   requested_by?: string;
-  /** LLM 生成的自由结构，前端只做展示（JSON.stringify） */
+  /** 自由结构；文件操作带 preview（后端建单时演算好的 diff），其余字段才摊 JSON */
   payload?: Record<string, unknown>;
   created_at?: string;
 };
@@ -77,6 +79,25 @@ const ACTION_LABELS: Record<string, string> = {
   computer_command: "🖥 高危本机操作（V5.5 审批门）",
   external_agent: "📤 外部 Agent 外发（V5.5 A3 审批门）",
 };
+
+/** 审批单正文：文件改动优先给 diff，其余字段才摊成 JSON。 */
+function ApprovalDetails({ payload }: { payload: Record<string, unknown> }) {
+  const preview = filePreviewOf(payload);
+  const json = JSON.stringify(approvalPayloadForDisplay(payload), null, 2);
+  return (
+    <>
+      {preview && <FileChangeCard preview={preview} />}
+      {json !== "{}" && (
+        <pre
+          className="text-xs mt-2 rounded-lg p-2 overflow-auto max-h-40 text-[var(--muted)]"
+          style={{ background: "rgba(0,0,0,0.25)" }}
+        >
+          {json}
+        </pre>
+      )}
+    </>
+  );
+}
 
 export default function InterventionPage() {
   const cid = useActiveCompanyId();
@@ -264,12 +285,7 @@ export default function InterventionPage() {
                     <p className="text-xs mt-1 text-[var(--muted)]">理由：{r.reason}</p>
                   )}
 
-                  {r.payload && (
-                    <pre className="text-xs mt-2 rounded-lg p-2 overflow-auto max-h-40 text-[var(--muted)]"
-                      style={{ background: "rgba(0,0,0,0.25)" }}>
-                      {JSON.stringify(r.payload, null, 2)}
-                    </pre>
-                  )}
+                  {r.payload && <ApprovalDetails payload={r.payload} />}
 
                   <div className="mt-2.5 flex gap-2">
                     <button
@@ -284,7 +300,7 @@ export default function InterventionPage() {
                       <button
                         onClick={() => decide(r.id, "approve", true)}
                         disabled={busyId === r.id}
-                        title="V5.6.1 工具级免批：同类操作（同能力+参数模式）后续自动放行，可撤销"
+                        title="V5.6.1 工具级免批：命令按命令串、文件写入只按这一个文件路径，后续同类操作自动放行，可撤销"
                         className="px-3 py-1 rounded-lg text-xs text-white disabled:opacity-50"
                         style={{ background: "#0e7490" }}
                       >

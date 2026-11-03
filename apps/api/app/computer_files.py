@@ -326,6 +326,51 @@ def _apply_patch_sync(params: dict) -> dict:
             "message": f"已备份原件后应用 {len(applied)} 处修改"}
 
 
+# 审批单要在建单时就带上「改哪几行」。这两个能力有内容可算，read_file 没有。
+PREVIEW_CAPABILITIES = ("write_file", "apply_patch")
+# 存进审批单的 diff 比给模型看的更短：待审批列表会一次拉出多条，
+# 每条都塞 20K 字符的 diff 等于把审批页变成文件浏览器。
+MAX_PREVIEW_DIFF_CHARS = 4_000
+
+
+def preview_file_op(capability: str, params: dict) -> dict:
+    """只演不写：算一次改动预览，供审批单展示。不写盘、不留备份。
+
+    为什么必须在建单时算：老板若只看到 params 的 200 字截断 JSON
+    （`write_file` 那串必然是被截断的文件正文），三档审批就退化成橡皮图章。
+    预演失败（锚点找不到、文件不是 UTF-8）照样建单，失败原因如实进预览，
+    而不是干脆不给看。
+    """
+    p = {**(params or {}), "dry_run": True}
+    try:
+        if capability == "write_file":
+            result = _write_file_sync(p)
+        elif capability == "apply_patch":
+            result = _apply_patch_sync(p)
+        else:
+            return {"available": False,
+                    "reason": f"{capability} 没有可预演的文件内容"}
+    except (FileOpError, OSError) as exc:
+        return {"available": False, "reason": str(exc),
+                "path": str((params or {}).get("path") or "")}
+
+    diff = str(result.get("diff") or "")
+    return {
+        "available": True,
+        "path": result.get("path"),
+        "changed": bool(result.get("changed")),
+        # 新建文件没有「原件」可回滚，审批页要单独标出来
+        "create": capability == "write_file" and result.get("existed") is False,
+        "hunks": int(result.get("hunks") or 0),
+        "added_lines": int(result.get("added_lines") or 0),
+        "removed_lines": int(result.get("removed_lines") or 0),
+        "edits": len(result.get("edits") or []),
+        "diff": diff[:MAX_PREVIEW_DIFF_CHARS],
+        "diff_truncated": (bool(result.get("diff_truncated"))
+                           or len(diff) > MAX_PREVIEW_DIFF_CHARS),
+    }
+
+
 async def read_file(params: dict) -> dict:
     return await asyncio.to_thread(_read_file_sync, params or {})
 

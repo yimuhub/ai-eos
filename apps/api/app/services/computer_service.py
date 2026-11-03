@@ -17,12 +17,14 @@
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.computer_agent import ComputerActionLog, ComputerPermission
+from app.computer_files import PREVIEW_CAPABILITIES, preview_file_op
 from app.computer_real import EXTENDED_CAPABILITIES, REAL_EXECUTORS
 from app.core.logging_config import get_logger
 
@@ -60,6 +62,23 @@ HIGH_RISK_CAPABILITIES = frozenset({
 })
 
 
+# 「始终允许」勾选项按什么界定"同一类操作"。文件写入只能按路径：正文每次都不
+# 一样，取错字段的后果是 pattern 落成空串，而空串在白名单里的意思是
+# 「该能力全部放行」——批一次就能往任意路径覆盖任意文件，审批门当场失效。
+PATH_SCOPED_CAPABILITIES = frozenset({"read_file", "write_file", "apply_patch"})
+
+
+def whitelist_pattern_for(capability: str, params: dict) -> str:
+    p = params or {}
+    if capability in PATH_SCOPED_CAPABILITIES:
+        path = str(p.get("path") or "").strip()
+        # 带引号：匹配的是 params 序列化后的 "path" 字段值本身，
+        # 别的参数（正文）里恰好提到同一段路径不会误命中
+        return f'"{path}"' if path else ""
+    return str(p.get("cmd") or p.get("command") or p.get("text")
+               or p.get("task_input") or "")[:300]
+
+
 async def _legacy_needs_approval(db: AsyncSession, company_id: str) -> bool:
     """公司还没配过三档策略时的旧门：干预策略勾了 computer_command 才拦。"""
     from app.models.intervention import InterventionPolicy
@@ -69,6 +88,24 @@ async def _legacy_needs_approval(db: AsyncSession, company_id: str) -> bool:
             InterventionPolicy.company_id == company_id,
             InterventionPolicy.project_id.is_(None)))).scalars().first()
     return bool(policy and "computer_command" in (policy.approval_actions or []))
+
+
+def _preview_summary(preview: dict) -> str:
+    """改动预览压成一行——推送和收件箱只显示 reason，这里不说清就等于没说。"""
+    path = str(preview.get("path") or "")
+    if not preview.get("available"):
+        return f"{path or '（路径未知）'} 预演失败：{preview.get('reason')}"
+    if not preview.get("changed"):
+        return f"{path} 内容与现状一致，批准也不会改盘"
+    if preview.get("create"):
+        return f"新建 {path}（+{preview.get('added_lines')} 行）"
+    line = (f"{path}：+{preview.get('added_lines')} 行 / "
+            f"-{preview.get('removed_lines')} 行，{preview.get('hunks')} 处改动")
+    if preview.get("edits"):
+        line += f"（{preview.get('edits')} 处替换）"
+    if preview.get("diff_truncated"):
+        line += "（diff 过长已截断）"
+    return line
 
 
 async def approval_gate(db: AsyncSession, *, company_id: str, capability: str,
@@ -121,12 +158,20 @@ async def approval_gate(db: AsyncSession, *, company_id: str, capability: str,
     from app.models.intervention import ApprovalRequest, new_id
     from app.services.notification_service import notify_approval_pending
 
-    reason = (f"高危本机操作 {capability}（{verdict['reason']}）: "
-              f"{json.dumps(params, ensure_ascii=False)[:200]}")
+    # 文件写/补丁：建单前先只演不写算一次 diff。老板点「批准」时看到的必须
+    # 是「哪个文件、加几行删几行」，而不是被截断成正好 200 字的文件正文。
+    preview: dict | None = None
+    if capability in PREVIEW_CAPABILITIES:
+        preview = await asyncio.to_thread(preview_file_op, capability, params)
+
+    detail = (f"改动预览：{_preview_summary(preview)}" if preview is not None
+              else json.dumps(params, ensure_ascii=False)[:200])
+    reason = f"高危本机操作 {capability}（{verdict['reason']}）: {detail}"
     req = ApprovalRequest(
         id=new_id(), company_id=company_id, action_type="computer_command",
         payload={"capability": capability, "params": params,
-                 "agent_id": agent_id, "awaiting_execution": True},
+                 "agent_id": agent_id, "awaiting_execution": True,
+                 "preview": preview},
         requested_by_agent_id=agent_id, reason=reason)
     db.add(req)
     await notify_approval_pending(

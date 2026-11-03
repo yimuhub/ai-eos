@@ -31,6 +31,7 @@ import {
   validateDeclineComment,
   type Tone,
 } from "@/lib/mobile";
+import { ApprovalFilePreview } from "@/components/FileChangePreview";
 
 type Tab = "accept" | "approve" | "sessions";
 
@@ -875,6 +876,7 @@ export default function MobilePage() {
                     <p className="mt-1 break-words text-[11px] leading-relaxed text-[var(--muted)]">
                       {r.reason || "未填写原因"}
                     </p>
+                    <ApprovalFilePreview payload={r.payload} maxHeightClass="max-h-40" />
                     <div className="mt-3 flex gap-2">
                       <button
                         type="button"
