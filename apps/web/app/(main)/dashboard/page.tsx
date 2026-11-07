@@ -241,7 +241,10 @@ export default function DashboardPage() {
         ? `\n\n📎 附件：${ntAttach.map((a) => a.name).join("、")}`
         : "";
       // 改走统一 api 层：自动注入鉴权、超时、错误规范化（原先裸 fetch + 手工拼 token）
-      const data = await api.post<{ created_count?: number }>(
+      // 分发即启动：不传 auto_start 时后端默认开工，这里显式写明意图
+      const data = await api.post<{
+        created_count?: number; started_count?: number; queued_count?: number;
+      }>(
         "/task-dispatch/dispatch",
         {
           company_id: company?.id,
@@ -251,9 +254,13 @@ export default function DashboardPage() {
           priority: ntForm.priority,
           target_type: "multi_agent_list",
           agent_ids: Array.from(picked),
+          auto_start: true,
         },
       );
-      notify("success", `已创建任务「${ntForm.title.trim()}」· 分发给 ${data?.created_count ?? picked.size} 名成员`);
+      notify("success",
+        `已创建任务「${ntForm.title.trim()}」· 分发给 ${data?.created_count ?? picked.size} 名成员`
+        + (data?.started_count ? `，${data.started_count} 个已开工` : "")
+        + (data?.queued_count ? `，${data.queued_count} 个排队中` : ""));
       setShowCreate(false);
       setNtForm({ title: "", description: "", priority: "NORMAL" });
       setPicked(new Set()); setNtAttach([]);

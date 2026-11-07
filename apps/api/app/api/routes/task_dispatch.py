@@ -31,9 +31,10 @@ class DispatchIn(BaseModel):
     agent_ids: list[str] = []          # single_agent / multi_agent_list 用
     department_ids: list[str] = []     # agent_org 用（支持多部门）
     priority: str = "NORMAL"           # LOW|NORMAL|HIGH|URGENT
-    # 创建后立即开工：队满时未启动的保留 auto_start 标记，由调度循环
-    # 在 worker 空闲后拉起（见 app/task_runner.py）。默认关闭，保持老行为。
-    auto_start: bool = False
+    # 分发即启动：队满时未启动的保留 auto_start 标记，由调度循环在 worker
+    # 空闲后拉起（见 app/task_runner.py）。默认开工——"派活"不启动等于
+    # 往待办里扔死行，用户还要再逐条点一次启动。
+    auto_start: bool = True
 
 
 async def _resolve_targets_async(db: AsyncSession, data: DispatchIn) -> list[Agent]:
@@ -153,6 +154,47 @@ async def dispatch_tasks(data: DispatchIn,
                    "status": status_of.get(t.id, "TODO")}
                   for t, a in created],
     }
+
+
+class StartTasksIn(BaseModel):
+    company_id: str
+    task_ids: list[str]
+
+
+@router.post("/start")
+async def start_tasks(data: StartTasksIn,
+                      db: AsyncSession = Depends(get_db),
+                      user=Depends(get_current_user)):
+    """批量启动选中的待办任务。
+
+    只处理 TODO：PAUSED 要走 /tasks/{id}/resume（恢复检查点），FAILED 要走
+    /tasks/{id}/retry（重试语义不同）。逐条回报原因，一条失败不影响其余。
+    """
+    await assert_company_capability(db, user.id, data.company_id,
+                                    Capability.OPERATE)
+    from app.task_runner import start_task as _start
+
+    started, queued, skipped = [], [], []
+    for tid in data.task_ids:
+        task = await db.get(Task, tid)
+        if task is None or task.company_id != data.company_id:
+            skipped.append({"task_id": tid, "reason": "不存在或无权限"})
+            continue
+        if task.status != TaskStatus.TODO:
+            skipped.append({"task_id": tid,
+                            "reason": f"状态 {task.status.value} 不能启动"})
+            continue
+        result = await _start(db, task, actor_type="user", actor_id=user.id)
+        if result["started"]:
+            started.append(tid)
+        elif result["reason"] == "queue_full":
+            # 队列满不是失败：任务退回 TODO 且保留自动拉起标记
+            queued.append(tid)
+        else:
+            skipped.append({"task_id": tid, "reason": result["reason"]})
+
+    return {"started_count": len(started), "queued_count": len(queued),
+            "started": started, "queued": queued, "skipped": skipped}
 
 
 class PriorityUpdateIn(BaseModel):

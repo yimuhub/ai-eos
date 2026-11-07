@@ -106,6 +106,7 @@ export default function TasksPage() {
   const [showBatchDelete, setShowBatchDelete] = useState(false);
   const [batchSel, setBatchSel] = useState<Set<string>>(new Set());
   const [batchDeleting, setBatchDeleting] = useState(false);
+  const [batchStarting, setBatchStarting] = useState(false);
 
   // 新建任务（仿项目中心）
   const [mounted, setMounted] = useState(false);
@@ -337,6 +338,28 @@ export default function TasksPage() {
     setBusyId(null);
   }
 
+  /* ---------- 批量启动：当前筛选里所有待办一起开工 ---------- */
+  async function startTodoTasks() {
+    const ids = filtered
+      .filter((t) => t.status === "TODO" && t.assigned_agent_id)
+      .map((t) => t.id);
+    if (!ids.length) { setMsg("当前列表没有可启动的待办任务"); return; }
+    setBatchStarting(true);
+    try {
+      const data = await api.post<{
+        started_count: number; queued_count: number;
+        skipped: { reason: string }[];
+      }>("/task-dispatch/start", { company_id: cid, task_ids: ids });
+      setMsg(
+        `▶ 已启动 ${data.started_count} 个任务`
+        + (data.queued_count ? `，${data.queued_count} 个排队中` : "")
+        + (data.skipped.length ? `，${data.skipped.length} 个跳过` : ""),
+      );
+      await load();
+    } catch (e) { setMsg(`❌ ${describeError(e, "批量启动失败")}`); }
+    setBatchStarting(false);
+  }
+
   /* ---------- 批量删除（复用 task-dispatch delete API）---------- */
   async function batchDeleteTasks() {
     if (!batchSel.size) return;
@@ -437,6 +460,14 @@ export default function TasksPage() {
                 );
               })}
             </div>
+            {view === "all" && filtered.some((t) => t.status === "TODO") && (
+              <button onClick={startTodoTasks} disabled={batchStarting}
+                className="btn-ghost">
+                {batchStarting
+                  ? "启动中…"
+                  : `▶ 启动待办（${filtered.filter((t) => t.status === "TODO").length}）`}
+              </button>
+            )}
             {view === "all" && (
               <button onClick={() => { setShowBatchDelete(true); setBatchSel(new Set()); }}
                 className="btn-ghost">🗑 批量删除</button>
@@ -604,7 +635,11 @@ export default function TasksPage() {
               <div className="mt-auto pt-3 mt-3 border-t flex gap-1.5 opacity-0 group-hover:opacity-100 transition-all duration-200"
                 style={{ borderColor: "var(--border)" }}
                 onClick={(e) => e.stopPropagation()}>
-                  {t.status === "PAUSED" ? (
+                  {t.status === "TODO" ? (
+                    <button onClick={() => control(t.id, "start")} disabled={isBusy}
+                      className="flex-1 text-[11px] py-1.5 rounded-lg hover:bg-indigo-500/12 text-indigo-300 transition-colors disabled:opacity-40"
+                      style={{ border: "1px solid rgba(99,102,241,0.35)" }}>▶ 启动</button>
+                  ) : t.status === "PAUSED" ? (
                     <button onClick={() => control(t.id, "resume")}
                       className="flex-1 text-[11px] py-1.5 rounded-lg hover:bg-emerald-500/12 text-emerald-300 transition-colors"
                       style={{ border: "1px solid rgba(16,185,129,0.3)" }}>▶ 恢复</button>

@@ -65,10 +65,14 @@ async def transition(
     # 抢占式 CAS：只有"读到的旧状态"仍然是库里当前状态时才会命中一行。
     # synchronize_session=False：内存对象由下面 set_committed_value 精确同步，
     # 不让 SQLAlchemy 自己猜（它可能把 object 标脏，反而在后续 flush 覆盖别人）。
+    # 完成即 100%：进度条此前只读不写，已完成的任务也停在 0%。
+    values: dict = {"status": new_status}
+    if new_status == TaskStatus.COMPLETED:
+        values["progress"] = 1.0
     res = await db.execute(
         update(Task)
         .where(Task.id == task.id, Task.status == old)
-        .values(status=new_status)
+        .values(**values)
         .execution_options(synchronize_session=False)
     )
     if res.rowcount != 1:
@@ -78,6 +82,8 @@ async def transition(
     # 把新状态写成"已提交值"：调用方后续读 task.status 拿到的是新状态，
     # 但不会把它当未保存修改再写一遍。
     set_committed_value(task, "status", new_status)
+    if new_status == TaskStatus.COMPLETED:
+        set_committed_value(task, "progress", 1.0)
 
     db.add(
         TaskEvent(

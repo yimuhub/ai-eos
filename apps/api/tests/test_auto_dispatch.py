@@ -17,6 +17,7 @@ import app.background_jobs as background_jobs
 from app.api.routes import task_dispatch
 from app.db.session import AsyncSessionLocal
 from app.models.task import Task, TaskPriority, TaskStatus
+from app.task_engine import transition
 from app.task_runner import dispatch_auto_queue, start_task
 
 
@@ -130,6 +131,107 @@ async def test_dispatch_rejects_other_tenants_agent(client, tenants, monkeypatch
 
     async with AsyncSessionLocal() as s:
         assert (await s.execute(select(Task))).scalars().all() == [], "越权请求不能落库"
+
+
+async def test_dispatch_without_flag_starts_immediately(client, tenants, monkeypatch):
+    """分发即启动：不传 auto_start 也必须开工（默认 True）。"""
+    alice, co = tenants.alice, tenants.alice_co
+    agent = await _make_agent(client, alice, co["id"])
+    submitted: list[str] = []
+    monkeypatch.setattr(background_jobs, "submit_async",
+                        lambda fn, *a, **kw: submitted.append("job"))
+
+    r = await client.post("/task-dispatch/dispatch", json={
+        "company_id": co["id"], "title": "默认开工", "target_type": "single_agent",
+        "agent_ids": [agent["id"]],
+    }, headers=alice["headers"])
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["started_count"] == 1
+    assert submitted
+
+
+async def test_batch_start_only_starts_todo(client, tenants, monkeypatch):
+    alice, co = tenants.alice, tenants.alice_co
+    agent = await _make_agent(client, alice, co["id"])
+    monkeypatch.setattr(background_jobs, "submit_async",
+                        lambda fn, *a, **kw: "future")
+
+    async with AsyncSessionLocal() as s:
+        ids = []
+        for i in range(2):
+            t = Task(company_id=co["id"], title=f"待办{i}",
+                     status=TaskStatus.TODO, assigned_agent_id=agent["id"],
+                     created_by=alice["id"])
+            s.add(t)
+            await s.flush()
+            ids.append(t.id)
+        done = Task(company_id=co["id"], title="已完成",
+                    status=TaskStatus.COMPLETED,
+                    assigned_agent_id=agent["id"], created_by=alice["id"])
+        s.add(done)
+        await s.flush()
+        done_id = done.id
+        await s.commit()
+
+    r = await client.post("/task-dispatch/start", json={
+        "company_id": co["id"], "task_ids": [*ids, done_id],
+    }, headers=alice["headers"])
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["started_count"] == 2
+    assert set(body["started"]) == set(ids)
+    assert [x["task_id"] for x in body["skipped"]] == [done_id]
+    assert "COMPLETED" in body["skipped"][0]["reason"]
+
+    async with AsyncSessionLocal() as s:
+        for tid in ids:
+            assert (await s.get(Task, tid)).status == TaskStatus.RUNNING
+
+
+async def test_batch_start_reports_queue_full_as_queued(client, tenants, monkeypatch):
+    alice, co = tenants.alice, tenants.alice_co
+    agent = await _make_agent(client, alice, co["id"])
+    monkeypatch.setattr(background_jobs, "submit_async",
+                        lambda fn, *a, **kw: background_jobs.QUEUE_FULL)
+    async with AsyncSessionLocal() as s:
+        t = Task(company_id=co["id"], title="排队", status=TaskStatus.TODO,
+                 assigned_agent_id=agent["id"], created_by=alice["id"])
+        s.add(t)
+        await s.flush()
+        tid = t.id
+        await s.commit()
+
+    r = await client.post("/task-dispatch/start", json={
+        "company_id": co["id"], "task_ids": [tid],
+    }, headers=alice["headers"])
+    body = r.json()
+    assert body["started_count"] == 0
+    assert body["queued"] == [tid]
+    assert body["skipped"] == []
+    async with AsyncSessionLocal() as s:
+        t = await s.get(Task, tid)
+        assert t.status == TaskStatus.TODO
+        assert t.auto_start is True, "队满要给调度循环留下自动拉起标记"
+
+
+async def test_completed_task_progress_becomes_full(client, tenants):
+    alice, co = tenants.alice, tenants.alice_co
+    agent = await _make_agent(client, alice, co["id"])
+    async with AsyncSessionLocal() as s:
+        t = Task(company_id=co["id"], title="进度", status=TaskStatus.RUNNING,
+                 assigned_agent_id=agent["id"], created_by=alice["id"])
+        s.add(t)
+        await s.flush()
+        tid = t.id
+        await s.commit()
+
+    async with AsyncSessionLocal() as s:
+        t = await s.get(Task, tid)
+        await transition(s, t, TaskStatus.COMPLETED)
+
+    async with AsyncSessionLocal() as s:
+        assert (await s.get(Task, tid)).progress == 1.0
 
 
 async def test_resolve_targets_filters_by_company():
