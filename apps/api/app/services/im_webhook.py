@@ -19,7 +19,7 @@
 ## 失败姿态
 
 IM 是锦上添花：URL 非法、DNS 失败、对端 500、超时，全部只记 warning。
-发送用 ``httpx.AsyncClient(timeout=5)``，且有明确的 SSRF 防护：
+发送用 ``http_client(timeout=5)``（统一出站入口，不读系统代理变量），且有明确的 SSRF 防护：
 只允许 http/https，拒绝本机、链路本地、内网/保留地址与单标签主机名。
 
 重试/死信不在本模块范围内（队列已具备，后续可接）。
@@ -35,7 +35,7 @@ import os
 import time
 from urllib.parse import quote_plus, urlsplit
 
-import httpx
+from app.core.http_client import http_client
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -181,7 +181,7 @@ def build_payload(kind: str, title: str | None, body: str | None,
 async def _send_one(url: str, payload: dict) -> None:
     """POST 一次；任何异常只记 warning，绝不向上抛。"""
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
+        async with http_client(timeout=5) as client:
             resp = await client.post(url, json=payload)
             if resp.status_code >= 400:
                 logger.warning("[im_webhook] 发送失败 status=%s url=%s",

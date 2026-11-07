@@ -176,13 +176,13 @@ class APIAgentAdapter(AgentAdapter):
     """OpenAI 兼容远程 API Adapter。"""
 
     async def execute(self, task_input: str, config: dict | None = None) -> dict:
-        import httpx
+        from app.core.http_client import http_client
         endpoint = await validated_endpoint(self.conn)
         headers = {}
         key = self._resolve_api_key()
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        async with httpx.AsyncClient(timeout=60, trust_env=False) as client:
+        async with http_client(timeout=60) as client:
             resp = await client.post(
                 f"{endpoint}/chat/completions",
                 json={"messages": [{"role": "user", "content": task_input}],
@@ -198,11 +198,10 @@ class APIAgentAdapter(AgentAdapter):
         return {"reachable": ok, "provider": "api"}
 
     async def test_connection(self) -> dict:
-        import httpx
+        from app.core.http_client import http_client
         try:
             endpoint = await validated_endpoint(self.conn)
-            async with httpx.AsyncClient(timeout=10, trust_env=False,
-                                         follow_redirects=False) as client:
+            async with http_client(timeout=10, follow_redirects=False) as client:
                 resp = await client.get(endpoint)
             return {"ok": True, "http": resp.status_code}
         except Exception as e:
@@ -236,15 +235,14 @@ class McpHttpAgentAdapter(AgentAdapter):
         return {"reachable": bool(self.conn.endpoint), "provider": "mcp"}
 
     async def test_connection(self) -> dict:
-        import httpx
+        from app.core.http_client import http_client
         try:
             endpoint = await validated_endpoint(self.conn)
             headers = {}
             key = self._resolve_api_key()
             if key:
                 headers["Authorization"] = f"Bearer {key}"
-            async with httpx.AsyncClient(timeout=10, trust_env=False,
-                                         follow_redirects=False) as client:
+            async with http_client(timeout=10, follow_redirects=False) as client:
                 r = await client.post(endpoint, json={
                     "jsonrpc": "2.0", "id": 1, "method": "initialize",
                     "params": {}}, headers=headers)

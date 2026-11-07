@@ -23,6 +23,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.core.http_client import http_client
+
 from app.core.net_guard import OutboundURLRejected, validate_outbound_url_async
 from app.models.agent import ModelProviderType, ModelType
 
@@ -388,7 +390,7 @@ async def discover_models(provider_type: ModelProviderType, base_url: str,
     urls = _list_urls(provider_type, base)
     last_error = "无法连接该 base_url"
     try:
-        async with httpx.AsyncClient(timeout=DISCOVERY_TIMEOUT, trust_env=False,
+        async with http_client(timeout=DISCOVERY_TIMEOUT,
                                      follow_redirects=False) as client:
             for url in urls:
                 try:

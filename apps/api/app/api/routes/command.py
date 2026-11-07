@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.command_engine import command_execute, command_plan
+from app.core.http_client import http_client
 from app.core.logging_config import get_logger
 from app.core.permissions import require_company_scope
 from app.models.user import User
@@ -228,7 +229,7 @@ async def notify(data: NotifyIn, db: AsyncSession = Depends(get_db),
         raise HTTPException(400, f"webhook 不安全：{e}")
 
     try:
-        async with httpx.AsyncClient(timeout=15, trust_env=False,
+        async with http_client(timeout=15,
                                      follow_redirects=False) as cli:
             r = await cli.post(webhook, json=body)
     except httpx.HTTPError as e:

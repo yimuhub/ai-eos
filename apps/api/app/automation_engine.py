@@ -4,6 +4,7 @@ import json
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.http_client import http_client
 from app.core.logging_config import get_logger
 from app.models.automation import (AutomationDefinition, AutomationRunRecord,
                                    MAX_DEPTH, MAX_STEPS_PER_RUN, new_id)
@@ -92,8 +93,6 @@ async def _execute_step(db: AsyncSession, company_id: str, step: dict,
         return {"workflow_execution_id": ex.id, "workflow_id": wf_id}
 
     if stype == "call_webhook":
-        import httpx
-
         from app.core.net_guard import OutboundURLRejected, assert_peer_is_safe, \
             validate_outbound_url_async
 
@@ -113,7 +112,7 @@ async def _execute_step(db: AsyncSession, company_id: str, step: dict,
             safe_url = await validate_outbound_url_async(url)
         except OutboundURLRejected as exc:
             raise ValueError(f"call_webhook 地址被拒绝：{exc}") from exc
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with http_client(timeout=timeout) as client:
             async with client.stream(method, safe_url,
                                      headers=params.get("headers"),
                                      json=params.get("payload")) as resp:

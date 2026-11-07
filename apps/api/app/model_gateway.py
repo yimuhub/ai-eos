@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import contextvars
 
+from app.core.http_client import http_client
 from app.core.logging_config import get_logger
 from app.core.metrics import (
     LLM_DURATION_SECONDS,
@@ -67,7 +68,7 @@ def get_http_client() -> httpx.AsyncClient:
     loop = asyncio.get_running_loop()
     client = _http_clients.get(loop)
     if client is None:
-        client = httpx.AsyncClient(timeout=HTTP_TIMEOUT, limits=HTTP_LIMITS)
+        client = http_client(timeout=HTTP_TIMEOUT, limits=HTTP_LIMITS)
         _http_clients[loop] = client
     return client
 

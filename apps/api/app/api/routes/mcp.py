@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (assert_company_capability, assert_company_owned,
                           get_current_user, get_db)
+from app.core.http_client import http_client
 from app.core.permissions import Capability
 from app.core.scope import agent_read_scope, build_ctx
 from app.models.user import User
@@ -261,8 +262,6 @@ async def mcp_http_execute(endpoint: str, task_input: str,
       1. JSON：{"tool": "x", "arguments": {...}}（显式）
       2. 自然语言：先 tools/list 找工具，取第一个能匹配的（尽力而为）
     """
-    import httpx
-
     headers = {"Content-Type": "application/json",
                "Accept": "application/json, text/event-stream"}
     if bearer:
@@ -272,7 +271,7 @@ async def mcp_http_execute(endpoint: str, task_input: str,
         return {"jsonrpc": "2.0", "id": rid, "method": method,
                 "params": params or {}}
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with http_client(timeout=timeout) as client:
         body = task_input.strip()
         explicit = None
         try:

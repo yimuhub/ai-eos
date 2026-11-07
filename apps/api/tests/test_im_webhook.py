@@ -8,7 +8,6 @@ import asyncio
 import base64
 import hashlib
 import hmac
-from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -202,19 +201,16 @@ class _ErrorClient:
 
 
 async def test_send_failure_is_swallowed(monkeypatch):
-    monkeypatch.setattr(im_webhook, "httpx",
-                        SimpleNamespace(AsyncClient=_BoomClient))
+    monkeypatch.setattr(im_webhook, "http_client", lambda **kw: _BoomClient())
     await im_webhook._send_one(HOOK, {"x": 1})  # 不抛
 
-    monkeypatch.setattr(im_webhook, "httpx",
-                        SimpleNamespace(AsyncClient=_ErrorClient))
+    monkeypatch.setattr(im_webhook, "http_client", lambda **kw: _ErrorClient())
     await im_webhook._send_one(HOOK, {"x": 1})  # 500 也不抛
 
 
 async def test_business_commit_survives_http_failure(monkeypatch):
     _use_env(monkeypatch)
-    monkeypatch.setattr(im_webhook, "httpx",
-                        SimpleNamespace(AsyncClient=_BoomClient))
+    monkeypatch.setattr(im_webhook, "http_client", lambda **kw: _BoomClient())
     async with AsyncSessionLocal() as s:
         im_webhook.queue_notification(
             s, kind="approval.pending", title="待审批", body="b", link="/i")

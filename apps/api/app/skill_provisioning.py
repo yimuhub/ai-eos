@@ -33,6 +33,7 @@ import httpx
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.http_client import http_client
 from app.core.logging_config import get_logger
 from app.knowledge_engine import _tokens
 from app.models.agent import Agent, AgentModelConfig
@@ -211,8 +212,8 @@ async def _fetch_market_repo(client: httpx.AsyncClient, repo: dict,
 
 async def search_market_skills(query: str, limit: int = 5) -> list[dict]:
     """并发搜索公开技能市场；单仓库失败只跳过自己。"""
-    async with httpx.AsyncClient(timeout=MARKET_TIMEOUT_S,
-                                 follow_redirects=True) as client:
+    async with http_client(timeout=MARKET_TIMEOUT_S,
+                           follow_redirects=True) as client:
         per_repo = await asyncio.gather(
             *[_fetch_market_repo(client, repo, query) for repo in MARKET_REPOS],
             return_exceptions=True)
@@ -247,8 +248,8 @@ async def fetch_market_skill(raw_url: str) -> str:
         await validate_outbound_url_async(raw_url, allow_private=False)
     except OutboundURLRejected as e:
         raise ValueError(f"目标地址被出站安全策略拒绝: {e}")
-    async with httpx.AsyncClient(timeout=MARKET_TIMEOUT_S,
-                                 follow_redirects=False) as client:
+    async with http_client(timeout=MARKET_TIMEOUT_S,
+                           follow_redirects=False) as client:
         resp = await client.get(raw_url, headers={"User-Agent": "ai-eos"})
         if resp.status_code in (301, 302, 303, 307, 308):
             # 重定向目标不再自动跟随：换目标请直接传新地址重新校验

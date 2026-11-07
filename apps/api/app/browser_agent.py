@@ -20,6 +20,8 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from app.core.http_client import http_client
+
 from sqlalchemy import JSON, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -114,8 +116,7 @@ def _require_safe_hop(url: str) -> None:
 async def _fetch_static(url: str, timeout_s: float) -> httpx.Response:
     """手动逐跳跟随重定向（最多 5 跳），每跳先过 SSRF 闸门。"""
     headers = {"User-Agent": "AI-EOS-BrowserAgent/1.0"}
-    async with httpx.AsyncClient(follow_redirects=False, timeout=timeout_s,
-                                 trust_env=False) as client:
+    async with http_client(follow_redirects=False, timeout=timeout_s) as client:
         current = url
         for _ in range(_MAX_REDIRECTS + 1):
             _require_safe_hop(current)
