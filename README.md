@@ -4,13 +4,13 @@
 
 **The AI-Native Enterprise Operating System — Found an AI Company, Hire Digital Employees, Delegate Work**
 
-[![Phase](https://img.shields.io/badge/version-v5.15.0-blue.svg?style=flat-square)](#-latest-v5150)
+[![Phase](https://img.shields.io/badge/version-v5.16.0-blue.svg?style=flat-square)](#-latest-v5160)
 [![License: BSL 1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12+-green.svg?style=flat-square)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688.svg?style=flat-square)](https://fastapi.tiangolo.com)
 [![Next.js](https://img.shields.io/badge/frontend-Next.js%2014-black.svg?style=flat-square)](https://nextjs.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20Docker-blueviolet.svg?style=flat-square)](#-quick-start)
-[![Tests](https://img.shields.io/badge/tests-171%20passing-green.svg?style=flat-square)](#-testing)
+[![Tests](https://img.shields.io/badge/tests-1181%20passing-green.svg?style=flat-square)](#-testing)
 
 <p align="center">
   <b>One Command. A Whole Company at Work.</b><br>
@@ -19,7 +19,7 @@
 
 **English** • [简体中文说明](README_ZH.md)
 
-[✨ Features](#-core-features) • [🚀 Quick Start](#-quick-start) • [🏗️ Architecture](#-system-architecture) • [🧪 Testing](#-testing) • [📦 Latest](#-latest-v5140) • [📜 License](#-license--copyright-terms)
+[✨ Features](#-core-features) • [🚀 Quick Start](#-quick-start) • [🏗️ Architecture](#-system-architecture) • [🧪 Testing](#-testing) • [📦 Latest](#-latest-v5160) • [📜 License](#-license--copyright-terms)
 
 </div>
 
@@ -112,7 +112,7 @@ flowchart TD
     Engines --> Storage
 ```
 
-**Scale (measured from source, v5.15.0)**: backend 42,836 lines / 203 files / 471 operations over 408 paths / 100 tables / 39 Alembic revisions (legacy 34 + baseline 0001–0005); frontend 39,463 lines / 51 page routes; backend suite **781 tests** (plus 38 e2e checks).
+**Scale (measured from source, v5.16.0)**: backend 61,697 lines / 258 files / 564 operations over 488 paths / 130 tables / 50 Alembic revisions (legacy 33 + baseline 0001–0017); frontend 51,605 lines / 58 page routes; backend suite **1,181 tests** (plus 38 e2e checks); frontend suite **264 tests**.
 
 > Two honest caveats, because "it works" and "it's been verified" are different claims:
 > - **`alembic upgrade head` is PostgreSQL-only.** One historical migration (`23e9b97bb927`) hits SQLite's
@@ -187,15 +187,28 @@ The script installs system dependencies, pulls the code (the repo is private —
 ## 🧪 Testing
 
 ```bash
-cd apps/api && uv run pytest        # 171 passed, 1 skipped
-cd apps/web && npm run test          # vitest (frontend)
+cd apps/api && uv run pytest        # 1,181 tests
+cd apps/web && npm run test          # 264 tests (vitest + Testing Library)
 ```
 
 > ⚠️ When running `test_auth.py`, **do not start a local Redis** — the test asserts on the in-memory rate-limit dict, and a live Redis would route limiting through the Redis path instead.
 
 ---
 
-## 📦 Latest: v5.15.0
+## 📦 Latest: v5.16.0
+
+*From one machine to many: remote execution devices, five-dimension audit fixes and the commercial loop closed — 2026-11-07. Full entry in [`CHANGELOG.md`](CHANGELOG.md).*
+
+- 🖥 **Work can be executed on another machine.** A sidecar on the target machine reports heartbeats, claims commands and returns results; the server only decides *whether* it is allowed, the sidecar enforces a second local guard. Pairing codes are single-use and stored hashed, claims are CAS so two sidecars never run the same command, and an approval freezes the device it was created for — a named remote device never silently falls back to the host machine.
+- 🧭 **The computer agent gained eyes and hands without screenshots.** A macOS accessibility-tree executor, real file read/write + patch with a diff preview on the approval card, a shell whitelist that can see repository code (runtime DB and `.git` stay closed), and three-tier plugin permissions.
+- 🏗 **Company building.** Materials → analysis → review → apply org synthesis (migration 0013), plus a two-level provider/model config center with an encrypted key vault.
+- 🔁 **Dispatching a job starts it.** `auto_start` is the default (queue-full is reported as "queued"), single and batch start from the task list, and completed tasks show 100% — not "completed at 87%".
+- 🧾 **The acceptance loop is closed.** Finishing a task creates an artifact linked to it, so the inbox's "to accept" bucket is no longer always empty; acceptance is idempotent and a decline requires a 1–2000 character reason.
+- 💳 **Commercial rails are enforced.** Seat and monthly-token quotas are checked when hiring and before every LLM call; upgrades and renewals require an order that only a platform operator can mark as paid — no self-service free upgrade. BYOK keys now resolve at the gateway (agent → company → platform), and member invites (migration 0017) let colleagues join with a one-time link without sharing a password.
+- 🔐 **Security and hygiene.** The device guard can no longer be bypassed with newlines, `&&` or pipes (each command is checked separately); all outbound HTTP uses `trust_env=False` so a dev machine's `HTTP_PROXY` can't intercept provider keys; broad `except: pass` is now a static-check failure; file-handle leaks and sync disk IO in async endpoints are fixed.
+- 🧪 **Quality.** Backend suite **1,181 tests**; frontend **264 tests**, including 10 new component tests that render the real pages for accept/decline, dispatch/start and model connectivity, mocking only the API boundary. `tsc --noEmit` and `next lint` are clean. Timestamps are UTC with `Z` end-to-end and rendered in the browser's local zone; billing, event logs and per-agent delivery bundles are exportable (CSV / JSON / zip).
+
+### Previous: v5.15.0
 
 *From audit to nine: contracts, deliverable loop, multi-device and security closed — 2026-11-01. Full entry in [`CHANGELOG.md`](CHANGELOG.md).*
 

@@ -4,13 +4,13 @@
 
 **AI 企业操作系统 —— 创建一家 AI 公司，雇佣数字员工，把工作交代下去**
 
-[![阶段](https://img.shields.io/badge/version-v5.15.0-blue.svg?style=flat-square)](#-最新动态v5150)
+[![阶段](https://img.shields.io/badge/version-v5.16.0-blue.svg?style=flat-square)](#-最新动态v5160)
 [![许可证: BSL 1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12+-green.svg?style=flat-square)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688.svg?style=flat-square)](https://fastapi.tiangolo.com)
 [![Next.js](https://img.shields.io/badge/frontend-Next.js%2014-black.svg?style=flat-square)](https://nextjs.org/)
 [![平台](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20Docker-blueviolet.svg?style=flat-square)](#-快速开始)
-[![测试](https://img.shields.io/badge/tests-171%20通过-green.svg?style=flat-square)](#-测试)
+[![测试](https://img.shields.io/badge/tests-1181%20通过-green.svg?style=flat-square)](#-测试)
 
 <p align="center">
   <b>一声令下，全公司为你开工</b><br>
@@ -19,7 +19,7 @@
 
 [English](README.md) • **简体中文**
 
-[✨ 核心功能](#-核心功能) • [🚀 快速开始](#-快速开始) • [🏗️ 系统架构](#-系统架构) • [🧪 测试](#-测试) • [📦 最新动态](#-最新动态v5140) • [📜 许可协议](#-许可与版权说明)
+[✨ 核心功能](#-核心功能) • [🚀 快速开始](#-快速开始) • [🏗️ 系统架构](#-系统架构) • [🧪 测试](#-测试) • [📦 最新动态](#-最新动态v5160) • [📜 许可协议](#-许可与版权说明)
 
 </div>
 
@@ -113,7 +113,7 @@ flowchart TD
     Engines --> Storage
 ```
 
-**规模（v5.15.0 源码实测）**：后端 42,836 行 / 203 文件 / 408 条路径共 471 个操作 / 100 张表 / 39 个 Alembic 版本文件（历史 34 + 基线 0001–0005）；前端 39,463 行 / 51 个页面路由；后端测试 **781 项**（含 e2e 38 项）。
+**规模（v5.16.0 源码实测）**：后端 61,697 行 / 258 文件 / 488 条路径共 564 个操作 / 130 张表 / 50 个 Alembic 版本文件（历史 33 + 基线 0001–0017）；前端 51,605 行 / 58 个页面路由；后端测试 **1,181 项**（含 e2e 38 项）；前端测试 **264 项**。
 
 > 两条如实说明，因为"能跑"和"验证过"不是一回事：
 > - **`alembic upgrade head` 只支持 PostgreSQL。** 历史迁移 `23e9b97bb927` 在 SQLite 上会抛
@@ -189,17 +189,28 @@ chmod +x 服务器一键部署.sh && ./服务器一键部署.sh
 ## 🧪 测试
 
 ```bash
-cd apps/api && uv run pytest        # 后端 171 通过、1 跳过
-cd apps/web && npm run test          # 前端 vitest
+cd apps/api && uv run pytest        # 1,181 项
+cd apps/web && npm run test          # 前端 264 项（vitest + Testing Library）
 ```
 
 > ⚠️ 跑 `test_auth.py` 时**不要启动本地 Redis**——该测试断言的是内存限流字典，起了 Redis 会走 Redis 通道导致断言失败。
 
 ---
 
-## 📦 最新动态：v5.15.0
+## 📦 最新动态：v5.16.0
 
-*从审查到九分：契约、交付、多端与安全收口 — 2026-11-01。完整记录见 [`CHANGELOG.md`](CHANGELOG.md)。*
+*从一台机器到多台机器：远程执行设备、五维实测缺陷收口与商业闭环 — 2026-11-07。完整记录见 [`CHANGELOG.md`](CHANGELOG.md)。*
+
+- 🖥 **活可以交给另一台机器干。** 目标机器上跑 sidecar：报心跳、领命令、交结果；服务端只判「该不该做」，设备端再过一道本地护栏。接入码一次性且只存哈希，领取走 CAS（两台 sidecar 不会重复执行同一条命令），审批单冻结目标设备——指名远程机器就绝不悄悄回落到本机。
+- 🧭 **电脑操作有了眼睛和手（不靠截图）。** macOS 无障碍树执行器；真正的读写文件与打补丁，审批单上直接显示改了哪几行；命令行能看到仓库代码（运行期数据库与 `.git` 仍关死）；插件库与三档电脑权限。
+- 🏗 **建公司更省事。** 资料 → 分析 → 审阅 → 应用的组织架构自动生成；供应商 / 模型两级配置中心 + 加密密钥库。
+- 🔁 **派活即开工。** 分发默认 `auto_start=true`（队满明确提示「排队中」），列表可单条或批量启动，完成态显示 100%，不再是「已完成但 87%」。
+- 🧾 **验收闭环真的通了。** 任务完成自动生成交付物并挂到任务上，收件箱「待验收」不再永远空着；验收幂等，退回必须写 1–2000 字意见。
+- 💳 **商业化真正生效。** 席位与月度 token 配额在招人、每次 LLM 调用前强制检查；升级/续费必须建订单，只有平台运营能标记已支付——自助免费升级的口子关掉。BYOK 客户的 Key 在网关按「员工 → 公司 → 平台」解析并真正生效；成员邀请链接让同事自己注册加入，密码不经过老板。
+- 🔐 **安全与工程卫生。** 设备护栏不再能被换行、`&&`、管道绕过（逐条命令单独检查）；所有出站 HTTP 统一 `trust_env=False`，开发机的 `HTTP_PROXY` 劫持不了厂商密钥；宽捕获吞异常纳入静态门禁；文件句柄泄漏与异步端点里的同步磁盘 IO 一并修掉。
+- 🧪 **质量。** 后端全量 **1,181 项**；前端 **264 项**，其中新增 10 条组件测试对「验收/退回」「派活/启动」「模型连通性测试」渲染真实页面、只在 API 边界打桩；`tsc --noEmit` 与 `next lint` 0 错。时刻端到端 UTC 带 `Z`、页面按本地钟显示；账单、工作记录、按员工打包的交付物都能导出（CSV / JSON / zip）。
+
+### 上一轮：v5.15.0
 
 - 🛡 **接口契约稳定。** 所有错误统一为 `{detail, code, message, request_id}`，`/api/v1` 与原路径等价；核心业务路由（员工/任务/项目/交付/评审/调度/技能/学习/绩效/反思）的 2xx 操作 **90%** 声明了 `response_model`（113 个模型类），棘轮测试防止回退；全库 113/471。
 - 🧾 **交付闭环。** 交付物关联任务、验收/退回（幂等）、评论；任务收件箱四桶（进行中/待验收/完成/失败），「提交 → 验收」成为真实流程。
