@@ -10,6 +10,7 @@
 7. POST /war-room/tasks/{tid}/review 可视化审核（负责人审 / 老板人工干预）
 8. POST /war-room/{sid}/finalize    全部通过 → 负责人整合最终产出物
 """
+import asyncio
 import logging
 import re
 import shutil
@@ -99,17 +100,19 @@ async def _render_and_register_file(*, session: AsyncSession, company_id: str,
     if fmt == "md":
         fname = fname_hint or f"{_safe_filename(title)}.md"
         fpath = session_dir / fname
-        fpath.write_text(content, encoding="utf-8")
+        await asyncio.to_thread(fpath.write_text, content, encoding="utf-8")
         size, mime = len(content.encode("utf-8")), "text/markdown"
     else:
-        gen = generate_document(fmt, title, content, agent_id=agent_id)
+        # 渲染 Office 文件是 CPU + 磁盘重活，同步跑会把整个事件循环卡住。
+        gen = await asyncio.to_thread(generate_document, fmt, title, content,
+                                      agent_id=agent_id)
         src = Path(gen["file_path"])
         fname, fpath = gen["file_name"], src
         size, mime = gen["size"], gen["mime"]
         try:
             target = session_dir / fname
             if src.resolve() != target.resolve():
-                shutil.move(str(src), str(target))
+                await asyncio.to_thread(shutil.move, str(src), str(target))
                 fpath = target
         except OSError as e:
             # 移动失败（跨盘/权限）不丢弃已渲染文件：保留 artifacts 下的路径

@@ -47,7 +47,8 @@ def _load_preset(pid: str) -> dict:
     path = os.path.join(_groups_dir(), f"{pid}.json")
     if not os.path.isfile(path):
         raise HTTPException(404, f"群聊分组 {pid} 不存在")
-    return json.load(open(path, encoding="utf-8"))
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 def _presets() -> list[dict]:
@@ -57,7 +58,8 @@ def _presets() -> list[dict]:
     out = []
     for f in sorted(os.listdir(d)):
         if f.endswith(".json"):
-            out.append(json.load(open(os.path.join(d, f), encoding="utf-8")))
+            with open(os.path.join(d, f), encoding="utf-8") as fh:
+                out.append(json.load(fh))
     return out
 
 

@@ -5,6 +5,7 @@ GET /diagnostics（鉴权）：跑一组检查项，每项返回
 所有检查都是只读、快速（<2s），失败项不抛异常——诊断的目的就是
 在坏的时候还能告诉你哪坏了。
 """
+import asyncio
 import shutil
 import socket
 import time
@@ -68,7 +69,7 @@ async def run_diagnostics(
         mf = mdir / "manifest.json"
         if mf.exists():
             import json
-            m = json.loads(mf.read_text())
+            m = json.loads(await asyncio.to_thread(mf.read_text))
             nfiles = len(m.get("files", {})) if isinstance(m, dict) else 0
             add("自动升级通道", True,
                 f"manifest 最新版 {m.get('latest', '?')}，{nfiles} 个平台文件")

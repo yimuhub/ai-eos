@@ -1,4 +1,5 @@
 """Asset Center: upload / list / download; runtime artifacts auto-saved."""
+import asyncio
 import mimetypes
 import uuid
 from pathlib import Path
@@ -69,7 +70,8 @@ async def save_artifact(db: AsyncSession, company_id: str, name: str, content: s
     # 落盘只用 basename，保证文件一定在 artifacts/ 内（审查 S9 同一根因）。
     fname = f"{uuid.uuid4().hex[:8]}_{safe_original_name(name)}"
     fpath = ensure_within(root, root / "artifacts" / fname)
-    fpath.write_text(content, encoding="utf-8")
+    # 写盘是同步阻塞调用：放在事件循环里会卡住同进程的所有请求。
+    await asyncio.to_thread(fpath.write_text, content, encoding="utf-8")
     ext = fpath.suffix.lower()
     atype = AssetType.REPORT if any(h in name.lower() for h in REPORT_HINTS) \
         else EXT_TYPE.get(ext, AssetType.OTHER)

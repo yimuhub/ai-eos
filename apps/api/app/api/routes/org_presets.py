@@ -57,7 +57,8 @@ def _load_preset(pid: str) -> dict:
     p = os.path.join(_presets_dir(), f"{pid}.json")
     if not os.path.isfile(p):
         raise HTTPException(404, f"组织形态预设 {pid} 不存在")
-    return json.load(open(p, encoding="utf-8"))
+    with open(p, encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 @router.get("")
@@ -73,7 +74,8 @@ async def list_presets():
     for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
         if not f.endswith(".json"):
             continue
-        obj = json.load(open(os.path.join(d, f), encoding="utf-8"))
+        with open(os.path.join(d, f), encoding="utf-8") as fh:
+            obj = json.load(fh)
         posts = sum(len(dp.get("agents", [])) for dp in obj.get("departments", []))
         out.append({
             "id": obj.get("id", f[:-5]),

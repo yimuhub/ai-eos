@@ -8,8 +8,10 @@
   POST   /experts/search            P1 自然语言找专家（LLM 检索 Top3）
   POST   /experts/team              P2 一句话组建专家团队（批量蓝图）
 """
+import asyncio
 import os
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -79,8 +81,8 @@ async def import_experts(
         if base.startswith("examples"):
             continue
         try:
-            with open(os.path.join(vdir, fname), encoding="utf-8") as fh:
-                text = fh.read()
+            text = await asyncio.to_thread(
+                Path(os.path.join(vdir, fname)).read_text, encoding="utf-8")
         except Exception as e:
             logger.warning("vendor 专家文件读取失败，跳过 %s：%s: %s", fname,
                            type(e).__name__, e)
@@ -141,8 +143,8 @@ async def import_original_experts(
     for fname in files:
         base = fname[:-3]
         try:
-            with open(os.path.join(odir, fname), encoding="utf-8") as fh:
-                text = fh.read()
+            text = await asyncio.to_thread(
+                Path(os.path.join(odir, fname)).read_text, encoding="utf-8")
         except Exception as e:
             # 原实现 open().read() 句柄未关闭；改 with 后失败仍跳过该文件，但要留痕
             logger.warning("专家文件读取失败，跳过 %s：%s: %s", fname,
