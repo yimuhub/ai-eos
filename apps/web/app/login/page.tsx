@@ -36,6 +36,17 @@ export default function LoginPage() {
   // 安装状态探测失败时给一个人工入口：否则首次使用者只能停在登录页干瞪眼
   const [setupDown, setSetupDown] = useState(false);
 
+  // 邀请链接等场景会带 ?mode=register / ?next=/join/<token> 进来。
+  // mode 只在挂载时读一次：用户手动切模式后不再被 URL 拽回去。
+  useEffect(() => {
+    try {
+      const q = new URLSearchParams(window.location.search);
+      if (q.get("mode") === "register") setMode("register");
+    } catch {
+      /* 老浏览器 / 异常 URL：保持默认登录模式 */
+    }
+  }, []);
+
   // 首次安装：系统里还没有 superadmin 时任何账号都登不进来，直接送去 /setup。
   // 状态接口失败时**不**跳转（当作已初始化）——否则后端临时不可用 / 版本较旧
   // 会把所有人锁死在安装页，连登录都进不去。
@@ -96,7 +107,15 @@ export default function LoginPage() {
       if (res.refresh_token) setRefreshToken(res.refresh_token);
       // 用 replace 避免用户回退时又落回登录页；
       // "/" 再按界面模式分流（经典 → 指挥中心，极客 → 工作台）
-      router.replace("/");
+      // ?next= 只接受站内绝对路径：否则邀请链接这类回跳会变成开放重定向。
+      let dest = "/";
+      try {
+        const n = new URLSearchParams(window.location.search).get("next");
+        if (n && n.startsWith("/") && !n.startsWith("//")) dest = n;
+      } catch {
+        /* 保持默认首页 */
+      }
+      router.replace(dest);
     } catch (err: any) {
       // lib/api.ts 对 /auth/login、/auth/register 的 401 不再整页跳转，
       // 错误在此内联呈现：文案可见、已输入内容不清空、loading 在 finally 恢复。

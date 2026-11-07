@@ -216,7 +216,8 @@ def test_thread_reads_scope_is_unique():
 
 def test_migration_revisions_extend_current_heads():
     active = _script_dir(ACTIVE_MIGRATIONS)
-    assert active.get_heads() == ["0016"]
+    assert active.get_heads() == ["0017"]
+    assert active.get_revision("0017").down_revision == "0016"
     assert active.get_revision("0016").down_revision == "0015"
     assert active.get_revision("0015").down_revision == "0014"
     assert active.get_revision("0014").down_revision == "0013"
@@ -250,6 +251,7 @@ def test_migration_revisions_extend_current_heads():
         ("0014", "0014_plugins_policy.py"),
         ("0015", "0015_remote_devices.py"),
         ("0016", "0016_subscription_orders.py"),
+        ("0017", "0017_member_invites.py"),
     ):
         path = ACTIVE_MIGRATIONS / "versions" / filename
         loaded = _load_revision(path)

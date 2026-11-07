@@ -64,6 +64,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/agents", label: "Agent 团队", icon: "⬡", desc: "你的数字员工：新建、编辑、暂停、批量管理", keywords: ["agent", "employee", "员工", "yuangong", "智能体", "团队成员"] },
       { href: "/organization", label: "组织架构", icon: "⌗", desc: "部门树与汇报关系，决定谁向谁汇报", keywords: ["organization", "org", "zuzhi", "部门", "架构", "汇报线"] },
+      { href: "/members", label: "成员与邀请", icon: "👥", desc: "把同事加进公司：生成一次性邀请链接，对方自己注册后加入", keywords: ["member", "invite", "chengyuan", "yaoqing", "成员", "邀请", "同事", "团队", "加入"] },
       { href: "/factory", label: "Agent 工厂", icon: "✦", desc: "按目标批量生成整套团队，而不是一个个招", keywords: ["factory", "gongchang", "工厂", "批量生成", "建团队"], hidden: true },
       { href: "/experts", label: "专家库", icon: "📚", desc: "265 位即插即用专家人设：找专家、组队、一键进工厂上岗", keywords: ["expert", "zhuanjia", "专家", "角色库", "agency", "模板", "人设"], hidden: true },
       { href: "/agent-offboarding", label: "离职交接", icon: "⇥", desc: "员工离职时把记忆、任务、资产交接给接手人", keywords: ["offboarding", "lizhi", "离职", "交接", "辞退"], hidden: true },

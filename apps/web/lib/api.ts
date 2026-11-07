@@ -156,7 +156,7 @@ export function setActiveCompanyId(cid: string) {
 }
 
 /** 不需要自动追加 company_id 的路径前缀 */
-const COMPANY_SCOPE_SKIP = ["/companies", "/auth", "/upload", "/health", "/setup"];
+const COMPANY_SCOPE_SKIP = ["/companies", "/auth", "/upload", "/health", "/setup", "/invites"];
 
 /** 把路径中的 company_id=... 替换为当前激活公司（有激活值才替换） */
 function applyCompanyScope(path: string): string {
