@@ -5,10 +5,13 @@
 - /by-project: 按项目分组的文件视图
 - /download/{asset_id}: 文件下载
 """
+import io
 import mimetypes
+import zipfile
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +20,7 @@ from app.api.deps import assert_company_owned, get_current_user, get_db
 # 直接 Path() 会按进程 CWD 解析，换目录/换机器全部 404。
 from app.api.routes.assets import _resolve_asset_path
 from app.core.scope import agent_read_scope, build_ctx
+from app.core.timeutil import iso_utc
 from app.models.agent import Agent
 from app.models.asset import Asset
 from app.models.company import Company
@@ -57,7 +61,7 @@ def _file_info(a: Asset) -> dict:
         "size": a.size,
         "mime_type": a.mime_type or mimetypes.guess_type(a.name)[0],
         "exists": bool(p and p.exists()),
-        "created_at": str(a.created_at),
+        "created_at": iso_utc(a.created_at),
     }
 
 
@@ -146,6 +150,58 @@ async def download(asset_id: str, db: AsyncSession = Depends(get_db),
     if not p.is_file():
         raise HTTPException(404, "file missing on disk")
     return FileResponse(p, filename=a.name)
+
+
+@router.get("/zip")
+async def zip_delivery(company_id: str = Query(...),
+                       agent_id: str | None = Query(None),
+                       project_id: str | None = Query(None),
+                       task_id: str | None = Query(None),
+                       db: AsyncSession = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    """把一个文件夹下的产出打成 zip：项目 20 个文件不必点 20 次。
+
+    目标三选一；一个都不传直接 400，避免无意间把全公司成果打包拖走。
+    """
+    if not (agent_id or project_id or task_id):
+        raise HTTPException(400, "agent_id / project_id / task_id 至少要给一个")
+    ctx = await build_ctx(db, user, company_id)
+    conds = [_asset_scope(ctx)]
+    if agent_id:
+        conds.append(Asset.agent_id == agent_id)
+    if project_id:
+        conds.append(Asset.project_id == project_id)
+    if task_id:
+        conds.append(Asset.task_id == task_id)
+    assets = (await db.execute(select(Asset).where(*conds))).scalars().all()
+
+    buffer = io.BytesIO()
+    used: set[str] = set()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for a in assets:
+            path = _resolve_asset_path(a.path or "")
+            if not path.is_file():
+                continue
+            # 文件名可能来自用户上传：只取 basename，防止 zip 内出现 ../ 路径
+            name = Path(a.name or path.name).name or "unnamed"
+            stem, suffix = Path(name).stem, Path(name).suffix
+            candidate, n = name, 1
+            while candidate in used:
+                candidate = f"{stem}({n}){suffix}"
+                n += 1
+            used.add(candidate)
+            zf.write(path, arcname=candidate)
+
+    if not used:
+        raise HTTPException(404, "这个文件夹里没有可下载的文件")
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="aieos-delivery.zip"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 # ---------------- 聊天页用：单个 Agent 的交付文件夹 ----------------

@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, describeError, downloadURL, fetchBlobURL } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
+import { formatLocalStamp } from "@/lib/remoteDevices";
 import { notify } from "@/components/Toast";
 
 /* ============================================================
@@ -97,6 +98,20 @@ export default function DeliveryCenterPage() {
 
   const match = (n: string) => !search || n.toLowerCase().includes(search.toLowerCase());
 
+  // 整包下载：一个项目 20 个文件不必点 20 次
+  async function zipDownload(
+    target: { agent_id?: string; project_id?: string; task_id?: string },
+    name: string,
+  ) {
+    if (!cid) return;
+    try {
+      const qs = new URLSearchParams({ company_id: cid, ...target });
+      downloadURL(await fetchBlobURL(`/delivery/zip?${qs.toString()}`), `${name}.zip`);
+    } catch (e: any) {
+      notify("error", `打包下载失败：${describeError(e)}`);
+    }
+  }
+
   return (
     <div className="p-6 max-w-[1400px] mx-auto animate-fade-up">
       {/* 页头 */}
@@ -164,7 +179,7 @@ export default function DeliveryCenterPage() {
                     <div className="font-semibold text-sm">{f.name}</div>
                     <div className="text-[11px] mt-0.5" style={{ color: "var(--muted)" }}>
                       {f.role ? `${f.role} · ` : ""}{f.file_count} 个文件 · {fmtSize(f.total_size)}
-                      {f.latest && ` · 最近 ${f.latest.slice(0, 10)}`}
+                      {f.latest && ` · 最近 ${formatLocalStamp(f.latest)}`}
                     </div>
                   </div>
                   <span className="text-xs shrink-0" style={{ color: "var(--muted)" }}>
@@ -175,6 +190,13 @@ export default function DeliveryCenterPage() {
                 {open && (
                   <div className="border-t px-5 py-3 space-y-1.5 animate-fade-up"
                     style={{ borderColor: "var(--border)", background: "rgba(255,255,255,0.02)" }}>
+                    <div className="flex justify-end">
+                      <button onClick={() => zipDownload({ agent_id: f.agent_id }, f.name)}
+                        className="text-[11px] text-emerald-300 hover:text-emerald-200 px-2 py-0.5 rounded-md"
+                        style={{ background: "rgba(16,185,129,0.12)" }}>
+                        ⬇ 打包下载（{f.file_count}）
+                      </button>
+                    </div>
                     {f.files.filter((x) => match(x.name)).map((file) => (
                       <div key={file.id} className="flex items-center gap-3 px-3 py-2 rounded-xl text-xs"
                         style={{ background: "var(--surface-2)" }}>
@@ -184,7 +206,7 @@ export default function DeliveryCenterPage() {
                           {fmtSize(file.size)}
                         </span>
                         <span className="shrink-0 tabular-nums" style={{ color: "var(--muted)" }}>
-                          {file.created_at.slice(0, 10)}
+                          {formatLocalStamp(file.created_at)}
                         </span>
                         <button onClick={() => download(file.id, file.name)}
                           className="shrink-0 text-indigo-300 hover:text-indigo-200 text-[11px] px-2 py-0.5 rounded-md"
@@ -233,6 +255,19 @@ export default function DeliveryCenterPage() {
                 {open && (
                   <div className="border-t px-5 py-3 space-y-1.5 animate-fade-up"
                     style={{ borderColor: "var(--border)", background: "rgba(255,255,255,0.02)" }}>
+                    {g.key !== "__loose__" && (
+                      <div className="flex justify-end">
+                        <button
+                          onClick={() => zipDownload(
+                            view === "task" ? { task_id: g.key } : { project_id: g.key },
+                            g.name,
+                          )}
+                          className="text-[11px] text-emerald-300 hover:text-emerald-200 px-2 py-0.5 rounded-md"
+                          style={{ background: "rgba(16,185,129,0.12)" }}>
+                          ⬇ 打包下载（{g.file_count}）
+                        </button>
+                      </div>
+                    )}
                     {g.files.map((file) => {
                       const ag = folders.find((x) => x.agent_id === file.agent_id);
                       return (

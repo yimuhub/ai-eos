@@ -1,7 +1,9 @@
 "use client";
 import { useMemo, useState } from "react";
-import { api } from "@/lib/api";
+import { api, describeError, downloadURL, fetchBlobURL } from "@/lib/api";
 import { useResource } from "@/lib/useResource";
+import { formatLocalStamp } from "@/lib/remoteDevices";
+import { notify } from "@/components/Toast";
 import { EVENT_TYPE_ZH, zh } from "@/lib/i18n";
 
 type Ev = { id: string; event_type: string; actor_type: string | null; entity_id: string | null; payload: any; created_at: string };
@@ -18,20 +20,35 @@ export default function LogsPage() {
   );
   const events = useMemo<Ev[]>(() => data ?? [], [data]);
 
+  async function exportLogs(format: "csv" | "json") {
+    try {
+      const qs = new URLSearchParams({ format, limit: "5000" });
+      if (typeFilter) qs.set("event_type", typeFilter);
+      downloadURL(await fetchBlobURL(`/events/export?${qs.toString()}`), `aieos-events.${format}`);
+      notify("success", `已导出 ${format.toUpperCase()}`);
+    } catch (e) {
+      notify("error", `导出失败：${describeError(e)}`);
+    }
+  }
+
   return (
     <div className="p-6 max-w-[1400px] mx-auto animate-fade-up">
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold tracking-tight">工作记录</h1>
-        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}
-          className="input w-auto !py-1.5 text-xs">
-          <option value="">全部事件</option>
-          {[["task.created", "任务创建"], ["task.status_changed", "状态变更"],
-            ["agent.started_task", "开始工作"], ["agent.completed_task", "完成任务"],
-            ["orchestration.started", "协同启动"], ["orchestration.failed", "协同失败"],
-            ["message.sent", "消息发送"], ["asset.created", "成果入库"]].map(([v, label]) => (
-            <option key={v} value={v}>{label}</option>
-          ))}
-        </select>
+        <div className="flex items-center gap-2">
+          <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}
+            className="input w-auto !py-1.5 text-xs">
+            <option value="">全部事件</option>
+            {[["task.created", "任务创建"], ["task.status_changed", "状态变更"],
+              ["agent.started_task", "开始工作"], ["agent.completed_task", "完成任务"],
+              ["orchestration.started", "协同启动"], ["orchestration.failed", "协同失败"],
+              ["message.sent", "消息发送"], ["asset.created", "成果入库"]].map(([v, label]) => (
+              <option key={v} value={v}>{label}</option>
+            ))}
+          </select>
+          <button onClick={() => exportLogs("csv")} className="btn-ghost !py-1.5 !px-2.5 text-xs">⬇ CSV</button>
+          <button onClick={() => exportLogs("json")} className="btn-ghost !py-1.5 !px-2.5 text-xs">⬇ JSON</button>
+        </div>
       </div>
       <div className="card-lg divide-y divide-[var(--border)] max-h-[80vh] overflow-auto">
         {events.map((e) => (
@@ -42,7 +59,7 @@ export default function LogsPage() {
               </span>
               <span className="text-[var(--muted)]">{JSON.stringify(e.payload).slice(0, 100)}</span>
             </div>
-            <span className="text-[var(--muted)] shrink-0">{new Date(e.created_at).toLocaleString()}</span>
+            <span className="text-[var(--muted)] shrink-0">{formatLocalStamp(e.created_at)}</span>
           </div>
         ))}
         {!events.length && <p className="p-6 text-center text-xs text-[var(--muted)]">暂无事件</p>}

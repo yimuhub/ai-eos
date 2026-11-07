@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { api, describeError, downloadURL, fetchBlobURL } from "@/lib/api";
+import { api, describeError, downloadURL, fetchBlobURL, fetchText } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { formatLocalStamp } from "@/lib/remoteDevices";
 import { confirmAction } from "@/components/ConfirmDialog";
@@ -113,9 +113,33 @@ export default function TokenAdminPage() {
 
   const [msg, setMsg] = useState("");
   const [msgType, setMsgType] = useState<"ok" | "err">("ok");
+  // 账单预览：后端返回整页 HTML，直接塞 iframe，避免新标签页被拦截
+  const [invoiceHtml, setInvoiceHtml] = useState<string | null>(null);
+  const [invoiceBusy, setInvoiceBusy] = useState(false);
   const flash = (t: string, type: "ok" | "err" = "ok") => {
     setMsg(t); setMsgType(type); setTimeout(() => setMsg(""), 3500);
   };
+
+  // 账单导出/预览：后端要 Bearer，不能直接 window.open，先取回内容
+  async function downloadInvoice() {
+    if (!cid) return flash("还没有公司，无法导出", "err");
+    try {
+      downloadURL(await fetchBlobURL(`/billing/invoices/export.csv?company_id=${cid}`), "aieos-invoice.csv");
+    } catch (e) {
+      flash(`账单导出失败：${describeError(e)}`, "err");
+    }
+  }
+
+  async function previewInvoice() {
+    if (!cid) return flash("还没有公司，无法查看", "err");
+    setInvoiceBusy(true);
+    try {
+      setInvoiceHtml(await fetchText(`/billing/invoices/view?company_id=${cid}`));
+    } catch (e) {
+      flash(`账单加载失败：${describeError(e)}`, "err");
+    }
+    setInvoiceBusy(false);
+  }
 
   // 计费表单
   const [pf, setPf] = useState({
@@ -301,6 +325,14 @@ export default function TokenAdminPage() {
           <option value={30}>最近30天</option>
           <option value={90}>最近90天</option>
         </select>
+        <button onClick={previewInvoice} disabled={invoiceBusy || !cid}
+          className="btn-ghost !py-2 !px-3 text-sm" title="按当前自然月生成可打印账单">
+          {invoiceBusy ? "加载中…" : "🧾 查看账单"}
+        </button>
+        <button onClick={downloadInvoice} disabled={!cid}
+          className="btn-ghost !py-2 !px-3 text-sm" title="导出本月账单 CSV，交给财务对账">
+          ⬇ 导出账单
+        </button>
         <div className="flex rounded-lg bg-white/[0.05] p-1">
           {([["dashboard", "📈 统计看板"], ["pricing", "💰 计费设置"], ["budget", "🛡 预算上限"], ["logs", "📜 用量流水"]] as [Tab, string][]).map(([k, label]) => (
             <button key={k} onClick={() => setTab(k)}
@@ -719,6 +751,27 @@ export default function TokenAdminPage() {
               <p className="text-xs mt-1 opacity-70">Agent 每次调用大模型都会在这里留下一条记录</p>
             </div>
           )}
+        </div>
+      )}
+
+      {/* 账单预览：后端返回整页可打印 HTML，直接渲染，无需新标签页 */}
+      {invoiceHtml !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(6px)" }}
+          onClick={() => setInvoiceHtml(null)}>
+          <div className="w-full max-w-4xl h-[85vh] rounded-2xl overflow-hidden flex flex-col bg-white"
+            onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-2.5 border-b" style={{ borderColor: "#e5e7eb" }}>
+              <span className="text-sm font-semibold text-slate-800">🧾 本月账单</span>
+              <div className="flex gap-2">
+                <button onClick={downloadInvoice}
+                  className="text-xs px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200">⬇ CSV</button>
+                <button onClick={() => setInvoiceHtml(null)}
+                  className="text-xs px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200">✕ 关闭</button>
+              </div>
+            </div>
+            <iframe title="账单预览" srcDoc={invoiceHtml} className="flex-1 w-full bg-white" />
+          </div>
         </div>
       )}
 

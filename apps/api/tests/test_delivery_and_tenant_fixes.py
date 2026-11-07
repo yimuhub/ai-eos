@@ -6,7 +6,9 @@
 """
 from __future__ import annotations
 
+import io
 import uuid
+import zipfile
 
 import pytest
 
@@ -19,7 +21,7 @@ pytestmark = pytest.mark.asyncio
 
 
 async def _add_asset(company_id: str, user_id: str, name: str,
-                     content: str) -> str:
+                     content: str, project_id: str | None = None) -> str:
     """按线上真实写法落盘：DB 里只存相对 storage 根的路径。"""
     root = storage_root().resolve()
     fname = f"{uuid.uuid4().hex[:8]}_{name}"
@@ -29,7 +31,8 @@ async def _add_asset(company_id: str, user_id: str, name: str,
     async with AsyncSessionLocal() as s:
         a = Asset(company_id=company_id, name=name, type=AssetType.REPORT,
                   path=str(fpath.relative_to(root)), size=len(content.encode()),
-                  created_by=user_id, creator_type="agent")
+                  created_by=user_id, creator_type="agent",
+                  project_id=project_id)
         s.add(a)
         await s.commit()
         return a.id
@@ -51,6 +54,40 @@ async def test_delivery_lists_and_downloads_relative_path(client, make_user,
     r = await client.get(f"/delivery/download/{aid}", headers=user["headers"])
     assert r.status_code == 200, f"下载失败：{r.status_code} {r.text}"
     assert "# 真实内容" in r.text
+
+
+async def test_delivery_zip_packs_folder_and_dedupes_names(client, make_user,
+                                                           make_company):
+    user = await make_user()
+    co = await make_company(user)
+    r = await client.post("/projects", json={
+        "company_id": co["id"], "name": "打包项目"}, headers=user["headers"])
+    assert r.status_code == 201, r.text
+    pid = r.json()["id"]
+    await _add_asset(co["id"], user["id"], "同名.md", "A", project_id=pid)
+    await _add_asset(co["id"], user["id"], "同名.md", "B", project_id=pid)
+
+    r = await client.get(
+        f"/delivery/zip?company_id={co['id']}&project_id={pid}",
+        headers=user["headers"])
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        names = sorted(zf.namelist())
+        assert names == ["同名(1).md", "同名.md"], names
+        assert {zf.read(n).decode() for n in names} == {"A", "B"}
+
+    # 一个目标都不给：不能默认把全公司成果打包
+    r = await client.get(f"/delivery/zip?company_id={co['id']}",
+                         headers=user["headers"])
+    assert r.status_code == 400, r.text
+
+
+async def test_delivery_zip_rejects_foreign_company(client, tenants):
+    r = await client.get(
+        f"/delivery/zip?company_id={tenants.bob_co['id']}&project_id=x",
+        headers=tenants.alice["headers"])
+    assert r.status_code == 404, f"跨租户打包未被拦截：{r.status_code} {r.text}"
 
 
 async def test_memory_recall_rejects_foreign_agent(client, tenants):
