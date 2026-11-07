@@ -4,8 +4,11 @@ import json
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging_config import get_logger
 from app.models.automation import (AutomationDefinition, AutomationRunRecord,
                                    MAX_DEPTH, MAX_STEPS_PER_RUN, new_id)
+
+logger = get_logger(__name__)
 
 
 async def _execute_step(db: AsyncSession, company_id: str, step: dict,
@@ -120,6 +123,7 @@ async def _execute_step(db: AsyncSession, company_id: str, step: dict,
                     try:
                         peer = stream.get_extra_info("server_addr")
                     except Exception:
+                        logger.debug("取不到连接对端地址，按无对端继续", exc_info=True)
                         peer = None
                 if peer:
                     try:

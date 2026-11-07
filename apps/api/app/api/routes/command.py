@@ -241,6 +241,8 @@ async def notify(data: NotifyIn, db: AsyncSession = Depends(get_db),
     try:
         detail = r.json()
     except Exception:
+        logger.warning("连平台返回 200 但响应不是 JSON，只保留状态码（platform=%s）",
+                       platform, exc_info=True)
         detail = {"http": r.status_code}
     return {"ok": True, "platform": platform, "detail": detail}
 

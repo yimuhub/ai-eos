@@ -231,6 +231,7 @@ async def _latest_exam(db: AsyncSession, company_id: str) -> dict | None:
     try:
         from app.models.exam import CeoExam
     except Exception:  # noqa: BLE001 — 模块尚未落地时进化照常跑
+        logger.debug("周考模块不可用，本次不带动周考数据", exc_info=True)
         return None
     row = (await db.execute(
         select(CeoExam).where(CeoExam.company_id == company_id)

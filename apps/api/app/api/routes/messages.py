@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import assert_company_capability, get_current_user
+from app.core.logging_config import get_logger
 from app.core.permissions import Capability
 from app.core.scope import agent_read_scope, build_ctx
 from app.db.session import get_db
@@ -16,6 +17,8 @@ from app.schemas.responses import ConversationDetailOut, ConversationOut
 from app.services.event_system import log_event
 
 router = APIRouter(tags=["communication"])
+
+logger = get_logger(__name__)
 
 
 class ConversationIn(BaseModel):
@@ -230,4 +233,6 @@ async def _agents_reply(session: AsyncSession, conv_id: str, speaker: str = "用
                             "agent", agent.id, {"type": "MESSAGE"})
             await session.commit()
         except Exception:
+            logger.warning("协作会话里 %s 发言失败，已回滚该条消息", agent.id,
+                           exc_info=True)
             await session.rollback()

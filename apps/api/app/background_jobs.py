@@ -86,6 +86,7 @@ def capacity_snapshot() -> dict:
     try:
         free = int(getattr(_job_slots, "_value", 0))
     except Exception:  # noqa: BLE001
+        log.debug("读取 worker 池空闲槽位失败，按 0 处理", exc_info=True)
         free = 0
     return {"workers": _JOB_WORKERS, "free": max(0, free)}
 

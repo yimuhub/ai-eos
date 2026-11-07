@@ -10,7 +10,10 @@ from datetime import datetime
 from sqlalchemy import DateTime, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.logging_config import get_logger
 from app.db.base import Base
+
+logger = get_logger(__name__)
 
 
 def _now() -> datetime:
@@ -52,4 +55,6 @@ def _to_text(params: dict) -> str:  # 模块级（matches 静态方法内引用�
     try:
         return _json.dumps(params or {}, ensure_ascii=False, sort_keys=True)
     except Exception:
+        logger.debug("白名单参数无法序列化为 JSON（%s），降级为 str()",
+                     type(params).__name__)
         return str(params)

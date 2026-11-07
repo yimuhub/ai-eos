@@ -17,6 +17,9 @@ from io import BytesIO
 from pathlib import Path
 
 from app.core.config import settings
+from app.core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 def storage_root() -> Path:
@@ -313,6 +316,8 @@ def render_xlsx(title: str, content: str) -> bytes:
                 elif data:
                     rows = [["值"]] + [[str(x)] for x in data]
             except Exception:
+                logger.warning("Excel 表格内容里没解析出 JSON 数组，回退为按行铺文本",
+                               exc_info=True)
                 rows = []
         if not rows:
             lines = [l for l in content.strip().split("\n") if l.strip()]

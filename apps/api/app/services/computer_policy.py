@@ -67,7 +67,7 @@ TERMINAL_HOSTS = {
     "terminal", "iterm", "iterm2", "warp", "kitty", "alacritty",
     "hyper", "tabby", "cmux", "powershell", "cmd", "windowsterminal",
 }
-_SHELL_METACHARS = re.compile(r"[;&|`$<>]")
+_SHELL_METACHARS = re.compile(r"[;&|`$<>\n\r]")
 _PATH_KEYS = ("path", "file", "filepath", "file_path", "target", "dir",
               "directory", "cwd", "destination", "output")
 
@@ -273,6 +273,12 @@ def _hard_block(action_type: str, params: dict) -> str | None:
                         "Agent 一律不可读写")
     command = str(params.get("command") or params.get("cmd") or "")
     if command:
+        # 换行 = 一次下发多条命令。本机执行器（computer_real）与设备 sidecar
+        # 都只按单条判定，放过去会出现"审批单看着无害、第二行真跑了"。
+        # 在策略层就拦掉，让老板/AI 立刻拿到原因，而不是批准后再执行失败。
+        if "\n" in command or "\r" in command:
+            return ("硬拦截：命令含换行，等于一次下发多条命令，无法逐条审批。"
+                    "请拆成多次 run_shell；改文件走 write_file / apply_patch")
         lowered = command.strip().lower()
         for pattern, label in HARD_BLOCK_COMMAND_PATTERNS:
             if re.search(pattern, lowered):

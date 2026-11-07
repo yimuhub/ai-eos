@@ -167,11 +167,42 @@ def path_writable(path: str | Path, allow_roots: list[str],
             + "、".join(allow_roots))
 
 
+def _tokenize(command: str) -> list[str]:
+    """分词，并把 `; & |` 一律切出来。
+
+    默认的 `shlex.split` 不把连接符当分隔符：`ls; rm -rf x` 里 `ls;` 会粘成
+    一个词，`_segments` 看不到 `;`，只能靠"白名单里没有 ls;"碰巧拒绝。
+    开启 `punctuation_chars` 后它们总是独立 token，判定与 shell 的解析对齐。
+    `2>&1` 里的 `&` 是文件描述符复制、不是后台分隔符，粘回去再切段。
+    """
+    lex = shlex.shlex(command, posix=(os.name != "nt"), punctuation_chars=";&|")
+    lex.whitespace_split = True
+    lex.commenters = ""
+    tokens = list(lex)
+    merged: list[str] = []
+    index = 0
+    while index < len(tokens):
+        tok = tokens[index]
+        if (tok == "&" and merged and merged[-1].endswith(">")
+                and index + 1 < len(tokens) and tokens[index + 1].isdigit()):
+            merged[-1] += "&" + tokens[index + 1]
+            index += 2
+            continue
+        merged.append(tok)
+        index += 1
+    return merged
+
+
 def _segments(tokens: list[str]) -> list[list[str]]:
-    """按 shell 连接符切成若干段，逐段判首命令。"""
+    """按 shell 连接符切成若干段，逐段判首命令。
+
+    单个 `&`（后台执行）也是命令分隔符：`ls & rm -rf x` 在 shell 里是两条
+    命令，不切就会只判 `ls` 而把第二条放过去。换行/回车不在此列——它们在
+    check_command 入口直接拒绝（多行命令无法用一次静态判定表达意图）。
+    """
     out: list[list[str]] = [[]]
     for tok in tokens:
-        if tok in ("&&", "||", ";", "|"):
+        if tok in ("&&", "||", ";", "|", "&"):
             if out[-1]:
                 out.append([])
         else:
@@ -236,6 +267,12 @@ def check_command(command: str, allow_roots: list[str],
     """
     if not command.strip():
         return "命令为空"
+    # 换行/回车在 shell 里就是命令分隔符，而执行走 shell=True：不拒的话
+    # `ls\nrm -rf x` 只会判到第一段，第二条照样跑。与本机执行器
+    # （app/computer_real.py 的 _SHELL_METACHARS 含 \n\r）同一口径。
+    if "\n" in command or "\r" in command:
+        return ("命令里有换行，等于一次下发多条命令，本机护栏无法逐条判定。"
+                "请拆成多次下发；要改文件走 write_file / apply_patch（有 diff 和备份）")
     lowered = command.lower()
     if not allow_destructive:
         for frag in DESTRUCTIVE_FRAGMENTS:
@@ -247,7 +284,7 @@ def check_command(command: str, allow_roots: list[str],
             return (f"命令里有 {mark} 这类替换/展开，本机无法静态判断它会做什么，"
                     "拒绝执行")
     try:
-        tokens = shlex.split(command, posix=(os.name != "nt"))
+        tokens = _tokenize(command)
     except ValueError as exc:
         return f"命令无法解析：{exc}"
     extra = {c.strip().lower() for c in (extra_commands or []) if c.strip()}

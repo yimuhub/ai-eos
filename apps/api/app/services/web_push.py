@@ -50,12 +50,17 @@ try:  # 可选依赖：没装也不能影响后端启动
     from pywebpush import WebPushException, webpush
 
     PYWEBPUSH_AVAILABLE = True
-except Exception:  # noqa: BLE001 — ImportError 之外还有依赖内部报错的可能
+    _PUSH_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # noqa: BLE001 — ImportError 之外还有依赖内部报错的可能
     webpush = None  # type: ignore[assignment]
     WebPushException = Exception  # type: ignore[assignment,misc]
     PYWEBPUSH_AVAILABLE = False
+    _PUSH_IMPORT_ERROR = exc
 
 logger = get_logger(__name__)
+
+if _PUSH_IMPORT_ERROR is not None:
+    logger.warning("pywebpush 不可用，Web Push 推送已停用：%s", _PUSH_IMPORT_ERROR)
 
 ENV_PRIVATE = "AIEOS_VAPID_PRIVATE_KEY"
 ENV_PUBLIC = "AIEOS_VAPID_PUBLIC_KEY"

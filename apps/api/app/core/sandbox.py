@@ -29,6 +29,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from app.core.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 # app/core/sandbox.py → app/core → app → apps/api → apps → 仓库根
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
@@ -100,6 +104,8 @@ def sandbox_roots() -> list[Path]:
             storage = PROJECT_ROOT / settings.storage_dir
         roots.append(storage)
     except Exception:  # pragma: no cover - 配置异常时退化为仓库 storage
+        logger.warning("读取配置里的 storage_dir 失败，沙箱根回退为仓库 storage",
+                       exc_info=True)
         roots.append(PROJECT_ROOT / "storage")
 
     roots.append(PROJECT_ROOT / "storage")

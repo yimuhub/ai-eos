@@ -113,6 +113,7 @@ def _scan_linux() -> list[dict]:
                     elif line.startswith("Terminal=true"):
                         terminal = True
             except Exception:
+                logger.debug("读不了 .desktop 文件，跳过该应用：%s", d, exc_info=True)
                 continue
             if hidden or name.lower() in ("uninstall",):
                 continue

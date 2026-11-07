@@ -548,6 +548,8 @@ async def _agent_speak(db, gw, agent, topic, history_lines, emit=None):
                         content = f"关于「{q}」，当前暂无实时数据，请尝试其他问题。"
                         break
                 except Exception:
+                    logger.warning("组内讨论的工具调用参数不是合法 JSON，跳过该条兜底：%r",
+                                   tc_args[:200], exc_info=True)
                     continue
         # 兜底：多轮后仍无总结，把收集到的搜索结果直接总结返回
         if not content or len(content) < 20:

@@ -37,6 +37,8 @@ def _resolve_screenshot_dir() -> str:
             from app.core.config import settings as _settings
             root = _settings.storage_dir
         except Exception:
+            logger.warning("读取 settings.storage_dir 失败，截屏目录回退 ./storage",
+                           exc_info=True)
             root = "./storage"
         base = Path(root)
         if not base.is_absolute():

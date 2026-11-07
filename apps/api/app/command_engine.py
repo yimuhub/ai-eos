@@ -14,8 +14,11 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging_config import get_logger
 from app.model_gateway import ModelGateway, set_usage_context
 from app.models.agent import Agent, AgentModelConfig
+
+logger = get_logger(__name__)
 
 
 async def _first_model_id(db: AsyncSession, company_id: str) -> str:
@@ -76,6 +79,8 @@ async def command_plan(db: AsyncSession, company_id: str,
         try:
             plan = json.loads(raw[s:e + 1])
         except Exception:
+            logger.warning("一句话指挥台的方案不是合法 JSON，已按默认 PROJECT 处理：%r",
+                           raw[s:e + 1][:200], exc_info=True)
             plan = {}
     path = plan.get("path")
     if path not in ("DIRECT", "EXPERT", "PROJECT"):

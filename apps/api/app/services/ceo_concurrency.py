@@ -31,7 +31,10 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging_config import get_logger
 from app.models.agent import Agent, AgentModelConfig, Model
+
+logger = get_logger(__name__)
 
 MIN_PARALLEL = 2
 DEFAULT_PARALLEL = 3
@@ -90,6 +93,8 @@ def _worker_free() -> int:
         import app.background_jobs as bg
         return int(bg.capacity_snapshot().get("free", 0))
     except Exception:  # noqa: BLE001 — 容量探测失败不能阻断统筹
+        logger.warning("后台 worker 空闲槽位探测失败，统筹按保底并发 %s 处理",
+                       MIN_PARALLEL, exc_info=True)
         return MIN_PARALLEL
 
 

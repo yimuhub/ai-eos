@@ -1,7 +1,10 @@
 """Unified event log — every core module reports through here."""
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging_config import get_logger
 from app.models.event import EventLog
+
+logger = get_logger(__name__)
 
 
 async def _resolve_company_id(
@@ -37,6 +40,8 @@ async def _resolve_company_id(
             return await _company_of(db, Skill, entity_id)
         return None
     except Exception:  # noqa: BLE001 — 反查失败必须降级为“不可见”，不能中断业务
+        logger.warning("事件所属公司反查失败（%s:%s），该事件降级为不可见",
+                       entity_type, entity_id, exc_info=True)
         return None
 
 

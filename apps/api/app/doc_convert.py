@@ -2,6 +2,10 @@
 import io
 from pathlib import Path
 
+from app.core.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 def extract_to_md(file_name: str, raw: bytes) -> tuple[str, bool]:
     """返回 (markdown文本或空, 是否成功)。docx/pdf/xlsx/pptx 自动转 MD 结构。"""
@@ -18,6 +22,8 @@ def extract_to_md(file_name: str, raw: bytes) -> tuple[str, bool]:
                 pages.append(f"## 第{i + 1}页\n\n{t}")
             return "\n\n".join(pages), True
         except Exception:
+            logger.warning("PDF 解析失败，按「转换失败」返回：%s", file_name,
+                           exc_info=True)
             return "", False
     if suffix == ".docx":
         try:
@@ -44,6 +50,8 @@ def extract_to_md(file_name: str, raw: bytes) -> tuple[str, bool]:
                     lines.append("\n".join(rows))
             return "\n\n".join(lines), True
         except Exception:
+            logger.warning("DOCX 解析失败，按「转换失败」返回：%s", file_name,
+                           exc_info=True)
             return "", False
     # 修复：openpyxl 不支持 legacy .xls，此前 .xls 走这里必然异常被吞、
     # 静默返回解析失败——如实降级为不支持，不再伪装支持。
@@ -60,6 +68,8 @@ def extract_to_md(file_name: str, raw: bytes) -> tuple[str, bool]:
                         out.append("| " + " | ".join(cells) + " |")
             return "\n".join(out), True
         except Exception:
+            logger.warning("XLSX 解析失败，按「转换失败」返回：%s", file_name,
+                           exc_info=True)
             return "", False
     if suffix == ".pptx":
         try:
@@ -83,11 +93,15 @@ def extract_to_md(file_name: str, raw: bytes) -> tuple[str, bool]:
                            "\n".join(f"- {b}" for b in bullets))
             return "\n\n".join(out), True
         except Exception:
+            logger.warning("PPTX 解析失败，按「转换失败」返回：%s", file_name,
+                           exc_info=True)
             return "", False
     # 兜底当纯文本
     try:
         return raw.decode("utf-8", errors="replace"), True
     except Exception:
+        logger.warning("按纯文本兜底解码也失败，返回空内容：%s", file_name,
+                       exc_info=True)
         return "", False
 
 

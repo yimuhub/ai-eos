@@ -85,6 +85,51 @@ def test_read_only_commands_pass_and_writers_are_refused(tmp_path):
     assert sidecar.check_command("make build", roots, extra_commands=["make"]) is None
 
 
+def test_multi_command_injection_is_refused(tmp_path):
+    """换行与单个 `&` 在 shell 里都是命令分隔符，而执行走 shell=True。
+
+    只判第一段就会把第二条放过去：`ls\\nrm -rf x` 看着是 ls，实际两条都跑。
+    换行在入口直接拒（与本机执行器同口径），单个 `&` 必须切段逐条判。
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    roots = [str(project)]
+
+    for cmd in ("ls\nrm -rf important_dir",
+                "cat notes.txt\npython3 -c 'print(1)'",
+                "pwd\nid",
+                "ls\r\nid",
+                "echo ok\recho BAD"):
+        reason = sidecar.check_command(cmd, roots)
+        assert reason and "换行" in reason, cmd
+
+    # 单个 & 后面藏非白名单命令：切段后第二条必须被拦
+    for cmd in ("ls & rm -rf x", "pwd & make build",
+                "ls&rm -rf x", "ls&&rm -rf x", "ls;rm -rf x",
+                "ls|sh", "pwd||make build"):
+        reason = sidecar.check_command(cmd, roots)
+        assert reason and "白名单" in reason, cmd
+
+    # 合法的只读管道/连接符不能被误伤（含等价处粘连写法）
+    for cmd in ("cat a.txt | grep x", "git status && git diff",
+                "ls; pwd", "ls;pwd", "echo a & echo b", "ls|wc -l",
+                "git log 2>&1 | grep fix", "ls 2>/dev/null"):
+        assert sidecar.check_command(cmd, roots) is None, cmd
+
+
+def test_run_shell_refuses_newline_before_anything_executes(tmp_path, isolated_dirs):
+    """端到端证明：多行命令不仅被判拒，而且第二条真的没跑。"""
+    project = tmp_path / "project"
+    project.mkdir()
+    sentinel = project / "sentinel.txt"
+    command = f"echo first\necho SECOND > {sentinel}"
+
+    with pytest.raises(PermissionError, match="换行"):
+        sidecar.run_shell({"command": command, "cwd": str(project)},
+                          _cfg(project))
+    assert not sentinel.exists(), "第二条命令竟然执行了——护栏被绕过"
+
+
 def test_output_redirection_is_guarded_like_a_write(tmp_path):
     project = tmp_path / "project"
     project.mkdir()

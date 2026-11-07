@@ -402,6 +402,32 @@ def test_runtime_state_is_closed_even_in_full_control_mode(rel):
         assert "运行期" in verdict["reason"] or "git" in verdict["reason"]
 
 
+def test_multiline_shell_command_is_blocked_in_every_mode():
+    """换行在 shell 里就是命令分隔符：审批单看着是 `ls`，第二行照样执行。
+
+    本机执行器与设备 sidecar 都按单条命令判定，所以策略层必须先拦，
+    让老板和 AI 在批准前就拿到原因，而不是批准后才发现被设备拒了。
+    """
+    for row in (None,
+                ComputerPolicy(company_id="co", mode="default"),
+                ComputerPolicy(company_id="co", mode="full",
+                               full_control_until=None)):
+        for command in ("ls\nrm -rf important_dir",
+                        "cat notes.txt\r\npython3 -c 'print(1)'"):
+            verdict = policy.evaluate_action(row, "run_shell",
+                                            {"command": command})
+            assert verdict["decision"] == "blocked", (row, command)
+            assert "换行" in verdict["reason"]
+
+
+def test_shell_metachars_include_newlines():
+    """`_SHELL_METACHARS` 用于「能不能自动审批」，漏掉换行就等于漏掉一条命令。"""
+    assert policy._SHELL_METACHARS.search("ls\nrm -rf x")
+    assert policy._SHELL_METACHARS.search("ls\rrm -rf x")
+    assert policy._SHELL_METACHARS.search("ls & rm -rf x")
+    assert not policy._SHELL_METACHARS.search("git status")
+
+
 def test_file_executor_refuses_the_real_database_path():
     """策略判一遍还不够：执行器解析路径时用的是同一套红线，且不碰磁盘。"""
     db = str(Path(cf.PROJECT_ROOT) / "apps" / "api" / "data" / "aieos.db")

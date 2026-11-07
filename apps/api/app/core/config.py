@@ -87,6 +87,8 @@ def _secret_file_candidates(database_url: str = "", storage_dir: str = "") -> li
             if path.is_dir():
                 path = path / _SECRET_FILE_NAME
         except Exception:  # noqa: BLE001 — 路径不可解析/无权限，换下一个候选即可
+            _config_logger.warning("JWT 密钥候选路径不可用，已跳过：%r",
+                                   p, exc_info=True)
             return
         if path not in out:
             out.append(path)

@@ -93,25 +93,126 @@ _LOGGING_ATTRS = {"debug", "info", "warning", "error", "exception",
 
 
 def _handler_logs(handler: ast.ExceptHandler) -> bool:
-    """处理器内是否有 logging 调用（logger.xxx / logging.xxx）。"""
+    """处理器内是否有 logging 调用（logger.xxx / logging.xxx / getLogger(...).xxx）。"""
     for node in ast.walk(handler):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
         if isinstance(func, ast.Attribute) and func.attr in _LOGGING_ATTRS:
             owner = func.value
+            while isinstance(owner, ast.Attribute):
+                owner = owner.value
             if isinstance(owner, ast.Name) and "log" in owner.id.lower():
+                return True
+            if (isinstance(owner, ast.Call)
+                    and isinstance(owner.func, ast.Attribute)
+                    and owner.func.attr == "getLogger"):
                 return True
     return False
 
 
-def _silent_exception_sites() -> list[str]:
-    """AST 级检测：`except` 处理器的 body 仅为 `pass` 且无 logging 调用即违规。
+def _is_broad_catch(handler: ast.ExceptHandler) -> bool:
+    """裸 except / except Exception / except BaseException（含元组形式）。
 
-    升级原因：老实现逐行比对 `lines[cursor].strip() == "pass"`，
-    行尾带注释的 `pass  # xxx` 直接逃逸（真实实例见 agent_runtime.py，
-    注释写着"记忆召回失败不阻塞任务"却没有任何日志）。
-    AST 只看语义不看注释文本——注释再也藏不住 `pass`。
+    窄类型捕获（如 json.JSONDecodeError、IntegrityError）通常是对**预期内**
+    条件的定向处理，不属于"把一切失败静默吞掉"；宽捕获才是事故温床。
+    """
+    t = handler.type
+    if t is None:
+        return True
+    parts = t.elts if isinstance(t, ast.Tuple) else [t]
+    return any(isinstance(n, ast.Name) and n.id in {"Exception", "BaseException"}
+               for n in parts)
+
+
+def _handler_raises(handler: ast.ExceptHandler) -> bool:
+    return any(isinstance(n, ast.Raise) for n in ast.walk(handler))
+
+
+def _handler_references_exception(handler: ast.ExceptHandler) -> bool:
+    """处理器把异常对象带进了任何表达式（错误文本落进返回值/日志/结果结构）。"""
+    if not handler.name:
+        return False
+    return any(isinstance(n, ast.Name) and n.id == handler.name
+               for n in ast.walk(handler))
+
+
+_ERROR_DICT_KEYS = {"error", "err", "error_message", "errmsg", "detail",
+                    "reason"}
+
+
+def _handler_returns_error_info(handler: ast.ExceptHandler) -> bool:
+    """返回/构造了带错误信息的结构：error 类字段的 dict，或 (ok, 消息) 元组。"""
+    for node in ast.walk(handler):
+        if isinstance(node, ast.Dict):
+            for k in node.keys:
+                if (isinstance(k, ast.Constant) and isinstance(k.value, str)
+                        and k.value.lower() in _ERROR_DICT_KEYS):
+                    return True
+        if isinstance(node, ast.Return) and isinstance(node.value, (ast.Tuple, ast.List)):
+            for el in node.value.elts:
+                if (isinstance(el, ast.Constant) and isinstance(el.value, str)
+                        and el.value.strip()):
+                    return True
+    return False
+
+
+def _handler_emits_trace(handler: ast.ExceptHandler) -> bool:
+    """其他显式留痕：审计事件落库 / traceback 打 stderr / print(file=...)。
+
+    logging_config 这类日志基础设施自身重配时不能用 logger（鸡生蛋），
+    print 到 stderr 是它唯一正确的出声方式。
+    """
+    for node in ast.walk(handler):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "log_event":
+            return True
+        if isinstance(func, ast.Attribute) and func.attr == "print_exc":
+            return True
+        if isinstance(func, ast.Name) and func.id == "print":
+            if any(kw.arg == "file" for kw in node.keywords):
+                return True
+    return False
+
+
+def _is_bool_probe(handler: ast.ExceptHandler, parents: dict) -> bool:
+    """布尔可用性探针：except 返回 False，且所在函数正常路径返回 True。
+
+    此时 False 本身就是向调用方报告的失败信号（如 vault_available），
+    不是"吞掉异常后假装没事"。口径刻意收窄：必须是单句 return False，
+    且函数里确有 return True，避免把一般的降级 return 混进来。
+    """
+    body = [n for n in handler.body if not _is_docstring(n)]
+    if len(body) != 1:
+        return False
+    ret = body[0]
+    if not (isinstance(ret, ast.Return) and isinstance(ret.value, ast.Constant)
+            and ret.value.value is False):
+        return False
+    fn = parents.get(handler)
+    while fn is not None and not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        fn = parents.get(fn)
+    if fn is None:
+        return False
+    return any(isinstance(n, ast.Return) and isinstance(n.value, ast.Constant)
+               and n.value.value is True for n in ast.walk(fn))
+
+
+def _silent_exception_sites() -> list[str]:
+    """AST 级检测：失败必须出声。两类违规：
+
+    1. `except` 的 body 仅为 `pass`（任何异常类型）——老口径，保留不放宽；
+    2. 宽捕获（裸 except / Exception / BaseException）后，处理器内
+       **没有 logging 调用、没有 raise、没有把异常对象带进任何表达式、
+       没有返回/构造带错误信息的结构**——例如 `except Exception: return "", False`，
+       调用方只看到"没产出"，日志里什么都没有。
+
+    精确排除（不是文件级豁免）：raise（含 HTTPException）、logger/logging 调用、
+    log_event 审计落库、traceback.print_exc / print(file=stderr)、
+    返回带 error 字段的 dict 或 (False, "错误消息") 元组、布尔可用性探针、
+    以及显式 `# noqa: silent-except` 标记。
     """
     hits: list[str] = []
     for path in _python_files():
@@ -120,13 +221,22 @@ def _silent_exception_sites() -> list[str]:
             tree = ast.parse("\n".join(lines))
         except SyntaxError:
             continue  # 语法错误由 test_every_module_parses 负责报告
+        parents: dict = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
         for node in ast.walk(tree):
             if not isinstance(node, ast.ExceptHandler):
                 continue
             body = [n for n in node.body if not _is_docstring(n)]
-            if len(body) != 1 or not isinstance(body[0], ast.Pass):
+            pass_only = len(body) == 1 and isinstance(body[0], ast.Pass)
+            if not pass_only and not _is_broad_catch(node):
                 continue
-            if _handler_logs(node):
+            if (_handler_logs(node) or _handler_raises(node)
+                    or _handler_references_exception(node)
+                    or _handler_returns_error_info(node)
+                    or _handler_emits_trace(node)
+                    or _is_bool_probe(node, parents)):
                 continue
             if _SILENT_EXEMPT_MARKER in _handler_source(node, lines):
                 continue
@@ -135,10 +245,11 @@ def _silent_exception_sites() -> list[str]:
 
 
 def test_no_silent_exception_swallowing():
-    """失败必须出声：不允许 `except: pass` 把异常整个吞掉。
+    """失败必须出声：不允许 `except: pass` 或宽捕获后无声降级。
 
     降级仍然是允许的（记忆召回失败不该阻断任务），
-    但必须落一条日志——否则"功能没生效"永远查不出来。
+    但必须落一条日志/审计事件，或把错误信息带进返回结构——
+    否则"功能没生效"永远查不出来。
     """
     hits = _silent_exception_sites()
     assert not hits, (

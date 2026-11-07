@@ -360,6 +360,8 @@ def _extract_json(text: str) -> dict:
     try:
         data = json.loads(text[start:end + 1])
     except Exception:  # noqa: BLE001
+        logger.debug("技能配备输出里没解析出 JSON 对象，按空配置继续：%r",
+                     text[start:end + 1][:200], exc_info=True)
         return {}
     return data if isinstance(data, dict) else {}
 

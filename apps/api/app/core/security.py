@@ -9,6 +9,9 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -34,7 +37,9 @@ def decode_token(token: str) -> str | None:
     try:
         payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
         return payload.get("sub")
-    except Exception:
+    except Exception as exc:
+        # 过期/伪造 token 是常态，只记类型不记原文——token 本身是凭据。
+        logger.debug("token 解码失败（%s），按未登录处理", type(exc).__name__)
         return None
 
 

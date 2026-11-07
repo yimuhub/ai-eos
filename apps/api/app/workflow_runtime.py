@@ -119,6 +119,8 @@ class WorkflowRuntime:
             try:
                 await transition_task(self.db, task, TaskStatus.FAILED)
             except Exception:
+                logger.warning("任务状态转换失败，直接置 FAILED 并通知：task=%s",
+                               task.id, exc_info=True)
                 task.status = TaskStatus.FAILED
                 from app.services.notification_service import notify_task_terminal
                 await notify_task_terminal(self.db, task, "FAILED",

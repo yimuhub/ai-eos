@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (assert_company_capability, assert_company_owned,
                           get_current_user, get_db)
+from app.core.logging_config import get_logger
 from app.core.permissions import Capability
 from app.models.company import Company
 from app.models.intervention import ApprovalRequest
@@ -24,6 +25,8 @@ from app.models.token_usage import TokenUsage
 from app.models.user import User
 
 router = APIRouter(prefix="/briefing", tags=["briefing"])
+
+logger = get_logger(__name__)
 
 # 高风险：跑超过 2 小时的 RUNNING 视为卡住，进"需要你决策"
 STUCK_HOURS = 2
@@ -190,6 +193,7 @@ async def build_briefing(db: AsyncSession, company: Company) -> dict:
                                             f"，可到「Token 统计 → 预算上限」调高额度")}
                 break
     except Exception:
+        logger.warning("晨间简报计算预算告警失败，本次不显示告警", exc_info=True)
         budget_alert = None
 
     return {

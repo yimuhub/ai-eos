@@ -4,9 +4,12 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.logging_config import get_logger
 from app.models.learning import (AgentCapabilityHistory, AgentGrowthEvent,
                                  AgentLearningRecord, AgentProfile,
                                  GrowthEventType)
+
+logger = get_logger(__name__)
 
 
 def _now():
@@ -89,6 +92,8 @@ def _jsonable(v):
         _j.dumps(v)
         return v
     except Exception:
+        logger.debug("档案字段不是可 JSON 化的值（%s），降级为字符串",
+                     type(v).__name__)
         return str(v)
 
 

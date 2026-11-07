@@ -5,6 +5,7 @@ from sqlalchemy import select, func as sa_func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import assert_agent_owned, get_current_user, get_db
+from app.core.logging_config import get_logger
 from app.core.permissions import (Capability, ensure_capability,
                                   require_company_scope)
 from app.models.agent import Agent
@@ -19,6 +20,8 @@ from app.reflection_engine import record_experience, reflect
 
 router = APIRouter(prefix="/reflection", tags=["reflection"],
                    dependencies=[Depends(require_company_scope())])
+
+logger = get_logger(__name__)
 class ExperienceIn(BaseModel):
     agent_id: str
     title: str
@@ -221,6 +224,8 @@ async def agents_overview(
         )).all()
         lesson_count = {a_: c for a_, c in lr}
     except Exception:
+        logger.warning("按员工统计经验教训条数失败，概览里经验数按 0 显示",
+                       exc_info=True)
         lesson_count = {}
     # 按部门聚合
     from collections import defaultdict
