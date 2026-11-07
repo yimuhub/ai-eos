@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import assert_company_owned, get_current_user
 from app.core.scope import build_ctx
+from app.core.timeutil import iso_utc
 from app.db.session import get_db
 from app.models.agent import Agent, AgentStatus
 from app.models.asset import Asset
@@ -95,7 +96,7 @@ async def _dashboard_payload(db: AsyncSession, company_id: str, c: Company,
         "recent_assets": [{"id": a.id, "name": a.name, "type": a.type.value}
                           for a in recent_assets],
         "recent_events": [{"event_type": e.event_type, "actor_type": e.actor_type,
-                           "payload": e.payload, "created_at": str(e.created_at)}
+                           "payload": e.payload, "created_at": iso_utc(e.created_at)}
                           for e in recent_events],
     }
 

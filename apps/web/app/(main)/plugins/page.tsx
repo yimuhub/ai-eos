@@ -13,6 +13,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, describeError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
+import { formatLocalStamp } from "@/lib/remoteDevices";
 import { confirmAction } from "@/components/ConfirmDialog";
 
 type Permission = { name: string; required: boolean; detail: string };
@@ -176,7 +177,7 @@ function formatRemaining(until: string | null, now: number): string | null {
 }
 
 function shortTime(iso: string): string {
-  return iso.slice(5, 16).replace("T", " ");
+  return formatLocalStamp(iso);
 }
 
 function PluginBadge({ item }: { item: CatalogItem }) {

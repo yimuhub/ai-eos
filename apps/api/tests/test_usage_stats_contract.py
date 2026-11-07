@@ -166,3 +166,37 @@ def test_provider_type_is_never_serialised_via_str():
             if re.search(r"str\(\s*[\w.\[\]\"']+\.provider_type\s*\)", line):
                 hits.append(f"{py.relative_to(app_dir)}:{lineno}: {line.strip()}")
     assert hits == [], "这些地方的 provider_type 会序列化成枚举名：\n" + "\n".join(hits)
+
+
+async def test_usage_logs_serialise_utc_with_z(client, tenants):
+    """流水时刻必须带 Z：naive ISO 会被浏览器当本地时间解析（差 8 小时）。"""
+    co = tenants.alice_co["id"]
+    await _usage(co, scenario="TASK", agent_id=_id(), agent_name="小A",
+                 model_id="m1", model_name="M1")
+
+    r = await client.get(f"/tokens/usage-logs?company_id={co}",
+                         headers=tenants.alice["headers"])
+    assert r.status_code == 200, r.text
+    row = r.json()[0]
+    assert row["created_at"].endswith("Z"), row
+
+
+async def test_usage_logs_csv_export_is_scoped_and_readable(client, tenants):
+    """导出是运营给财务用的：UTF-8 BOM、中文表头、跨租户 404。"""
+    co = tenants.alice_co["id"]
+    await _usage(co, scenario="TASK", agent_id=_id(), agent_name="小A",
+                 model_id="m1", model_name="M1")
+
+    r = await client.get(f"/tokens/usage-logs/export.csv?company_id={co}",
+                         headers=tenants.alice["headers"])
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("text/csv")
+    body = r.content.decode("utf-8")
+    assert body.startswith("\ufeff"), "缺少 BOM，Excel 打开中文会乱码"
+    lines = body.lstrip("\ufeff").splitlines()
+    assert lines[0].split(",")[:4] == ["时间(UTC)", "Agent", "场景", "模型"]
+    assert "小A" in lines[1]
+
+    r = await client.get(f"/tokens/usage-logs/export.csv?company_id={co}",
+                         headers=tenants.bob["headers"])
+    assert r.status_code == 404, r.text

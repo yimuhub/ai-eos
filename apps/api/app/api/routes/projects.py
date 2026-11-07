@@ -1,6 +1,7 @@
 """Project Management System API (P2-01)."""
 import json
 import re as _re
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import and_, case, func, or_, select, text
@@ -11,6 +12,7 @@ from app.api.deps import (assert_agent_owned, assert_company_capability,
 from app.core.logging_config import get_logger
 from app.core.permissions import Capability
 from app.core.scope import build_ctx
+from app.core.timeutil import iso_utc
 from app.db.session import get_db
 from app.models.agent import Agent
 from app.models.asset import Asset
@@ -749,6 +751,19 @@ async def project_deliverables(pid: str, db: AsyncSession = Depends(get_db),
     } for a in rows]
 
 
+def _iso_any(value) -> str | None:
+    """日志 ts 统一带 Z。text() 查询在 SQLite 下回的是原始字符串，先解析再补时区。"""
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            value = datetime.fromisoformat(raw)
+        except ValueError:
+            return raw
+    return iso_utc(value)
+
+
 @router.get("/projects/{pid}/logs", response_model=LogsOut)
 async def project_logs(pid: str, db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
@@ -767,7 +782,7 @@ async def project_logs(pid: str, db: AsyncSession = Depends(get_db),
         for m in msgs:
             sender = await db.get(Agent, m.sender_agent_id) if m.sender_agent_id else None
             logs.append({
-                "ts": str(m.created_at), "kind": "collab",
+                "ts": _iso_any(m.created_at), "kind": "collab",
                 "who": sender.name if sender else (m.sender_agent_id or "system"),
                 "type": m.message_type.value if hasattr(m.message_type, "value") else str(m.message_type),
                 "title": getattr(m, "title", "") or "",
@@ -785,7 +800,7 @@ async def project_logs(pid: str, db: AsyncSession = Depends(get_db),
             MeetingMessage.meeting_id == meet.id).order_by(MeetingMessage.created_at))).scalars().all()
         for m in mm:
             logs.append({
-                "ts": str(m.created_at), "kind": "meeting",
+                "ts": _iso_any(m.created_at), "kind": "meeting",
                 "who": f"{m.speaker_name}（{meet.title}）",
                 "type": "MEETING_SPEAK",
                 "title": meet.title or "",
@@ -800,7 +815,7 @@ async def project_logs(pid: str, db: AsyncSession = Depends(get_db),
         {"pid": pid})).fetchall()
     for e in evs:
         logs.append({
-            "ts": str(e[2]), "kind": "event", "who": "system",
+            "ts": _iso_any(e[2]), "kind": "event", "who": "system",
             "type": e[0], "title": e[3] or "", "content": json.dumps(e[1], ensure_ascii=False)[:300] if e[1] else "",
         })
 

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, ApiError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
+import { formatLocalStamp } from "@/lib/remoteDevices";
 import { notify } from "@/components/Toast";
 import { confirmAction } from "@/components/ConfirmDialog";
 
@@ -227,7 +228,7 @@ export default function ReflectionCenterPage() {
                   {sec.key === "reflections" && detailData?.reflections?.length ? detailData.reflections.map((r: any, idx: number) => (
                     <div key={r.id || idx} className="space-y-1.5">
                       <p className="text-[10px] font-semibold" style={{ color: sec.color }}>
-                        📅 {(r.triggered_at || "").slice(0, 16)}{r.agent_id === detail.agent.id ? "" : ` · ${r.agent_name}`}
+                        📅 {formatLocalStamp(r.triggered_at)}{r.agent_id === detail.agent.id ? "" : ` · ${r.agent_name}`}
                       </p>
                       {(r.lessons || r.reflections || [r.review]).map((item: string, i: number) => (
                         <div key={i} className="px-2.5 py-1.5 rounded-lg text-xs"

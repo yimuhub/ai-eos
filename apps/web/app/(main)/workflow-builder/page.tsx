@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, describeError } from "@/lib/api";
 import { useResource } from "@/lib/useResource";
+import { formatLocalStamp } from "@/lib/remoteDevices";
 import { notify } from "@/components/Toast";
 import type { Company } from "@/lib/types";
 
@@ -386,7 +387,7 @@ export default function WorkflowBuilderPage() {
                   style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--border)" }}>
                   <span style={{ color: f.success ? "#6ee7b7" : "#fca5a5" }}>{f.score.toFixed(0)} 分</span>
                   <span className="text-[var(--muted)]">
-                    {" "}· {f.source === "manual" ? "人工反馈" : "CEO 自动评分"} · {f.created_at.slice(0, 16).replace("T", " ")}
+                    {" "}· {f.source === "manual" ? "人工反馈" : "CEO 自动评分"} · {formatLocalStamp(f.created_at)}
                   </span>
                   {f.lessons.length > 0 && (
                     <span className="text-[var(--foreground)]"> — {f.lessons.join("；")}</span>

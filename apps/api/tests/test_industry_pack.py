@@ -177,3 +177,22 @@ async def test_scaffold_cross_tenant_is_404(client, tenants):
     }, headers=tenants.bob["headers"])
     assert r.status_code == 404
     assert await _counts(tenants.alice_co["id"]) == (0, 0)
+
+
+# ---------------------------------------------------------------------------
+# 预设文案护栏：industry 会原样出现在向导的组织预设下拉里（客户看得见）。
+# 曾泄漏内部竞品调研笔记「一人公司·销售岗位包（Lindy $300/月 付费点验证）」。
+# ---------------------------------------------------------------------------
+def test_preset_industry_copy_has_no_internal_notes():
+    banned = ("$", "¥", "付费点验证", "竞品", "调研", "内测", "TODO", "FIXME")
+    preset_dir = REPO_ROOT / "content" / "org_presets"
+    presets = sorted(preset_dir.glob("*.json"))
+    assert presets, f"没有找到任何组织预设：{preset_dir}"
+
+    leaks = []
+    for path in presets:
+        industry = json.loads(path.read_text(encoding="utf-8")).get("industry", "")
+        hit = [word for word in banned if word in industry]
+        if hit:
+            leaks.append(f"{path.name}: {industry!r} 命中 {hit}")
+    assert not leaks, "组织预设 industry 含内部调研/定价文案：\n" + "\n".join(leaks)

@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, describeError, getActiveCompanyId } from "@/lib/api";
 import { useActiveCompanyId, useResource, invalidate } from "@/lib/useResource";
+import { formatLocalStamp } from "@/lib/remoteDevices";
 import { confirmAction } from "@/components/ConfirmDialog";
 import type {
   Agent, ConvertConfig, DiscoveredModel, ModelConfig, ModelProvider,
@@ -1064,7 +1065,7 @@ export default function ModelsPage() {
                 </div>
                 <div className="text-[10px] mt-0.5 truncate" style={{ color: "var(--muted)" }}>
                   {p.last_check_ok === true
-                    ? `上次检查：正常${p.last_check_at ? ` · ${p.last_check_at.slice(0, 16).replace("T", " ")}` : ""}`
+                    ? `上次检查：正常${p.last_check_at ? ` · ${formatLocalStamp(p.last_check_at)}` : ""}`
                     : p.last_check_ok === false
                       ? `上次检查：失败${p.last_check_error ? ` · ${p.last_check_error}` : ""}`
                       : "尚未测试连接"}

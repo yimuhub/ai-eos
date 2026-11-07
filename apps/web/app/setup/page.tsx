@@ -316,6 +316,23 @@ export default function SetupPage() {
   const [stageIdx, setStageIdx] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [done, setDone] = useState<DoneState | null>(null);
+  // 完成页的结论要以服务端的模型体检为准：向导里那次测试可能已经过期，
+  // 用户也可能在别处修好了 Key——不能拿旧结果一直挂着"未通过"。
+  const [serverModelReady, setServerModelReady] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (!done || done.model?.status !== "bound") return;
+    let running = true;
+    (async () => {
+      try {
+        const d = await api.get<{ ready?: boolean }>("/models/diagnostics", { silent: true });
+        if (running && typeof d?.ready === "boolean") setServerModelReady(d.ready);
+      } catch {
+        // 体检接口不可用就沿用向导结果，不额外打扰用户
+      }
+    })();
+    return () => { running = false; };
+  }, [done]);
 
   // 推倒重建：完成页上的二次确认
   const [rebuildOpen, setRebuildOpen] = useState(false);
@@ -1104,10 +1121,13 @@ export default function SetupPage() {
           ? `未生成 · ${org.note}`
           : "未生成 · 可进系统后再补";
     const m = done.model;
+    const modelBound = m?.status === "bound";
+    // 服务端体检优先；拿不到体检结果时才退回向导里那次测试的结论
+    const modelOk = serverModelReady ?? (m?.status === "bound" ? m.testOk : false);
     const modelText =
-      m?.status === "bound"
-        ? `${m.modelName}（${m.modelIdOnProvider}）· ${modelBindingSummary(m)}${
-            m.testOk ? "" : " · 连通测试未通过"
+      modelBound
+        ? `${m!.modelName}（${m!.modelIdOnProvider}）· ${modelBindingSummary(m!)}${
+            modelOk ? "" : " · 连通测试未通过"
           }`
         : "未接入 · 进入系统后可在「模型配置」完成";
     return (
@@ -1141,7 +1161,7 @@ export default function SetupPage() {
             <Row label="大模型" value={modelText} />
           </div>
 
-          {m?.status === "bound" && !m.testOk && (
+          {modelBound && !modelOk && (
             <div
               className="mt-4 text-left rounded-[11px] px-3.5 py-3 text-[11.5px] leading-relaxed"
               style={{
@@ -1154,7 +1174,7 @@ export default function SetupPage() {
               <div className="font-medium" style={{ color: "var(--warning)" }}>
                 模型已登记并绑定，但连通测试未通过
               </div>
-              {m.testError && <p className="mt-1">原因：{m.testError}</p>}
+              {serverModelReady === null && m?.testError && <p className="mt-1">原因：{m.testError}</p>}
               <p className="mt-1" style={{ color: "var(--muted)" }}>
                 常见原因：Key 复制不完整、模型 ID 与服务商不符、需要代理网络。
                 进入系统后打开「模型配置」调整并点「测试」，无需重装。

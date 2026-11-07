@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
+import { formatLocalStamp } from "@/lib/remoteDevices";
 import { notify } from "@/components/Toast";
 import FileChangeCard from "@/components/FileChangePreview";
 import { approvalPayloadForDisplay, filePreviewOf } from "@/lib/approvalPreview";
@@ -482,7 +483,7 @@ export default function InterventionPage() {
                 {overrides.map((o) => (
                   <tr key={o.id} style={{ borderTop: "1px solid var(--border)" }}>
                     <td className="py-1.5 pr-3 whitespace-nowrap text-[var(--muted)]">
-                      {o.created_at?.slice(0, 16).replace("T", " ")}
+                      {formatLocalStamp(o.created_at)}
                     </td>
                     <td className="py-1.5 pr-3">{o.target_type}</td>
                     <td className="py-1.5 pr-3 max-w-[180px] truncate">

@@ -1,7 +1,9 @@
 """Token 统计与计费后台：计费设置 CRUD + 六维用量统计。"""
+import csv
+import io
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +13,7 @@ from app.api.deps import (assert_company_capability, assert_company_owned,
 from app.core.logging_config import get_logger
 from app.core.permissions import Capability
 from app.core.scope import build_ctx
+from app.core.timeutil import iso_utc
 from app.models.agent import Agent, Model
 from app.models.company import Company, Department
 from app.models.membership import CompanyMember
@@ -456,5 +459,43 @@ async def usage_logs(company_id: str = Query(...), limit: int = Query(100, le=50
              "model_name": r.model_name or "-", "input_tokens": r.input_tokens,
              "output_tokens": r.output_tokens, "total_tokens": r.total_tokens,
              "total_cost": r.total_cost, "latency_ms": r.latency_ms,
-             "success": r.success, "created_at": r.created_at.isoformat() if r.created_at else None}
+             "success": r.success, "created_at": iso_utc(r.created_at)}
             for r in q.scalars().all()]
+
+
+@router.get("/usage-logs/export.csv")
+async def export_usage_logs(company_id: str = Query(...), days: int | None = Query(None, ge=1, le=366),
+                            scenario: str = Query(None), agent_id: str = Query(None),
+                            db: AsyncSession = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    """用量流水 CSV（最近 5000 条）。
+
+    表格页只展示 100 条，运营要拿给财务就得能导出全量；前端不走
+    `window.open`（带不上 Bearer），而是取回 blob 再触发下载。
+    """
+    ctx = await build_ctx(db, user, company_id)
+    conds = [_usage_scope(ctx)]
+    if scenario:
+        conds.append(TokenUsage.scenario == scenario)
+    if agent_id:
+        conds.append(TokenUsage.agent_id == agent_id)
+    conds += _parse_range(days, None, None)
+    rows = (await db.execute(
+        select(TokenUsage).where(*conds)
+        .order_by(TokenUsage.created_at.desc()).limit(5000))).scalars().all()
+
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(["时间(UTC)", "Agent", "场景", "模型", "输入 tokens",
+                     "输出 tokens", "合计 tokens", "费用", "耗时(ms)", "成功"])
+    for r in rows:
+        writer.writerow([
+            iso_utc(r.created_at) or "", r.agent_name or "(系统)",
+            SCENARIO_LABELS.get(r.scenario, r.scenario), r.model_name or "-",
+            r.input_tokens, r.output_tokens, r.total_tokens, r.total_cost,
+            r.latency_ms, "是" if r.success else "否",
+        ])
+    # BOM：Excel 直接打开中文 CSV 不乱码
+    body = ("\ufeff" + buffer.getvalue()).encode("utf-8")
+    return Response(content=body, media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": 'attachment; filename="usage-logs.csv"'})

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { api, describeError, downloadURL, fetchBlobURL, isCancelled } from "@/lib/api";
-import { TASK_STATUS_ZH, EVENT_TYPE_ZH, EXEC_STATUS_ZH, zh } from "@/lib/i18n";
+import { TASK_STATUS_ZH, TASK_EVENT_ZH, EXEC_STATUS_ZH, INTERVENTION_STATUS_ZH, INTERVENTION_TYPE_ZH, zh } from "@/lib/i18n";
 import { DeliverablesPanel, TaskLogsPanel } from "@/components/DeliverablesLogs";
 import { createPortal } from "react-dom";
 import { notify } from "@/components/Toast";
@@ -726,7 +726,7 @@ export default function TaskDetailPage() {
             </div>
           </div>
 
-          <TaskLogsPanel taskId={id} />
+          <TaskLogsPanel taskId={id} refreshKey={d.events.length} />
 
           {/* 事件流 */}
           <div className="card card-static">
@@ -738,7 +738,7 @@ export default function TaskDetailPage() {
                 <div key={`ev-${e.type}-${e.at}-${i}`} className="py-2 text-xs flex justify-between items-center gap-2">
                   <span className="flex items-center gap-2 min-w-0">
                     <span className="w-1 h-1 rounded-full bg-indigo-400/60 shrink-0" />
-                    <span className="truncate">{zh(EVENT_TYPE_ZH, e.type)}</span>
+                    <span className="truncate">{zh(TASK_EVENT_ZH, e.type)}</span>
                   </span>
                   <span className="tabular-nums shrink-0" style={{ color: "var(--muted)" }}>
                     {new Date(e.at).toLocaleTimeString()}
@@ -763,7 +763,9 @@ export default function TaskDetailPage() {
                       {iv.type === "INSTRUCTION" ? "📣" : iv.type === "MESSAGE" ? "💬" : "🎛"}
                     </span>
                     <span className="truncate">{iv.content}</span>
-                    <span className="ml-auto shrink-0" style={{ color: "var(--muted)" }}>{iv.status}</span>
+                    <span className="ml-auto shrink-0" style={{ color: "var(--muted)" }}>
+                      {zh(INTERVENTION_STATUS_ZH, iv.status)}
+                    </span>
                   </div>
                 ))}
               </div>

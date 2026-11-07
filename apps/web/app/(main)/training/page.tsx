@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
+import { formatLocalStamp } from "@/lib/remoteDevices";
 import { notify } from "@/components/Toast";
 import { confirmAction } from "@/components/ConfirmDialog";
 import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
@@ -328,7 +329,7 @@ export default function TrainingPage() {
                       {TYPE_ZH[detail.type] || detail.type}
                       {" · "}
                       {(STATUS_ZH[detail.status] || { label: detail.status }).label}
-                      {detail.created_at && ` · ${detail.created_at.slice(0, 16).replace("T", " ")}`}
+                      {detail.created_at && ` · ${formatLocalStamp(detail.created_at)}`}
                     </p>
                   </div>
                   {pending && (

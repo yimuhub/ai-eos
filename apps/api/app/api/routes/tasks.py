@@ -14,6 +14,7 @@ from app.background_jobs import QUEUE_FULL
 from app.core.logging_config import get_logger
 from app.core.permissions import Capability
 from app.core.scope import build_ctx
+from app.core.timeutil import iso_utc
 from app.db.session import get_db
 from app.models.agent import Agent
 from app.models.automation import AutomationDefinition
@@ -218,7 +219,7 @@ async def get_task(tid: str, db: AsyncSession = Depends(get_db),
     ev_rows = await db.execute(select(TE).where(TE.task_id == tid).order_by(TE.created_at))
     d["events"] = [
         {"type": ev.event_type.value, "actor_type": ev.actor_type,
-         "payload": ev.payload, "at": str(ev.created_at)}
+         "payload": ev.payload, "at": iso_utc(ev.created_at)}
         for ev in ev_rows.scalars()]
     inter = await db.execute(select(Intervention).where(Intervention.task_id == tid))
     d["interventions"] = [
@@ -261,7 +262,7 @@ async def get_task_summary(tid: str, db: AsyncSession = Depends(get_db),
         .order_by(TE.created_at.desc()).limit(100))).scalars().all()
     d["events"] = [
         {"type": ev.event_type.value, "actor_type": ev.actor_type,
-         "payload": ev.payload, "at": str(ev.created_at)}
+         "payload": ev.payload, "at": iso_utc(ev.created_at)}
         for ev in reversed(ev_rows)]
 
     inter = await db.execute(select(Intervention).where(Intervention.task_id == tid))
@@ -807,7 +808,7 @@ async def task_trace(tid: str, db: AsyncSession = Depends(get_db),
         nodes.append({
             "kind": "execution",
             "id": e.id,
-            "ts": e.created_at.isoformat() if e.created_at else None,
+            "ts": iso_utc(e.created_at),
             "agent_id": e.agent_id,
             "agent_name": amap.get(e.agent_id, e.agent_id),
             "status": e.status,
@@ -818,7 +819,7 @@ async def task_trace(tid: str, db: AsyncSession = Depends(get_db),
             "duration_s": meta.get("duration_s"),
             "checkpoints": [
                 {"type": cp.checkpoint_type, "step": cp.step_index,
-                 "ts": cp.created_at.isoformat() if cp.created_at else None}
+                 "ts": iso_utc(cp.created_at)}
                 for cp in cp_list],
             "usage": ({
                 "tokens": usage_by_agent[e.agent_id]["tokens"],
@@ -831,12 +832,12 @@ async def task_trace(tid: str, db: AsyncSession = Depends(get_db),
         # V5.6.1 事件流（学 OpenHands）：老板介入 = 流中"老板事件"，
         # 与 Agent 动作同一条时间线，可回放/审计/分叉
         nodes.append({"kind": "boss", "id": iv.id,
-                     "ts": iv.created_at.isoformat() if iv.created_at else None,
+                     "ts": iso_utc(iv.created_at),
                      "type": iv.type, "content": (iv.content or "")[:200],
                      "status": iv.status})
     for ev in evs:
         nodes.append({"kind": "event", "id": ev.id,
-                     "ts": ev.created_at.isoformat() if ev.created_at else None,
+                     "ts": iso_utc(ev.created_at),
                      "event_type": ev.event_type,
                      "detail": (str(ev.payload or {})[:150])})
     nodes.sort(key=lambda n: n.get("ts") or "")
@@ -866,7 +867,7 @@ async def task_logs(tid: str, db: AsyncSession = Depends(get_db),
         TE.created_at))).scalars().all()
     for e in evs:
         logs.append({
-            "ts": str(e.created_at), "kind": "event", "who": "system",
+            "ts": iso_utc(e.created_at), "kind": "event", "who": "system",
             "type": e.event_type.value if hasattr(e.event_type, "value") else str(e.event_type),
             "title": "", 
             "content": json.dumps(e.payload, ensure_ascii=False)[:300] if e.payload else "",
@@ -876,7 +877,7 @@ async def task_logs(tid: str, db: AsyncSession = Depends(get_db),
         IV.created_at))).scalars().all()
     for i in ivs:
         logs.append({
-            "ts": str(i.created_at), "kind": "intervention",
+            "ts": iso_utc(i.created_at), "kind": "intervention",
             "who": "老板（人工介入）",
             "type": i.type.value if hasattr(i.type, "value") else str(i.type),
             "title": "", "content": i.content or "",
@@ -890,7 +891,7 @@ async def task_logs(tid: str, db: AsyncSession = Depends(get_db),
     for ex in execs:
         body = ex.error or ex.output or ""
         logs.append({
-            "ts": str(ex.completed_at or ex.created_at), "kind": "execution",
+            "ts": ex.completed_at or iso_utc(ex.created_at), "kind": "execution",
             "who": "AI 员工",
             "type": str(ex.status),
             "title": "执行失败" if ex.status == "failed" else "执行完成",

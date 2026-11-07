@@ -1,6 +1,8 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { api, describeError, downloadText, downloadURL, fetchBlobURL, fetchText } from "@/lib/api";
+import { COLLAB_MESSAGE_ZH, EVENT_TYPE_ZH, EXEC_STATUS_ZH, INTERVENTION_TYPE_ZH, TASK_EVENT_ZH, zh } from "@/lib/i18n";
+import { formatLocalStamp } from "@/lib/remoteDevices";
 import { notify } from "@/components/Toast";
 
 /* ============================================================
@@ -119,13 +121,18 @@ export function DeliverablesPanel({ projectId }: { projectId: string }) {
 
 export function ProjectLogsPanel({ projectId }: { projectId: string }) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [loadError, setLoadError] = useState("");
   const [expanded, setExpanded] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const data = await api.get<{ logs?: LogEntry[] }>(`/projects/${projectId}/logs`);
       setLogs(data.logs || []);
-    } catch { setLogs([]); }
+      setLoadError("");
+    } catch (e) {
+      setLogs([]);
+      setLoadError(describeError(e, "项目日志加载失败"));
+    }
   }, [projectId]);
 
   useEffect(() => { load(); }, [load]);
@@ -135,6 +142,11 @@ export function ProjectLogsPanel({ projectId }: { projectId: string }) {
     meeting: { icon: "🏛", label: "会议" },
     event: { icon: "⚙", label: "事件" },
   };
+
+  const typeLabel = (log: LogEntry) =>
+    log.kind === "event" ? zh(EVENT_TYPE_ZH, log.type)
+      : log.kind === "collab" ? zh(COLLAB_MESSAGE_ZH, log.type)
+        : log.type;
 
   async function exportMd() {
     // 原来用 window.open(接口地址)：导出接口同样需要 token，
@@ -162,6 +174,8 @@ export function ProjectLogsPanel({ projectId }: { projectId: string }) {
         </button>
       </div>
 
+      {loadError && <p className="mb-2 text-[11px] text-red-400">{loadError}</p>}
+
       <div className={`space-y-1 overflow-y-auto ${expanded ? "max-h-[500px]" : "max-h-52"}`}>
         {(expanded ? logs : logs.slice(0, 12)).map((log, i) => {
           const km = KIND_META[log.kind] || { icon: "•", label: log.kind };
@@ -173,10 +187,10 @@ export function ProjectLogsPanel({ projectId }: { projectId: string }) {
                 <span className="font-medium">{log.who}</span>
                 <span className="text-[9px] px-1.5 py-0.5 rounded"
                   style={{ background: "rgba(99,102,241,0.12)", color: "#a5b4fc" }}>
-                  {log.type}
+                  {typeLabel(log)}
                 </span>
                 <span className="ml-auto text-[10px] tabular-nums" style={{ color: "var(--muted)" }}>
-                  {log.ts.slice(5, 16).replace("T", " ")}
+                  {formatLocalStamp(log.ts)}
                 </span>
               </summary>
               {log.title && (
@@ -212,18 +226,29 @@ export function ProjectLogsPanel({ projectId }: { projectId: string }) {
 }
 
 
-export function TaskLogsPanel({ taskId }: { taskId: string }) {
+export function TaskLogsPanel({ taskId, refreshKey }: { taskId: string; refreshKey?: number }) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [loadError, setLoadError] = useState("");
   const [expanded, setExpanded] = useState(false);
 
-  const load = useCallback(async () => {
-    try {
-      const data = await api.get<{ logs?: LogEntry[] }>(`/tasks/${taskId}/logs`);
-      setLogs(data.logs || []);
-    } catch { setLogs([]); }
-  }, [taskId]);
-
-  useEffect(() => { load(); }, [load]);
+  // refreshKey 由任务详情页递增：事件流刷新后日志面板跟着重拉，
+  // 否则首屏拿到 0 条就再也不更新，看起来像"日志丢了"。
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const data = await api.get<{ logs?: LogEntry[] }>(`/tasks/${taskId}/logs`);
+        if (!alive) return;
+        setLogs(data.logs || []);
+        setLoadError("");
+      } catch (e) {
+        if (!alive) return;
+        setLogs([]);
+        setLoadError(describeError(e, "任务日志加载失败"));
+      }
+    })();
+    return () => { alive = false; };
+  }, [taskId, refreshKey]);
 
   const KIND_META: Record<string, { icon: string }> = {
     event: { icon: "⚙" },
@@ -231,6 +256,12 @@ export function TaskLogsPanel({ taskId }: { taskId: string }) {
     collab: { icon: "💬" },
     meeting: { icon: "🏛" },
   };
+
+  const typeLabel = (log: LogEntry) =>
+    log.kind === "event" ? zh(TASK_EVENT_ZH, log.type)
+      : log.kind === "execution" ? zh(EXEC_STATUS_ZH, log.type)
+        : log.kind === "intervention" ? zh(INTERVENTION_TYPE_ZH, log.type)
+          : log.type;
 
   return (
     <div className="card card-static">
@@ -243,6 +274,10 @@ export function TaskLogsPanel({ taskId }: { taskId: string }) {
         </h2>
       </div>
 
+      {loadError && (
+        <p className="mb-2 text-[11px] text-red-400">{loadError}</p>
+      )}
+
       <div className={`space-y-1 overflow-y-auto ${expanded ? "max-h-[500px]" : "max-h-52"}`}>
         {(expanded ? logs : logs.slice(0, 12)).map((log, i) => {
           const km = KIND_META[log.kind] || { icon: "•" };
@@ -254,10 +289,10 @@ export function TaskLogsPanel({ taskId }: { taskId: string }) {
                 <span className="font-medium">{log.who}</span>
                 <span className="text-[9px] px-1.5 py-0.5 rounded"
                   style={{ background: "rgba(99,102,241,0.12)", color: "#a5b4fc" }}>
-                  {log.type}
+                  {typeLabel(log)}
                 </span>
                 <span className="ml-auto text-[10px] tabular-nums" style={{ color: "var(--muted)" }}>
-                  {log.ts.slice(5, 16).replace("T", " ")}
+                  {formatLocalStamp(log.ts)}
                 </span>
               </summary>
               {log.content && (

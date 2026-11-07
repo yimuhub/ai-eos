@@ -74,8 +74,10 @@ async def run_diagnostics(
             add("自动升级通道", True,
                 f"manifest 最新版 {m.get('latest', '?')}，{nfiles} 个平台文件")
         else:
-            add("自动升级通道", False, "未部署 manifest.json",
-                "跑 tools/publish_client_updates.py（--from-local 或 --release）发布一次")
+            # 新装环境本来就没发布过客户端更新——这不是"坏"，不该在体检里报红。
+            add("自动升级通道", True,
+                "未启用（可选）：首次发布客户端更新后才会生成 manifest",
+                "需要时跑 tools/publish_client_updates.py 发布一次")
     except Exception as e:
         add("自动升级通道", False, f"manifest 损坏或不可读：{e}",
             "重跑发布工具；旧版备份在 .bak-* 文件里")

@@ -1,7 +1,8 @@
 "use client";
 import { useState } from "react";
-import { api } from "@/lib/api";
+import { api, describeError, downloadURL, fetchBlobURL } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
+import { formatLocalStamp } from "@/lib/remoteDevices";
 import { confirmAction } from "@/components/ConfirmDialog";
 
 type Pricing = {
@@ -261,7 +262,7 @@ export default function TokenAdminPage() {
                   <span className="text-[var(--foreground)] font-medium truncate max-w-[60%]">{r.name || r.key}</span>
                   <span className="text-[var(--muted-foreground)] shrink-0 ml-2">
                     {fmtTokens(r.total_tokens)} tokens · {fmtCost(r.total_cost)} · {r.calls}次
-                    {r.cost_pct != null ? ` · ${r.cost_pct}%` : ""}
+                    {r.cost_pct ? ` · 成本占比 ${r.cost_pct}%` : ""}
                   </span>
                 </div>
                 {/* V5.8 ⑩ 成本分维：可规则化场景的高占比降本建议 */}
@@ -658,7 +659,23 @@ export default function TokenAdminPage() {
         <div className="card p-5">
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-semibold text-[var(--foreground)]">📜 最近 100 条调用流水</h3>
-            <button onClick={() => refreshLogs()} className="text-xs text-[var(--muted-foreground)] hover:text-[var(--accent)]">⟳ 刷新</button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={async () => {
+                  if (!cid) return flash("还没有公司，无法导出", "err");
+                  try {
+                    downloadURL(
+                      await fetchBlobURL(`/tokens/usage-logs/export.csv?company_id=${cid}`),
+                      "usage-logs.csv",
+                    );
+                  } catch (e: any) {
+                    flash(`导出失败：${describeError(e)}`, "err");
+                  }
+                }}
+                className="text-xs text-[var(--muted-foreground)] hover:text-[var(--accent)]"
+              >⬇ 导出 CSV</button>
+              <button onClick={() => refreshLogs()} className="text-xs text-[var(--muted-foreground)] hover:text-[var(--accent)]">⟳ 刷新</button>
+            </div>
           </div>
           {logs.length ? (
             <div className="overflow-x-auto">
@@ -679,7 +696,7 @@ export default function TokenAdminPage() {
                 <tbody>
                   {logs.map((l) => (
                     <tr key={l.id} className="border-b border-[var(--border)] last:border-0 hover:bg-white/[0.03]">
-                      <td className="py-2 pr-3 text-[var(--muted-foreground)] whitespace-nowrap">{l.created_at?.slice(5, 16).replace("T", " ")}</td>
+                      <td className="py-2 pr-3 text-[var(--muted-foreground)] whitespace-nowrap">{formatLocalStamp(l.created_at)}</td>
                       <td className="py-2 pr-3 font-medium text-[var(--foreground)]">{l.agent_name}</td>
                       <td className="py-2 pr-3">
                         <span className="px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 text-[10px]">{l.scenario_label}</span>

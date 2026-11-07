@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
+import { formatLocalStamp } from "@/lib/remoteDevices";
 import { confirmAction } from "@/components/ConfirmDialog";
 
 type Agent = { id: string; name: string; role?: string; department_id?: string | null };
@@ -362,7 +363,7 @@ export default function AutonomousPage() {
                   {l.human_override && <span className="px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-400 text-[10px]">人工干预</span>}
                   {l.why === "EMERGENCY_STOP" && <span className="px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 text-[10px]">紧急停止</span>}
                   {l.why === "CONFIG_UPDATE" && <span className="px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 text-[10px]">配置变更</span>}
-                  <span className="text-[var(--muted-foreground)]">{l.created_at?.slice(0, 16).replace("T", " ")}</span>
+                  <span className="text-[var(--muted-foreground)]">{formatLocalStamp(l.created_at)}</span>
                 </div>
                 <div className="mt-1 text-[var(--foreground)]">
                   {l.summary || l.why || `${l.scope_type} · L${l.level}`}

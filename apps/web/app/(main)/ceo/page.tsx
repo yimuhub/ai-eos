@@ -23,6 +23,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { api, ApiError, describeError, isCancelled } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
+import { formatLocalStamp } from "@/lib/remoteDevices";
 import { notify } from "@/components/Toast";
 import { confirmAction } from "@/components/ConfirmDialog";
 
@@ -268,7 +269,7 @@ function isActive(status?: string | null): boolean {
 
 function fmtTime(v?: string | null): string {
   if (!v) return "—";
-  return v.slice(0, 16).replace("T", " ");
+  return formatLocalStamp(v);
 }
 
 function StatusPill({ status }: { status: string }) {

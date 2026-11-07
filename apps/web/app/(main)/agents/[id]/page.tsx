@@ -4,6 +4,7 @@ import { useParams } from "next/navigation";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
+import { formatLocalStamp } from "@/lib/remoteDevices";
 import { confirmAction } from "@/components/ConfirmDialog";
 import { notify } from "@/components/Toast";
 import AgentChat from "@/components/AgentChat";
@@ -386,7 +387,7 @@ export default function AgentDetailPage() {
               {reflections.map((r) => (
                 <div key={r.id} className="card card-static !py-2 text-sm text-[var(--foreground)]">
                   <span className="text-xs text-[var(--muted)]">
-                    {r.created_at.slice(0, 16).replace("T", " ")}
+                    {formatLocalStamp(r.created_at)}
                   </span>
                   {r.went_well?.map((w: string, i: number) => (
                     <div key={"w" + i}>✅ {w}</div>

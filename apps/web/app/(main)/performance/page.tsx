@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback } from "react";
 import { api, describeError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { formatDuration, formatRate, type MetricsOverview } from "@/lib/types";
+import { formatLocalStamp } from "@/lib/remoteDevices";
 import { notify } from "@/components/Toast";
 
 /* ============================================================
@@ -360,7 +361,7 @@ export default function PerformancePage() {
             <div className="space-y-1 text-xs">
               {history.map((h, i) => (
                 <div key={i} className="flex justify-between tabular-nums" style={{ color: "var(--muted)" }}>
-                  <span>{h.period_end?.slice(0, 16).replace("T", " ")} · 员工 {h.agent_id?.slice(0, 8)}</span>
+                  <span>{formatLocalStamp(h.period_end)} · 员工 {h.agent_id?.slice(0, 8)}</span>
                   <span className="text-[var(--foreground)]">{h.score}</span>
                 </div>
               ))}

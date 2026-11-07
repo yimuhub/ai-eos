@@ -14,6 +14,7 @@ import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { api, describeError } from "@/lib/api";
 import { confirmAction } from "@/components/ConfirmDialog";
+import { formatLocalStamp } from "@/lib/remoteDevices";
 import type { ModelConfig } from "@/lib/types";
 
 type Readiness = {
@@ -532,7 +533,7 @@ export default function OrgSynthesisDrawer({
                         style={{ border: "1px solid var(--border)" }}>
                         <span className="text-xs font-medium">{statusText(r)}</span>
                         <span className="text-[11px] truncate" style={{ color: "var(--muted)" }}>
-                          {r.created_at?.replace("T", " ").slice(0, 16)}
+                          {formatLocalStamp(r.created_at)}
                         </span>
                         <span className="ml-auto text-[11px]" style={{ color: "var(--muted)" }}>
                           {r.draft?.totals
