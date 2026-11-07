@@ -517,18 +517,28 @@ export default function MobilePage() {
     }
   };
 
-  const accept = (artifactId: string) =>
+  // IN_REVIEW 的成果还没过审，但老板在"待验收"里看到它时就已经看过内容了：
+  // 验收即视为审核通过（先 approve 再 accept），退回即视为审核驳回。
+  const accept = (artifactId: string, status?: string | null) =>
     act(
       `accept:${artifactId}`,
-      () =>
-        api.post(`/artifacts/${artifactId}/accept`, undefined, {
+      async () => {
+        if (status === "IN_REVIEW") {
+          await api.post(
+            `/artifacts/${artifactId}/review`,
+            { decision: "approve", comment: "" },
+            { silent: true, noAuthRedirect: true },
+          );
+        }
+        await api.post(`/artifacts/${artifactId}/accept`, undefined, {
           silent: true,
           noAuthRedirect: true,
-        }),
+        });
+      },
       "已验收通过，任务结案",
     );
 
-  const decline = async (artifactId: string) => {
+  const decline = async (artifactId: string, status?: string | null) => {
     const check = validateDeclineComment(declineText);
     if (!check.ok) {
       setDeclineError(check.error);
@@ -538,11 +548,17 @@ export default function MobilePage() {
     const ok = await act(
       `decline:${artifactId}`,
       () =>
-        api.post(
-          `/artifacts/${artifactId}/decline`,
-          { comment: check.comment },
-          { silent: true, noAuthRedirect: true },
-        ),
+        status === "IN_REVIEW"
+          ? api.post(
+              `/artifacts/${artifactId}/review`,
+              { decision: "reject", comment: check.comment },
+              { silent: true, noAuthRedirect: true },
+            )
+          : api.post(
+              `/artifacts/${artifactId}/decline`,
+              { comment: check.comment },
+              { silent: true, noAuthRedirect: true },
+            ),
       "已退回，等待员工返工",
     );
     if (ok) {
@@ -824,13 +840,17 @@ export default function MobilePage() {
                               type="button"
                               className="btn-primary flex-1 !py-1.5 text-xs"
                               disabled={!!busy}
-                              onClick={() => void decline(it.artifact_id!)}
+                              onClick={() =>
+                                void decline(it.artifact_id!, it.artifact_status)
+                              }
                             >
                               {busy === `decline:${it.artifact_id}` ? "提交中…" : "确认退回"}
                             </button>
                           </div>
                         </div>
-                      ) : it.artifact_status && it.artifact_status !== "APPROVED" ? (
+                      ) : it.artifact_status &&
+                        it.artifact_status !== "APPROVED" &&
+                        it.artifact_status !== "IN_REVIEW" ? (
                         <p className="mt-2 text-[11px] text-[var(--muted)]">
                           成果还在审核中，审核通过后才能验收或退回。
                         </p>
@@ -840,7 +860,9 @@ export default function MobilePage() {
                             type="button"
                             className="btn-primary flex-1 !py-1.5 text-xs"
                             disabled={!!busy}
-                            onClick={() => void accept(it.artifact_id!)}
+                            onClick={() =>
+                              void accept(it.artifact_id!, it.artifact_status)
+                            }
                           >
                             {busy === `accept:${it.artifact_id}` ? "处理中…" : "验收通过"}
                           </button>

@@ -92,6 +92,11 @@ async def transition(
         db, "task.status_changed", "task", task.id, actor_type, actor_id,
         {"from": old.value, "to": new_status.value},
     )
+    if new_status == TaskStatus.COMPLETED:
+        # 任务产出要进"待验收"，否则老板在收件箱里永远只看到"已完成"，
+        # 交付/验收链路（IN_REVIEW → APPROVED → accepted_at）无从开始。
+        from app.services.deliverables import record_task_deliverable
+        await record_task_deliverable(db, task)
     # 完成/失败必须让任务创建人知道。通知与状态同事务：commit 由本函数
     # （commit=True）或调用方决定，通知失败只记 warning，不影响状态机。
     from app.services.notification_service import notify_task_terminal
