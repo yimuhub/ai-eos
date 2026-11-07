@@ -67,8 +67,21 @@ async def transition(
     # 不让 SQLAlchemy 自己猜（它可能把 object 标脏，反而在后续 flush 覆盖别人）。
     # 完成即 100%：进度条此前只读不写，已完成的任务也停在 0%。
     values: dict = {"status": new_status}
+    touched: dict = {}
     if new_status == TaskStatus.COMPLETED:
         values["progress"] = 1.0
+        touched["progress"] = 1.0
+    # 开始/结束时刻：这两列此前只有 CEO mission 会写，普通派活永远是空，
+    # 于是任务详情算不出耗时、CEO 的"卡住任务"巡检（按 started_at 过滤）
+    # 一条也扫不到。状态机是唯一入口，就在这里落时刻。
+    if new_status == TaskStatus.RUNNING and old != TaskStatus.RUNNING:
+        values["started_at"] = task.started_at or datetime.now(
+            timezone.utc).isoformat()
+        touched["started_at"] = values["started_at"]
+    if new_status in (TaskStatus.COMPLETED, TaskStatus.FAILED,
+                      TaskStatus.CANCELLED):
+        values["completed_at"] = datetime.now(timezone.utc).isoformat()
+        touched["completed_at"] = values["completed_at"]
     res = await db.execute(
         update(Task)
         .where(Task.id == task.id, Task.status == old)
@@ -82,8 +95,8 @@ async def transition(
     # 把新状态写成"已提交值"：调用方后续读 task.status 拿到的是新状态，
     # 但不会把它当未保存修改再写一遍。
     set_committed_value(task, "status", new_status)
-    if new_status == TaskStatus.COMPLETED:
-        set_committed_value(task, "progress", 1.0)
+    for field, value in touched.items():
+        set_committed_value(task, field, value)
 
     db.add(
         TaskEvent(

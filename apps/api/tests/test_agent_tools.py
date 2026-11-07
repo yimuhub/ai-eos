@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.agent_runtime import run_agent_on_task
 from app.db.session import AsyncSessionLocal
 from app.model_gateway import ModelGateway
@@ -153,3 +155,72 @@ async def test_text_form_tool_call_also_runs(client, tenants, monkeypatch):
         e = await s.get(AgentExecution, execution.id)
         trace = (e.metadata_json or {}).get("tools_used")
     assert trace and trace[0]["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# 4) 工具轮用尽：绝不能把「空正文」记成已完成
+# ---------------------------------------------------------------------------
+def _search_call(n: int) -> dict:
+    return {"id": f"call_{n}", "type": "function",
+            "function": {"name": "web_search",
+                         "arguments": json.dumps({"query": f"AI {n}"})}}
+
+
+async def _fake_search(slug, payload):
+    return {"result": {"query": payload["query"], "results": []}}
+
+
+async def test_tool_budget_exhausted_forces_text_answer(client, tenants, monkeypatch):
+    """4 轮工具吃完后模型还在要工具：必须摘掉工具再问一次正文。
+
+    线上实测：本地网关模型连搜 4 轮后正文为空，任务照样被标成
+    COMPLETED——派活的人看到状态变绿，点进去什么都没有。
+    """
+    alice, co = tenants.alice, tenants.alice_co
+    agent_id, task_id = await _seed_agent_task(co["id"], alice["id"], "查数据")
+    seen_tools: list = []
+    rounds = {"n": 0}
+
+    async def fake_chat(self, model_ids, messages, tools=None, config=None):
+        seen_tools.append(tools)
+        if tools is not None:
+            rounds["n"] += 1
+            return {"content": "", "tool_calls": [_search_call(rounds["n"])]}
+        assert messages[-1]["role"] == "user", "收尾必须追加一次明确指令"
+        return {"content": "基于已检索到的信息：市场约 1200 亿元。"}
+
+    monkeypatch.setattr(ModelGateway, "chat_with_agent_models", fake_chat)
+    monkeypatch.setattr("app.skill_system.execute_skill", _fake_search)
+
+    async with AsyncSessionLocal() as s:
+        agent = await s.get(Agent, agent_id)
+        task = await s.get(Task, task_id)
+        execution = await run_agent_on_task(s, agent, task)
+        await s.commit()
+
+    assert seen_tools[-1] is None, "收尾必须不带工具再问一次"
+    assert execution.status == "completed"
+    assert "1200 亿元" in execution.output
+
+
+async def test_empty_output_still_fails_instead_of_silent_success(
+        client, tenants, monkeypatch):
+    """连收尾都拿不到正文时按失败上报，不写空成果。"""
+    alice, co = tenants.alice, tenants.alice_co
+    agent_id, task_id = await _seed_agent_task(co["id"], alice["id"], "查数据")
+    rounds = {"n": 0}
+
+    async def fake_chat(self, model_ids, messages, tools=None, config=None):
+        if tools is not None:
+            rounds["n"] += 1
+            return {"content": "", "tool_calls": [_search_call(rounds["n"])]}
+        return {"content": "   "}
+
+    monkeypatch.setattr(ModelGateway, "chat_with_agent_models", fake_chat)
+    monkeypatch.setattr("app.skill_system.execute_skill", _fake_search)
+
+    async with AsyncSessionLocal() as s:
+        agent = await s.get(Agent, agent_id)
+        task = await s.get(Task, task_id)
+        with pytest.raises(RuntimeError, match="没有返回正文"):
+            await run_agent_on_task(s, agent, task)

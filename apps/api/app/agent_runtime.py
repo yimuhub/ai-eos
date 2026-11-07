@@ -317,9 +317,27 @@ async def run_agent_on_task(
             await db.commit()
             rounds += 1
 
+        # 工具轮用尽时模型往往「还在要工具、正文为空」。直接落库就是
+        # 「已完成但产出为空」的假成功（本地网关首跑正是这样收场的）：
+        # 派活的人看到状态变绿，点进去什么也没有。先摘掉工具逼一次纯文本
+        # 收尾，仍为空则按失败上报，绝不把空成果写成完成。
+        if not (llm_result.get("content") or "").strip():
+            messages.append({
+                "role": "user",
+                "content": ("工具调用预算已用尽。请不要再调用任何工具，"
+                            "直接基于上面已获得的信息给出最终答复正文。"),
+            })
+            llm_result = await gateway.chat_with_agent_models(
+                model_ids, messages, tools=None)
+            await db.commit()
+
         # 文本形式的残留标记不能进正文/正文落盘文件
         if isinstance(llm_result.get("content"), str):
             llm_result["content"] = strip_text_tool_calls(llm_result["content"])
+        if not (llm_result.get("content") or "").strip():
+            raise RuntimeError(
+                "模型没有返回正文：多轮工具调用后仍然只给出工具请求/空内容。"
+                "任务按失败处理，避免把空产出记成已完成。")
         if tool_trace:
             await log_event(db, "agent.tools_used", "task", str(task.id),
                             "agent", agent.id,

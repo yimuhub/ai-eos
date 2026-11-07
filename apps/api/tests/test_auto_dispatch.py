@@ -234,6 +234,39 @@ async def test_completed_task_progress_becomes_full(client, tenants):
         assert (await s.get(Task, tid)).progress == 1.0
 
 
+async def test_transition_records_started_and_completed_at(client, tenants):
+    """耗时不能用 execute 的时刻倒推：状态机必须落开始/结束时刻。
+
+    这两列长期只有 CEO mission 会写，普通派活永远是空——
+    任务详情算不出耗时，CEO「卡住任务」巡检（按 started_at 过滤）
+    也一条都扫不到。
+    """
+    alice, co = tenants.alice, tenants.alice_co
+    agent = await _make_agent(client, alice, co["id"])
+    async with AsyncSessionLocal() as s:
+        t = Task(company_id=co["id"], title="计时", status=TaskStatus.TODO,
+                 assigned_agent_id=agent["id"], created_by=alice["id"])
+        s.add(t)
+        await s.flush()
+        tid = t.id
+        await s.commit()
+
+    async with AsyncSessionLocal() as s:
+        t = await s.get(Task, tid)
+        await transition(s, t, TaskStatus.RUNNING)
+    async with AsyncSessionLocal() as s:
+        t = await s.get(Task, tid)
+        assert t.started_at, "进入 RUNNING 必须写开始时刻"
+        assert t.completed_at is None
+        started = t.started_at
+        await transition(s, t, TaskStatus.COMPLETED)
+
+    async with AsyncSessionLocal() as s:
+        t = await s.get(Task, tid)
+        assert t.started_at == started, "重复迁移不能刷新开始时刻"
+        assert t.completed_at, "进入 COMPLETED 必须写结束时刻"
+
+
 async def test_resolve_targets_filters_by_company():
     """直接验证解析层：即便绕过路由鉴权，跨公司 agent 也拿不到。"""
     from app.api.routes.task_dispatch import DispatchIn
