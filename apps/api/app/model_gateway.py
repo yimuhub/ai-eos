@@ -796,17 +796,37 @@ def _http_status(exc: Exception) -> int | None:
     return code
 
 
-def _resolve_api_key(model_row: Model) -> str:
-    """解析模型密钥。
+def _resolve_api_key(model_row: Model,
+                     company_vault_key: str | None = None) -> str:
+    """解析模型密钥（同步部分：公司密钥库 → 进程环境）。
 
     改造前这里直接读 os.environ，而 .env 从未被注入 os.environ，
     导致"只在 .env 里配了密钥"时静默取到空串、调用方收到 401 却查不出原因。
-    现在统一走 settings.resolved_api_key（.env 已在 core.config 导入期注入）。
-    """
-    from app.core.config import settings
+    现在统一走 `api_key_resolver.env_key`（.env 已在 core.config 导入期注入）。
 
-    provider_name = getattr(model_row.provider_type, "value", "") or ""
-    return settings.resolved_api_key(model_row.api_key_env, provider_name)
+    BYOK：调用方已从公司密钥库解出的明文通过 `company_vault_key` 传入并
+    优先使用——客户自带 Key 就必须真的用自己的 Key。库读取是异步的，
+    这里保持同步，是为了让"敏感变量名一律取不到值"这条兜底有唯一断言点。
+    """
+    if company_vault_key:
+        return company_vault_key
+    from app.services import api_key_resolver
+
+    return api_key_resolver.env_key(model_row.api_key_env,
+                                    model_row.provider_type)
+
+
+def _ctx_company_id(ctx: dict | None, model_row: Model) -> str | None:
+    """BYOK 作用域：优先调用上下文里的公司，其次模型行自己的归属。
+
+    平台级共享模型（`company_id=None`）被租户调用时，必须用租户的公司 id
+    去查密钥库，否则客户的 Key 永远命中不了。
+    """
+    ctx = ctx or {}
+    agent_obj = ctx.get("agent")
+    return (ctx.get("company_id")
+            or getattr(agent_obj, "company_id", None)
+            or getattr(model_row, "company_id", None))
 
 
 # 模型行里可以下发给 provider 的调用参数。只认这三个：其余 config 项
@@ -875,33 +895,54 @@ class ModelGateway:
         self.db = db
 
     @staticmethod
-    def _build_provider(row: Model):
+    def _build_provider(row: Model, api_key: str | None = None):
         """按 provider 类型构造调用器：内置 PROVIDERS 优先，插件兜底。
 
         插件 register() 可返回类（按 base_url/api_key/model_id 实例化）
         或已实例化的对象；未知类型返回 None，由调用方记入失败摘要。
+        `api_key` 由异步的 `_provider_for` 先解析（含公司密钥库）再传进来。
         """
+        key = _resolve_api_key(row, api_key)
         provider_cls = PROVIDERS.get(row.provider_type)
         if provider_cls is not None:
             return provider_cls(
                 base_url=row.base_url or "",
-                api_key=_resolve_api_key(row),
+                api_key=key,
                 model_id=row.model_id,
             )
-        key = str(getattr(row.provider_type, "value", row.provider_type))
-        plugin_obj = _PLUGIN_PROVIDERS.get(key)
+        key_name = str(getattr(row.provider_type, "value", row.provider_type))
+        plugin_obj = _PLUGIN_PROVIDERS.get(key_name)
         if plugin_obj is None:
             return None
         if isinstance(plugin_obj, type):
             return plugin_obj(
                 base_url=row.base_url or "",
-                api_key=_resolve_api_key(row),
+                api_key=key,
                 model_id=row.model_id,
             )
         return plugin_obj
 
+    async def _provider_for(self, row: Model, company_id: str | None):
+        """构造调用器前先解析「真正生效」的密钥（公司密钥库优先）。
+
+        BYOK 的库读取需要数据库，所以不能放在同步的 `_build_provider` 里；
+        解析结果一旦命中，就覆盖环境变量里的平台密钥。
+        """
+        from app.services import api_key_resolver
+
+        key = await api_key_resolver.vault_key(
+            self.db, company_id, getattr(row, "api_key_env", ""),
+            row.provider_type)
+        return self._build_provider(row, api_key=key)
+
     async def _enforce_budget(self, ctx: dict | None) -> None:
-        """V5.5 P0 成本护栏：LLM 调用前检查 token 预算上限，到顶即抛暂停。"""
+        """LLM 调用前护栏：套餐月度配额 → token 预算上限。
+
+        套餐配额（`monthly_token_quota`）是商业硬上限，超了直接 402、连一次
+        上游请求都不发；预算上限（`token_budgets`）是公司自设的成本熔断，
+        超了抛 `BudgetExhausted` 让任务停下等老板调额。两者都在这里，是因为
+        这是所有模型调用（chat / stream）共同的必经点。
+        """
         if not ctx:
             return
         agent_obj = ctx.get("agent")
@@ -909,6 +950,10 @@ class ModelGateway:
         agent_id = getattr(agent_obj, "id", None) or ctx.get("agent_id")
         if not company_id:
             return
+
+        from app.services import subscription_service
+        await subscription_service.enforce_token_quota(self.db, company_id)
+
         budgets = (await self.db.execute(
             select(TokenBudget).where(
                 TokenBudget.company_id == company_id,
@@ -1026,7 +1071,8 @@ class ModelGateway:
                 logger.warning("模型 %s(%s) 处于熔断冷却期，跳过本次调用",
                                row.name, mid)
                 continue
-            provider = self._build_provider(row)
+            provider = await self._provider_for(
+                row, _ctx_company_id(ctx, row))
             if provider is None:
                 failures.append(f"{row.name}：未知 provider 类型 {row.provider_type}")
                 logger.warning("模型 %s(%s) 的 provider 类型 %s 无法解析，跳过",
@@ -1150,7 +1196,8 @@ class ModelGateway:
                 yield {"type": "model_error", "model_id": mid,
                        "model_name": row.name, "message": "熔断冷却中，已跳过"}
                 continue
-            provider = self._build_provider(row)
+            provider = await self._provider_for(
+                row, _ctx_company_id(ctx, row))
             if provider is None:
                 failures.append(f"{row.name}：未知 provider 类型 {row.provider_type}")
                 yield {"type": "model_error", "model_id": mid,

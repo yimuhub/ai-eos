@@ -16,6 +16,7 @@ base_url 与"密钥放在哪个环境变量"这类信息。这是跨租户越权
   无主配置可能正被别家公司的员工使用，直接删会造成看不见的破坏。
 """
 import logging
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -126,21 +127,25 @@ async def _validate_model_base_url(base_url: str | None) -> None:
         raise HTTPException(400, f"base_url 不安全：{e}")
 
 
-def key_available(model_row: Model) -> bool:
+def key_available(model_row: Model,
+                  vault_names: frozenset[str] = frozenset()) -> bool:
     """该模型在**实际调用时**能否取到密钥。
 
-    必须与 `model_gateway._resolve_api_key()` 使用同一套解析逻辑
-    （`settings.resolved_api_key`）。否则自检与运行时会出现两种事实：
-    自检说"缺密钥"、任务却能跑通；或者自检说"就绪"、任务 401 失败。
+    必须与网关的解析链一致（公司密钥库 → 环境变量），否则自检与运行时会
+    出现两种事实：自检说"缺密钥"、任务却能跑通；或者自检说"就绪"、
+    任务 401 失败。`vault_names` 由调用方批量预取（只查名字、不解密）。
     """
-    import os
+    from app.services import api_key_resolver
 
-    from app.core.config import settings
-
-    provider = model_row.provider_type.value
-    if settings.resolved_api_key(model_row.api_key_env, provider):
+    for name in api_key_resolver.candidate_names(
+            model_row.api_key_env, model_row.provider_type):
+        if name in vault_names:
+            return True
+    if api_key_resolver.env_key(model_row.api_key_env,
+                                model_row.provider_type):
         return True
-    # 兼容 <ENV>_FILE 形式的密钥文件注入
+    provider = model_row.provider_type.value
+    # 兼容 <ENV>_FILE 形式的密钥文件注入（env_key 已覆盖，保留兜底语义）
     env_name = model_row.api_key_env or PROVIDER_ENV_VARS.get(provider, "")
     return bool(env_name and os.environ.get(f"{env_name}_FILE", ""))
 
@@ -250,9 +255,14 @@ async def diagnostics(db: AsyncSession = Depends(get_db),
     本接口让前端能明确告诉用户卡在哪一步。安全约束：
     **只报告密钥是否存在（布尔），绝不返回密钥内容本身**。
     """
+    from app.services import api_key_resolver
+
+    company_ids = await _my_company_ids(db, user.id)
     all_rows = list((await db.execute(select(Model).where(
         or_(Model.company_id.is_(None),
-            Model.company_id.in_(await _my_company_ids(db, user.id)))))).scalars())
+            Model.company_id.in_(company_ids))))).scalars())
+    # 公司密钥库里的名字一次取全（不解密）：自检只需知道"有这把钥匙"。
+    vault = await api_key_resolver.vault_names(db, company_ids)
     # 停用的模型不参与"能否开工"的判断：界面上关掉一个坏模型，
     # 自检就不应继续因为它的失败把人拦在门外。
     rows = [m for m in all_rows if m.enabled is not False]
@@ -260,7 +270,7 @@ async def diagnostics(db: AsyncSession = Depends(get_db),
     for ptype, env_name in PROVIDER_ENV_VARS.items():
         configured = [m for m in rows
                       if m.provider_type.value == ptype]
-        key_ready = [m for m in configured if key_available(m)]
+        key_ready = [m for m in configured if key_available(m, vault)]
         ready_of_type = [m for m in key_ready if not _test_failed(m)]
         tested_at = [t for t in (_last_test_at(m) for m in configured) if t]
         providers.append({
@@ -280,11 +290,12 @@ async def diagnostics(db: AsyncSession = Depends(get_db),
         })
 
     # 是否存在"至少一个模型 + 该模型的密钥已就位"的组合
-    ready_models = [m.id for m in rows if key_available(m) and not _test_failed(m)]
+    ready_models = [m.id for m in rows
+                    if key_available(m, vault) and not _test_failed(m)]
     # 密钥有、但连通性测试明确失败：这不是"缺配置"，是"配了但不通"，
     # 提示必须区分开，否则用户会去反复重填一个本来正确的密钥。
     connectivity_failed = [m for m in rows
-                           if key_available(m) and _test_failed(m)]
+                           if key_available(m, vault) and _test_failed(m)]
 
     missing_hint = ""
     if not all_rows:
@@ -515,7 +526,7 @@ async def delete_model(mid: str, db: AsyncSession = Depends(get_db),
 async def test_model(mid: str, db: AsyncSession = Depends(get_db),
                      user=Depends(get_current_user)):
     """Ping the provider with a tiny prompt."""
-    from app.model_gateway import _resolve_api_key, PROVIDERS
+    from app.model_gateway import PROVIDERS
     m = await db.get(Model, mid)
     if not m:
         raise HTTPException(404, "Model not found")
@@ -529,8 +540,17 @@ async def test_model(mid: str, db: AsyncSession = Depends(get_db),
     _reject_sensitive_env(m.api_key_env)
     await _validate_model_base_url(m.base_url)
 
+    # 密钥必须用「运行时真正会用的那一把」：客户存在密钥库里的 Key 要生效，
+    # 否则测试报缺密钥、任务却跑得通。无主模型按调用方各公司的库依次找。
+    from app.services import api_key_resolver
+
+    company_ids = ([m.company_id] if m.company_id
+                   else await _my_company_ids(db, user.id))
+    resolved = await api_key_resolver.resolve_for_companies(
+        db, company_ids, m.api_key_env, m.provider_type)
     provider = PROVIDERS[m.provider_type](
-        base_url=m.base_url or "", api_key=_resolve_api_key(m), model_id=m.model_id)
+        base_url=m.base_url or "", api_key=resolved.value,
+        model_id=m.model_id)
     try:
         # 64 而不是 10：推理型模型（如 agnes-2.5-flash）会先用 token 写
         # reasoning_content，上限太小会导致 content 为空——测试显示"连通正常"

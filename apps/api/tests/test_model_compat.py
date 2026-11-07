@@ -276,7 +276,7 @@ def _use_stream_providers(monkeypatch, providers: dict, names: dict | None = Non
             return rows.get(mid)
 
     monkeypatch.setattr(model_gateway.ModelGateway, "_build_provider",
-                        staticmethod(lambda row: providers[row.id]))
+                        staticmethod(lambda row, api_key=None: providers[row.id]))
 
     async def _noop_usage(*args, **kwargs):
         return None
@@ -509,7 +509,7 @@ async def test_stream_with_agent_models_announces_fallback(monkeypatch):
 
     providers = {"m-bad": BadProvider(), "m-good": GoodProvider()}
     monkeypatch.setattr(model_gateway.ModelGateway, "_build_provider",
-                        staticmethod(lambda row: providers[row.id]))
+                        staticmethod(lambda row, api_key=None: providers[row.id]))
 
     async def _noop_usage(*args, **kwargs):
         return None

@@ -42,22 +42,41 @@ router = APIRouter(prefix="/model-providers", tags=["model-providers"])
 _SAFE_NAME = re.compile(r"[\s\"'`\\]")
 
 
-def _provider_key(provider: ModelProvider) -> str:
-    """按模型网关同一套逻辑解析密钥（含 <ENV>_FILE 注入形式）。"""
-    import os
+async def _provider_key(db: AsyncSession, provider: ModelProvider) -> str:
+    """按模型网关同一套解析链取密钥：公司密钥库（BYOK）→ 环境变量。
 
-    from app.core.config import settings
+    连通测试必须用"运行时真正会用的那把钥匙"，否则客户把 Key 存进密钥库后，
+    测试会报"缺密钥"，而任务其实能跑通。
+    """
+    from app.services import api_key_resolver
 
-    provider_type = provider.provider_type.value
-    key = settings.resolved_api_key(provider.api_key_env, provider_type)
-    if key:
-        return key
-    env_name = provider.api_key_env or ""
-    return os.environ.get(f"{env_name}_FILE", "") if env_name else ""
+    resolved = await api_key_resolver.resolve(
+        db, company_id=provider.company_id,
+        api_key_env=provider.api_key_env,
+        provider_type=provider.provider_type)
+    return resolved.value
 
 
-def _key_present(provider: ModelProvider) -> bool:
-    return bool(_provider_key(provider))
+async def _vault_names_for(db: AsyncSession,
+                           providers: list[ModelProvider]) -> frozenset[str]:
+    """这些供应商所属公司的密钥库里有那些名字（不解密）。"""
+    from app.services import api_key_resolver
+
+    return await api_key_resolver.vault_names(
+        db, [p.company_id for p in providers])
+
+
+def _key_present(provider: ModelProvider,
+                 vault_names: frozenset[str] = frozenset()) -> bool:
+    """"已配置"：环境变量/密钥库任一有值即为 True。"""
+    from app.services import api_key_resolver
+
+    for name in api_key_resolver.candidate_names(
+            provider.api_key_env, provider.provider_type):
+        if name in vault_names:
+            return True
+    return bool(api_key_resolver.env_key(
+        provider.api_key_env, provider.provider_type))
 
 
 async def _visible_providers(db: AsyncSession, user: User) -> list[ModelProvider]:
@@ -84,14 +103,15 @@ async def _get_provider(db: AsyncSession, user: User, pid: str,
 
 
 def _provider_out(provider: ModelProvider, *, model_count: int = 0,
-                  enabled_count: int = 0) -> dict:
+                  enabled_count: int = 0,
+                  vault_names: frozenset[str] = frozenset()) -> dict:
     return {
         "id": provider.id,
         "name": provider.name,
         "provider_type": provider.provider_type.value,
         "base_url": provider.base_url,
         "api_key_env": provider.api_key_env,
-        "api_key_present": _key_present(provider),
+        "api_key_present": _key_present(provider, vault_names),
         "enabled": provider.enabled is not False,
         "config": provider.config or {},
         "company_id": provider.company_id,
@@ -188,8 +208,10 @@ async def list_model_providers(db: AsyncSession = Depends(get_db),
             slot[0] += 1
             if m.enabled is not False:
                 slot[1] += 1
+    vault = await _vault_names_for(db, providers)
     return [_provider_out(p, model_count=counts.get(p.id, [0, 0])[0],
-                          enabled_count=counts.get(p.id, [0, 0])[1])
+                          enabled_count=counts.get(p.id, [0, 0])[1],
+                          vault_names=vault)
             for p in sorted(providers, key=lambda x: (x.company_id is not None,
                                                       x.name))]
 
@@ -200,9 +222,10 @@ async def get_model_provider(pid: str, db: AsyncSession = Depends(get_db),
     provider = await _get_provider(db, user, pid, Capability.VIEW)
     rows = await db.execute(select(Model).where(Model.provider_id == pid))
     models = list(rows.scalars())
-    return _provider_out(provider, model_count=len(models),
-                         enabled_count=sum(1 for m in models
-                                           if m.enabled is not False))
+    return _provider_out(
+        provider, model_count=len(models),
+        enabled_count=sum(1 for m in models if m.enabled is not False),
+        vault_names=await _vault_names_for(db, [provider]))
 
 
 @router.post("", status_code=201, response_model=ModelProviderItemOut)
@@ -256,7 +279,8 @@ async def create_model_provider(data: ProviderIn,
     db.add(provider)
     await db.commit()
     await db.refresh(provider)
-    return _provider_out(provider)
+    return _provider_out(
+        provider, vault_names=await _vault_names_for(db, [provider]))
 
 
 @router.patch("/{pid}", response_model=ModelProviderItemOut)
@@ -279,9 +303,11 @@ async def update_model_provider(pid: str, data: ProviderPatch,
                 m.company_id = data.company_id
         await db.commit()
         await db.refresh(provider)
-        return _provider_out(provider, model_count=len(children),
-                             enabled_count=sum(1 for m in children
-                                               if m.enabled is not False))
+        return _provider_out(
+            provider, model_count=len(children),
+            enabled_count=sum(1 for m in children
+                              if m.enabled is not False),
+            vault_names=await _vault_names_for(db, [provider]))
 
     await ensure_capability(db, user.id, provider.company_id, Capability.MANAGE)
 
@@ -333,9 +359,10 @@ async def update_model_provider(pid: str, data: ProviderPatch,
         m.api_key_env = provider.api_key_env
     await db.commit()
     await db.refresh(provider)
-    return _provider_out(provider, model_count=len(children),
-                         enabled_count=sum(1 for m in children
-                                           if m.enabled is not False))
+    return _provider_out(
+        provider, model_count=len(children),
+        enabled_count=sum(1 for m in children if m.enabled is not False),
+        vault_names=await _vault_names_for(db, [provider]))
 
 
 @router.delete("/{pid}", status_code=204)
@@ -394,7 +421,7 @@ async def test_model_provider(pid: str, db: AsyncSession = Depends(get_db),
     try:
         result = await discover_models(
             provider.provider_type, provider.base_url or "",
-            _provider_key(provider), provider.config or {})
+            await _provider_key(db, provider), provider.config or {})
     except OutboundURLRejected as e:
         raise HTTPException(400, f"base_url 不安全：{e}")
     _record_check(provider, result.ok, result.error)
@@ -415,7 +442,8 @@ async def pull_model_provider(pid: str, data: ProviderPullIn | None = None,
                               user: User = Depends(get_current_user)):
     """按供应商已存配置拉取模型；也允许临时传入 key（不落库）先试。"""
     provider = await _get_provider(db, user, pid, Capability.VIEW)
-    key = (data.api_key.strip() if data and data.api_key else "") or _provider_key(provider)
+    key = (data.api_key.strip() if data and data.api_key else "") or \
+        await _provider_key(db, provider)
     try:
         result = await discover_models(
             provider.provider_type, provider.base_url or "", key,

@@ -67,6 +67,12 @@ class ByokDeletedOut(BaseModel):
 class ByokVerifyOut(BaseModel):
     name: str
     configured: bool
+    # 真实探测（给了 provider 才有）：只回答"能不能用"，绝不回显密钥
+    probed: bool = False
+    valid: bool | None = None
+    reachable: bool | None = None
+    status_code: int | None = None
+    detail: str | None = None
 
 
 # ---------------------------------------------------------------------------
