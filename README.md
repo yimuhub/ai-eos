@@ -203,7 +203,7 @@ cd apps/web && npm run test          # vitest (frontend)
 - 🧾 **Deliverable loop.** Artifacts link to tasks, accept/decline with idempotent state, comments, and a task inbox with four buckets (in progress / to accept / done / failed) — "submit → accept" is now a real workflow.
 - 📱 **Multi-device.** `/m` PWA with approvals, Web Push (`push_subscriptions` + VAPID + 404/410 cleanup), and cross-device read state (`thread_reads`, max-merge, never decreases).
 - 🏭 **One-command company.** SaaS industry pack (5 departments / 13 roles / 3 deliverable templates / 10 task templates) scaffolds a whole company; local hybrid search (CJK bigram + synonyms + BM25) powers ⌘K.
-- 💳 **Commercial rails.** 14-day trial + plans, HTML invoice, Fernet-encrypted BYOK vault, Ed25519 license with global read-only gate.
+- 💳 **Commercial rails.** 14-day trial + three plans whose seat and monthly-token quotas are **enforced** (hiring and every LLM call are gated); upgrades and renewals require an order that only a platform operator can mark as paid — no self-service free upgrade; CSV/HTML invoices; Fernet-encrypted BYOK vault; Ed25519 license with global read-only gate.
 - 🧪 **Quality.** Suite **781 tests**, line coverage **69.8%** (the old 47.9% was a measurement bug — coverage wasn't tracking greenlet), Lighthouse first-paint gate, 60-task eval set, dependency/secret scanning and tenant matrix in the manual pre-release pipeline.
 - 🚀 **Ops.** Dockerfiles + compose, backup/restore with sha256-verified drills, and a documented cloud + local backup strategy (`docs/备份与恢复.md`).
 

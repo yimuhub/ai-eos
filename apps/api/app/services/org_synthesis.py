@@ -925,10 +925,16 @@ async def apply_run(db: AsyncSession, run: OrgSynthesisRun, user_id: str,
                 created_by_user_id=user_id,
                 visibility="company",
             )
-            db.add(row)
             names.add(name)
             created_rows.append(row)
             all_agents_by_name.setdefault(name, row)
+
+    # 套餐席位闸门：行还没 add 进 session，此时 COUNT 不会把本批算两遍。
+    if created_rows:
+        from app.services import subscription_service
+        await subscription_service.enforce_seat_limit(
+            db, run.company_id, adding=len(created_rows), label="应用组织方案")
+        db.add_all(created_rows)
     await db.flush()
 
     for row in created_rows:

@@ -239,8 +239,10 @@ async def _enforce_agent_quota(db: AsyncSession, company: Company, user,
     并发口径刻意只做一次 COUNT：配额是"软上限 + 人工审批"，用分布式锁
     去保证严格不超卖，代价远大于收益；多算一个的后果只是多一张审批单。
 
-    顺序：License 只读（过期/不可信）→ 现有部门配额 → License 席位。
-    社区模式（无 License）时后两步里席位闸门直接跳过，行为与改造前一致。
+    顺序：License 只读（过期/不可信）→ 现有部门配额 → License 席位
+    → 订阅套餐席位（硬上限，不接审批）。
+    社区模式（无 License）时 License 席位闸门直接跳过，行为与改造前一致；
+    套餐席位闸门对每家公司都生效（试用也是套餐）。
     """
     state = license_service.get_state()
     if state.read_only:
@@ -285,6 +287,10 @@ async def _enforce_agent_quota(db: AsyncSession, company: Company, user,
                         f"（审批单 {req.id}），请等待管理员批准。"))
 
     await _enforce_license_seats(db, company, user, adding=adding, label=label)
+
+    from app.services import subscription_service
+    await subscription_service.enforce_seat_limit(
+        db, company.id, adding=adding, label=label)
 
 
 @router.get("", response_model=list[AgentListItemOut])

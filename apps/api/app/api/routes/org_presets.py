@@ -177,6 +177,32 @@ async def apply_preset(pid: str, data: ApplyIn,
     if not data.dry_run and created_d:
         await db.flush()  # 让新部门拿到真实 id
 
+    # 阶段 1.5：套餐席位预检。
+    # 员工此刻还没 db.add，COUNT 只包含既有在编员工；这里用与下方完全相同的
+    # 去重口径预演一遍将新建的数量。不预检的话，「一键建公司」就是套餐席位
+    # 的合法绕过口——批量导入 56 个岗位和逐个点 56 次没有区别。
+    if not data.dry_run:
+        seen = {k: set(v) for k, v in names_in.items()}
+        planned = 0
+        for dp in depts:
+            dname = (dp.get("name") or "").strip()
+            d = dept_by_name.get(dname) if dname else None
+            if not d:
+                continue
+            known = seen.setdefault(str(d.id), set()) if d.id else set()
+            for a in dp.get("agents", []):
+                aname = (a.get("name") or "").strip()
+                if not aname:
+                    continue
+                if d.id and aname in known:
+                    continue
+                known.add(aname)
+                planned += 1
+        if planned:
+            from app.services import subscription_service
+            await subscription_service.enforce_seat_limit(
+                db, data.company_id, adding=planned, label="导入组织预设")
+
     # 阶段 2：岗位 → 配备专家的智能体（部门 id 此刻已就位）
     for dp in depts:
         dname = (dp.get("name") or "").strip()

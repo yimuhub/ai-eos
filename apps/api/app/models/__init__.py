@@ -26,7 +26,8 @@ from .memory import AgentMemory, MemoryType  # noqa: F401
 from .artifact import Artifact, ArtifactStatus, ArtifactVersion  # noqa: F401
 from .deliverable import DeliverableComment  # noqa: F401
 from .queue_item import QueueItem, QueueItemStatus  # noqa: F401
-from .subscription import CompanySubscription, SubscriptionStatus  # noqa: F401
+from .subscription import (CompanySubscription, SubscriptionOrder,  # noqa: F401
+                           SubscriptionOrderStatus, SubscriptionStatus)
 from .company_secret import CompanySecret  # noqa: F401
 from .intervention import (ApprovalRequest, InterventionPolicy,  # noqa: F401
                            OverrideLog)
