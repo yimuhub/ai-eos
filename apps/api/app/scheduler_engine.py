@@ -30,11 +30,23 @@ async def execute_action(db: AsyncSession, sched: AutomationSchedule) -> dict:
         definition_id = params.get("definition_id")
         if not definition_id:
             raise ValueError("definition_id required")
-        from app.workflow_runtime import WorkflowRuntime
-        rt = await WorkflowRuntime.start(db, definition_id,
-                                         input_data=params.get("input_data", {}),
-                                         triggered_by=f"scheduler:{sched.id}")
-        return {"workflow_execution_id": str(rt.execution.id)}
+        # 修复：此前调用的 WorkflowRuntime.start 根本不存在（AttributeError），
+        # 所有"启动工作流"调度动作 100% 失败。改走模块级 start_workflow，
+        # 并与 automation_engine.run_workflow 一致：由后台任务继续推进执行。
+        from app.workflow_runtime import start_workflow
+        ex = await start_workflow(db, str(definition_id),
+                                  started_by=f"scheduler:{sched.id}",
+                                  input_data=params.get("input_data") or {})
+        from app.background_jobs import submit_async
+
+        _ex_id = str(ex.id)
+
+        async def _advance(session):
+            from app.workflow_runtime import advance_execution
+            await advance_execution(session, _ex_id)
+
+        submit_async(_advance)
+        return {"workflow_execution_id": _ex_id}
 
     if sched.action_type == "send_message":
         from app.collaboration.routing import send_collaboration_message

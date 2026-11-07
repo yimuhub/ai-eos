@@ -30,6 +30,10 @@ async def build_team(
     user: User = Depends(get_current_user),
 ):
     """为项目自动组建团队。"""
+    # 修复：此前无任何归属校验——任何登录用户可以用别人公司的 project_id
+    # 把任意 Agent 写进他人项目的 project_members（跨租户写）。
+    from app.api.routes.projects import _project_owned
+    await _project_owned(db, user.id, project_id)
     result = await build_team_for_project(db, project_id,
                                           data.template_key if data else None)
     if not result:

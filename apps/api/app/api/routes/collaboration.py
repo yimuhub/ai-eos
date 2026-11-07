@@ -320,10 +320,17 @@ async def get_message(
 async def mark_as_read(
     message_id: str,
     company_id: str = Query(..., description="Company ID"),
+    reader_agent_id: str | None = Query(None,
+        description="标记哪个收件 Agent 已读；不传则全部收件人置为已读"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """标记消息为已读。"""
+    """标记消息为已读。
+
+    修复：此前把已读记在 **发送者** 身上（read_by[sender.id]=True），
+    收件人永远不会被记录，已读回执完全失效。现在由请求指定读者：
+    reader_agent_id 必须在收件人列表里；不传则视为全部收件人已读。
+    """
     message = await db.get(AgentMessage, message_id)
     if not message:
         raise HTTPException(status_code=404, detail="Message not found")
@@ -332,13 +339,21 @@ async def mark_as_read(
     if not sender or sender.company_id != company_id:
         raise HTTPException(status_code=404, detail="Message not found")
 
-    # 更新 read_by
+    receivers = [r for r in (message.receiver_agent_ids or []) if r]
+    if reader_agent_id:
+        if reader_agent_id not in receivers:
+            raise HTTPException(status_code=404, detail="Message not found")
+        readers = [reader_agent_id]
+    else:
+        readers = receivers
+
     if not message.read_by:
         message.read_by = {}
-    message.read_by[sender.id] = True
+    for rid in readers:
+        message.read_by[rid] = True
     await db.commit()
 
-    return {"detail": "Marked as read"}
+    return {"detail": "Marked as read", "read_by": readers}
 
 
 @router.get("/agents/{agent_id}/graph")

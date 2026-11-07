@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { api, describeError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { formatDuration, formatRate, type MetricsOverview } from "@/lib/types";
@@ -66,12 +66,14 @@ export default function PerformancePage() {
     assessment_top: { agent: string; score: number }[];
     health: number;
   } | null>(null);
-  const loadHr = () => {
+  // 修复：此前 loadHr() 直接写在渲染体内——每次渲染发一次请求且 setHr 新对象
+  // 回写触发再渲染 → 无限请求风暴。改为 useEffect + useCallback，仅随 cid 变化拉取。
+  const loadHr = useCallback(() => {
     if (!cid) return;
     api.get(`/performance/company/${cid}/hr-overview`).then(setHr).catch(() => {});
-  };
-  loadHr();
-  const hrRefresh = () => { loadHr(); };
+  }, [cid]);
+  useEffect(() => { loadHr(); }, [loadHr]);
+  const hrRefresh = useCallback(() => { loadHr(); }, [loadHr]);
 
   const { data: m, error: mErr, loading: mLoading, refresh: refreshMetrics } =
     useResource<MetricsOverview>(

@@ -433,7 +433,17 @@ async def create_from_template(
     """一键按模板创建公司结构（部门+Agent）。"""
     tpl = BUILTIN_TEMPLATES.get(data.template_key)
     if not tpl:
-        raise HTTPException(404, "template not found")
+        # 修复：此前只查内置模板——save-company-as-template 存进
+        # EnterpriseTemplate 的模板在 GET /templates 里能看到，在这里却永远
+        # 404，"存为模板→复用"整条链路走不通。现在回查自存模板。
+        saved = (await db.execute(select(EnterpriseTemplate).where(
+            EnterpriseTemplate.key == data.template_key,
+            EnterpriseTemplate.is_builtin.is_(False)))).scalar_one_or_none()
+        if not saved:
+            raise HTTPException(404, "template not found")
+        tpl = saved.template_data or {}
+        if not tpl.get("departments") and not tpl.get("agents"):
+            raise HTTPException(422, "自存模板缺少 departments/agents 结构，无法使用")
     # owner_company_id 来自调用方：必须确认当前用户在该公司具备组织变更能力，
     # 否则等于允许往他人公司塞部门与员工。
     await assert_company_capability(db, user.id, owner_company_id,

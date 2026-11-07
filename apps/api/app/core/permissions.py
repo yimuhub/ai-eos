@@ -192,8 +192,10 @@ async def resolve_role(db: AsyncSession, user_id: str,
         if mapped is not None:
             return mapped
 
-    # 4) 只在部门成员表里：视为普通成员
-    if await _has_department_membership(db, company_id, user_id):
+    # 4) 只在部门成员表里（没有任何 company_members 行）：视为普通成员。
+    #    company_members 行存在但非 active（invited/suspended）的成员
+    #    不能凭部门残留行进入公司（语义是"只在部门表里"，实现此前漏了这个前提）。
+    if member is None and await _has_department_membership(db, company_id, user_id):
         return Role.MEMBER
 
     # 5) 与该公司无关

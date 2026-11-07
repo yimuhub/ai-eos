@@ -8,10 +8,10 @@ import contextlib
 import json
 import random
 import re
+import weakref
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from functools import lru_cache
 
 import httpx
 from sqlalchemy import func, select, update
@@ -49,34 +49,47 @@ RETRY_MAX_DELAY_S = 8.0
 RETRYABLE_STATUS = frozenset({408, 425, 429})
 
 
-@lru_cache(maxsize=1)
-def get_http_client() -> httpx.AsyncClient:
-    """进程级共享 AsyncClient（懒创建）。
+# 每个事件循环一个 AsyncClient（懒创建）。
+#
+# 为什么不能进程级单例：submit_async 的后台作业在 worker 线程里用
+# asyncio.run() 开**临时事件循环**执行（见 background_jobs._runner），
+# 主循环或另一个作业循环建立的 keepalive 连接一旦被当前循环复用，
+# 其 transport 仍绑定在创建它的循环上 → "RuntimeError: Event loop is closed"。
+# 按运行中的循环缓存，循环结束被回收后条目自然消失；同一循环内
+# 连接池照常复用，HTTP_LIMITS 的收敛语义不变。
+_http_clients: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient]" = (
+    weakref.WeakKeyDictionary()
+)
 
-    每次调用都新建 AsyncClient 会让连接无法复用、也失去了连接数上限；
-    这里用单例把连接池收敛到 HTTP_LIMITS。
-    """
-    return httpx.AsyncClient(timeout=HTTP_TIMEOUT, limits=HTTP_LIMITS)
+
+def get_http_client() -> httpx.AsyncClient:
+    """当前事件循环专用的共享 AsyncClient（懒创建）。"""
+    loop = asyncio.get_running_loop()
+    client = _http_clients.get(loop)
+    if client is None:
+        client = httpx.AsyncClient(timeout=HTTP_TIMEOUT, limits=HTTP_LIMITS)
+        _http_clients[loop] = client
+    return client
 
 
 def reset_http_client() -> None:
     """丢弃缓存的 client（仅供测试/事件循环切换时使用）。
 
-    调用方应先 ``await aclose()`` 关闭旧 client，再重置。
+    同步上下文里无法等待 aclose；未关闭的连接随各自事件循环退出被回收。
+    测试里如需确定性清理，在 async 上下文里先 ``await aclose()``。
     """
-    get_http_client.cache_clear()
+    _http_clients.clear()
 
 
 async def aclose() -> None:
-    """关闭共享 client。
+    """关闭**当前事件循环**的共享 client。
 
-    main.py 的 lifespan 不在本工包改动范围内，因此这里暴露一个显式的
-    异步关闭入口；接入 lifespan 时调用 ``await model_gateway.aclose()``
-    即可。测试里先 ``await aclose()`` 再 ``reset_http_client()``。
+    main.py lifespan（主循环）与 background_jobs._with_fresh_engine
+    （作业临时循环）收尾时各调一次，避免连接与其循环一同悬置。
     """
-    if get_http_client.cache_info().currsize:
-        client = get_http_client()
-        get_http_client.cache_clear()
+    loop = asyncio.get_running_loop()
+    client = _http_clients.pop(loop, None)
+    if client is not None:
         await client.aclose()
 
 

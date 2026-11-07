@@ -124,16 +124,26 @@ async def batch_delete_departments(data: BatchDeleteIn,
                         "UPDATE departments SET parent_department_id = NULL "
                         "WHERE CAST(parent_department_id AS varchar) = CAST(:did AS varchar)"),
                         {"did": did})
-                # 员工改为未分配
+                # 先圈定本部门员工，再改为未分配（顺序不能反，否则失去清单）
+                staff_rows = await db.execute(text(
+                    "SELECT id FROM agents "
+                    "WHERE CAST(department_id AS varchar) = CAST(:did AS varchar)"),
+                    {"did": did})
+                staff_ids = [r[0] for r in staff_rows.all()]
                 await db.execute(text(
                     "UPDATE agents SET department_id = NULL "
                     "WHERE CAST(department_id AS varchar) = CAST(:did AS varchar)"),
                     {"did": did})
-                # 部门负责人引用清空（其他部门的 manager_agent_id 可能指向已删部门员工，此处仅清本部门字段）
-                await db.execute(text(
-                    "UPDATE agents SET department_id = NULL "
-                    "WHERE CAST(department_id AS varchar) = CAST(:did AS varchar)"),
-                    {"did": did})
+                # 汇报关系清空：下属 Agent 的 manager_agent_id 可能指向本部门
+                # （即将失去部门的）员工——修复前这里是上一段 UPDATE 的复制粘贴，
+                # manager_agent_id 从未被清理。
+                if staff_ids:
+                    from sqlalchemy import bindparam
+                    await db.execute(
+                        text("UPDATE agents SET manager_agent_id = NULL "
+                             "WHERE manager_agent_id IN :ids").bindparams(
+                            bindparam("ids", expanding=True)),
+                        {"ids": staff_ids})
                 await db.delete(d)
                 # 显式 flush：本条失败在 savepoint 内回滚，不影响同批其他部门
                 await db.flush()

@@ -103,14 +103,14 @@ export default function AutomationsPage() {
         attachments: attachments.length ? attachments : undefined,
       });
       setName(""); setSteps(""); setAttachments([]); setMsg("✅ 自动化规则已创建"); reload();
-    } catch (e) { setMsg(String(e)); }
+    } catch (e) { setMsg(describeError(e, "操作失败")); }
   };
 
   const updateStatus = async (a: Automation, action: "pause" | "resume" | "archive") => {
     try {
       await api.patch(`/automations/${a.id}`, { action });
       reload();
-    } catch (e) { setMsg(String(e)); }
+    } catch (e) { setMsg(describeError(e, "操作失败")); }
   };
 
   const runOnce = async (a: Automation) => {
@@ -119,7 +119,7 @@ export default function AutomationsPage() {
       setMsg(`▶ 已触发执行，状态: ${r.status}`);
       if (a.id) loadRuns(a.id);
       reload();
-    } catch (e) { setMsg(String(e)); }
+    } catch (e) { setMsg(describeError(e, "操作失败")); }
   };
 
   /** 复制定义（副本强制 TEST + 暂停，不带走运行历史） */
@@ -183,7 +183,7 @@ export default function AutomationsPage() {
       const r = await api.post(`/automations/runs/${rid}/approve-continue`) as any;
       setMsg("✅ 已审批并通过断点继续执行");
       loadRuns(aid);
-    } catch (e) { setMsg(String(e)); }
+    } catch (e) { setMsg(describeError(e, "操作失败")); }
   };
 
   return (

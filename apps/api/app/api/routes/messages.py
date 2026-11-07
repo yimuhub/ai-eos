@@ -149,7 +149,19 @@ async def post_message(cid: str, data: MessageIn,
                        background: BackgroundTasks,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
-    await _conv_owned(db, user.id, cid)
+    cv = await _conv_owned(db, user, cid)
+    ctx = await build_ctx(db, user, cv.company_id)
+    # 身份绑定：不能代别人/别的 Agent 发言（修复前 sender_type/sender_id 由客户端任意指定）
+    if data.sender_type == "user":
+        if (data.sender_id or user.id) != user.id:
+            raise HTTPException(403, "不能以其他用户身份发消息")
+        data.sender_id = user.id
+    elif data.sender_type == "agent":
+        if not data.sender_id:
+            raise HTTPException(422, "agent 发言必须提供 sender_id")
+        visible = await _visible_agent_ids(db, ctx)
+        if data.sender_id not in visible:
+            raise HTTPException(404, "Conversation not found")
     m = Message(conversation_id=cid, sender_type=data.sender_type,
                 sender_id=data.sender_id, receiver_id=data.receiver_id,
                 message_type=MessageType(data.message_type), content=data.content)

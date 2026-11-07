@@ -270,16 +270,20 @@ export default function WorkspaceChat({
     const stale = () => currentKeyRef.current !== sendKey || viewEpochRef.current !== sendEpoch;
     const live = () => !detached && !stale();
     try {
+      const failedFiles: File[] = [];
       for (const f of files) {
         const fd = new FormData();
         fd.append("file", f);
         try {
           await api.upload(`/kb2/agents/${target.id}/upload`, fd);
         } catch (e) {
+          failedFiles.push(f);
           notify("error", `${f.name} 上传失败：${describeError(e)}`);
         }
       }
-      setFiles([]);
+      // 只清掉上传成功的附件；失败的保留在输入区，用户可直接重试
+      // （修复前无条件清空，失败的那几个看起来像"传完了"）。
+      setFiles(failedFiles);
       if (!text) {
         if (!stale()) setMsgs((p) => [...p, { role: "agent", content: "附件已经进我的知识库了，接下来要我拿它们做什么？" }]);
         return;

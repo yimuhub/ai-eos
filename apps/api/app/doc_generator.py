@@ -463,9 +463,9 @@ def parse_doc_markers(llm_output: str) -> list[dict]:
             t, ti, c = _grab("type"), _grab("title"), _grab("content")
             if not (t and ti and c):
                 continue
-            spec = {"type": t, "title": ti,
-                    "content": c.encode("utf-8").decode("unicode_escape")
-                    if "\\n" in c else c}
+            # 修复：此前 encode("utf-8").decode("unicode_escape") 按 latin-1
+            # 映射字节，中文全部变乱码；字面量 \n 统一交给下方 replace 处理。
+            spec = {"type": t, "title": ti, "content": c}
         if spec.get("type") and spec.get("title") and spec.get("content"):
             if isinstance(spec["content"], str):
                 # 模型有时把换行写成字面量 \n

@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
 
 type Template = { key: string; name: string; builtin: boolean; departments?: number; agents?: number };
@@ -25,7 +25,7 @@ export default function TemplatesPage() {
       const r = await api.post(`/governance/create-company-from-template?owner_company_id=${cid}`,
         { template_key: key, company_name: companyName });
       setMsg(`✅ 公司结构创建成功：${r.created_agents.map((a: any) => a.name).join("、")}`);
-    } catch (e) { setMsg(String(e)); }
+    } catch (e) { setMsg(describeError(e, "操作失败")); }
   };
 
   return (

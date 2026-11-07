@@ -21,7 +21,8 @@ pytestmark = pytest.mark.asyncio
 def dispatched(monkeypatch):
     calls: list[tuple[str, str]] = []
 
-    async def _fake(db, task_id, agent_id, company_id=None):
+    async def _fake(db, task_id, agent_id, company_id=None, revert_to=None):
+        # revert_to：队列满时的回退目标（TODO/PAUSED），见 _dispatch_or_revert
         calls.append((task_id, agent_id))
 
     monkeypatch.setattr(tasks_route, "_dispatch_or_revert", _fake)

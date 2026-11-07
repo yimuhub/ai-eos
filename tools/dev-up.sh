@@ -69,4 +69,4 @@ fi
 
 wait_http "http://127.0.0.1:$API_PORT/health" "API"
 wait_http "http://127.0.0.1:$WEB_PORT/login" "Web"
-echo "完成。日志：$RUN（api-$API_PORT.log / web-$WEB_PORT.log）"
+echo "完成。日志：${RUN}（api-$API_PORT.log / web-$WEB_PORT.log）"

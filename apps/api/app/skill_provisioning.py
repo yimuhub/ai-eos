@@ -227,12 +227,32 @@ async def search_market_skills(query: str, limit: int = 5) -> list[dict]:
 
 
 async def fetch_market_skill(raw_url: str) -> str:
-    """拉取市场技能正文（只允许 GitHub raw，大小上限内截断）。"""
-    if not (raw_url or "").startswith("https://raw.githubusercontent.com"):
+    """拉取市场技能正文（只允许 GitHub raw，大小上限内截断）。
+
+    修复 SSRF：此前用 startswith 前缀校验——``https://raw.githubusercontent.com@内网IP/``
+    或 ``https://raw.githubusercontent.com.evil.com/`` 都能绕过；且
+    follow_redirects=True 允许 302 跳进内网。改为解析 hostname 精确比对 +
+    关闭重定向，并复用出站闸门做 DNS 级私网拦截。
+    """
+    from urllib.parse import urlparse
+
+    from app.core.net_guard import OutboundURLRejected, validate_outbound_url_async
+
+    if not (raw_url or "").startswith("https://"):
+        raise ValueError("仅支持 HTTPS 地址")
+    host = (urlparse(raw_url).hostname or "").lower()
+    if host != "raw.githubusercontent.com":
         raise ValueError("仅支持 GitHub raw 地址")
+    try:
+        await validate_outbound_url_async(raw_url, allow_private=False)
+    except OutboundURLRejected as e:
+        raise ValueError(f"目标地址被出站安全策略拒绝: {e}")
     async with httpx.AsyncClient(timeout=MARKET_TIMEOUT_S,
-                                 follow_redirects=True) as client:
+                                 follow_redirects=False) as client:
         resp = await client.get(raw_url, headers={"User-Agent": "ai-eos"})
+        if resp.status_code in (301, 302, 303, 307, 308):
+            # 重定向目标不再自动跟随：换目标请直接传新地址重新校验
+            raise ValueError("目标地址发生了重定向，已拒绝（防止跳转绕过校验）")
         resp.raise_for_status()
         if len(resp.content) > MARKET_MAX_BYTES:
             raise ValueError("技能文件过大，已拒绝")

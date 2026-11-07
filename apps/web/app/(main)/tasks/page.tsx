@@ -896,7 +896,7 @@ export default function TasksPage() {
               <span className="w-10 h-10 rounded-xl flex items-center justify-center text-lg shrink-0"
                 style={{ background: "linear-gradient(135deg,#ef4444,#f59e0b)" }}>⚠️</span>
               <p className="text-sm leading-relaxed whitespace-pre-wrap flex-1">
-                彻底删除任务「{confirmTarget.t.title}」？\n所有记忆、成果、执行记录将全部清除，不可恢复！
+                彻底删除任务「{confirmTarget.t.title}」？{"\n"}所有记忆、成果、执行记录将全部清除，不可恢复！
               </p>
             </div>
             <div className="flex gap-2 justify-end">

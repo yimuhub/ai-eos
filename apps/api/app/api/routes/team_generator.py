@@ -44,9 +44,10 @@ async def _llm_plan(db: AsyncSession, system: str, user: str) -> dict:
         raise HTTPException(502, f"模型未返回有效蓝图：{content[:200]}")
     try:
         plan = _json.loads(m.group(0))
+        return _normalize_plan(plan)
     except Exception:
+        # 模型返回的不是 JSON / 不是对象：502 上游问题，而不是 500 内部错误
         raise HTTPException(502, f"蓝图解析失败：{m.group(0)[:200]}")
-    return _normalize_plan(plan)
 
 
 def _normalize_plan(plan: dict) -> dict:
@@ -242,13 +243,22 @@ async def generate_team(data: GenerateIn,
         leader_id = str(list(agent_by_name.values())[0].id)
 
     # ---- 模型绑定（全部绑同一可用模型）----
+    from app.models import Model
     from app.models.agent import AgentModelConfig
     mid = data.model_id
-    if not mid:
-        from app.models import Model
-        from app.model_discovery import chat_model_condition
+    if mid:
+        # 客户端指定的模型必须属于本公司（修复前无校验，可绑定别家模型）
         mid = (await db.execute(
-            select(Model.id).where(chat_model_condition())
+            select(Model.id).where(Model.id == str(mid),
+                                   Model.company_id == str(company.id))
+            .limit(1))).scalar_one_or_none()
+    if not mid:
+        from app.model_discovery import chat_model_condition
+        # 修复：只在本公司模型里挑。此前是无公司过滤的全表查询——
+        # 新公司的员工会被绑到别家公司的模型（成本跨公司归属、越权消费）。
+        mid = (await db.execute(
+            select(Model.id).where(chat_model_condition(),
+                                   Model.company_id == str(company.id))
             .order_by(Model.created_at).limit(1))).scalar_one_or_none()
     if mid:
         for ag in agent_by_name.values():

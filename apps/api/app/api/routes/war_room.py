@@ -1064,6 +1064,11 @@ async def review_task(tid: str, data: ReviewIn,
     t = await db.get(WarRoomTask, tid)
     if not t:
         raise HTTPException(404, "task not found")
+    # 修复：此前只校验 query 里的 company_id，未比对 task 所属作战会话的
+    # 归属——A 公司用户可拿自己的 company_id 改 B 公司作战任务的审核状态。
+    sess = await db.get(WarRoomSession, t.session_id)
+    if not sess or sess.company_id != company_id:
+        raise HTTPException(404, "task not found")
     t.reviewed_by = data.reviewer
     t.review_comment = data.comment
     if data.approve:

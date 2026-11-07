@@ -1,6 +1,6 @@
 "use client";
 import { useMemo, useState } from "react";
-import { api } from "@/lib/api";
+import { api, describeError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
 import { notify } from "@/components/Toast";
@@ -58,7 +58,7 @@ export default function MemoryPage() {
         { agent_id: agentId, memory_type: type, content, importance: Number(importance) });
       setMsg(r.stored ? "已记住" : "重要度太低，被过滤");
       setContent(""); refreshMems();
-    } catch (e) { setMsg(String(e)); }
+    } catch (e) { setMsg(describeError(e, "操作失败")); }
   };
 
   const forget = async (id: string) => {

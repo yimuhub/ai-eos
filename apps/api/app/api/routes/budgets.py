@@ -161,29 +161,33 @@ async def patch_budget(
         # AgentExecution 续跑（学 OpenAI SDK"加预算续跑"；老板有可视化确认点）
         if was_paused:
             from app.models.task import AgentExecution
-            # 找范围内 PAUSED 执行：agent 级按 agent_id；department 级先查该部门
-            # 下的 agent 集合；company 级全部
+            from app.models.agent import Agent as _Agent
+            # 修复两处（此前 company 级恢复**没有任何公司过滤**——A 公司老板
+            # 给预算充值会把他公司所有 PAUSED 执行全部续跑，替别家买单；
+            # department 级引用了 AgentExecution 上不存在的 department_id 列
+            # → AttributeError 500）：
+            # 统一先圈定"本公司 + 范围内"的 agent 集合，再按 agent_id 过滤执行。
             agent_ids: list[str] | None = None
             if b.scope_type == "agent" and b.scope_id:
                 agent_ids = [b.scope_id]
             elif b.scope_type == "department" and b.scope_id:
-                from app.models.agent import Agent as _Agent
                 agent_ids = [str(a.id) for a in (await db.execute(
-                    select(_Agent).where(_Agent.department_id == b.scope_id)
+                    select(_Agent).where(_Agent.department_id == b.scope_id,
+                                         _Agent.company_id == b.company_id)
                 )).scalars().all()]
+            else:  # company 级：本公司全部 Agent
+                agent_ids = [str(a.id) for a in (await db.execute(
+                    select(_Agent).where(_Agent.company_id == b.company_id)
+                )).scalars().all()]
+            if not agent_ids:
+                agent_ids = ["__none__"]
             # agent_runtime.pause_execution 写入的是小写 "paused"；
             # 历史数据里可能同时存在 "PAUSED"/"paused"，查询按大小写无关匹配。
             q2 = select(AgentExecution).where(
-                func.lower(AgentExecution.status) == "paused")
-            if agent_ids:
-                q2 = q2.where(AgentExecution.agent_id.in_(agent_ids))
+                func.lower(AgentExecution.status) == "paused",
+                AgentExecution.agent_id.in_(agent_ids))
             execs = (await db.execute(q2)).scalars().all()
             for ex in execs:
-                # 只恢复范围匹配的（company 级全恢复；agent/department 级按范围）
-                if b.scope_type == "agent" and ex.agent_id != b.scope_id:
-                    continue
-                if b.scope_type == "department" and ex.department_id != b.scope_id:
-                    continue
                 try:
                     from app.agent_runtime import resume_execution
                     await resume_execution(db, ex)

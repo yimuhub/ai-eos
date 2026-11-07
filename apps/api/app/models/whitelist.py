@@ -14,7 +14,9 @@ from app.db.base import Base
 
 
 def _now() -> datetime:
-    return datetime.now()
+    # 与全项目 naive-UTC 口径一致（修复前用本地时间，UTC+8 下快 8 小时）
+    from datetime import timezone
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class ApprovalWhitelist(Base):

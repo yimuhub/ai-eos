@@ -153,7 +153,11 @@ async def create_plan(data: PlanIn, company_id: str = Query(...),
     await _owned_company(db, user.id, company_id, Capability.OPERATE)
     now = datetime.now(timezone.utc)
     created = []
+    from app.models.agent import Agent as _Agent
+    from app.api.deps import assert_agent_owned as _assert_agent
     for aid in data.agent_ids:
+        # 修复：此前不校验 agent_ids 归属——可以给别公司员工挂学习计划
+        await _assert_agent(db, user.id, aid)
         p = LearningPlan(
             id=_uuid.uuid4().hex[:32], company_id=company_id, agent_id=aid,
             title=data.title, target_skills=data.target_skills,

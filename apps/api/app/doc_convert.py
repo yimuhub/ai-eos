@@ -45,7 +45,9 @@ def extract_to_md(file_name: str, raw: bytes) -> tuple[str, bool]:
             return "\n\n".join(lines), True
         except Exception:
             return "", False
-    if suffix in (".xlsx", ".xls"):
+    # 修复：openpyxl 不支持 legacy .xls，此前 .xls 走这里必然异常被吞、
+    # 静默返回解析失败——如实降级为不支持，不再伪装支持。
+    if suffix == ".xlsx":
         try:
             import openpyxl
             wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True)

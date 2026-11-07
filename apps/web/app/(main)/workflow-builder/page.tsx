@@ -198,13 +198,18 @@ export default function WorkflowBuilderPage() {
 
   async function save() {
     const cs = await api.get<Company[]>("/companies");
-    const res = await api.post(`/workflows?company_id=${cs[0].id}`, {
+    const body = {
       name: wfName, nodes: nodes.map(({ node_key, node_type, name, config, position_x, position_y }) =>
         ({ node_key, node_type, name, config, position_x, position_y })),
       edges,
-    });
+    };
+    // 修复：此前每次保存都 POST 新建——同名工作流会越攒越多。
+    // 编辑已保存的工作流（savedId 存在）改为 PUT 原地更新、版本 +1。
+    const res = savedId
+      ? await api.put<{ id: string; name: string; version: number }>(`/workflows/${savedId}`, body)
+      : await api.post<{ id: string; name: string; version?: number }>(`/workflows?company_id=${cs[0].id}`, body);
     setSavedId(res.id);
-    notify("success", `已保存：${res.name}`);
+    notify("success", res.version ? `已保存：${res.name}（v${res.version}）` : `已保存：${res.name}`);
     void refreshMeta(res.id);
   }
 

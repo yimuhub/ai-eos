@@ -207,6 +207,33 @@ async def save_workflow(data: WorkflowSaveIn, company_id: str,
     types = {n.node_type for n in data.nodes}
     if NodeType.START not in types or NodeType.END not in types:
         raise HTTPException(400, "工作流必须包含开始和结束节点")
+    # 校验连线（修复前零连线/断连图也能保存，运行时执行实例会永久卡 RUNNING）：
+    # 1) 非 END 节点必须有出边；2) START 必须可达 END。
+    node_keys = {n.node_key for n in data.nodes}
+    key_types = {n.node_key: n.node_type for n in data.nodes}
+    edge_pairs = [(e.from_node, e.to_node) for e in data.edges
+                  if e.from_node in node_keys and e.to_node in node_keys
+                  and e.from_node != e.to_node]
+    if not edge_pairs:
+        raise HTTPException(400, "工作流没有任何连线：请从节点右侧圆点拖到另一节点连线后再保存")
+    out_map: dict[str, list[str]] = {}
+    for s, d2 in edge_pairs:
+        out_map.setdefault(s, []).append(d2)
+    no_out = sorted(k for k, t in key_types.items()
+                    if t != NodeType.END.value and not out_map.get(k))
+    if no_out:
+        raise HTTPException(400, f"这些节点没有连到下一步：{', '.join(no_out[:5])}（每个非结束节点都要有出边）")
+    seen_reach: set[str] = set()
+    stack = [k for k, t in key_types.items() if t == NodeType.START.value]
+    while stack:
+        k = stack.pop()
+        if k in seen_reach:
+            continue
+        seen_reach.add(k)
+        stack.extend(out_map.get(k, []))
+    ends = {k for k, t in key_types.items() if t == NodeType.END.value}
+    if not (seen_reach & ends):
+        raise HTTPException(400, "开始节点连不到结束节点，请检查连线方向")
 
     wf = WorkflowDefinition(company_id=company_id, project_id=data.project_id,
                             name=data.name, description=data.description,
@@ -229,6 +256,63 @@ async def save_workflow(data: WorkflowSaveIn, company_id: str,
                     user.id, {"name": data.name, "nodes": len(data.nodes)})
     await db.commit()
     return {"id": wf.id, "name": wf.name}
+
+
+@router.put("/workflows/{wid}")
+async def update_workflow(wid: str, data: WorkflowSaveIn,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(get_current_user)):
+    """更新已有工作流（修复前只有 POST：编辑保存会新建重复定义）。"""
+    wf = await _wf_owned(db, user, wid, Capability.OPERATE)
+    # 与新建同一套图校验（见 save_workflow：非 END 必须有出边、START 可达 END）
+    types = {n.node_type for n in data.nodes}
+    if NodeType.START not in types or NodeType.END not in types:
+        raise HTTPException(400, "工作流必须包含开始和结束节点")
+    node_keys = {n.node_key for n in data.nodes}
+    key_types = {n.node_key: n.node_type for n in data.nodes}
+    edge_pairs = [(e.from_node, e.to_node) for e in data.edges
+                  if e.from_node in node_keys and e.to_node in node_keys
+                  and e.from_node != e.to_node]
+    if not edge_pairs:
+        raise HTTPException(400, "工作流没有任何连线：请从节点右侧圆点拖到另一节点连线后再保存")
+    out_map: dict[str, list[str]] = {}
+    for s, d2 in edge_pairs:
+        out_map.setdefault(s, []).append(d2)
+    no_out = sorted(k for k, t in key_types.items()
+                    if t != NodeType.END.value and not out_map.get(k))
+    if no_out:
+        raise HTTPException(400, f"这些节点没有连到下一步：{', '.join(no_out[:5])}")
+    seen_reach: set[str] = set()
+    stack = [k for k, t in key_types.items() if t == NodeType.START.value]
+    while stack:
+        k = stack.pop()
+        if k in seen_reach:
+            continue
+        seen_reach.add(k)
+        stack.extend(out_map.get(k, []))
+    ends = {k for k, t in key_types.items() if t == NodeType.END.value}
+    if not (seen_reach & ends):
+        raise HTTPException(400, "开始节点连不到结束节点，请检查连线方向")
+
+    from sqlalchemy import delete as _sa_delete
+    wf.name = data.name
+    wf.description = data.description
+    await db.execute(_sa_delete(WorkflowNode).where(WorkflowNode.workflow_id == wid))
+    await db.execute(_sa_delete(WorkflowEdge).where(WorkflowEdge.workflow_id == wid))
+    for n in data.nodes:
+        nt = NodeType(n.node_type)
+        db.add(WorkflowNode(workflow_id=wid, node_key=n.node_key,
+                            node_type=nt, name=n.name,
+                            config=n.config or {},
+                            position_x=n.position_x, position_y=n.position_y))
+    for e in data.edges:
+        db.add(WorkflowEdge(workflow_id=wid, from_node=e.from_node,
+                            to_node=e.to_node, label=e.label))
+    wf.version = (wf.version or 1) + 1
+    await log_event(db, "workflow.updated", "workflow_definition", wid, "user",
+                    user.id, {"name": data.name, "version": wf.version})
+    await db.commit()
+    return {"id": wid, "name": wf.name, "version": wf.version}
 
 
 @router.delete("/workflows/{wid}", status_code=204)

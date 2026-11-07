@@ -199,6 +199,14 @@ async def _with_fresh_engine(coro_fn, timeout_s: float | None = None,
                         log.error("超时回调失败: %s", cb_err, exc_info=True)
                 raise
     finally:
+        # 本作业跑在 asyncio.run() 开的临时事件循环上：把网关等模块
+        # 在这条循环里创建的共享 AsyncClient 关掉，避免未关闭连接随循环
+        # GC 时刷 "Unclosed" 告警（客户端本身按循环作用域缓存，见 model_gateway）。
+        try:
+            from app.model_gateway import aclose as _gw_aclose
+            await _gw_aclose()
+        except Exception as gw_err:  # 关不掉也不影响作业结果
+            log.debug("gateway http client 关闭失败（忽略）: %s", gw_err)
         await dispose_factory_engine(factory)
 
 

@@ -110,7 +110,11 @@ async def list_projects(company_id: str | None = None, status: str | None = None
         q = select(Project).where(or_(*scopes) if scopes
                                   else Project.company_id.in_([]))
     if status:
-        q = q.where(Project.status == ProjectStatus(status))
+        try:
+            status_enum = ProjectStatus(status)
+        except ValueError:
+            raise HTTPException(400, f"未知的项目状态：{status}")
+        q = q.where(Project.status == status_enum)
     rows = (await db.execute(q.order_by(Project.created_at.desc()))).scalars().all()
     # 一条聚合查询算出所有项目的任务总数/完成数，避免逐项目两次 COUNT 的 N+1
     stats: dict[str, tuple[int, int]] = {}
@@ -145,6 +149,12 @@ async def create_project(data: ProjectIn, company_id: str | None = None,
     if not cid:
         raise HTTPException(422, "缺少 company_id：请在请求体或查询参数中提供")
     await assert_company_capability(db, user.id, cid, Capability.OPERATE)
+    # 修复：manager_agent_id 此前不校验——不存在的 id 直接 IntegrityError 500，
+    # 别家公司的真实 id 则建立跨公司引用。
+    if data.manager_agent_id:
+        mgr = await db.get(Agent, data.manager_agent_id)
+        if not mgr or mgr.company_id != cid:
+            raise HTTPException(404, "manager_agent_id 不存在或不属于本公司")
     payload = data.model_dump(exclude={"company_id"})
     p = Project(**payload, company_id=cid,
                 status=ProjectStatus.PLANNING, owner_id=user.id)
@@ -278,6 +288,10 @@ async def update_milestone(mid: str, data: dict,
         raise HTTPException(404, "Milestone not found")
     await _project_owned(db, user.id, m.project_id, Capability.OPERATE)
     if "status" in data:
+        try:
+            MilestoneStatus(data["status"])
+        except ValueError:
+            raise HTTPException(400, f"未知的里程碑状态：{data['status']}")
         from datetime import datetime, timezone
         m.status = MilestoneStatus(data["status"])
         if m.status == MilestoneStatus.COMPLETED:
@@ -300,6 +314,10 @@ async def add_member(pid: str, data: MemberIn,
     if data.member_type == "agent":
         a = await db.get(Agent, data.member_id)
         if not a:
+            raise HTTPException(404, "Agent not found")
+        # 修复：此前不校验 Agent 归属——可把别家公司的员工拉进本项目（跨租户写入）
+        p0 = await db.get(Project, pid)
+        if a.company_id != p0.company_id:
             raise HTTPException(404, "Agent not found")
     exists = await db.execute(select(ProjectMember).where(
         ProjectMember.project_id == pid,

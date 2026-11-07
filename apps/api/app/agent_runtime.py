@@ -8,7 +8,7 @@ Pause/Resume via execution_checkpoints (real persisted state).
 import json
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging_config import get_logger
@@ -259,6 +259,10 @@ async def run_agent_on_task(
 
         llm_result = await gateway.chat_with_agent_models(
             model_ids, messages, tools=AGENT_TOOLS)
+        # 网关已在会话里写下用量流水：立刻提交，别让写事务跨工具轮持有
+        # SQLite 写锁——并发的工作台对话落库会 busy_timeout 15s 超时报
+        # "database is locked"（测评 B-080 的另一半根因）。
+        await db.commit()
         tool_trace: list[dict] = []
         total_calls = 0
         rounds = 0
@@ -309,6 +313,8 @@ async def run_agent_on_task(
                 })
             llm_result = await gateway.chat_with_agent_models(
                 model_ids, messages, tools=AGENT_TOOLS)
+            # 同上：每轮工具调用后立即释放写事务（含上一轮网关用量流水）
+            await db.commit()
             rounds += 1
 
         # 文本形式的残留标记不能进正文/正文落盘文件
@@ -333,6 +339,48 @@ async def run_agent_on_task(
                              "note": "LLM 返回时任务已取消，成果未写回"})
             await db.commit()
             return execution
+
+        # 暂停要同样"立即生效"（修复前只查 CANCELLED）：LLM 返回时任务已被
+        # 用户暂停的话，把结果存进 checkpoint 就停——不覆盖 execution 的
+        # paused 状态、不写 task.result、不把 Agent 置回空闲。否则会出现
+        # "任务 PAUSED → 恢复时找不到 paused 执行 → 永久 RUNNING 无 worker"
+        # 的假恢复死路（resume 只认 status=='paused' 的执行行）。
+        if task.status == TaskStatus.PAUSED:
+            await write_checkpoint(db, execution.id, "llm_result", 1,
+                                   {"output": llm_result["content"][:2000],
+                                    "usage": llm_result.get("usage"),
+                                    "used_model_id": llm_result.get("used_model_id")})
+            await log_event(db, "agent.paused_after_llm", "agent", agent.id,
+                            actor_type, agent.id,
+                            {"task_id": task.id,
+                             "note": "LLM 返回时任务已暂停，结果存检查点，恢复后直接采用"})
+            await db.commit()
+            return execution
+
+        # 写回前对执行行做 CAS：只有仍是 running 才允许置 completed。
+        # （与 pause_execution 的 CAS 对应；竞态下宁可少写一次成果，
+        # 也不能把刚被置为 paused 的执行覆盖成 completed。）
+        refreshed = await db.execute(
+            update(AgentExecution)
+            .where(AgentExecution.id == execution.id,
+                   AgentExecution.status == "running")
+            .values(status="completed", completed_at=utcnow_iso(),
+                    output=llm_result["content"],
+                    metadata_json={
+                        "usage": llm_result.get("usage"),
+                        "used_model_id": llm_result.get("used_model_id"),
+                        "raw_model": llm_result.get("raw_model"),
+                        "tools_used": tool_trace,
+                    }))
+        if refreshed.rowcount == 0:
+            # 执行状态已被其他路径改掉（paused/cancelled/superseded）：本轮作废
+            await log_event(db, "agent.write_back_lost_race", "agent", agent.id,
+                            actor_type, agent.id,
+                            {"task_id": task.id,
+                             "note": "写回时执行状态已非 running，成果未落库"})
+            await db.commit()
+            return execution
+        await db.refresh(execution)
 
         execution.output = llm_result["content"]
         execution.status = "completed"
@@ -602,5 +650,8 @@ async def resume_execution(db: AsyncSession, execution: AgentExecution) -> Agent
                                          "from_checkpoint": from_checkpoint})
         await session.commit()
 
-    submit_async(_resume_job)
-    return execution
+    # 队满时不能假装恢复成功：把 submit_async 的结果交回调用方处理
+    # （QUEUE_FULL 时调用方应回滚任务状态 RUNNING→PAUSED），否则任务已
+    # RUNNING、执行已 superseded、又没有 worker——僵尸任务（修复前丢弃返回值）。
+    submit_result = submit_async(_resume_job)
+    return execution, submit_result

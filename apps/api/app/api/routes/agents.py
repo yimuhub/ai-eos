@@ -582,12 +582,67 @@ async def delete_agent(aid: str, db: AsyncSession = Depends(get_db),
     # 删除员工不可逆：其技能绑定、记忆、档案一并消失。
     # DESTRUCTIVE 不在 member 矩阵里，部门负责人也删不了——删除权不下放。
     await ensure_agent_access(db, user, a, Capability.DESTRUCTIVE)
-    # 技能绑定没有数据库级级联：不先清就删人会触发 FK 失败
-    # （自动配备技能上线后，这一点几乎每个员工都会命中）。
+    # 引用清理与批量删除走同一套（修复前单删只清 agent_skills——
+    # 员工只要被指派过任务/参加过会议/任过项目经理，DELETE 必然
+    # IntegrityError → 500）。个别未登记引用也不 500，回 409 说明原因。
+    from sqlalchemy.exc import IntegrityError, DBAPIError
     from app.models.skill import AgentSkill
-    await db.execute(delete(AgentSkill).where(AgentSkill.agent_id == a.id))
-    await db.delete(a)
+    try:
+        async with db.begin_nested():  # savepoint：失败可整体回滚到此处
+            await _clear_agent_references(db, aid)
+            await db.execute(delete(AgentSkill).where(AgentSkill.agent_id == a.id))
+            await db.delete(a)
+            await db.flush()
+    except (IntegrityError, DBAPIError) as e:
+        await db.rollback()
+        raise HTTPException(409, f"该员工仍有无法自动清理的数据引用，暂不能删除：{str(getattr(e, 'orig', e))[:160]}")
     await db.commit()
+
+
+async def _clear_agent_references(db: AsyncSession, aid: str) -> None:
+    """删除员工前清理各处引用，保证外键不阻塞（单删/批删共用一份逻辑）。"""
+    from sqlalchemy import text
+    # 1) 下属 Agent 的上级引用置空
+    sub = await db.execute(select(Agent).where(Agent.manager_agent_id == aid))
+    for child in sub.scalars():
+        child.manager_agent_id = None
+    # 2) 清理各处引用，保证外键不阻塞
+    await db.execute(text(
+        "UPDATE tasks SET assigned_agent_id = NULL WHERE assigned_agent_id = :aid"),
+        {"aid": aid})
+    await db.execute(text(
+        "DELETE FROM agent_model_configs WHERE agent_id = :aid"), {"aid": aid})
+    await db.execute(text(
+        "DELETE FROM meeting_participants WHERE agent_id = :aid"), {"aid": aid})
+    await db.execute(text(
+        "UPDATE meetings SET coordinator_agent_id = NULL, "
+        "current_speaker_id = NULL WHERE coordinator_agent_id = :aid "
+        "OR current_speaker_id = :aid"), {"aid": aid})
+    await db.execute(text(
+        "UPDATE meeting_action_items SET assignee_agent_id = NULL "
+        "WHERE assignee_agent_id = :aid"), {"aid": aid})
+    await db.execute(text(
+        "UPDATE meeting_decisions SET proposed_by_agent_id = NULL "
+        "WHERE proposed_by_agent_id = :aid"), {"aid": aid})
+    await db.execute(text(
+        "UPDATE meeting_messages SET speaker_agent_id = NULL "
+        "WHERE speaker_agent_id = :aid"), {"aid": aid})
+    await db.execute(text(
+        "UPDATE assets SET agent_id = NULL WHERE agent_id = :aid"), {"aid": aid})
+    await db.execute(text(
+        "UPDATE projects SET manager_agent_id = NULL "
+        "WHERE manager_agent_id = :aid"), {"aid": aid})
+    await db.execute(text(
+        "UPDATE agent_factory_jobs SET agent_id = NULL "
+        "WHERE agent_id = :aid"), {"aid": aid})
+    await db.execute(text(
+        "DELETE FROM agent_skills WHERE agent_id = :aid"), {"aid": aid})
+    await db.execute(text(
+        "DELETE FROM execution_checkpoints WHERE execution_id IN "
+        "(SELECT id FROM agent_executions WHERE agent_id = :aid)"),
+        {"aid": aid})
+    await db.execute(text(
+        "DELETE FROM agent_executions WHERE agent_id = :aid"), {"aid": aid})
 
 
 class BatchDeleteIn(BaseModel):

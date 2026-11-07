@@ -273,17 +273,24 @@ async def _advance_locked(db: AsyncSession, execution_id: str,
             if not node:
                 continue
 
+            # 恢复推进防重放（修复前会把已完成节点再跑一遍：重复建任务/重复计费）：
+            # done_nodes 只含有 COMPLETED 输出的节点；等待人工的节点不会进入
+            # done_nodes（output=None 提前 return），所以"已完成即跳过"是精确的。
+            if key in done_nodes:
+                progressed = True
+                continue
+
             # 取消/暂停立即生效：每步前重读状态。读到就退出，不再开新节点。
             await db.refresh(ex)
             if ex.status in (RunStatus.CANCELLED, RunStatus.PAUSED,
                              RunStatus.FAILED):
                 return ex
 
-            # MERGE：等待所有上游分支完成
+            # MERGE：汇聚语义按"先到先过"处理——并行分支在同一个 advance 里
+            # 顺序执行完再调度 MERGE（next_nodes 去重后只进一次）；若分支跨轮
+            # 完成，后到分支的出边会再次调度 MERGE，但此时 MERGE 已在
+            # done_nodes 里，上面的跳过逻辑保证下游子树不会执行两遍。
             if node.node_type == NodeType.MERGE:
-                upstream_done = all(
-                    any(e.to_node == key and src in done_nodes for src in nodes)
-                    for e in [])  # simplified: merge passes when scheduled
                 pass
 
             step = await rt._open_step(node, {})
@@ -367,6 +374,22 @@ async def _advance_locked(db: AsyncSession, execution_id: str,
                              RunStatus.WAITING_INPUT):
             set_committed_value(ex, "status", RunStatus.WAITING_INPUT)
             ex.current_nodes = current
+        await db.commit()
+    elif ex.status == RunStatus.RUNNING:
+        # 收尾兜底（修复前直接 return，执行实例带着空 current_nodes 永久
+        # RUNNING，看板轮询反复空转自愈）：
+        # - current 为空：走到了没有出边的非 END 节点（图不完整/断连）；
+        # - current 非空但全部已完成：永远到不了 END（缺 END 连线）。
+        # 两种都判 FAILED，把"图不完整"如实暴露给用户，而不是静默挂死。
+        reason = ("流程在非结束节点处没有后继节点（图不完整或存在断连）"
+                  if not current else
+                  "剩余节点均已执行但未到达结束节点（请检查连线后重试）")
+        if await _cas_status(db, ex.id, RunStatus.RUNNING, RunStatus.FAILED,
+                             error=reason):
+            set_committed_value(ex, "status", RunStatus.FAILED)
+            ex.error = reason
+        await log_event(db, "workflow.failed", "workflow_execution",
+                        ex.id, "system", None, {"reason": reason})
         await db.commit()
     return ex
 

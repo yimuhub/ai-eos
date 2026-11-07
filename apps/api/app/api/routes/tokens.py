@@ -234,16 +234,23 @@ def _parse_range(days: int | None, start: str | None, end: str | None):
     这里改为留痕；同时保留"非法值即忽略"的宽松行为，避免直接 500。
     """
     conds = []
+
+    def _naive_utc(value: str) -> datetime:
+        """带时区的 ISO 串统一折算成 naive UTC，与 created_at 列口径对齐。"""
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+
     if start:
         try:
-            conds.append(TokenUsage.created_at >= datetime.fromisoformat(start))
+            conds.append(TokenUsage.created_at >= _naive_utc(start))
         except ValueError as exc:
             logger.warning("用量查询的 start 参数不是合法时间，已忽略该过滤条件 "
                            "start=%r: %s", start, exc)
     if end:
         try:
-            e = datetime.fromisoformat(end)
-            conds.append(TokenUsage.created_at <= e)
+            conds.append(TokenUsage.created_at <= _naive_utc(end))
         except ValueError as exc:
             logger.warning("用量查询的 end 参数不是合法时间，已忽略该过滤条件 "
                            "end=%r: %s", end, exc)

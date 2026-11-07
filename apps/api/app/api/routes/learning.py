@@ -146,6 +146,8 @@ async def growth_events(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # 修复：此前缺归属校验，知道 agent_id 即可读他人公司员工的全部成长事件
+    await _agent(db, agent_id, user.id)
     from sqlalchemy import select
     from app.models.learning import AgentGrowthEvent
     q = await db.execute(select(AgentGrowthEvent).where(

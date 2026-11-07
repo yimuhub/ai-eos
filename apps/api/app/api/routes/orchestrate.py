@@ -75,6 +75,16 @@ async def orchestrate_task(data: OrchestrateIn,
             await session.commit()
 
     import app.background_jobs as background_jobs
-    background_jobs.submit_async(_run)
+    submit_result = background_jobs.submit_async(_run)
+    if submit_result is background_jobs.QUEUE_FULL:
+        # worker 池满：父任务停在 PLANNING 且无人推进（recover_stuck_tasks
+        # 只回收 RUNNING/PAUSED，PLANNING 是永久死胡同）→ 明确标 FAILED 并回 503。
+        from sqlalchemy import update as _sa_update
+        await db.execute(
+            _sa_update(Task)
+            .where(Task.id == task_id, Task.status == TaskStatus.PLANNING)
+            .values(status=TaskStatus.FAILED))
+        await db.commit()
+        raise HTTPException(503, "后台执行队列已满，编排未启动，请稍后重试")
 
     return {"detail": "orchestration started", "task_id": task_id}

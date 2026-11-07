@@ -320,23 +320,37 @@ export default function TaskDetailPage() {
     if (!id || !d) return;
     setBusy(true);
     try {
-      // 1. 更换执行 Agent
+      const agentId = (newAgentId && newAgentId !== d.assigned_agent_id)
+        ? newAgentId : d.assigned_agent_id;
+      const notes: string[] = [];
+      // 1. 更换执行 Agent（只有真的换了才发 PATCH）
       if (newAgentId && newAgentId !== d.assigned_agent_id) {
         await api.patch(`/tasks/${id}`, { assigned_agent_id: newAgentId });
-        setMsg("✅ 执行 Agent 已更换");
-        // 新 Agent 绑定所选模型
-        if (newModelId) {
-          // 原来是裸 fetch 且不看返回：模型没切成功也会提示"已更换"
-          await api.put(`/agents/${newAgentId}/switch-model`, { model_id: newModelId });
-        }
-        // 新 Agent 获得勾选的技能
-        for (const sk of Array.from(skillIds)) {
-          await api.post(`/skill-growth/agents/${newAgentId}/acquire`, {
+        notes.push("执行 Agent 已更换");
+      }
+      // 2. 换模型 / 加技能对"当前或新任"负责人独立生效——修复前这两步
+      //    嵌在"换了 Agent"分支里，只换模型/只加技能会被静默丢弃还谎报成功。
+      if (newModelId && agentId) {
+        await api.put(`/agents/${agentId}/switch-model`, { model_id: newModelId });
+        notes.push("驱动模型已切换");
+      }
+      let skillOk = 0, skillFail = 0;
+      for (const sk of Array.from(skillIds)) {
+        try {
+          await api.post(`/skill-growth/agents/${agentId}/acquire`, {
             skill_node_id: sk,
             source_type: "assignment",
             evidence: [{ type: "assignment" }],
-          }).catch(() => {});
-        }
+          });
+          skillOk += 1;
+        } catch { skillFail += 1; }
+      }
+      if (skillOk) notes.push(`已附加 ${skillOk} 项技能`);
+      if (skillFail) notes.push(`${skillFail} 项技能附加失败`);
+      if (!notes.length) {
+        setMsg("没有可应用的更改：请先选择要更换的 Agent / 模型 / 技能");
+      } else {
+        setMsg(`✅ ${notes.join(" · ")}`);
       }
       await load(true);
     } catch (e) { setMsg(`❌ ${describeError(e, "更换失败")}`); }

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import (assert_agent_owned, assert_company_capability,
                           get_current_user)
 from app.agent_runtime import pause_execution, run_agent_on_task, resume_execution, utcnow_iso
+from app.background_jobs import QUEUE_FULL
 from app.core.logging_config import get_logger
 from app.core.permissions import Capability
 from app.core.scope import build_ctx
@@ -93,7 +94,11 @@ async def list_tasks(company_id: str | None = None, status: str | None = None,
         q = select(Task).where(or_(*scopes) if scopes
                                else Task.company_id.in_([]))
     if status:
-        q = q.where(Task.status == TaskStatus(status))
+        try:
+            status_enum = TaskStatus(status)
+        except ValueError:
+            raise HTTPException(400, f"未知的任务状态：{status}（可选：todo/planning/running/paused/completed/failed/cancelled）")
+        q = q.where(Task.status == status_enum)
     if agent_id:
         q = q.where(Task.assigned_agent_id == agent_id)
     rows = (await db.execute(q.order_by(Task.created_at.desc()))).scalars().all()
@@ -410,11 +415,15 @@ def _run_in_background(task_id: str, agent_id: str,
 
 
 async def _dispatch_or_revert(db: AsyncSession, task_id: str, agent_id: str,
-                              company_id: str | None = None) -> None:
-    """投递后台执行；队列满则把刚置的 RUNNING 退回 TODO 并回 503。
+                              company_id: str | None = None,
+                              revert_to: TaskStatus = TaskStatus.TODO) -> None:
+    """投递后台执行；队列满则把刚置的 RUNNING 退回原状态并回 503。
 
     原先用 `background.add_task(...)` 丢弃了返回值：worker 池满时任务已经是
     RUNNING 却没有任何 worker，前端只能一直转圈，用户也取消不掉预期结果。
+
+    revert_to 是进入 RUNNING 之前的状态（TODO 或 PAUSED）：修复前一律退回
+    TODO，从暂停恢复的任务队满后被写成 TODO，丢失暂停语义且无 auto_start 标记。
 
     投递前先把执行意图写进持久队列：进程重启后，没跑完的任务由启动自愈
     重新投递，而不是永远停在 RUNNING。
@@ -444,7 +453,7 @@ async def _dispatch_or_revert(db: AsyncSession, task_id: str, agent_id: str,
         await db.execute(
             update(Task)
             .where(Task.id == task_id, Task.status == TaskStatus.RUNNING)
-            .values(status=TaskStatus.TODO)
+            .values(status=revert_to)
             .execution_options(synchronize_session=False))
         # 排队条目也要撤掉：否则同键去重会让下次启动误判"已有活跃条目"，
         # 而 auto_start 的调度循环会重新入队（下一拍再来）。
@@ -465,11 +474,13 @@ async def start_task(tid: str,
     await db.commit()
     # CAS 抢占：双击/重试/双端并发时只有一个请求能把 TODO/PAUSED 改成 RUNNING，
     # 也就只有一个请求会投递后台执行 —— 不会重复执行、重复计费。
+    prev_status = t.status
     try:
         await transition(db, t, TaskStatus.RUNNING, "user", user.id)
     except IllegalTransition as e:
         raise HTTPException(409, str(e))
-    await _dispatch_or_revert(db, tid, t.assigned_agent_id, t.company_id)
+    await _dispatch_or_revert(db, tid, t.assigned_agent_id, t.company_id,
+                              revert_to=prev_status)
     return {"detail": "started", "task_id": tid}
 
 
@@ -501,10 +512,37 @@ async def resume_task(tid: str, db: AsyncSession = Depends(get_db),
         await transition(db, t, TaskStatus.RUNNING, "user", user.id)
     except IllegalTransition as e:
         raise HTTPException(409, str(e))
+    # 只恢复最新一个 paused 执行；其余的批量置 superseded——一次任务可能积累
+    # 多个 paused 执行，全部恢复会并发重跑同一任务（双份计费、结果互相覆盖）。
     q = await db.execute(select(AgentExecution).where(
-        AgentExecution.task_id == tid, AgentExecution.status == "paused"))
-    for e in q.scalars():
-        await resume_execution(db, e)
+        AgentExecution.task_id == tid, AgentExecution.status == "paused")
+        .order_by(AgentExecution.created_at.desc(), AgentExecution.id.desc()))
+    execs = list(q.scalars())
+    if not execs:
+        # 没有 paused 执行：任务可能从未真正开跑（首跑前就被暂停），
+        # 或全部执行已终态。按冷启动重新投递（与 start 同路径，含队满回退），
+        # 而不是留一个 RUNNING 无 worker 的僵尸。
+        await _dispatch_or_revert(db, tid, t.assigned_agent_id, t.company_id,
+                                  revert_to=TaskStatus.PAUSED)
+        return {"detail": "resumed"}
+    for stale in execs[1:]:
+        await db.execute(
+            update(AgentExecution)
+            .where(AgentExecution.id == stale.id,
+                   AgentExecution.status == "paused")
+            .values(status="superseded", completed_at=utcnow_iso())
+            .execution_options(synchronize_session=False))
+    await db.commit()
+    _, submit_result = await resume_execution(db, execs[0])
+    if submit_result == QUEUE_FULL:
+        # 队满：把任务回滚到 PAUSED，执行保持 paused（旧执行已 superseded，
+        # 用户再点一次「继续」会重新走本路径恢复最新执行）
+        try:
+            await transition(db, t, TaskStatus.PAUSED, "user", user.id)
+            await db.commit()
+        except IllegalTransition:
+            await db.rollback()
+        raise HTTPException(503, "后台执行队列已满，任务已回到暂停状态，请稍后重试")
     return {"detail": "resumed"}
 
 
@@ -582,10 +620,32 @@ async def resolve_takeover(tid: str, data: InterventionIn,
         await transition(db, t, TaskStatus.RUNNING, "user", user.id)
     except IllegalTransition as e:
         raise HTTPException(409, str(e))
+    # 与 /resume 同口径：只恢复最新 paused 执行（其余 superseded），队满回滚
     q = await db.execute(select(AgentExecution).where(
-        AgentExecution.task_id == tid, AgentExecution.status == "paused"))
-    for e in q.scalars():
-        await resume_execution(db, e)
+        AgentExecution.task_id == tid, AgentExecution.status == "paused")
+        .order_by(AgentExecution.created_at.desc(), AgentExecution.id.desc()))
+    execs = list(q.scalars())
+    if not execs:
+        # 与 /resume 同口径：没有 paused 执行就按冷启动重新投递
+        await _dispatch_or_revert(db, tid, t.assigned_agent_id, t.company_id,
+                                  revert_to=TaskStatus.PAUSED)
+        return {"detail": "接管已解除，任务重新开工"}
+    for stale in execs[1:]:
+        await db.execute(
+            update(AgentExecution)
+            .where(AgentExecution.id == stale.id,
+                   AgentExecution.status == "paused")
+            .values(status="superseded", completed_at=utcnow_iso())
+            .execution_options(synchronize_session=False))
+    await db.commit()
+    _, submit_result = await resume_execution(db, execs[0])
+    if submit_result == QUEUE_FULL:
+        try:
+            await transition(db, t, TaskStatus.PAUSED, "user", user.id)
+            await db.commit()
+        except IllegalTransition:
+            await db.rollback()
+        raise HTTPException(503, "后台执行队列已满，任务已回到暂停状态，请稍后重试")
     return {"detail": "接管已解除，任务从检查点恢复（含老板指令）"}
 
 

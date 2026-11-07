@@ -88,6 +88,16 @@ export default function CompanyManagePage() {
       const d = await api.post<{ deleted_count: number; failed?: string[] }>(
         "/company-manage/batch-delete", { company_ids: Array.from(batchSel) });
       setMsg(`🗑 已彻底删除 ${d.deleted_count} 家公司${d.failed?.length ? `，失败 ${d.failed.length}` : ""}`);
+      // 修复：批量删除可能包含激活公司——不重置的话 aieos_active_cid 变成
+      // 悬空 id，直接读 localStorage 的页面（/workspace、/m）会拿它打请求全部 404。
+      if (activeCid && batchSel.has(activeCid)) {
+        const next = rows.find((x) => x.id !== activeCid && !batchSel.has(x.id));
+        if (next) setActiveCompanyId(next.id);
+        else {
+          localStorage.removeItem("aieos_active_cid");
+          window.dispatchEvent(new CustomEvent("aieos-company-changed", { detail: "" }));
+        }
+      }
       setShowBatch(false); setBatchSel(new Set());
       refresh();
     } catch (e) { setMsg(`❌ ${describeError(e, "批量删除失败")}`); }

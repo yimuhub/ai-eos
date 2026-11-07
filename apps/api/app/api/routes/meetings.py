@@ -75,7 +75,9 @@ async def create_meeting(data: MeetingCreateIn, db: AsyncSession = Depends(get_d
     await db.flush()
     for aid in data.participant_ids:
         a = await db.get(Agent, aid)
-        if not a:
+        # 修复：此前未校验 Agent 归属——可以把别家公司的员工拉进本公司会议，
+        # 会议引擎会拿 A 公司的上下文去调 B 公司 Agent 的模型。
+        if not a or str(a.company_id) != str(data.company_id):
             continue
         db.add(MeetingParticipant(meeting_id=m.id, agent_id=aid))
     await log_event(db, "meeting.created", "meeting", str(m.id), "user", user.id,
@@ -267,10 +269,14 @@ async def upload_meeting_material(
     raw = await file.read()
     if len(raw) > 10 * 1024 * 1024:
         raise HTTPException(400, "文件过大（最大 10MB）")
-    # 存入会议 context_material（追加）
+    # 修复：此前只把文件名拼进 context_material，正文 raw 从未写入——
+    # 上传的会议材料 Agent 永远看不到（死功能）；>50000 字时静默不落库仍返回 ok。
+    decoded = raw.decode("utf-8", errors="replace").strip()
     existing = m.context_material or ""
-    new_text = f"\n\n--- 附件：{file.filename} ---\n"
-    if len(existing) + len(new_text) < 50000:
-        m.context_material = existing + new_text
-        await db.commit()
-    return {"ok": True, "filename": file.filename, "size": len(raw)}
+    new_text = f"\n\n--- 附件：{file.filename} ---\n{decoded}\n"
+    if len(existing) + len(new_text) > 50000:
+        raise HTTPException(409, f"会议材料已达上限（{len(existing)} 字），无法再追加 {len(new_text)} 字，请精简后重传")
+    m.context_material = existing + new_text
+    await db.commit()
+    return {"ok": True, "filename": file.filename, "size": len(raw),
+            "chars_appended": len(new_text)}

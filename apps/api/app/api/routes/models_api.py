@@ -428,7 +428,10 @@ async def update_model(mid: str, data: dict, db: AsyncSession = Depends(get_db),
                "model_type", "multimodal", "capabilities", "enabled",
                "provider_id", "config_source", "upstream_meta"}
     if "provider_type" in data:
-        m.provider_type = ModelProviderType(data["provider_type"])
+        try:
+            m.provider_type = ModelProviderType(data["provider_type"])
+        except ValueError:
+            raise HTTPException(400, f"未知的供应商类型：{data['provider_type']}")
     if "api_key_env" in data:
         _reject_sensitive_env(data["api_key_env"])
         if not (data["api_key_env"] or "").strip():
