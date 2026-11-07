@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
+import Link from "next/link";
 import { api, describeError } from "@/lib/api";
 import { invalidate, useActiveCompanyId, useResource } from "@/lib/useResource";
 import { confirmAction } from "@/components/ConfirmDialog";
@@ -326,6 +327,7 @@ export default function OrganizationPage() {
             </button>
             <button onClick={() => setShowBatchDelete(true)} className="btn-ghost">🗑 批量删除</button>
             <button onClick={() => setShowBatchAdd(!showBatchAdd)} className="btn-ghost">⚡ 批量添加</button>
+            <Link href="/members" className="btn-ghost">👥 成员与邀请</Link>
             <button onClick={() => openCreate(null)} className="btn-primary">＋ 新建部门</button>
           </div>
         </div>

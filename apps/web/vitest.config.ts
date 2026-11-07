@@ -1,10 +1,20 @@
+import { fileURLToPath } from "node:url";
+import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
-// 前端单元测试：只覆盖纯函数（lib/api.ts 的错误规范化、lib/validate.ts 的校验规则），
-// 不碰 React 组件与网络。测试用相对导入，避免依赖 @/* 别名配置。
+const root = fileURLToPath(new URL(".", import.meta.url));
+
+// 两层测试：
+// - lib/**：纯函数，node 环境（最快）
+// - test/components/**：jsdom + testing-library，只验证交互契约（点了按钮发什么请求、
+//   失败时用户看到什么），不断言样式
 export default defineConfig({
+  plugins: [react()],
+  resolve: { alias: { "@": root } },
   test: {
     environment: "node",
-    include: ["lib/**/*.test.ts"],
+    environmentMatchGlobs: [["test/components/**/*.test.tsx", "jsdom"]],
+    include: ["lib/**/*.test.ts", "test/**/*.test.tsx"],
+    setupFiles: ["./test/setup.ts"],
   },
 });
