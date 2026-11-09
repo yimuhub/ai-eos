@@ -9,7 +9,7 @@
 import asyncio
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -144,6 +144,9 @@ WEB_SEARCH_TOOL = {
 # 仍复用 model_gateway 的共享连接池与超时/重试机制。
 GROUP_CHAT_LLM_CONFIG = {"max_tokens": 512, "timeout": 90}
 GROUP_CHAT_CONCURRENCY = 4
+# 单次群聊同时发言的员工数：5 人群从"每人等 1 分钟"压到约 2 轮。
+# 真正调模型的并发上限仍是公司级 GROUP_CHAT_CONCURRENCY。
+GROUP_CHAT_PARALLEL = 3
 # 任务/话题描述入 prompt 前截断，防止超长需求把上下文撑爆
 GROUP_CHAT_TOPIC_LIMIT = 1200
 
@@ -348,6 +351,7 @@ async def _agent_speak(db, gw, agent, topic, history_lines, emit=None):
     ``emit`` 给定时全程走流式：思考、模型选择/降级、搜索工具、逐字正文都会
     播报出去；不给时（阻塞式 POST）行为和以前完全一致。
     """
+    from app.core.prompting import staff_identity
     from app.kb_engine import cost_optimized_rag
     from app.public_doc_skill import get_public_doc_system_prompt
     import re as _re
@@ -356,6 +360,7 @@ async def _agent_speak(db, gw, agent, topic, history_lines, emit=None):
 
     messages = [{"role": "system", "content":
         f"你是「{agent.name}」，{agent.role or '数字员工'}。"
+        f"{staff_identity(agent.name)}"
         f"现在是项目会议，老板说了想法，请你从你的专业角度给出简短反馈"
         f"（200字以内）。\n"
         f"重要规则：\n"
@@ -653,25 +658,29 @@ async def group_chat_stream(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """老板发言 → 所有参与 Agent 依次反馈（互相可见），逐字实时输出。
+    """老板发言 → 参与 Agent **并行**反馈（带并发闸门），逐字实时输出。
 
     与 ``group_chat`` 同一条数据链路（角色、模型、RAG、工具、正文）—— 只
     不再等完整条结果，每条中间状态都转发给老板：
 
     * ``group_start`` ：参与的所有代理、占比和开始时间
     * ``agent_start``/``agent_done`` ：单个代理的思考/模型/工具/正文
-      （其 ``process`` 随 ``tool_end``/``done`` 缀回；`ProcessAccumulator`）
+      （其 ``process`` 随 ``tool_end``/``done`` 缀回；`ProcessAccumulator`）。
+      并行后每个事件都带 ``agent_id``/``agent_name``，前端按 id 归属气泡，
+      ``agent_done`` 按完成先后到达、**不保证**与名单顺序一致。
     * ``group_done``/``error`` ：整轮结束或失败
     * 静止超过 ``GROUP_CHAT_HEARTBEAT_S`` 秒自动补 ``status`` 心跳
     * process 落库在每段 `agent_done` 前完成，`history` 回放同单聊
+
+    并行边界：每个 Agent 用**独立数据库会话**（RAG/技能/用量各写各的），
+    总并发受 ``GROUP_CHAT_PARALLEL`` 与公司级 ``_company_semaphore`` 双重
+    限制；消息落库按发起顺序写入 ``created_at``，历史回放顺序稳定。
 
     端点照常放在最后一段，不抢占 ``/{scope}/{scope_id}`` 的短路径。
     """
     if scope not in ("project", "task", "group"):
         raise HTTPException(400, "scope must be project, task or group")
     await _owned_company(db, user.id, company_id, Capability.OPERATE)
-    from app.model_gateway import ModelGateway
-    gw = ModelGateway(db)
 
     # 1. 存老板消息
     db.add(GroupChatMessage(
@@ -691,73 +700,105 @@ async def group_chat_stream(
                 (m.content or {}).get("text", "")) for m in prev]
     await db.commit()
 
-    # 3. 未绑对应对话模型的 Agent 挂上默认模型再开工
+    # 3. 未绑对应对话模型的 Agent 挂上默认模型再开工。
+    # 并行后每个 Agent 用独立会话，这些回退配置必须**先提交**，否则它们
+    # 在新会话里读不到，等于白挂。
     await _prepare_default_models(db, agents)
+    await db.commit()
 
     agents_payload = [{"agent_id": str(a.id), "agent_name": a.name}
                       for a in agents]
+    agent_order = [(str(a.id), a.name) for a in agents]
 
     async def event_stream():
         q = asyncio.Queue()
 
-        # 每个 Agent 各自的 活 过程
-        _active: dict = {"name": None, "proc": None}
-
-        async def emit(ev: dict) -> None:
-            """事件同时喂给当前 Agent 的 process 累加器（供落库回放）与消费端。"""
-            proc = _active.get("proc")
-            if proc is not None:
-                proc.feed(ev)
-            await q.put(ev)
+        # 正在思考的员工名（并行时可能有多个）
+        active: dict = {"names": []}
 
         async def heartbeat():
             """没新事件时，15 秒补一次 status（心跳）保持连接不断。"""
             while True:
                 await asyncio.sleep(GROUP_CHAT_HEARTBEAT_S)
-                name = _active["name"]
+                names = active["names"]
                 await q.put({"type": "status",
-                             "text": (f"{name} 仍在思考中，请稍候…" if name
-                                      else "进一步汇总中，请稍候…")})
+                             "text": (f"{'、'.join(names[:3])} 仍在思考中，请稍候…"
+                                      if names else "进一步汇总中，请稍候…")})
+
+        async def run_agent(idx: int, agent_id: str, agent_name: str,
+                            base_ts: datetime) -> None:
+            """一个 Agent 的完整发言：独立会话 + 独立过程累加器。
+
+            ``emit`` 给所有事件盖上 ``agent_id``，前端据此把正文/过程写回
+            对应气泡——并行时多个 Agent 的 delta 会交错到达，不能再靠
+            "最后一个气泡"归属。
+            """
+            proc = ProcessAccumulator()
+            ag = None
+            active["names"].append(agent_name)
+            q.put_nowait({"type": "agent_start", "agent_id": agent_id,
+                          "agent_name": agent_name})
+
+            async def emit_agent(ev: dict) -> None:
+                tagged = {**ev, "agent_id": agent_id,
+                          "agent_name": agent_name}
+                proc.feed(tagged)
+                await q.put(tagged)
+
+            try:
+                async with AsyncSessionLocal() as adb:
+                    from app.model_gateway import ModelGateway
+                    ag = await adb.get(Agent, agent_id)
+                    if ag is None:
+                        raise RuntimeError("员工已不存在")
+                    async with _company_semaphore(company_id):
+                        out = await _agent_speak(
+                            adb, ModelGateway(adb), ag, data.message,
+                            [f"{n}: {t}" for n, t in history],
+                            emit=emit_agent)
+            except Exception as e:
+                logger.warning("群聊单个 Agent 发言失败 agent=%s: %s",
+                               agent_name, e, exc_info=True)
+                out = {"text": f"（{agent_name} 发言失败：{e}）",
+                       "search_used": False}
+            finally:
+                if agent_name in active["names"]:
+                    active["names"].remove(agent_name)
+
+            # process 必须随正文一起落库，history 才能回放。
+            # created_at 按发起序号错开，写入顺序不受完成先后影响。
+            async with AsyncSessionLocal() as pdb:
+                pdb.add(GroupChatMessage(
+                    id=uuid.uuid4().hex[:32], company_id=company_id,
+                    scope=scope, scope_id=scope_id, agent_id=agent_id,
+                    agent_name=agent_name, role="agent",
+                    created_at=base_ts + timedelta(milliseconds=idx),
+                    content={"text": out["text"],
+                             "search_used": out["search_used"],
+                             "process": proc.meta()}))
+                await pdb.commit()
+            q.put_nowait({"type": "agent_done", "agent_id": agent_id,
+                          "agent_name": agent_name, "text": out["text"],
+                          "search_used": out["search_used"],
+                          "model": proc.model or (ag.role if ag else None)})
 
         async def agent_loop():
-            """按顺序跑每个 Agent，事件全部经由 q 输出。"""
+            """并行跑每个 Agent（带并发闸门），事件全部经由 q 输出。"""
             try:
                 q.put_nowait({"type": "group_start",
-                              "text": f"会议开始（{len(agents)} 名员工参与）",
+                              "text": f"会议开始（{len(agents)} 名员工参与，并行发言）",
                               "count": len(agents),
                               "agents": agents_payload})
-                for ag in agents:
-                    proc = ProcessAccumulator()
-                    _active["name"] = ag.name
-                    _active["proc"] = proc
-                    q.put_nowait({"type": "agent_start",
-                                  "agent_id": str(ag.id),
-                                  "agent_name": ag.name})
-                    try:
-                        async with _company_semaphore(company_id):
-                            out = await _agent_speak(
-                                db, gw, ag, data.message,
-                                [f"{n}: {t}" for n, t in history],
-                                emit=emit)
-                    except Exception as e:
-                        out = {"text": f"（{ag.name} 发言失败：{e}）",
-                               "search_used": False}
-                    _active["name"] = None
-                    # process 必须随正文一起落库，history 才能回放
-                    db.add(GroupChatMessage(
-                        id=uuid.uuid4().hex[:32], company_id=company_id,
-                        scope=scope, scope_id=scope_id, agent_id=str(ag.id),
-                        agent_name=ag.name, role="agent",
-                        content={"text": out["text"],
-                                 "search_used": out["search_used"],
-                                 "process": proc.meta()}))
-                    await db.commit()
-                    q.put_nowait({"type": "agent_done",
-                                  "agent_id": str(ag.id),
-                                  "agent_name": ag.name,
-                                  "text": out["text"],
-                                  "search_used": out["search_used"],
-                                  "model": proc.model or ag.role})
+                base_ts = datetime.now(timezone.utc).replace(tzinfo=None)
+                par = asyncio.Semaphore(GROUP_CHAT_PARALLEL)
+
+                async def one(idx: int, agent_id: str, agent_name: str):
+                    async with par:
+                        await run_agent(idx, agent_id, agent_name, base_ts)
+
+                await asyncio.gather(*(
+                    one(i, aid, name)
+                    for i, (aid, name) in enumerate(agent_order)))
                 q.put_nowait({"type": "group_done",
                               "text": "谢谢大家，群聊结束", "count": len(agents)})
                 q.put_nowait(_GROUP_STREAM_DONE)

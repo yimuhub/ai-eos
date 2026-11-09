@@ -100,8 +100,10 @@ async def _chat(db: AsyncSession, agent: Agent, system_prompt: str,
 
 def _speaker_prompt(agent: Agent, meeting: Meeting, history: list[dict],
                     phase: str) -> tuple[str, str]:
+    from app.core.prompting import staff_identity
     system = (
         f"你是数字员工「{agent.name}」，岗位：{agent.role or '成员'}。"
+        f"{staff_identity(agent.name)}"
         f"{(agent.system_prompt or '')[:600]}\n"
         f"你正在参加一场会议：《{meeting.title}》。"
         f"议题：{meeting.topic or '见材料'}。"
@@ -367,7 +369,9 @@ async def _finalize(db: AsyncSession, meeting: Meeting, history: list[dict]):
     # 会议纪要
     lines = [f"# 会议纪要：《{meeting.title}》", "",
              f"- 类型：{meeting.meeting_type}",
-             f"- 时间：{utcnow_iso()[:16]}", "", "## 发言记录"]
+             # 正文是给人看的：写服务器本地时间，避免和页面其余时刻差 8 小时
+             f"- 时间：{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M')}",
+             "", "## 发言记录"]
     for h in history:
         lines.append(f"- **{h['who']}**：{h['content']}")
     if decisions:

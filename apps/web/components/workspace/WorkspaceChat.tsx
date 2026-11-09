@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, describeError, isCancelled, streamPost } from "@/lib/api";
 import { notify } from "@/components/Toast";
 import NotificationBell from "@/components/NotificationBell";
@@ -41,6 +41,35 @@ function fromHistory(rows: HistoryMsg[]): ChatMsg[] {
     citations: citationsFromMeta(m.meta),
     process: processFromMeta(m.meta),
   }));
+}
+
+/** 日期分隔标签：历史里隔了几天的旧消息（如早已修好的失败气泡）不再和今天的混在一起。 */
+function dayLabel(iso?: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const now = new Date();
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  if (sameDay(d, now)) return "今天";
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (sameDay(d, yesterday)) return "昨天";
+  return d.toLocaleDateString("zh-CN", { month: "long", day: "numeric" });
+}
+
+/** 群聊并行发言：事件都带 agent_id，按 id 找回对应气泡；老服务端没带 id 时退回"最后一个在说的"。 */
+function findGroupAgentIdx(list: GroupMsg[], agentId: string): number {
+  if (agentId) {
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i].role === "agent" && list[i].agent_id === agentId) return i;
+    }
+    return -1;
+  }
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i].role === "agent" && list[i].streaming) return i;
+  }
+  return -1;
 }
 
 const SUGGESTIONS = [
@@ -431,7 +460,7 @@ export default function WorkspaceChat({
     setInput("");
     atBottomRef.current = true;
     forceScrollRef.current = true;
-    // 先把自己的话放上去，再等员工依次回应（每个员工有专属的 process 下落盘）
+    // 先把自己的话放上去，再等员工并行回应（事件带 agent_id，按 id 回填各自气泡）
     setGroupMsgs((p) => [...p, { role: "boss", text }]);
     try {
       await streamPost(`/group-chat/${groupScope}/${groupId}/stream?company_id=${cid}`,
@@ -443,21 +472,31 @@ export default function WorkspaceChat({
               case "group_start":
                 // 等第一个 agent_start 出现后再往下接
                 break;
-              case "agent_start":
-                setGroupMsgs((p) => [...p, {
-                  role: "agent",
-                  agent_name: String(ev.agent_name ?? ""),
-                  text: "",
-                  streaming: true,
-                  process: newChatProcess(),
-                }]);
-                break;
-              case "agent_done":
+              case "agent_start": {
+                const aid = String((ev as { agent_id?: string }).agent_id ?? "");
+                const name = String(ev.agent_name ?? "");
                 setGroupMsgs((p) => {
-                  const last = p[p.length - 1];
-                  if (!last || last.role !== "agent" || !last.streaming) return p;
+                  // 并行时同一员工的事件会重复到达，按 agent_id 去重
+                  if (aid && p.some((m) => m.role === "agent" && m.agent_id === aid)) return p;
+                  return [...p, {
+                    role: "agent",
+                    agent_id: aid || null,
+                    agent_name: name,
+                    text: "",
+                    streaming: true,
+                    process: newChatProcess(),
+                  }];
+                });
+                break;
+              }
+              case "agent_done": {
+                const aid = String((ev as { agent_id?: string }).agent_id ?? "");
+                setGroupMsgs((p) => {
+                  const idx = findGroupAgentIdx(p, aid);
+                  if (idx < 0) return p;
+                  const last = p[idx];
                   const next = p.slice();
-                  next[next.length - 1] = {
+                  next[idx] = {
                     ...last,
                     // 正文整体落盘，过程随 process 一起保存到消息里
                     text: String(ev.text || last.text),
@@ -470,6 +509,7 @@ export default function WorkspaceChat({
                   return next;
                 });
                 break;
+              }
               case "group_done":
                 setGroupBusy(false);
                 setGroupStartedAt(null);
@@ -480,15 +520,11 @@ export default function WorkspaceChat({
                 setGroupBusy(false);
                 setGroupStartedAt(null);
                 setGroupMsgs((p) => {
-                  const next = p.slice();
-                  const last = next[next.length - 1];
-                  if (last && last.role === "agent" && last.streaming) {
-                    next[next.length - 1] = {
-                      ...last,
-                      streaming: false,
-                      text: `${last.text}${last.text ? "\n" : ""}（流式失败：${ev.message}）`,
-                    };
-                  }
+                  // 并行时可能有多个员工同时卡在 thinking，一并收口
+                  const next = p.map((m) => (m.role === "agent" && m.streaming
+                    ? { ...m, streaming: false,
+                        text: `${m.text}${m.text ? "\n" : ""}（流式失败：${ev.message}）` }
+                    : m));
                   if (next[next.length - 1]?.role !== "system") {
                     next.push({ role: "system", text: `❌ ${describeError(new Error(String(ev.message || "群聊流式失败")), "群聊发送失败")}` });
                   }
@@ -497,21 +533,26 @@ export default function WorkspaceChat({
                 break;
               default:
                 // 过程事件与正文逐字（status/model/model_error/reasoning/tool_start/
-                // tool_end/done/delta）全部写到当前发言的 agent 头上
+                // tool_end/done/delta）按 agent_id 写到对应气泡——并行发言时多路
+                // 事件交错到达，不能再默认归到"最后一个气泡"。
                 if (!isProcessEvent(ev.type) && ev.type !== "delta" && ev.type !== "done") break;
-                setGroupMsgs((p) => {
-                  const last = p[p.length - 1];
-                  if (!last || last.role !== "agent" || !last.streaming) return p;
-                  const next = p.slice();
-                  const m = { ...last };
-                  m.process = applyChatProcessEvent(
-                    m.process ?? newChatProcess(), ev as ChatProcessEvent);
-                  if (ev.type === "delta") {
-                    m.text = String(m.text || "") + String(ev.text || "");
-                  }
-                  next[next.length - 1] = m;
-                  return next;
-                });
+                {
+                  const aid = String((ev as { agent_id?: string }).agent_id ?? "");
+                  setGroupMsgs((p) => {
+                    const idx = findGroupAgentIdx(p, aid);
+                    if (idx < 0) return p;
+                    const last = p[idx];
+                    const next = p.slice();
+                    const m = { ...last };
+                    m.process = applyChatProcessEvent(
+                      m.process ?? newChatProcess(), ev as ChatProcessEvent);
+                    if (ev.type === "delta") {
+                      m.text = String(m.text || "") + String(ev.text || "");
+                    }
+                    next[idx] = m;
+                    return next;
+                  });
+                }
             }
           },
         });
@@ -1036,12 +1077,19 @@ export default function WorkspaceChat({
                     ? `${chatGroup.members.length} 位成员已就位，说一句话他们会依次回应。`
                     : "在群里说一句话，参与项目的员工会依次回应，结论会自动同步到项目知识库。"} />
               )}
-              {groupMsgs.map((m, i) => (
-                <ChatBubble key={m.id || i} role={m.role}
-                  name={m.agent_name || (m.role === "boss" ? "我" : "系统")}
-                  text={m.text} time={m.created_at}
-                  process={m.process} live={!!m.streaming} />
-              ))}
+              {groupMsgs.map((m, i) => {
+                const day = dayLabel(m.created_at);
+                const prevDay = i > 0 ? dayLabel(groupMsgs[i - 1].created_at) : "";
+                return (
+                  <Fragment key={m.id || i}>
+                    {day && day !== prevDay && <DayDivider label={day} />}
+                    <ChatBubble role={m.role}
+                      name={m.agent_name || (m.role === "boss" ? "我" : "系统")}
+                      text={m.text} time={m.created_at}
+                      process={m.process} live={!!m.streaming} />
+                  </Fragment>
+                );
+              })}
               {groupBusy && (
                 <BusyHint startedAt={groupStartedAt} label="群里正在轮流回应" />
               )}
@@ -1353,6 +1401,16 @@ export default function WorkspaceChat({
 }
 
 /* ---------------- 小部件 ---------------- */
+
+function DayDivider({ label }: { label: string }) {
+  return (
+    <div className="flex items-center gap-2.5 my-1">
+      <span className="h-px flex-1" style={{ background: "var(--border)" }} />
+      <span className="text-[10px]" style={{ color: "var(--muted)" }}>{label}</span>
+      <span className="h-px flex-1" style={{ background: "var(--border)" }} />
+    </div>
+  );
+}
 
 function ChatBubble({ role, name, text, time, process, live }: {
   role: string;

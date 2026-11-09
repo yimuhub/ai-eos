@@ -242,12 +242,20 @@ export default function TaskDetailPage() {
     }).catch((e) => { if (!isCancelled(e)) warnOnce("companies", `公司信息加载失败：${describeError(e)}`); });
     loadTrace();
     const t = setInterval(() => {
-      if (terminal.current) return;
+      // 页面在后台时不轮询：省请求、省 CPU，回到前台立即补一次
+      if (terminal.current || document.visibilityState === "hidden") return;
       load(); loadTrace();
     }, 5000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && !terminal.current) {
+        load(); loadTrace();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       // 卸载：停掉轮询 + abort 全部在途请求（轮询、下拉数据、手动 load）
       clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
       inflight.current.forEach((c) => c.abort());
       inflight.current.clear();
     };

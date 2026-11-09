@@ -76,6 +76,7 @@ export type WsView = { mode: WsMode; id: string };
 export type GroupMsg = {
   id?: string;
   role: string;
+  agent_id?: string | null;
   agent_name?: string | null;
   text: string;
   streaming?: boolean;

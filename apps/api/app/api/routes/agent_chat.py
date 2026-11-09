@@ -423,10 +423,12 @@ async def _build_qa_messages(db: AsyncSession, a: Agent, text: str,
 
     messages = []
     from datetime import datetime
+    from app.core.prompting import staff_identity
     now = datetime.now()
     base_prompt = (
         f"你是「{a.name}」，公司的一名数字员工。"
         f"职责：{a.role or '综合事务'}。"
+        f"{staff_identity(a.name)}"
         f"现在老板正在和你单独对话（当前时间：{now:%Y-%m-%d %H:%M}，"
         f"星期{'一二三四五六日'[now.weekday()]}）。回答要：\n"
         "1. 基于你的记忆和知识库里的真实信息；不知道就说不知道，不要编造\n"

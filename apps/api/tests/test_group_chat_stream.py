@@ -87,6 +87,41 @@ async def _group_with_agents(client, user, company_id, n=2):
     return r.json()["id"], [a["name"] for a in agents]
 
 
+async def test_stream_agents_run_in_parallel(client, tenants, monkeypatch):
+    """并行发言：每人"思考"0.4s，2 人总耗时应明显低于串行的 0.8s。"""
+    import asyncio
+    import time
+
+    async def fake_stream(self, agent, messages, tools=None, config=None):
+        await asyncio.sleep(0.4)
+        yield {"type": "model", "model_id": "fake-model",
+               "model_name": agent.name}
+        yield {"type": "delta", "text": f"{agent.name} 的意见"}
+        yield {"type": "done", "tool_calls": [], "model": agent.name,
+               "used_model_id": "fake-model", "elapsed_ms": 400}
+
+    monkeypatch.setattr(ModelGateway, "stream_with_agent_models_by_agent",
+                        fake_stream)
+
+    co_id = tenants.alice_co["id"]
+    gid, names = await _group_with_agents(client, tenants.alice, co_id, 2)
+
+    started = time.monotonic()
+    r = await client.post(f"/group-chat/group/{gid}/stream?company_id={co_id}",
+                          json={"message": "在吗"}, headers=tenants.alice["headers"])
+    elapsed = time.monotonic() - started
+    assert r.status_code == 200, r.text
+    assert elapsed < 0.7, f"两位员工串行跑完了（{elapsed:.2f}s），没有并行"
+
+    events = parse_sse(r.text)
+    done = [e for e in events if e["type"] == "agent_done"]
+    assert len(done) == 2
+    # 每条事件都能定位到自己的员工，前端才敢在并行时按 id 回填气泡
+    assert {e["agent_name"] for e in done} == set(names)
+    assert all(e.get("agent_id") for e in done)
+    assert {e["text"] for e in done} == {f"{n} 的意见" for n in names}
+
+
 async def test_stream_reports_events_and_process(client, tenants, monkeypatch):
     responses = [{"content": "我是员工-1。", "tool_calls": [], "finish_reason": "stop"},
                  {"content": "我是员工-2。", "tool_calls": [], "finish_reason": "stop"}]
@@ -108,12 +143,16 @@ async def test_stream_reports_events_and_process(client, tenants, monkeypatch):
     assert len([k for k in kinds if k == "agent_done"]) == 2
     assert not [k for k in kinds if k == "error"], events
 
-    # agent_done 带着正文和最终模型名
+    # agent_done 带着正文和最终模型名。群聊已改为并行发言，事件到达顺序
+    # 由调度决定——所以断言"谁说了什么"（集合 + 归属），不锁死先后。
     agent_done = [e for e in events if e["type"] == "agent_done"]
-    texts = [e["text"] for e in agent_done]
-    assert texts == ["我是员工-1。", "我是员工-2。"]
-    models = [e["model"] for e in agent_done]
-    assert models == [names[0], names[1]]
+    texts = sorted(e["text"] for e in agent_done)
+    assert texts == sorted(["我是员工-1。", "我是员工-2。"])
+    models = sorted(e["model"] for e in agent_done)
+    assert models == sorted(names)
+    # 每条事件都能定位到自己的员工：并行时前端靠 id 回填正确的气泡
+    assert {e["agent_id"] for e in agent_done} and \
+        {e["agent_name"] for e in agent_done} == set(names)
 
     # history 回放的 process 从这条线产生
     async with AsyncSessionLocal() as s:
