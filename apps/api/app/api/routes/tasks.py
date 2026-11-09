@@ -13,13 +13,11 @@ from app.agent_runtime import pause_execution, run_agent_on_task, resume_executi
 from app.background_jobs import QUEUE_FULL
 from app.core.logging_config import get_logger
 from app.core.permissions import Capability
-from app.core.scope import build_ctx
+from app.core.scope import accessible_company_ids, build_ctx
 from app.core.timeutil import iso_utc
 from app.db.session import get_db
 from app.models.agent import Agent
 from app.models.automation import AutomationDefinition
-from app.models.company import Company
-from app.models.membership import CompanyMember
 from app.models.queue_item import QueueItemStatus
 from app.models.task import (AgentExecution, Intervention, Task, TaskEvent, TaskEventType,
                              TaskPriority, TaskStatus)
@@ -48,13 +46,7 @@ class TaskIn(BaseModel):
 
 def _accessible_company_ids(user_id: str):
     """调用者可访问的公司：owner 事实源 ∪ active 成员行。"""
-    owned = select(Company.id).join(
-        User, User.id == Company.owner_id).where(User.id == user_id)
-    member = select(CompanyMember.company_id).where(
-        CompanyMember.user_id == user_id,
-        CompanyMember.status == "active")
-    return select(Company.id).where(
-        or_(Company.id.in_(owned), Company.id.in_(member)))
+    return accessible_company_ids(user_id)
 
 
 def _task_scope(ctx):

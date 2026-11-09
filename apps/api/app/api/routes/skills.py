@@ -7,13 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import assert_company_capability, get_current_user
 from app.core.permissions import Capability, require_company_scope
 from app.core.logging_config import get_logger
-from app.core.scope import build_ctx, ensure_agent_access
+from app.core.scope import accessible_company_ids, build_ctx, ensure_agent_access
 from app.db.session import get_db
 from app.skill_provisioning import (ensure_builtin_skills, fetch_market_skill,
                                     security_scan, search_market_skills)
 from app.models.agent import Agent
-from app.models.company import Company
-from app.models.membership import CompanyMember
 from app.models.skill import AgentSkill, SkillStatus, Skill as SkillRow
 from app.models.user import User
 from app.schemas.responses import (CustomSkillOut, SkillImportOut,
@@ -41,13 +39,7 @@ async def ensure_skills_seeded(db: AsyncSession):
 
 def _accessible_company_ids(user_id: str):
     """调用者可访问的公司：owner 事实源 ∪ active 成员行。"""
-    owned = select(Company.id).join(
-        User, User.id == Company.owner_id).where(User.id == user_id)
-    member = select(CompanyMember.company_id).where(
-        CompanyMember.user_id == user_id,
-        CompanyMember.status == "active")
-    return select(Company.id).where(
-        or_(Company.id.in_(owned), Company.id.in_(member)))
+    return accessible_company_ids(user_id)
 
 
 @router.get("", response_model=list[SkillOut])

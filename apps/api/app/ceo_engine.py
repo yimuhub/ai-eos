@@ -48,7 +48,8 @@ from app.services.ceo_concurrency import (DEFAULT_PARALLEL, HARD_CAP, MIN_PARALL
                                           DynamicGate, failure_kind,
                                           resolve_capacity)
 from app.services.event_system import log_event
-from app.task_engine import transition
+from app.task_engine import (ConcurrentTransition, IllegalTransition,
+                             transition)
 
 logger = get_logger(__name__)
 
@@ -58,6 +59,8 @@ MAX_RETRY = 1
 # 造出一堆用不上的岗位。超出上限的子任务回落到现有员工（预览里仍然标出来）。
 MAX_NEW_AGENTS = 3
 DEFAULT_NEW_DEPARTMENT = "综合部"
+# 补跑任务在 description 里回指原任务 id：结果合并靠它而不是标题
+_RETRY_OF = re.compile(r"\[补跑 of ([^\]]+)\]")
 MISSION_TIMEOUT_S = 3600
 MIN_RESULT_CHARS = 10
 DIGEST_WINDOW_HOURS = 24
@@ -809,6 +812,22 @@ def _agent_result_rows(results: list[dict]) -> tuple[list[str], list[str]]:
     return ok, problems
 
 
+# 后台会话工厂复用：以前每个子任务、每次"读一眼 mission 状态"都新建并
+# dispose 一个 engine，一场 12 个子任务就是几十次连接池建拆。
+# 按事件循环缓存（测试每个用例一个新 loop，跨 loop 复用 engine 会炸）。
+_BG_FACTORY: dict = {"loop": None, "factory": None}
+
+
+def _bg_factory():
+    from app.background_jobs import _make_session_factory
+
+    loop = asyncio.get_running_loop()
+    if _BG_FACTORY["factory"] is None or _BG_FACTORY["loop"] is not loop:
+        _BG_FACTORY["factory"] = _make_session_factory()
+        _BG_FACTORY["loop"] = loop
+    return _BG_FACTORY["factory"]
+
+
 async def execute_subtask(task_id: str, agent_id: str,
                           anchor_block: str) -> dict:
     """单条子任务：独立 session 执行，避免并行时共享 ORM 缓存。
@@ -816,9 +835,8 @@ async def execute_subtask(task_id: str, agent_id: str,
     测试直接 monkeypatch 这个函数，不需要连模型。
     """
     from app.agent_runtime import run_agent_on_task
-    from app.background_jobs import _make_session_factory, dispose_factory_engine
 
-    factory = _make_session_factory()
+    factory = _bg_factory()
     try:
         async with factory() as s:
             task = await s.get(Task, task_id)
@@ -831,6 +849,16 @@ async def execute_subtask(task_id: str, agent_id: str,
                 return {"task_id": task_id, "agent_id": agent_id,
                         "title": task.title, "agent_name": agent.name,
                         "status": "SKIPPED", "error": f"状态 {task.status.value} 不再执行"}
+            # 认领（CAS）：两个调度器同时捞到同一条子任务时，只有第一个能把
+            # TODO/PLANNING 推进到 RUNNING。抢输的一方返回 SKIPPED 而不是继续
+            # 跑——否则两边都记 COMPLETED/FAILED，后写的覆盖先写的。
+            try:
+                await transition(s, task, TaskStatus.RUNNING, "system", None)
+            except (ConcurrentTransition, IllegalTransition):
+                return {"task_id": task_id, "agent_id": agent_id,
+                        "title": task.title, "agent_name": agent.name,
+                        "status": "SKIPPED",
+                        "error": "任务已被其他执行器认领"}
             await run_agent_on_task(s, agent, task, actor_type="agent",
                                     extra_system=[anchor_block])
             task = await s.get(Task, task_id)
@@ -855,7 +883,16 @@ async def execute_subtask(task_id: str, agent_id: str,
                 t2 = await s2.get(Task, task_id)
                 a2 = await s2.get(Agent, agent_id)
                 if t2 and t2.status == TaskStatus.RUNNING:
-                    t2.status = TaskStatus.FAILED
+                    # 走状态机而不是直接赋 status：completed_at 与状态事件
+                    # 都要落库，否则详情页耗时/事件流各缺一段。
+                    try:
+                        await transition(s2, t2, TaskStatus.FAILED, "system", None,
+                                         payload={"error": str(exc)[:500]})
+                    except (ConcurrentTransition, IllegalTransition) as te:
+                        # 别处已把状态推走（取消/重试/另一个执行器），失败标记
+                        # 本就不该覆盖它；但要留痕，否则"失败没落库"无从排查。
+                        logger.warning(
+                            "CEO 子任务失败标记被跳过 task=%s: %s", task_id, te)
                 if a2 and a2.status == AgentStatus.RUNNING:
                     a2.status = AgentStatus.IDLE
                 await log_event(s2, "ceo.subtask_failed", "task", task_id,
@@ -866,19 +903,14 @@ async def execute_subtask(task_id: str, agent_id: str,
         return {"task_id": task_id, "agent_id": agent_id, "title": "",
                 "agent_name": "", "status": "FAILED", "error": str(exc)[:500],
                 "failure_kind": failure_kind(exc)}
-    finally:
-        await dispose_factory_engine(factory)
+    # 工厂是按事件循环复用的，这里不再 dispose（否则下一次调用又要重建连接池）
 
 
 async def _mission_status(mission_id: str) -> str:
-    from app.background_jobs import _make_session_factory, dispose_factory_engine
-    factory = _make_session_factory()
-    try:
-        async with factory() as s:
-            row = await s.get(CeoMission, mission_id)
-            return row.status if row else "MISSING"
-    finally:
-        await dispose_factory_engine(factory)
+    factory = _bg_factory()
+    async with factory() as s:
+        row = await s.get(CeoMission, mission_id)
+        return row.status if row else "MISSING"
 
 
 async def _run_one(task: Task, gate: DynamicGate, anchor: str,
@@ -906,22 +938,18 @@ async def _run_one(task: Task, gate: DynamicGate, anchor: str,
 
 
 async def _mark_degraded(mission_id: str, info: dict) -> None:
-    from app.background_jobs import _make_session_factory, dispose_factory_engine
-    factory = _make_session_factory()
-    try:
-        async with factory() as s:
-            m = await s.get(CeoMission, mission_id)
-            if not m:
-                return
-            m.degraded = True
-            m.degrade_reason = info.get("reason")
-            m.degraded_until = info.get("until")
-            m.effective_parallel = info.get("limit") or MIN_PARALLEL
-            await log_event(s, "ceo.degraded", "ceo_mission", mission_id,
-                            "system", None, info, company_id=m.company_id)
-            await s.commit()
-    finally:
-        await dispose_factory_engine(factory)
+    factory = _bg_factory()
+    async with factory() as s:
+        m = await s.get(CeoMission, mission_id)
+        if not m:
+            return
+        m.degraded = True
+        m.degrade_reason = info.get("reason")
+        m.degraded_until = info.get("until")
+        m.effective_parallel = info.get("limit") or MIN_PARALLEL
+        await log_event(s, "ceo.degraded", "ceo_mission", mission_id,
+                        "system", None, info, company_id=m.company_id)
+        await s.commit()
 
 
 async def _collect_finished(db: AsyncSession, mission_id: str) -> list[dict]:
@@ -963,8 +991,16 @@ async def _collect_finished(db: AsyncSession, mission_id: str) -> list[dict]:
             "status": status, "output": t.result or "",
             "off_track_reason": reason,
         }
-        if base not in by_title or t.title.startswith("补跑："):
-            by_title[base] = item
+        # 以 task_id 为主键：拆解出两条同名子任务时，按标题合并会把其中
+        # 一条的产出整段丢掉。补跑行通过 description 里的 [补跑 of id]
+        # 回指原任务，仍然只留最新一次尝试。
+        key = t.id
+        if t.title.startswith("补跑："):
+            link = _RETRY_OF.search(t.description or "")
+            if link:
+                key = link.group(1)
+        if key not in by_title or t.title.startswith("补跑："):
+            by_title[key] = item
     return list(by_title.values())
 
 
@@ -1170,8 +1206,14 @@ async def run_mission(db: AsyncSession, mission_id: str) -> dict:
 
     # 批量锚审查（一次调用）——只对真正有产出的结果
     reviews = await _review_outputs(db, mission, results)
+    # 同名子任务无法只凭标题吃到同一条判词，宁可不判也不误判
+    _title_counts: dict[str, int] = {}
     for r in results:
-        verdict = reviews.get(str(r.get("title") or ""))
+        key = str(r.get("title") or "")
+        _title_counts[key] = _title_counts.get(key, 0) + 1
+    for r in results:
+        title = str(r.get("title") or "")
+        verdict = reviews.get(title) if _title_counts.get(title) == 1 else None
         if verdict and not verdict["on_track"]:
             r["status"] = "OFF_TRACK"
             r["off_track_reason"] = verdict["reason"] or "偏离准绳"
@@ -1196,12 +1238,17 @@ async def run_mission(db: AsyncSession, mission_id: str) -> dict:
             *[_run_one(t, gate, anchor, mission_id) for t in retry_tasks]))
         # 补跑结果按标题（去掉「补跑：」前缀）替换原结果：同一条子任务只留
         # 最新一次尝试，否则原偏离与补跑会被算成两条，统计翻倍。
-        by_title = {str(r.get("title") or ""): r for r in results}
-        for rr in retry_results:
-            key = str(rr.get("title") or "").removeprefix("补跑：")
-            rr["title"] = key
-            by_title[key] = rr
-        results = list(by_title.values())
+        # 补跑结果替换原结果：按原任务 id 合并，而不是标题——同名子任务
+        # 按标题合并会互相覆盖，最终报告少一条产出。
+        by_id = {str(r.get("task_id") or r.get("title")): r for r in results}
+        for rt, rr in zip(retry_tasks, retry_results):
+            key = str(rr.get("task_id") or "")
+            link = _RETRY_OF.search(rt.description or "")
+            if link:
+                key = link.group(1)
+            rr["title"] = str(rr.get("title") or "").removeprefix("补跑：")
+            by_id[key] = rr
+        results = list(by_id.values())
 
     await db.refresh(mission)
     if mission.status in ("PAUSED", "CANCELLED"):

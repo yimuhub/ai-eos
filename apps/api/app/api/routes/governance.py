@@ -8,12 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (assert_company_capability, get_current_user, get_db)
 from app.core.permissions import Capability, require_company_scope
-from app.core.scope import ensure_agent_access
+from app.core.scope import accessible_company_ids, ensure_agent_access
 from app.learning_engine import add_growth_event
 from app.models.agent import Agent
-from app.models.company import Company
 from app.models.learning import GrowthEventType
-from app.models.membership import CompanyMember
 from app.models.p3_governance import (AgentSandbox, AgentVersion,
                                       AutonomousExecutionLog,
                                       AutonomousSettings, CompanyCreationJob,
@@ -54,13 +52,7 @@ async def _owned_case(db: AsyncSession, user_id: str, iid: str,
 
 def _accessible_company_ids(user_id: str):
     """调用者可访问的公司：超管由调用方另行展开，其余 = owner ∪ active 成员。"""
-    owned = select(Company.id).join(
-        User, User.id == Company.owner_id).where(User.id == user_id)
-    member = select(CompanyMember.company_id).where(
-        CompanyMember.user_id == user_id,
-        CompanyMember.status == "active")
-    return select(Company.id).where(
-        or_(Company.id.in_(owned), Company.id.in_(member)))
+    return accessible_company_ids(user_id)
 
 
 # ================= P3-13 Self-Improvement Governance =================

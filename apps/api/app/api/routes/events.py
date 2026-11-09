@@ -9,26 +9,18 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
-from app.core.scope import build_ctx
+from app.core.scope import accessible_company_ids, build_ctx
 from app.db.session import get_db
 from app.models.agent import Agent
-from app.models.company import Company
 from app.models.event import EventLog
-from app.models.membership import CompanyMember, DepartmentMember
-from app.models.user import User
+from app.models.membership import DepartmentMember
 
 router = APIRouter(prefix="/events", tags=["events"])
 
 
 def _accessible_company_ids(user_id: str):
     """调用者可访问的公司：owner 事实源 ∪ active 成员行。"""
-    owned = select(Company.id).join(
-        User, User.id == Company.owner_id).where(User.id == user_id)
-    member = select(CompanyMember.company_id).where(
-        CompanyMember.user_id == user_id,
-        CompanyMember.status == "active")
-    return select(Company.id).where(
-        or_(Company.id.in_(owned), Company.id.in_(member)))
+    return accessible_company_ids(user_id)
 
 
 def _event_scope(ctx):

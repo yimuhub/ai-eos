@@ -33,13 +33,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import Capability, Role, resolve_role, role_has
 from app.models.agent import Agent
-from app.models.company import Department
-from app.models.membership import DepartmentMember
+from app.models.company import Company, Department
+from app.models.membership import CompanyMember, DepartmentMember
 
 # visibility 的三种取值；NULL 等价 company（升级前的老 Agent 全员可见）
 VISIBILITY_COMPANY = "company"
 VISIBILITY_DEPARTMENT = "department"
 VISIBILITY_PRIVATE = "private"
+
+
+def accessible_company_ids(user_id: str):
+    """调用者可访问的公司 id 子查询：owner 事实源 ∪ active 成员行。
+
+    tasks/skills/events/tokens/projects/governance 都曾在各自文件里抄一份
+    同样的查询；口径一旦漂移（有人漏掉 active、有人漏掉 owner），
+    "不传 company_id 就聚合全平台"的缺口会从某一条路由重新长回来。
+    """
+    owned = select(Company.id).where(Company.owner_id == user_id)
+    member = select(CompanyMember.company_id).where(
+        CompanyMember.user_id == user_id,
+        CompanyMember.status == "active")
+    return select(Company.id).where(
+        or_(Company.id.in_(owned), Company.id.in_(member)))
 
 
 @dataclass(frozen=True)
