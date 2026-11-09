@@ -81,3 +81,4 @@ from .plugin import ComputerPolicy, PluginInstallation  # noqa: F401
 from .org_synthesis import OrgSynthesisRun, OrgSynthesisStatus  # noqa: F401
 from .computer_device import (ComputerDevice, ComputerDispatch,  # noqa: F401
                               DISPATCH_STATUSES, ONLINE_WINDOW)
+from .media import MediaGeneration  # noqa: F401

@@ -95,6 +95,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: "/memory", label: "记忆库", icon: "🧠", desc: "员工记住的事实与经验，可查可删", keywords: ["memory", "jiyi", "记忆", "长期记忆"], hidden: true },
       { href: "/templates", label: "模板库", icon: "📋", desc: "可复用的任务与文档模板", keywords: ["template", "muban", "模板"], hidden: true },
       { href: "/assets", label: "素材资产", icon: "🖼", desc: "图片等素材的统一管理", keywords: ["asset", "sucai", "素材", "图片", "资产"], hidden: true },
+      { href: "/media", label: "创作中心", icon: "🎨", desc: "用图片/视频模型生成素材：文生图、文生视频，结果自动入库可下载", keywords: ["media", "creation", "chuangzuo", "创作", "生图", "生成图片", "文生图", "视频生成", "文生视频", "image", "video", "画图"], hidden: true },
     ],
   },
   {

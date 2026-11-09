@@ -30,7 +30,7 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             app_alias, skills, tasks, team_builder, training, workflows, war_room, team_generator, company_manage,
                             tokens, experts, command, org_presets, prometheus_metrics, setup,
                             org_synthesis, plugins, computer_policy, computer_devices,
-                            members, licensing, subscription, byok, invites)
+                            members, licensing, subscription, byok, invites, media)
 from app.api.routes import notifications
 from app.api.routes import thread_reads
 # 收件箱挂在 /tasks 下，必须比 tasks 路由**先注册**——tasks 有 /{tid} 兜底，
@@ -491,5 +491,5 @@ for r in (health, auth, companies, company_search, agents, agent_chat, models_ap
           budgets, mcp, mailboxes, worklogs, setup, members, notifications,
           thread_reads, licensing, queue_routes, subscription, byok,
           org_synthesis, plugins, computer_policy, computer_devices,
-          invites):
+          invites, media):
     app.include_router(r.router)

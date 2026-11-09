@@ -216,7 +216,8 @@ def test_thread_reads_scope_is_unique():
 
 def test_migration_revisions_extend_current_heads():
     active = _script_dir(ACTIVE_MIGRATIONS)
-    assert active.get_heads() == ["0017"]
+    assert active.get_heads() == ["0018"]
+    assert active.get_revision("0018").down_revision == "0017"
     assert active.get_revision("0017").down_revision == "0016"
     assert active.get_revision("0016").down_revision == "0015"
     assert active.get_revision("0015").down_revision == "0014"
