@@ -12,11 +12,10 @@ from app.api.deps import (assert_company_capability, assert_company_owned,
                           get_current_user, get_db)
 from app.core.logging_config import get_logger
 from app.core.permissions import Capability
-from app.core.scope import build_ctx
+from app.core.scope import accessible_company_ids, build_ctx
 from app.core.timeutil import iso_utc
 from app.models.agent import Agent, Model
 from app.models.company import Company, Department
-from app.models.membership import CompanyMember
 from app.models.token_usage import PricingConfig, TokenUsage, new_id
 from app.models.user import User
 from app.schemas.responses_governance import (
@@ -41,13 +40,7 @@ def _accessible_company_ids(user_id: str):
     统计端点不能简单把 company_id 改成必填（现有页面有不传的调用），
     也不能不传就聚合全平台——改为服务端自行推导可访问公司集合。
     """
-    owned = select(Company.id).join(
-        User, User.id == Company.owner_id).where(User.id == user_id)
-    member = select(CompanyMember.company_id).where(
-        CompanyMember.user_id == user_id,
-        CompanyMember.status == "active")
-    return select(Company.id).where(
-        or_(Company.id.in_(owned), Company.id.in_(member)))
+    return accessible_company_ids(user_id)
 
 
 def _usage_scope(ctx):
@@ -79,6 +72,80 @@ class PricingIn(BaseModel):
     currency: str = "CNY"
     enabled: bool = True
     note: str | None = None
+
+
+# 公开标价的粗略参考（人民币/百万 token）。只用于「一键导入」的初始值，
+# 页面上明确标注可改——实际账单价以合同为准。未命中的模型仍会建一条
+# 0 价配置并标注「未匹配参考价」，避免"有调用但成本栏一片空白"。
+_REFERENCE_PRICING: list[tuple[str, float, float, str]] = [
+    ("gpt-4o-mini", 1.1, 4.4, "OpenAI 公开标价（参考）"),
+    ("gpt-4o", 18.0, 72.0, "OpenAI 公开标价（参考）"),
+    ("claude-3-5-haiku", 5.6, 28.0, "Anthropic 公开标价（参考）"),
+    ("claude-3-5-sonnet", 21.0, 105.0, "Anthropic 公开标价（参考）"),
+    ("deepseek-chat", 2.0, 8.0, "DeepSeek 公开标价（参考）"),
+    ("deepseek-reasoner", 4.0, 16.0, "DeepSeek 公开标价（参考）"),
+    ("qwen-plus", 0.8, 2.0, "阿里云公开标价（参考）"),
+    ("qwen-max", 20.0, 60.0, "阿里云公开标价（参考）"),
+    ("moonshot-v1-8k", 12.0, 12.0, "月之暗面公开标价（参考）"),
+    ("gemini-1.5-pro", 8.75, 35.0, "Google 公开标价（参考）"),
+]
+
+
+def _reference_price(model_id: str) -> tuple[float, float, str] | None:
+    mid = (model_id or "").lower()
+    # 长键优先：gpt-4o-mini 必须先于 gpt-4o 命中
+    for key, inp, out, note in sorted(_REFERENCE_PRICING,
+                                      key=lambda r: -len(r[0])):
+        if key in mid:
+            return inp, out, note
+    return None
+
+
+class PricingImportIn(BaseModel):
+    company_id: str
+
+
+@router.post("/pricing/import-defaults")
+async def import_default_pricing(data: PricingImportIn,
+                                 db: AsyncSession = Depends(get_db),
+                                 user: User = Depends(get_current_user)):
+    """给公司模型一键补参考报价：已有的跳过，没匹配到的建 0 价待填。"""
+    await assert_company_capability(db, user.id, data.company_id,
+                                    Capability.MANAGE)
+    model_rows = (await db.execute(
+        select(Model).where(Model.company_id == data.company_id)
+    )).scalars().all()
+    if not model_rows:
+        return {"created": 0, "skipped": 0, "unmatched": 0,
+                "message": "公司下还没有登记模型"}
+
+    model_ids = [m.id for m in model_rows]
+    existing = set((await db.execute(
+        select(PricingConfig.model_id).where(
+            PricingConfig.enabled.is_(True),
+            PricingConfig.model_id.in_(model_ids))
+    )).scalars().all())
+
+    created = skipped = unmatched = 0
+    for m in model_rows:
+        if m.id in existing:
+            skipped += 1
+            continue
+        ref = _reference_price(m.model_id)
+        if ref is None:
+            unmatched += 1
+            inp = out = 0.0
+            note = "未匹配到公开参考价，请按实际账单填写"
+        else:
+            inp, out, note = ref
+        db.add(PricingConfig(id=new_id(), model_id=m.id, model_name=m.name,
+                             billing_mode="USAGE",
+                             input_price_per_m=inp,
+                             output_price_per_m=out,
+                             currency="CNY", enabled=True, note=note))
+        created += 1
+    await db.commit()
+    return {"created": created, "skipped": skipped, "unmatched": unmatched}
 
 
 @router.get("/pricing", response_model=list[PricingConfigOut])

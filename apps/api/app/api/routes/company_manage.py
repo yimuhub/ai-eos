@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import assert_company_capability, get_current_user
 from app.core.permissions import Capability
+from app.core.timeutil import iso_utc
 from app.db.session import get_db
 from app.models.company import Company
 from app.models.membership import CompanyMember
@@ -89,7 +90,7 @@ async def list_companies(db: AsyncSession = Depends(get_db),
             {"cid": cid})).scalars().all()
         out.append({
             "id": cid, "name": c.name, "description": c.description,
-            "created_at": str(c.created_at),
+            "created_at": iso_utc(c.created_at),
             "stats": {
                 "agents": agents_n,
                 "departments": await _count("departments"),

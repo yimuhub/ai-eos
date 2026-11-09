@@ -80,8 +80,16 @@ async def ingest_document(db: AsyncSession, doc: KBDocument) -> int:
         await db.commit()
         return len(pieces)
     except Exception:
-        doc.status = KBDocumentStatus.FAILED
-        await db.commit()
+        # 先回滚：切块/写块中途失败时，已 add 的半批 chunk 必须一起撤销，
+        # 否则会话处于待回滚状态，紧接着的 commit 会抛 PendingRollbackError
+        # 掩盖真正的失败原因。id 必须在 rollback 前取出——rollback 会让 ORM
+        # 对象过期，之后再读属性会触发异步惰性加载并抛 MissingGreenlet。
+        doc_id = doc.id
+        await db.rollback()
+        failed = await db.get(KBDocument, doc_id)
+        if failed is not None:
+            failed.status = KBDocumentStatus.FAILED
+            await db.commit()
         raise
 
 
@@ -92,6 +100,9 @@ async def retrieve(db: AsyncSession, company_id: str, query: str,
 
     limit：在 SQL 层截断候选 chunk 数（默认 200），避免全表 chunk 拉进
     Python 做 bigram 打分导致内存爆炸；不做 pgvector 的轻方案。
+    候选必须显式排序：没有 ORDER BY 时 SQLite 返回的是存储顺序的任意子集，
+    知识库一大，真正相关的块可能根本进不了候选集，检索会随数据增长悄悄变差。
+    这里取「最新入库优先」作为确定性兜底，向量检索接上后可替换为相似度排序。
     """
     q = select(KBChunk).where(KBChunk.company_id == company_id)
     if project_id:
@@ -101,6 +112,7 @@ async def retrieve(db: AsyncSession, company_id: str, query: str,
         if not doc_ids:
             return []
         q = q.where(KBChunk.document_id.in_(doc_ids))
+    q = q.order_by(KBChunk.created_at.desc(), KBChunk.seq.asc())
     if limit:
         q = q.limit(limit)
 

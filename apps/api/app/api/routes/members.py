@@ -44,6 +44,7 @@ from app.api.routes.auth import validate_password_strength
 from app.core.permissions import Capability, Role, role_has
 from app.core.scope import build_ctx
 from app.core.security import hash_password
+from app.core.timeutil import iso_utc
 from app.db.session import get_db
 from app.models.company import Company, Department
 from app.models.membership import CompanyMember, DepartmentMember
@@ -182,8 +183,8 @@ def _member_dict(member: CompanyMember, user: User,
         "invited_by": member.invited_by,
         "departments": departments,
         "department_ids": [d["department_id"] for d in departments],
-        "created_at": member.created_at,
-        "updated_at": member.updated_at,
+        "created_at": iso_utc(member.created_at),
+        "updated_at": iso_utc(member.updated_at),
     }
 
 

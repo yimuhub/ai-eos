@@ -16,6 +16,7 @@ from datetime import datetime
 from sqlalchemy import Integer, String, Boolean, Float, DateTime
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.timeutil import iso_utc
 from app.db.base import Base
 
 
@@ -61,6 +62,6 @@ class TokenBudget(Base):
             "period": self.period, "enabled": self.enabled,
             "paused": self.paused, "paused_reason": self.paused_reason,
             "note": self.note,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "created_at": iso_utc(self.created_at),
+            "updated_at": iso_utc(self.updated_at),
         }

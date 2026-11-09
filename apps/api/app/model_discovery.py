@@ -284,7 +284,10 @@ def default_config_for(model_type: str, upstream: dict | None = None,
         config.update({
             "default_duration": 5,
             "durations": [5, 10],
-            "resolutions": ["720p", "1080p"],
+            # 上游没声明分辨率时只给保守默认 720p：此前默认带 1080p，
+            # 实际 agnes-video-2.5-flash 只支持 720P，配置页等于虚标。
+            # 真支持 1080p 的模型在模型配置里显式加上即可。
+            "resolutions": ["720p"],
             "aspect_ratios": ["16:9", "9:16", "1:1"],
             "fps": 24,
         })

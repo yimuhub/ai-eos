@@ -1,4 +1,6 @@
 """Performance API (P2-11)."""
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import (assert_agent_owned, assert_company_capability,
                           get_current_user, get_db)
 from app.core.permissions import Capability
+from app.core.timeutil import iso_utc
 from app.models.performance import PerformanceSnapshot
 from app.performance_engine import compute_agent_metrics, snapshot_company
 from app.models.user import User
@@ -15,12 +18,20 @@ from app.schemas.responses import (AgentMetricsOut, HrOverviewOut,
 router = APIRouter(prefix="/performance", tags=["performance"])
 
 
+def utc_naive_now() -> datetime:
+    """当前 UTC 时刻（去掉 tzinfo），与库里的 naive UTC 时刻列同基准。
+
+    直接用 `datetime.now()` 是本地时间，东八区会比 UTC 快 8 小时，
+    「本月 / 近 30 天」窗口整体错位。独立成函数便于回归测试冻结时间。
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 @router.get("/company/{company_id}/hr-overview",
             response_model=HrOverviewOut)
 async def hr_overview(company_id: str, db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
     """V5.5 C1：公司 HR 看板——编制 / 成本 / 产出 / 考核分 四象限。"""
-    from datetime import datetime, timedelta
     from sqlalchemy import func
     from app.models.agent import Agent
     from app.models.task import Task
@@ -36,8 +47,11 @@ async def hr_overview(company_id: str, db: AsyncSession = Depends(get_db),
         status_dist[a.status.value] = status_dist.get(a.status.value, 0) + 1
 
     # 2) 成本：本月 token 用量（按 Agent 汇总 top3）
-    month_start = datetime.now().replace(day=1, hour=0, minute=0,
-                                         second=0, microsecond=0)
+    # 库里的时刻列是 naive UTC，这里必须同样取 UTC 再去掉 tzinfo，
+    # 否则东八区本机时间会比 UTC 快 8 小时，月初/近 30 天窗口整体错位。
+    now_utc = utc_naive_now()
+    month_start = now_utc.replace(day=1, hour=0, minute=0, second=0,
+                                  microsecond=0)
     month_total_row = (await db.execute(
         select(func.coalesce(func.sum(TokenUsage.total_tokens), 0),
                func.coalesce(func.sum(TokenUsage.total_cost), 0.0)).where(
@@ -58,7 +72,7 @@ async def hr_overview(company_id: str, db: AsyncSession = Depends(get_db),
                 for r in top_cost_rows]
 
     # 3) 产出：近 30 天完成任务（按负责人 top3）
-    since30 = datetime.now() - timedelta(days=30)
+    since30 = now_utc - timedelta(days=30)
     done_rows = (await db.execute(
         select(Task.assigned_agent_id, func.count()).where(
             Task.company_id == company_id,
@@ -119,11 +133,16 @@ async def agent_performance(
     user: User = Depends(get_current_user),
 ):
     """单 Agent 实时绩效（从真实执行数据计算）。"""
-    from datetime import datetime
+    from datetime import datetime, timezone
     # 归属校验：按 agent 反查其公司，再要求调用者在该公司有角色（全部角色都含
     # VIEW）。不存在与跨租户同为 404，避免用 id 枚举他人员工。
     await assert_agent_owned(db, user.id, agent_id)
-    since_dt = datetime.fromisoformat(since) if since else None
+    since_dt = None
+    if since:
+        since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        # 库里是 naive UTC：带时区的入参会与列比较错位，统一转成 naive UTC
+        if since_dt.tzinfo is not None:
+            since_dt = since_dt.astimezone(timezone.utc).replace(tzinfo=None)
     metrics = await compute_agent_metrics(db, agent_id, since_dt)
     return metrics
 
@@ -158,5 +177,5 @@ async def snapshot_history(
         PerformanceSnapshot.created_at.desc()).limit(limit))
     snaps = q.scalars().all()
     return [{"id": s.id, "agent_id": s.agent_id, "score": s.score,
-             "metrics": s.metrics, "period_end": s.period_end.isoformat()}
+             "metrics": s.metrics, "period_end": iso_utc(s.period_end)}
             for s in snaps]
