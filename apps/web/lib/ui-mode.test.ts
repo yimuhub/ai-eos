@@ -1,4 +1,4 @@
-// 界面模式语义：未设置 = classic，只有显式存过 geek 才是极客。
+// 界面模式语义：未设置 = geek（三栏极客），只有显式存过 classic 才回整页经典。
 //
 // 这条契约决定首次进入是否弹「二选一」，也决定 SSR 首帧渲染哪个外壳；
 // 测试直接锁 readUIMode / writeUIMode 的存储与事件语义。
@@ -36,18 +36,18 @@ afterEach(() => {
 });
 
 describe("界面模式", () => {
-  it("默认是 classic", () => {
-    expect(DEFAULT_UI_MODE).toBe("classic");
+  it("默认是 geek", () => {
+    expect(DEFAULT_UI_MODE).toBe("geek");
   });
 
-  it("SSR（没有 window）回退到 classic，而不是 null", () => {
+  it("SSR（没有 window）回退到 geek，而不是 null", () => {
     expect(typeof window).toBe("undefined");
-    expect(readUIMode()).toBe("classic");
+    expect(readUIMode()).toBe("geek");
   });
 
-  it("从未选择过时是 classic", () => {
+  it("从未选择过时是 geek", () => {
     stubBrowser();
-    expect(readUIMode()).toBe("classic");
+    expect(readUIMode()).toBe("geek");
   });
 
   it("存储过 geek 时返回 geek；存储过 classic 时返回 classic", () => {
@@ -58,9 +58,9 @@ describe("界面模式", () => {
     expect(readUIMode()).toBe("classic");
   });
 
-  it("存储值损坏时回退到 classic", () => {
+  it("存储值损坏时回退到 geek", () => {
     stubBrowser({ aieos_ui_mode: "banana" });
-    expect(readUIMode()).toBe("classic");
+    expect(readUIMode()).toBe("geek");
   });
 
   it("writeUIMode 同时写存储并广播事件，供所有挂载组件对齐", () => {
