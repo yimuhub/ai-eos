@@ -437,6 +437,7 @@ def to_public(sub: CompanySubscription,
     return {
         "company_id": sub.company_id,
         "plan_code": sub.plan_code,
+        "plan_label": plan_label(sub.plan_code),
         "status": _status_value(sub.status),
         "effective_status": effective_status(sub, now),
         "trial_ends_at": _iso(sub.trial_ends_at),

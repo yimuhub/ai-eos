@@ -21,10 +21,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import assert_company_capability, get_current_user, get_db
 from app.core.permissions import Capability
-from app.models.subscription import SubscriptionOrder
+from app.models.company import Company
+from app.models.subscription import SubscriptionOrder, SubscriptionOrderStatus
 from app.models.user import User
 from app.schemas.responses import SubscriptionOut
-from app.services import subscription_service
+from app.services import subscription_service, usage_service
 
 router = APIRouter(prefix="/subscription", tags=["subscription"])
 
@@ -53,7 +54,30 @@ async def get_subscription(
     await assert_company_capability(db, user.id, company_id, Capability.VIEW)
     sub = await subscription_service.get_or_create(db, company_id)
     await db.commit()
-    return subscription_service.to_public(sub)
+    data = subscription_service.to_public(sub)
+    # 配额进度：席位与本月 token 都按真实流水统计，让「套餐与账单」页
+    # 能直接显示"已用 / 上限"，而不是只给一个数字让老板自己算。
+    data["usage"] = {
+        "seats_used": await usage_service.count_active_agents(db, company_id),
+        "tokens_used_this_month":
+            await subscription_service.tokens_used_this_month(db, company_id),
+    }
+    return data
+
+
+@router.get("/plans")
+async def list_plans(user: User = Depends(get_current_user)):
+    """套餐目录：只有能力边界（席位 / token 配额），不含价格。
+
+    前端据此渲染对比表，避免把同一份上限在前后端各抄一遍。
+    """
+    return {"plans": [
+        {"plan_code": p["plan_code"], "label": p["label"],
+         "seats_limit": p["seats_limit"],
+         "monthly_token_quota": p["monthly_token_quota"]}
+        for p in subscription_service.PLAN_CATALOG.values()
+        if p["plan_code"] in subscription_service.SELF_SERVICE_PLANS
+    ]}
 
 
 @router.post("/trial", response_model=SubscriptionOut)
@@ -123,6 +147,31 @@ async def list_orders(
         .order_by(SubscriptionOrder.created_at.desc())
         .limit(50))).scalars().all()
     return {"orders": [subscription_service.order_to_public(o) for o in rows]}
+
+
+@router.get("/orders/pending")
+async def list_pending_orders(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """平台运营视图：全部公司的待确认收款订单（仅超管）。
+
+    没有独立平台后台之前，运营要知道"谁在等开通"只能翻数据库。这里按
+    提交时间正序返回（先来先处理），前端「套餐与账单」的超管区块据此
+    一键确认收款，确认后公司再切套餐即可生效。
+    """
+    if not user.is_superadmin:
+        raise HTTPException(404, "Not found")
+    rows = (await db.execute(
+        select(SubscriptionOrder, Company.name)
+        .join(Company, Company.id == SubscriptionOrder.company_id)
+        .where(SubscriptionOrder.status == SubscriptionOrderStatus.PENDING)
+        .order_by(SubscriptionOrder.created_at.asc())
+        .limit(200))).all()
+    return {"orders": [
+        {**subscription_service.order_to_public(o), "company_name": name}
+        for o, name in rows
+    ]}
 
 
 @router.post("/orders", status_code=201)

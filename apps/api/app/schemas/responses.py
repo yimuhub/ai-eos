@@ -31,9 +31,16 @@ class SubscriptionLimitsOut(BaseModel):
     monthly_tokens: int | None
 
 
+class SubscriptionUsageOut(BaseModel):
+    seats_used: int
+    tokens_used_this_month: int
+
+
 class SubscriptionOut(BaseModel):
     company_id: str
     plan_code: str
+    # 中文套餐名由后端给：前端若自己维护一份映射，改套餐文案就会两边漂移。
+    plan_label: str
     status: str
     effective_status: str
     trial_ends_at: str | None
@@ -43,6 +50,9 @@ class SubscriptionOut(BaseModel):
     period_end: str | None
     seats_limit: int | None
     monthly_token_quota: int | None
+    # 仅 GET /subscription 回填（需要额外的 COUNT/SUM 查询）；
+    # 变更类端点返回时允许为空，前端据 available 与否决定是否展示配额进度。
+    usage: SubscriptionUsageOut | None = None
 
 
 # ---------------------------------------------------------------------------

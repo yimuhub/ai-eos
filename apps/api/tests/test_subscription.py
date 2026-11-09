@@ -352,3 +352,72 @@ async def test_effective_status_for_expired_trial_and_period(client, tenants):
         assert subscription_service.effective_status(sub, NOW) == "PAST_DUE"
         # 纯函数：不修改落库状态
         assert sub.status is SubscriptionStatus.ACTIVE
+
+
+# ---------------------------------------------------------------------------
+# 套餐与账单页（/billing）依赖的展示契约
+# ---------------------------------------------------------------------------
+
+async def test_get_subscription_reports_usage(client, tenants):
+    """配额进度要能直接渲染：席位与本月 token 都按真实数据回填。"""
+    alice, co = tenants.alice, tenants.alice_co
+    body = await _get(client, co["id"], alice)
+    assert body["plan_label"] == "试用"
+    assert body["usage"] == {"seats_used": 0, "tokens_used_this_month": 0}
+
+
+async def test_plans_catalog_is_free_of_prices(client, tenants):
+    """套餐目录只描述能力边界；金额属于商业决策，未确认前不展示。"""
+    r = await client.get("/subscription/plans")
+    assert r.status_code == 401
+
+    r = await client.get("/subscription/plans", headers=tenants.alice["headers"])
+    assert r.status_code == 200, r.text
+    plans = r.json()["plans"]
+    assert [p["plan_code"] for p in plans] == ["pro", "enterprise"]
+    pro, ent = plans
+    assert pro["seats_limit"] == 200
+    assert pro["monthly_token_quota"] == 20_000_000
+    assert ent["seats_limit"] is None
+    assert ent["monthly_token_quota"] is None
+    for plan in plans:
+        assert not {"price", "amount", "currency", "fee"} & set(plan)
+
+
+async def test_pending_orders_are_superadmin_only(client, tenants):
+    """平台运营视图：非超管一律 404（与全系统"不泄露资源存在"一致）。"""
+    alice, co = tenants.alice, tenants.alice_co
+    bob = tenants.bob
+    await _get(client, co["id"], alice)
+    order = await _request_order(client, co["id"], "pro", alice)
+
+    r = await client.get("/subscription/orders/pending", headers=alice["headers"])
+    assert r.status_code == 404
+    r = await client.get("/subscription/orders/pending", headers=bob["headers"])
+    assert r.status_code == 404
+
+    await _make_superadmin(alice["id"])
+    r = await client.get("/subscription/orders/pending", headers=alice["headers"])
+    assert r.status_code == 200, r.text
+    rows = r.json()["orders"]
+    assert len(rows) == 1
+    assert rows[0]["id"] == order["id"]
+    # 运营要能直接看出是哪家公司在等开通
+    assert rows[0]["company_name"] == "A 公司"
+    assert rows[0]["status"] == "PENDING"
+
+    await _confirm(client, order["id"], alice)
+    r = await client.get("/subscription/orders/pending", headers=alice["headers"])
+    assert r.json()["orders"] == []
+
+
+async def test_me_exposes_superadmin_flag(client, tenants):
+    """前端据此决定是否展示平台运营区块；只回布尔，不泄露权限细节。"""
+    alice = tenants.alice
+    r = await client.get("/auth/me", headers=alice["headers"])
+    assert r.status_code == 200
+    assert r.json()["is_superadmin"] is False
+
+    await _make_superadmin(alice["id"])
+    r = await client.get("/auth/me", headers=alice["headers"])
+    assert r.json()["is_superadmin"] is True

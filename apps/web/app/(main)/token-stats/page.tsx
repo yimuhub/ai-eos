@@ -1,4 +1,5 @@
 "use client";
+import Link from "next/link";
 import { useState } from "react";
 import { api, describeError, downloadURL, fetchBlobURL, fetchText } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
@@ -249,6 +250,22 @@ export default function TokenAdminPage() {
     });
   }
 
+  const [importing, setImporting] = useState(false);
+  async function importDefaultPricing() {
+    if (!cid) return flash("还没有公司，无法导入", "err");
+    setImporting(true);
+    try {
+      const r = await api.post<{ created: number; skipped: number; unmatched: number }>(
+        "/tokens/pricing/import-defaults", { company_id: cid });
+      const parts = [`新增 ${r.created} 条`];
+      if (r.skipped) parts.push(`已有配置跳过 ${r.skipped} 条`);
+      if (r.unmatched) parts.push(`未匹配参考价 ${r.unmatched} 条（已按 0 元占位，请按账单填写）`);
+      flash(`✅ 已导入参考报价：${parts.join("，")}`);
+      refreshPricing(); refreshStats();
+    } catch (e: any) { flash(e.message || String(e), "err"); }
+    finally { setImporting(false); }
+  }
+
   async function delPricing(p: Pricing) {
     if (!(await confirmAction({
       title: `删除「${p.model_name}」的计费标准？`,
@@ -325,6 +342,10 @@ export default function TokenAdminPage() {
           <option value={30}>最近30天</option>
           <option value={90}>最近90天</option>
         </select>
+        <Link href="/billing" className="btn-ghost !py-2 !px-3 text-sm"
+          title="看当前套餐、配额进度，提交升级申请或续费">
+          💳 套餐与账单
+        </Link>
         <button onClick={previewInvoice} disabled={invoiceBusy || !cid}
           className="btn-ghost !py-2 !px-3 text-sm" title="按当前自然月生成可打印账单">
           {invoiceBusy ? "加载中…" : "🧾 查看账单"}
@@ -484,7 +505,18 @@ export default function TokenAdminPage() {
 
           {/* 已配置列表 */}
           <div className="card p-5 lg:col-span-2">
-            <h3 className="font-semibold text-[var(--foreground)] mb-3">📋 已配置的计费标准</h3>
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div>
+                <h3 className="font-semibold text-[var(--foreground)]">📋 已配置的计费标准</h3>
+                <p className="text-[11px] text-[var(--muted-foreground)] mt-0.5">
+                  先「导入参考报价」一键铺开主流厂商价格，再逐条按实际账单校正——否则成本统计会一直是 ¥0。
+                </p>
+              </div>
+              <button onClick={importDefaultPricing} disabled={importing}
+                className="btn-ghost text-xs shrink-0 disabled:opacity-50">
+                {importing ? "导入中…" : "⚡ 导入参考报价"}
+              </button>
+            </div>
             {pricings.length ? (
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">
@@ -531,7 +563,7 @@ export default function TokenAdminPage() {
               <div className="text-center py-10 text-[var(--muted-foreground)]">
                 <p className="text-3xl mb-2 opacity-40">💰</p>
                 <p className="text-sm">还没有配置任何计费标准</p>
-                <p className="text-xs mt-1 opacity-70">左侧选择模型并填写单价——保存后系统开始按此标准估算每次调用的费用</p>
+                <p className="text-xs mt-1 opacity-70">点右上角「⚡ 导入参考报价」一键铺开，或在左侧手动选模型填单价</p>
               </div>
             )}
           </div>

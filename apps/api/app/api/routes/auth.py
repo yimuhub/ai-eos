@@ -268,7 +268,10 @@ async def login(data: LoginIn, request: Request = None,
 @router.get("/me")
 async def me(user: User = Depends(get_current_user)):
     return {"id": user.id, "email": user.email, "username": user.username,
-            "display_name": user.display_name, "avatar_url": user.avatar_url}
+            "display_name": user.display_name, "avatar_url": user.avatar_url,
+            # 平台超管身份决定前端是否展示「待确认收款」等平台运营区块；
+            # 这里只回布尔，不泄露任何权限细节。
+            "is_superadmin": bool(user.is_superadmin)}
 
 
 class RefreshIn(BaseModel):
