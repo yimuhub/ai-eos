@@ -31,6 +31,7 @@ from app.api.routes.models_api import (_reject_sensitive_env,
 from app.core.http_client import http_client
 from app.core.net_guard import OutboundURLRejected, validate_outbound_url_async
 from app.core.permissions import Capability, ensure_capability
+from app.core.timeutil import iso_utc
 from app.core.uploads import ensure_within
 from app.db.session import get_db
 from app.models.agent import Model
@@ -96,7 +97,7 @@ def _out(row: MediaGeneration, progress: int | None = None) -> dict:
         "file_url": f"/media/files/{row.id}" if row.local_path else None,
         "progress": progress,
         "error": row.error,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "created_at": iso_utc(row.created_at),
     }
 
 
