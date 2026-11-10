@@ -25,7 +25,8 @@ const TG_TEMPLATE = `【组织架构】
 export default function TeamGenModal({ open, onClose, onCreated }: {
   open: boolean;
   onClose: () => void;
-  onCreated?: (companyName: string) => void;
+  /** companyId：新公司的 id，调用方用于切换激活公司（B-021） */
+  onCreated?: (companyName: string, companyId?: string) => void;
 }) {
   const [step, setStep] = useState<1 | 2>(1);
   const [name, setName] = useState("");
@@ -33,36 +34,49 @@ export default function TeamGenModal({ open, onClose, onCreated }: {
   const [blueprint, setBlueprint] = useState("");
   const [teamAttachments, setTeamAttachments] = useState<Attachment[]>([]); // 📎 建团参考材料
   const [preview, setPreview] = useState<any | null>(null);
+  const [previewConfirmed, setPreviewConfirmed] = useState<any | null>(null); // 用户确认过的蓝图（生成时原样回传）
   const [busy, setBusy] = useState(false);
+  const [elapsed, setElapsed] = useState(0); // 解析计时：外部 LLM 可能要几分钟，让用户知道没卡死
 
   if (!open) return null;
 
   async function doPreview() {
     if (!blueprint.trim()) return;
     setBusy(true);
+    setElapsed(0);
+    const timer = setInterval(() => setElapsed((s) => s + 1), 1000);
     try {
       const d = await api.post("/team-generator/preview", {
         company_name: name.trim() || null,
         industry, blueprint,
       });
       setPreview(d.blueprint);
+      setPreviewConfirmed(d.blueprint); // 记住这份蓝图：确认后原样回传
       setStep(2);
     } catch (e: any) { notify("error", `方案生成失败：${e.message || e}`); }
+    clearInterval(timer);
     setBusy(false);
   }
 
   async function doGenerate() {
     setBusy(true);
+    setElapsed(0);
+    const timer = setInterval(() => setElapsed((s) => s + 1), 1000);
     try {
       const d = await api.post("/team-generator/generate", {
         company_name: name.trim() || null,
         industry, blueprint,
+        // 修复（预览与生成脱节）：把确认过的蓝图原样回传，服务端直接落库
+        // 不再重跑 LLM——用户确认的 3 部门/2 人就是生成的结果。
+        confirmed: previewConfirmed ?? undefined,
         attachments: teamAttachments.length ? teamAttachments : undefined, // 📎 参考材料
       });
-      onClose(); setStep(1); setPreview(null);
+      onClose(); setStep(1); setPreview(null); setPreviewConfirmed(null);
       setBlueprint(""); setIndustry(""); setName(""); setTeamAttachments([]);
-      onCreated?.(`${d.company_name}（${d.departments} 部门 · ${d.agents.length} Agent）`);
+      onCreated?.(`${d.company_name}（${d.departments} 部门 · ${d.agents.length} Agent）`,
+                  d.company_id);
     } catch (e: any) { notify("error", `团队生成失败：${e.message || e}`); }
+    clearInterval(timer);
     setBusy(false);
   }
 
@@ -99,7 +113,7 @@ export default function TeamGenModal({ open, onClose, onCreated }: {
               style={{ border: "1px solid var(--border)" }}>取消</button>
             <button onClick={doPreview} disabled={!blueprint.trim() || busy}
               className="btn-primary disabled:opacity-40">
-              {busy ? "AI 解析中…" : "🔍 解析为组织蓝图"}
+              {busy ? `AI 解析中…${elapsed >= 10 ? ` ${elapsed}s（外部模型响应可能较慢，请稍候）` : ""}` : "🔍 解析为组织蓝图"}
             </button>
           </div>
         </>)}
@@ -147,7 +161,7 @@ export default function TeamGenModal({ open, onClose, onCreated }: {
               style={{ border: "1px solid var(--border)" }}>← 返回修改</button>
             <button onClick={doGenerate} disabled={busy}
               className="btn-primary disabled:opacity-40 bg-gradient-to-r from-violet-600 to-indigo-500">
-              {busy ? "创建中…" : "🎉 确认无误，一键生成公司"}
+              {busy ? `创建中…${elapsed >= 10 ? ` ${elapsed}s（外部模型响应可能较慢，请稍候）` : ""}` : "🎉 确认无误，一键生成公司"}
             </button>
           </div>
         </>)}

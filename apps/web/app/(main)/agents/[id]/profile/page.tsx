@@ -173,11 +173,12 @@ export default function AgentProfilePage() {
   const [trUploading, setTrUploading] = useState(false);
   const trFileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
-  const { data: kbDocRows } = useResource<any[]>(
+  const { data: kbDocRows, refresh: kbRefresh } = useResource<any[]>(
     agentId ? `agent:kbdocs:${agentId}` : null,
     () => api.get<any[]>(`/kb2/agents/${agentId}/documents`),
   );
   const kbDocs = useMemo<any[]>(() => kbDocRows ?? [], [kbDocRows]);
+  const kbFileRef = useRef<HTMLInputElement>(null);
   const [uploadNote, setUploadNote] = useState("");
   const [msg, setMsg] = useState("");
   // 记忆新增
@@ -207,6 +208,22 @@ export default function AgentProfilePage() {
     refreshCareer();
     refreshMemories();
   }, [refreshProfile, refreshSkills, refreshLessons, refreshReviews, refreshCareer, refreshMemories]);
+
+  async function uploadKbFile(f: File) {
+    if (!agentId) return;
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", f);
+      const d = await api.upload<{ chunks?: number }>(
+        `/kb2/agents/${agentId}/upload`, fd);
+      notify("success", `✅ ${f.name} 已入私人知识库（${d.chunks ?? 0} 块索引）`);
+      kbRefresh();
+    } catch (e) {
+      notify("error", `❌ ${describeError(e, "上传失败")}`);
+    }
+    setBusy(false);
+  }
 
   async function uploadTrainingFile(f: File) {
     if (!agentId || !cid) return;
@@ -536,7 +553,19 @@ export default function AgentProfilePage() {
       {tab === "私人知识库" && (
         <div className="space-y-3 max-w-3xl">
           <div className="card card-static !py-3 flex items-center gap-3">
-            <input ref={undefined as any} type="file" multiple className="hidden" />
+            {/* 修复：此处曾是一个没有触发按钮的死文件输入（ref 被强制传
+                undefined）——文案承诺"上传资料后仅此 Agent 可检索"，实际
+                无任何可点的东西。现在接通 /kb2/agents/{id}/upload。 */}
+            <input ref={kbFileRef} type="file" multiple className="hidden"
+              onChange={(e) => {
+                const files = Array.from(e.target.files ?? []);
+                e.target.value = "";
+                files.forEach(uploadKbFile);
+              }} />
+            <button onClick={() => kbFileRef.current?.click()} disabled={busy}
+              className="btn-primary !py-1 text-xs disabled:opacity-40">
+              {busy ? "上传中…" : "📎 上传资料"}
+            </button>
             <p className="text-[11px]" style={{ color: "var(--muted)" }}>
               上传资料后仅此 Agent 可检索使用
             </p>

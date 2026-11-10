@@ -326,7 +326,7 @@ export default function CompanyManagePage() {
 
       {/* 创建新团队向导 */}
       <TeamGenModal open={showTeamGen} onClose={() => setShowTeamGen(false)}
-        onCreated={async (name) => {
+        onCreated={async (name, _companyId) => {
           setMsg(`🎉 新团队「${name}」已创建`);
           refresh();
         }} />

@@ -966,8 +966,14 @@ export default function DashboardPage() {
 
       {/* ===== 创建新团队向导 ===== */}
       <TeamGenModal open={showTeamGen} onClose={() => setShowTeamGen(false)}
-        onCreated={async (name) => {
+        onCreated={async (name, companyId) => {
           setMsg(`🎉 新团队「${name}」已创建`);
+          // 修复：此前只弹 toast 不切公司——指挥中心仍显示旧公司 0 员工，
+          // 用户找不到刚生成的团队。现在切到新公司并全站刷新。
+          if (companyId) {
+            const { setActiveCompanyId } = await import("@/lib/api");
+            setActiveCompanyId(companyId);
+          }
           await load();
         }} />
 
