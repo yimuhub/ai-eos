@@ -5,6 +5,29 @@
 
 ## [Unreleased]
 
+### 修复：测评第二轮收口——越权口径、预览即生成与引擎健壮性（2026-11-11）
+
+外部全面测评（docs/测评报告_AI-EOS_2026-11-06.md）遗留项的最后一次收口，42 项，
+后端 1207 项测试 0 失败、tsc strict / eslint 全绿。台账见 .zcode-eval-findings.md。
+
+- **权限口径**：skill-growth 全线端点补归属校验（此前除 delete 外全部裸奔，create_node
+  落 NULL 全平台可见）；建考核周期/打分升 OPERATE；应用别名 /platform 需登录、/run 升
+  OPERATE、建/删规则升 MANAGE；电脑能力 grant/revoke 升 MANAGE、/execute 升 OPERATE；
+  模型批量导入必填 company_id 且挂公司名下（不再 company_id=None 全平台可见）；批量删
+  公司改挂 FK pragma + 按真实 schema 动态兜底清扫（拓扑排序，覆盖静态清单遗漏的 80+ 张表）。
+- **越权读/泄露**：/knowledge/search 对私人文档按调用者行级范围过滤；交付文件夹口径对齐
+  行级 VIEW；provider.config 回显剔除密钥键；convert-config（进程级全局设置）仅超管可写；
+  技能安装/卸载按 slug 限定本公司或内置；kb2 上传不再回显服务器绝对路径；push 退订缺
+  company_id 时按 endpoint 反查并逐条校验归属。
+- **功能闭环**：一键建团队"确认的蓝图"原样回传直接落库（预览=生成，不再二跑 LLM 出另一张
+  组织图）；生成后自动切换到新公司；会议轮次异常走自愈收尾（不再永久 RUNNING）；员工没绑
+  模型时 reflect 如实返回不反思；自动化循环检测改真正的连续重复判定；文档转换模型设置限超管。
+- **健壮性**：工厂蓝图 JSON 半个 `{`/非 dict 归一兜底；考场空答卷不再打全 0 分；自动化
+  QUEUE_FULL 如实标败；写文件临时名加唯一后缀防并发互踩；kb 查询缓存与 headcount 解析
+  收口；删除员工/公司/成果的引用清理与孤儿评论收口；mdns/initializers 等死变量与文档漂移清理。
+- **前端**：创建团队向导显示耗时提示（外部模型响应可能较慢）；员工详情页 180 行不可达
+  面板删除；综合档案"私人知识库"死文件输入接通为真实上传；员工离职面板等配套收敛。
+
 ### 新增：套餐与账单——升级/续费走「订单 → 平台确认收款 → 生效」
 
 - 后端补 `GET /subscription/plans`（只给能力边界，不含金额）、`GET /subscription/orders/pending`
