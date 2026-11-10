@@ -81,7 +81,7 @@ async def _execute_step(db: AsyncSession, company_id: str, step: dict,
                                    f"automation:{run_id}",
                                    params.get("input_data"))
         # 与 POST /workflows/{wid}/run 一致：后台继续推进执行，步骤立即返回执行 id
-        from app.background_jobs import submit_async
+        from app.background_jobs import submit_async, QUEUE_FULL
 
         _ex_id = ex.id
 
@@ -89,7 +89,11 @@ async def _execute_step(db: AsyncSession, company_id: str, step: dict,
             from app.workflow_runtime import advance_execution
             await advance_execution(session, _ex_id)
 
-        submit_async(_advance)
+        submit_result = submit_async(_advance)
+        if submit_result is QUEUE_FULL:
+            # 修复：队满时返回值被丢弃——工作流执行停在 PENDING 无人推进，
+            # 只能靠看板轮询的孤儿自愈救。如实把这次 run 标失败留痕。
+            raise RuntimeError("后台执行队列已满，工作流执行未能投递")
         return {"workflow_execution_id": ex.id, "workflow_id": wf_id}
 
     if stype == "call_webhook":
@@ -209,12 +213,19 @@ async def run_automation(db: AsyncSession, definition: AutomationDefinition,
         for i, step in enumerate(steps):
             if i < start_idx:
                 continue  # 断点前已完成的步骤直接跳过
-            # 循环检测：同 type+params 连续重复 3 次以上视为循环
+            # 循环检测：修复前是"全流程唯一 type+params 数 < i//3+1"——
+            # 合法场景（同一收件人发 4 条相同提醒）第 4 次就误判 FAILED。
+            # 现在按注释本意检测**连续重复**：相邻 3 步完全相同才算循环。
             key = json.dumps({k: step.get(k) for k in ("type", "params")},
                              sort_keys=True, default=str)
+            if i >= start_idx + 2:
+                prev1 = json.dumps({k: steps[i - 1].get(k) for k in ("type", "params")},
+                                   sort_keys=True, default=str)
+                prev2 = json.dumps({k: steps[i - 2].get(k) for k in ("type", "params")},
+                                   sort_keys=True, default=str)
+                if key == prev1 == prev2:
+                    raise RuntimeError("检测到循环执行：连续 3 步完全相同")
             seen_steps.add(key)
-            if len(seen_steps) < i // 3 + 1:
-                raise RuntimeError("检测到循环执行")
 
             # 条件判断（简单版）：condition 存在时检查前一步结果
             cond = step.get("condition")

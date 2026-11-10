@@ -348,6 +348,9 @@ async def create_group(data: GroupIn,
                        db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
     await _owned_company(db, user.id, data.company_id, Capability.OPERATE)
+    # 修复：重复 id 时 members（按唯一 id 查回的行数）与 set() 同长，
+    # 校验形同虚设、重复引用原样写库——入口先去重再查。
+    data.agent_ids = list(dict.fromkeys(data.agent_ids))
     members = await _agents_by_ids(db, data.company_id, data.agent_ids)
     if len(members) != len(set(data.agent_ids)):
         raise HTTPException(400, "有员工不存在或不属于当前公司")
@@ -376,6 +379,7 @@ async def update_group(gid: str, data: GroupPatch,
     if data.name is not None:
         group.name = data.name.strip()
     if data.agent_ids is not None:
+        data.agent_ids = list(dict.fromkeys(data.agent_ids))  # 修复：重复 id 校验失效
         members = await _agents_by_ids(db, group.company_id, data.agent_ids)
         if len(members) != len(set(data.agent_ids)):
             raise HTTPException(400, "有员工不存在或不属于当前公司")

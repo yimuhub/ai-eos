@@ -85,6 +85,9 @@ async def self_reflect(db: AsyncSession, agent, max_recent: int = 12) -> dict:
     order = {"primary": 0, "secondary": 1, "fallback": 2}
     model_ids = [c.model_id for c in sorted(
         cfg_rows, key=lambda c: order.get(c.role, 3))]
+    if not model_ids:
+        # 修复：员工没绑模型时此前必然 RuntimeError（调度器每轮 FAILED）。
+        return {"reflected": False, "reason": "no model", "memories_written": 0}
     llm = await gw.chat_with_agent_models(model_ids, messages)
     raw = (llm.get("content") or "").strip()
 
@@ -176,5 +179,9 @@ async def reflect(db: AsyncSession, memory_row, trigger: str | None = None):
     )).scalars().all() if agent else []
     order = {"primary": 0, "secondary": 1, "fallback": 2}
     model_ids = [c.model_id for c in sorted(cfg_rows, key=lambda c: order.get(c.role, 3))]
+    if not model_ids:
+        # 修复：员工没绑模型时此前必然抛 RuntimeError（网关对空列表直接 raise），
+        # 调度器的 reflect_agent 动作每轮 FAILED。如实返回"未反思"。
+        return {"reflected": False, "reason": "no model"}
     llm = await gw.chat_with_agent_models(model_ids, messages)
     return {"summary": (llm.get("content") or "")[:300]}

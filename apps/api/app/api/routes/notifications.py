@@ -148,14 +148,32 @@ async def push_unsubscribe(
     company_id = (payload.company_id if payload else None) or company_id
     if not endpoint:
         raise HTTPException(400, "endpoint is required")
-    await assert_company_capability(db, user.id, company_id or "", Capability.VIEW)
-
-    res = await db.execute(
-        delete(PushSubscription).where(
+    if company_id:
+        await assert_company_capability(db, user.id, company_id, Capability.VIEW)
+        res = await db.execute(
+            delete(PushSubscription).where(
+                PushSubscription.user_id == user.id,
+                PushSubscription.company_id == company_id,
+                PushSubscription.endpoint == endpoint)
+            .execution_options(synchronize_session=False))
+    else:
+        # 修复：docstring 说"二选一"，实现却把缺 company_id 一律 400。
+        # 现在按 endpoint 反查该用户自己的订阅，逐条校验公司归属后删除
+        # 可见的那些（不可见的等价于"不存在"，不泄露）。
+        owned = (await db.execute(select(PushSubscription).where(
             PushSubscription.user_id == user.id,
-            PushSubscription.company_id == company_id,
-            PushSubscription.endpoint == endpoint)
-        .execution_options(synchronize_session=False))
+            PushSubscription.endpoint == endpoint))).scalars().all()
+        deleted = 0
+        for sub in owned:
+            try:
+                await assert_company_capability(db, user.id, sub.company_id,
+                                                Capability.VIEW)
+            except HTTPException:
+                continue
+            await db.delete(sub)
+            deleted += 1
+        await db.commit()
+        return {"deleted": deleted}
     await db.commit()
     return {"deleted": int(res.rowcount or 0)}
 

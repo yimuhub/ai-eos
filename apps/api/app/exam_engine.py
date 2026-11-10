@@ -481,7 +481,9 @@ async def run_exam(db: AsyncSession, company_id: str, *,
             _answer_prompt(questions, metrics, playbook_text), max_tokens=2400)
         tokens += a_usage["tokens"]
         cost += a_usage["cost"]
-        if a_raw is None:
+        # 修复：模型返回空 JSON `{}`（解析成功但没有任何答案）此前不算
+        # a_raw is None，会走出"全 0 分的 GRADED"——违背"模型不可用不编分数"。
+        if not a_raw or not (a_raw.get("answers") or []):
             row.status = "SKIPPED"
             row.error = "CEO 模型不可用或未返回有效答卷，本场不产生分数"
             row.tokens_used = int(tokens)

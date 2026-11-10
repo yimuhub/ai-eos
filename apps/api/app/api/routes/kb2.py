@@ -289,8 +289,10 @@ async def upload_private_file(agent_id: str, file: UploadFile = File(...),
                        content=ch, keywords=sorted(_tokens(ch))[:30]))
     await db.commit()
     cache_invalidate(a.company_id)
+    from pathlib import Path as _Path
     return {"id": doc_id, "converted": True, "chunks": len(chunks),
-            "original_saved": str(save_path), "size": size}
+            # 修复：此前回显服务器绝对路径（内部目录结构泄露）。
+            "original_saved": _Path(save_path).name, "size": size}
 
 
 # ---------------- 全局公用库管理 ----------------

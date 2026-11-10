@@ -18,10 +18,19 @@ from app.model_gateway import ModelGateway
 router = APIRouter(prefix="/team-generator", tags=["team-generator"])
 
 
+class ConfirmedBlueprint(BaseModel):
+    """预览确认后的蓝图（客户端原样回传）：generate 直接落库，不再重跑 LLM。"""
+    company_name: str | None = None
+    intro: str | None = None
+    departments: list[dict]
+    agents: list[dict]
+
+
 class GenerateIn(BaseModel):
     company_name: str | None = None       # 不填则由 LLM 起名
     industry: str = ""                     # 行业
     blueprint: str                         # 老板填写的范本内容（自由文本）
+    confirmed: ConfirmedBlueprint | None = None  # 预览确认的蓝图：传了就直接用
     model_id: str | None = None            # 新 Agent 绑定的模型
     attachments: list[dict] | None = None  # 📎 附件口：建团参考材料 [{id,name,size}]
 
@@ -158,8 +167,20 @@ def _normalize_plan(plan: dict) -> dict:
 async def generate_team(data: GenerateIn,
                         db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
-    """范本 + 提示词 → LLM 生成团队蓝图 → 一键创建完整公司。"""
-    plan = await _llm_plan(db,
+    """范本 + 提示词 → LLM 生成团队蓝图 → 一键创建完整公司。
+
+    修复（预览与生成脱节）：此前 /generate 无论如何都重跑一遍 LLM——
+    用户确认的是 3 部门/2 人，生成出来的可能是 2 部门/4 人。现在前端把
+    确认过的蓝图回传（confirmed），服务端校验结构后直接落库；没有
+    confirmed 才退回 LLM 解析（兼容旧调用方）。
+    """
+    if data.confirmed is not None:
+        cb = data.confirmed
+        if not cb.departments or not cb.agents:
+            raise HTTPException(422, "确认的蓝图缺少 departments/agents，无法生成")
+        plan = cb.model_dump()
+    else:
+        plan = await _llm_plan(db,
         "你是企业组织架构设计专家。根据建团范本，输出一个 JSON 对象（只输出 JSON，禁止 markdown 代码块）。\n"
         "严格遵守以下结构，agents 必须是顶层独立数组，严禁把 agents 嵌套进 departments 里：\n"
         '{\n'

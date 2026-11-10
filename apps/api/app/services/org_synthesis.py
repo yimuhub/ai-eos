@@ -817,7 +817,7 @@ async def apply_run(db: AsyncSession, run: OrgSynthesisRun, user_id: str,
             selected.append({
                 **base,
                 "headcount": max(
-                    1, min(20, int(item.get("headcount") or base["headcount"]))),
+                    1, min(20, _headcount(item.get("headcount"), base["headcount"]))),
             })
         if not selected:
             raise SynthesisError("至少要保留一个岗位才能落地。", 400)
@@ -896,7 +896,7 @@ async def apply_run(db: AsyncSession, run: OrgSynthesisRun, user_id: str,
         if not dept:
             raise SynthesisError(f"部门「{item.get('department')}」不存在，无法落地。", 409)
         base_name = _clip(item.get("name"), 50) or _clip(item.get("role"), 50)
-        desired = max(1, min(20, int(item.get("headcount") or 1)))
+        desired = max(1, min(20, _headcount(item.get("headcount"), 1)))
         names = agent_names_by_dept.setdefault(str(dept.id), set())
         already = sum(1 for n in names
                       if n == base_name or n.startswith(base_name + " "))

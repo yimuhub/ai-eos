@@ -109,6 +109,9 @@ def is_incremental(agent_id: str, query: str) -> bool:
 
 
 def mark_query(agent_id: str, query: str):
+    # 修复：无界增长（进程长期运行的内存泄漏）——与 _CACHE 同款 256 上限。
+    while len(_last_query_map) >= 256:
+        _last_query_map.pop(next(iter(_last_query_map)))
     _last_query_map[agent_id] = query
 
 

@@ -143,10 +143,24 @@ async def run_meeting_turn(db: AsyncSession, meeting_id: str) -> dict:
     result: dict = {}
     try:
         result = await _run_turn_locked(db, meeting_id)
+    except Exception as turn_err:
+        # 修复：本轮异常此前被吞掉——need_next 恒 False，不再有下一轮调度，
+        # 而超时自愈逻辑在 _run_turn_locked 内部（不会再被触发），会议永远
+        # 停在 RUNNING。现在按"超时自愈"同款路径收尾：抢占结束权 → 生成
+        # 纪要/行动项（尽力而为），会议不再卡死；错误进日志与事件流。
+        logger.error("[meeting %s] 轮次异常，走自愈收尾: %s: %s",
+                     meeting_id, type(turn_err).__name__, turn_err, exc_info=True)
+        meeting = await db.get(Meeting, meeting_id)
+        if meeting is not None and meeting.status == MeetingStatus.RUNNING:
+            try:
+                await _finish_meeting(db, meeting, mode="timeout")
+            except Exception as finish_err:
+                logger.error("[meeting %s] 异常自愈收尾失败: %s",
+                             meeting_id, finish_err, exc_info=True)
     finally:
         # 先释放租约再调度下一轮：否则下一轮 worker 立刻抢锁会拿到 busy，
         # 会议就停在这里了。
-        need_next = bool(result.pop("_schedule_next", False))
+        need_next = bool(result.pop("_schedule_next", False)) if result else False
         try:
             await release_lock(db, lock_key, owner)
         except Exception as lease_err:  # 释放失败最多等租约自然过期

@@ -57,9 +57,13 @@ async def get_briefing(
         member = select(CompanyMember.company_id).where(
             CompanyMember.user_id == user.id,
             CompanyMember.status == "active")
+        # 修复：limit(1) 无 ORDER BY——多公司用户首页简报漂移。
+        # 稳定口径：owner 的公司优先，其余按创建时间。
         rows = (await db.execute(
             select(Company).where(
-                or_(Company.id.in_(owned), Company.id.in_(member))).limit(1)
+                or_(Company.id.in_(owned), Company.id.in_(member)))
+            .order_by(Company.id.in_(owned).desc(), Company.created_at)
+            .limit(1)
         )).scalars().all()
         company = rows[0] if rows else None
     if company is None:

@@ -186,6 +186,15 @@ async def create_trial(
     user: User = Depends(get_current_user),
 ):
     await assert_agent_owned(db, user.id, agent_id)
+    # 修复：此前不校验 target_position_id——不存在的 id 挂成悬空引用，
+    # 直到 decide 时才 409；也别公司的岗位 id 一样挂进来。
+    # （CareerPosition.company_id 可空 = 全局岗位，允许。）
+    from app.models.agent import Agent as _Agent
+    from app.models.career import CareerPosition
+    agent_row = await db.get(_Agent, agent_id)
+    pos = await db.get(CareerPosition, target_position_id)
+    if not pos or (pos.company_id and pos.company_id != agent_row.company_id):
+        raise HTTPException(404, "Position not found")
     t = TrialAssignment(id=_id(), agent_id=agent_id,
                         target_position_id=target_position_id,
                         task_description=data.get("task_description"))

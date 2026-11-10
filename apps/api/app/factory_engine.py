@@ -98,7 +98,15 @@ async def generate_blueprint(db: AsyncSession, company_id: str,
             config={"max_tokens": 1000})
     raw = result.get("content") or "{}"
     start, end = raw.find("{"), raw.rfind("}")
-    data = json.loads(raw[start:end + 1]) if start >= 0 else {}
+    # 修复：模型输出半个 {（end=-1）时 raw[start:0] 是空串 → json.loads 必炸；
+    # 解析出非 dict（如数组）时 setdefault 抛 AttributeError → 500。
+    # 两种都按"模型没给出有效蓝图"归一为空 dict，交给后续兜底。
+    try:
+        data = json.loads(raw[start:end + 1]) if (start >= 0 and end > start) else {}
+        if not isinstance(data, dict):
+            data = {}
+    except json.JSONDecodeError:
+        data = {}
     # 补全默认字段
     data.setdefault("required_skills", [])
     data.setdefault("knowledge_scope", [])

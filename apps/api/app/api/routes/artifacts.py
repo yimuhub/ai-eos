@@ -18,6 +18,7 @@ from app.core.permissions import Capability
 from app.models.artifact import (Artifact, ArtifactStatus, ArtifactVersion,
                                  can_transition)
 from app.models.deliverable import DeliverableComment
+from app.models.project import Project
 from app.models.task import Task
 from app.models.user import User
 from app.schemas.responses import (
@@ -89,6 +90,12 @@ async def create_artifact(
         task = await db.get(Task, data.task_id)
         if not task or task.company_id != company_id:
             raise HTTPException(404, "Task not found")
+    if data.project_id:
+        # 修复：project_id 此前不校验——可挂别公司项目 id"借壳"，按项目
+        # 过滤时成果会出现在别人的项目下。
+        proj = await db.get(Project, data.project_id)
+        if not proj or proj.company_id != company_id:
+            raise HTTPException(404, "Project not found")
     art = Artifact(id=str(uuid.uuid4()), company_id=company_id,
                    project_id=data.project_id, name=data.name,
                    artifact_type=data.artifact_type, current_version=1,
@@ -568,6 +575,11 @@ async def delete_artifact(
     art = await _owned_artifact(artifact_id, db, user, Capability.MANAGE)
     await db.execute(delete(ArtifactVersion).where(
         ArtifactVersion.artifact_id == artifact_id))
+    # 修复：删除成果连评论一起删——此前孤儿评论常驻，comment_count 对
+    # 已删 id 仍能统计出来（deliverable_comments.artifact_id 带
+    # ondelete=CASCADE，但 SQLite 主引擎才开 FK；这里显式删干净）。
+    await db.execute(delete(DeliverableComment).where(
+        DeliverableComment.artifact_id == artifact_id))
     await db.delete(art)
     await db.commit()
     return {"id": artifact_id, "deleted": True}
@@ -599,7 +611,8 @@ async def artifact_sop(
         "",
         f"- **类型**：{art.artifact_type}",
         f"- **状态**：{art.status.value}（v{art.current_version}）",
-        f"- **生成时间**：{datetime.now().isoformat(timespec='seconds')}",
+        # 修复：此前 datetime.now() 是本地时间，SOP 时间戳随服务器时区漂移
+        f"- **生成时间**：{datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec='seconds')}",
         "",
         "## 交接内容（最新版摘要）",
         (v.content or "")[:800] if v else "",

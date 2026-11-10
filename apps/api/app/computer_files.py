@@ -28,6 +28,7 @@ import difflib
 import hashlib
 import os
 import re
+import uuid
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -155,7 +156,10 @@ def _write_atomic(target: Path, data: bytes) -> None:
     """同目录临时文件 + os.replace：不留半个文件。"""
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.parent / f".{target.name}.aieos-{os.getpid()}.tmp"
+        # 修复：临时名只按 pid——同进程两个协程并发写同一目标时，
+        # 第二个 os.replace 会因 tmp 已被第一个消费而报错。加唯一后缀。
+        tmp = target.parent / (f".{target.name}.aieos-{os.getpid()}"
+                               f"-{uuid.uuid4().hex[:8]}.tmp")
         try:
             tmp.write_bytes(data)
             os.replace(tmp, target)
