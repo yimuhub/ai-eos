@@ -29,7 +29,7 @@
     "jsdom": "^31.0.0",
     "postcss": "^8",
     "tailwindcss": "^3.4.1",
-    "typescript": "^5",
+    "typescript": "^7",
     "vitest": "^2"
   }
 }
