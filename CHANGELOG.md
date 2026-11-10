@@ -3,9 +3,9 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的组织方式。
 完整的工程质量改造记录见 [UPGRADE_NOTES.md](UPGRADE_NOTES.md)。
 
-## [Unreleased]
+## [5.16.1] - 2026-11-11
 
-### 修复：测评第二轮收口——越权口径、预览即生成与引擎健壮性（2026-11-11）
+### 修复：测评第二轮收口——越权口径、预览即生成与引擎健壮性
 
 外部全面测评（docs/测评报告_AI-EOS_2026-11-06.md）遗留项的最后一次收口，42 项，
 后端 1207 项测试 0 失败、tsc strict / eslint 全绿。台账见 .zcode-eval-findings.md。
