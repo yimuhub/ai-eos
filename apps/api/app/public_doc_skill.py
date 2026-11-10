@@ -229,7 +229,9 @@ def resolve_style(role: str | None, skill_names: list[str] | None = None,
     if skill_names:
         for sn in skill_names:
             for kw, style_key in _KEYWORD_STYLE.items():
-                if kw in (sn or "").lower() or kw in sn:
+                # 修复：sn 为 None 时 `kw in sn` 直接 TypeError（原表达式
+                # 第二个操作数未做 None 防护）
+                if sn and (kw in sn.lower() or kw in sn):
                     st = AGENT_DOC_STYLES.get(style_key)
                     if st:
                         return {**st, "is_custom": True}

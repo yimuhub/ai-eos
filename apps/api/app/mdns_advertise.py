@@ -12,11 +12,8 @@
 """
 import os
 import socket
-import threading
-from typing import Optional
 
 from app.core.logging_config import get_logger
-from app.core.config import settings
 from app.version import __version__ as _ADVERTISE_VERSION
 
 logger = get_logger(__name__)
@@ -24,7 +21,6 @@ logger = get_logger(__name__)
 _TYPE = "_aieos._tcp"
 _DOMAIN = "local."
 _service = None
-_thread: Optional[threading.Thread] = None
 
 
 def _service_name() -> str:
@@ -53,7 +49,7 @@ def _guess_port() -> int:
 
 def start() -> None:
     """在应用 lifespan 启动后调用。任何异常都不抛。"""
-    global _service, _thread
+    global _service
     if os.environ.get("AI_EOS_MDNS") == "0":
         logger.info("[mdns] 已禁用（AI_EOS_MDNS=0）")
         return

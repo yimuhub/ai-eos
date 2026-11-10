@@ -5,10 +5,12 @@
 - Windows: 扫描开始菜单 .lnk 快捷方式（含用户与全局两处）
 - Linux:  解析 /usr/share/applications 与 ~/.local/share/applications 的 .desktop
 
-聊天时自然语言 → 应用名匹配顺序：
+聊天时自然语言 → 应用名匹配顺序（与 match_app 实现一致）：
 1. 用户自定义别名规则（数据库 AppAliasRule，公司级）
-2. 内置常用中文映射（微信→WeChat 等）
-3. 本机扫描到的应用模糊匹配
+2. 本机扫描结果里的精确应用名（有扫描结果时）
+3. 内置常用中文映射（微信→WeChat 等）
+4. 本机扫描到的应用模糊匹配
+5. 内置映射兜底（无扫描结果时）
 """
 import os
 import platform
