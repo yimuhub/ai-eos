@@ -32,6 +32,10 @@ async def create_cycle(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # 修复：router 级依赖默认只给 VIEW——只读成员此前也能建考核周期。
+    from app.api.deps import assert_company_capability
+    from app.core.permissions import Capability as _Cap
+    await assert_company_capability(db, user.id, company_id, _Cap.OPERATE)
     c = ReviewCycle(id=str(__import__("uuid").uuid4()), company_id=company_id,
                     name=name)
     db.add(c)
@@ -50,8 +54,11 @@ async def submit_review(
     user: User = Depends(get_current_user),
 ):
     # 给别家员工打考核分会污染对方的档案与成长事件，必须校验归属。
-    from app.api.deps import assert_agent_owned
+    from app.api.deps import assert_agent_owned, assert_company_capability
+    from app.core.permissions import Capability as _Cap
     a = await assert_agent_owned(db, user.id, agent_id)
+    # 修复：router 级依赖默认 VIEW——只读成员此前也能给员工打考核分。
+    await assert_company_capability(db, user.id, a.company_id, _Cap.OPERATE)
     if not 0 <= data.score <= 100:
         raise HTTPException(400, "score must be 0-100")
 

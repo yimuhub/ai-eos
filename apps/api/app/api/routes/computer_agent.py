@@ -62,7 +62,11 @@ async def grant_capability(
     user: User = Depends(get_current_user),
 ):
     """用户授权某项本机操作能力。默认全未授权，必须显式开启。"""
-    await assert_company_owned(db, user.id, company_id)
+    # 修复：此前任意角色（含只读成员）可给自己开 run_shell 等主机能力。
+    # 给 Agent 授权主机能力是老板级动作，升为 MANAGE（与 computer_policy 一致）。
+    from app.api.deps import assert_company_capability
+    from app.core.permissions import Capability as _Cap
+    await assert_company_capability(db, user.id, company_id, _Cap.MANAGE)
     if capability not in EXTENDED_CAPABILITIES:
         raise HTTPException(
             400, f"未知能力 {capability!r}，可用：{', '.join(EXTENDED_CAPABILITIES)}")
@@ -90,7 +94,9 @@ async def revoke_capability(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    await assert_company_owned(db, user.id, company_id)
+    from app.api.deps import assert_company_capability
+    from app.core.permissions import Capability as _Cap
+    await assert_company_capability(db, user.id, company_id, _Cap.MANAGE)
     q = await db.execute(select(ComputerPermission).where(
         ComputerPermission.company_id == company_id,
         ComputerPermission.capability == capability))
@@ -147,7 +153,10 @@ async def execute_action(
     user: User = Depends(get_current_user),
 ):
     """Agent 请求执行本机操作：审批门 → 检查授权 → 真实执行 → 审计落库。"""
-    await assert_company_owned(db, user.id, company_id)
+    # 修复：真实执行本机操作此前任意角色可触发，升为 OPERATE。
+    from app.api.deps import assert_company_capability
+    from app.core.permissions import Capability as _Cap
+    await assert_company_capability(db, user.id, company_id, _Cap.OPERATE)
 
     # Agent 归属校验：此前只要知道 agent_id 就能把它写进审批单 / 审计日志，
     # 可跨公司冒用他人 Agent 的身份发起主机操作。这里同时要求该 Agent

@@ -22,11 +22,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.api.routes.models_api import (_my_company_ids, _reject_sensitive_env,
-                                       _validate_model_base_url)
+                                       _safe_config, _validate_model_base_url,
+                                       ensure_capability)
 from app.core.env_store import (is_allowed_model_env, mask_key,
                                 persist_env_key, provider_env_name)
 from app.core.net_guard import OutboundURLRejected, validate_outbound_url_async
-from app.core.permissions import Capability, ensure_capability
+from app.core.permissions import Capability
 from app.db.session import get_db
 from app.model_discovery import (default_config_for, discover_models,
                                  provider_default_config)
@@ -113,7 +114,9 @@ def _provider_out(provider: ModelProvider, *, model_count: int = 0,
         "api_key_env": provider.api_key_env,
         "api_key_present": _key_present(provider, vault_names),
         "enabled": provider.enabled is not False,
-        "config": provider.config or {},
+        # 修复：provider.config 此前原样回显——PATCH config 可写入
+        # api_key 等敏感键再被读出来。与 models_api._safe_config 同口径剔除。
+        "config": _safe_config(provider.config or {}),
         "company_id": provider.company_id,
         "unowned": provider.company_id is None,
         "model_count": model_count,
@@ -572,3 +575,4 @@ async def import_provider_models(pid: str, data: ImportIn,
     return {"imported": created, "updated": updated, "adopted": adopted,
             "skipped": skipped,
             "imported_count": len(created) + len(adopted) + len(updated)}
+

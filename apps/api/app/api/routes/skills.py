@@ -262,8 +262,13 @@ async def _agent_owned(db: AsyncSession, user_id: str, agent_id: str) -> Agent:
 async def install_skill(skill_slug: str, data: InstallIn,
                         db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
     await ensure_skills_seeded(db)
-    await _agent_owned(db, user.id, data.agent_id)
-    sq = await db.execute(select(SkillRow).where(SkillRow.slug == skill_slug))
+    agent = await _agent_owned(db, user.id, data.agent_id)
+    # 修复：slug 全表匹配——别家私有技能也可被装到自家员工身上，
+    # 运行时能读到它的 instruction。限定：本公司或无主（公共/内置）技能。
+    sq = await db.execute(select(SkillRow).where(
+        SkillRow.slug == skill_slug,
+        or_(SkillRow.company_id == agent.company_id,
+            SkillRow.company_id.is_(None))))
     skill = sq.scalar_one_or_none()
     if not skill:
         raise HTTPException(404, "Skill not found")
@@ -281,8 +286,13 @@ async def install_skill(skill_slug: str, data: InstallIn,
              response_model=SkillInstallOut)
 async def uninstall_skill(skill_slug: str, data: InstallIn,
                           db: AsyncSession = Depends(get_db), user=Depends(get_current_user)):
-    await _agent_owned(db, user.id, data.agent_id)
-    sq = await db.execute(select(SkillRow).where(SkillRow.slug == skill_slug))
+    agent = await _agent_owned(db, user.id, data.agent_id)
+    # 修复：slug 全表匹配——别家私有技能也可被装到自家员工身上，
+    # 运行时能读到它的 instruction。限定：本公司或无主（公共/内置）技能。
+    sq = await db.execute(select(SkillRow).where(
+        SkillRow.slug == skill_slug,
+        or_(SkillRow.company_id == agent.company_id,
+            SkillRow.company_id.is_(None))))
     skill = sq.scalar_one_or_none()
     if not skill:
         raise HTTPException(404, "Skill not found")

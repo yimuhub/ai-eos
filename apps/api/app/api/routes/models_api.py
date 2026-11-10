@@ -689,6 +689,7 @@ async def list_provider_models(data: FetchModelsIn,
 
 
 class BatchSelectIn(BaseModel):
+    company_id: str           # 修复：此前恒落 company_id=None = 全平台可见/可用
     name_prefix: str          # 配置显示名前缀，如 "Hermes本地"
     provider_type: str = "openai_compat"
     base_url: str
@@ -705,17 +706,21 @@ async def batch_import_models(data: BatchSelectIn,
         pt = ModelProviderType(data.provider_type)
     except ValueError:
         raise HTTPException(400, f"provider_type must be one of {list(PROVIDERS)}")
+    # 修复：批量导入此前一律落 company_id=None——"我导入的模型"变成全平台
+    # 可见可用（含 base_url 等配置）。现在必须指定公司，且需要该公司的
+    # 模型管理权（MANAGE，与 create_model 口径一致）。
+    await ensure_capability(db, user.id, data.company_id, Capability.MANAGE)
     _reject_sensitive_env(data.api_key_env)
     await _validate_model_base_url(data.base_url)
     created, existed = [], []
-    q = await db.execute(select(Model))
+    q = await db.execute(select(Model).where(Model.company_id == data.company_id))
     existing = {(m.provider_type, m.model_id): m.name for m in q.scalars()}
     for mid in data.model_ids:
         key = (pt, mid)
         if key in existing:
             existed.append(mid)
             continue
-        m = Model(company_id=None, name=f"{data.name_prefix}-{mid}",
+        m = Model(company_id=data.company_id, name=f"{data.name_prefix}-{mid}",
                   provider_type=pt, base_url=data.base_url,
                   api_key_env=data.api_key_env, model_id=mid)
         db.add(m)
@@ -737,7 +742,13 @@ async def get_convert_config(user=Depends(get_current_user)):
 # 同上：返回的是用户自己 POST 进来的任意值的回显，不建模型。
 @router.post("/convert-config")
 async def set_convert_config(data: dict, user=Depends(get_current_user)):
-    """设置专用文档转换大模型（低成本模型），用于上传资料→MD 转换。"""
+    """设置专用文档转换大模型（低成本模型），用于上传资料→MD 转换。
+
+    修复：这是进程级全局设置（影响所有公司），此前任何登录用户可改。
+    收口为仅超管（与 save_env_key 的"服务器级动作"口径一致）。
+    """
     from app.core.config import settings
+    if not user.is_superadmin:
+        raise HTTPException(403, "仅系统管理员可修改文档转换模型")
     settings.doc_convert_model_id = data.get("convert_model_id") or ""
     return {"ok": True, "convert_model_id": settings.doc_convert_model_id}

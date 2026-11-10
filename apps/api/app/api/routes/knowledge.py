@@ -144,7 +144,17 @@ async def search(
     """知识检索：返回最相关的块。"""
     # 归属校验：company_id 由调用者指定，不校验即可检索任何公司的知识库
     await assert_company_owned(db, user.id, company_id)
-    hits = await retrieve(db, company_id, q, top_k=top_k, project_id=project_id)
+    # 修复：私人文档此前对全公司任意角色可检索——按调用者的行级读范围过滤
+    from app.core.scope import build_ctx, agent_read_scope
+    from app.models.agent import Agent
+    ctx = await build_ctx(db, user, company_id)
+    if ctx.sees_all_agents:
+        visible = None  # 不过滤
+    else:
+        visible = set((await db.execute(
+            select(Agent.id).where(agent_read_scope(ctx)))).scalars().all())
+    hits = await retrieve(db, company_id, q, top_k=top_k, project_id=project_id,
+                          visible_agent_ids=visible)
     return {"query": q, "results": hits}
 
 

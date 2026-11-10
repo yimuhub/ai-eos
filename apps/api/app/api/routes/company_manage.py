@@ -45,6 +45,92 @@ CASCADE_SQLS = [
 ]
 
 
+# 公司维度叶子表：静态链里作为"父表"出现的这些不在动态清扫里删，
+# 交给静态链（其子表靠间接子查询清理，必须先于父表存在）。
+_STATIC_PARENTS = {"tasks", "projects", "meetings", "war_room_sessions",
+                   "kb_documents", "agents", "departments", "companies"}
+
+
+def _collect_scoped_tables(sync_conn):
+    """按真实 schema 收集带 company_id / agent_id 的表（SQLite/PG 通用）。
+
+    通过 ``AsyncConnection.run_sync(_collect_scoped_tables)`` 调用（本函数
+    在 greenlet 里跑同步 Inspector）；在事务外收集一次，schema 不因删除
+    而变化。返回 (agent_only, leaf_tables, fk_deps)：fks[t] = t 引用的、
+    同样在清扫集合里的父表集合，供拓扑排序（子表先删，FK 开启也不违例）。
+    """
+    from sqlalchemy import inspect as sa_inspect
+    insp = sa_inspect(sync_conn)
+    tables = [t for t in insp.get_table_names()
+              if not t.startswith("sqlite_") and t != "alembic_version"
+              and t not in _STATIC_PARENTS]
+    info = {}
+    for t in tables:
+        cols = {c["name"] for c in insp.get_columns(t)}
+        deps = set()
+        for fk in insp.get_foreign_keys(t):
+            rt = fk.get("referred_table")
+            if not rt or rt == t or rt in _STATIC_PARENTS or rt == "companies":
+                continue
+            if rt in tables:
+                deps.add(rt)
+        if "company_id" in cols:
+            info[t] = ("company", deps)
+        elif "agent_id" in cols:
+            info[t] = ("agent", deps)
+    agent_only = [t for t, (kind, _) in info.items() if kind == "agent"]
+    leaf = [t for t, (kind, _) in info.items() if kind == "company"]
+    return agent_only, leaf, {t: deps for t, (_, deps) in info.items()}
+
+
+async def _precompute_cascade(engine) -> list[tuple[str, str]]:
+    """事务外预计算全部清扫 SQL：agent 维度 + 拓扑排序后的公司维度。
+
+    用引擎自己的一个独立连接跑 run_sync 收集 schema（greenlet 安全），
+    事务内只执行 DELETE。
+    """
+    async with engine.connect() as conn:
+        agent_only, leaf, deps = await conn.run_sync(_collect_scoped_tables)
+    plans: list[tuple[str, str]] = []  # (kind, table)
+    for t in _topo_order(agent_only, deps):
+        plans.append(("agent", t))
+    for t in _topo_order(leaf, deps):
+        plans.append(("company", t))
+    return plans
+
+
+def _topo_order(tables: list[str], deps: dict[str, set[str]]) -> list[str]:
+    """子表先于父表；有环时按字母序兜底推进（保证终止）。"""
+    done, order = set(), []
+    remaining = sorted(tables)
+    while remaining:
+        progressed = False
+        for t in list(remaining):
+            if deps.get(t, set()) <= done:
+                order.append(t)
+                done.add(t)
+                remaining.remove(t)
+                progressed = True
+        if not progressed:
+            t = remaining.pop(0)
+            order.append(t)
+            done.add(t)
+    return order
+
+
+async def _run_cascade_sweeps(trans, cid: str,
+                              plans: list[tuple[str, str]]) -> None:
+    """执行预计算的动态清扫（①agent 维度 → ②公司维度叶子表）。"""
+    for kind, t in plans:
+        if kind == "agent":
+            await trans.execute(text(
+                f"DELETE FROM {t} WHERE agent_id IN "
+                "(SELECT id FROM agents WHERE company_id=:cid)"), {"cid": cid})
+        else:
+            await trans.execute(text(
+                f"DELETE FROM {t} WHERE company_id=:cid"), {"cid": cid})
+
+
 def _manageable_company_ids(user_id: str):
     """可进入"公司管理"的公司：owner 事实源 ∪ 具备管理角色的 active 成员行。
 
@@ -112,10 +198,17 @@ async def batch_delete(data: DeleteIn, db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
     """批量删除公司（级联清除全部下属数据，savepoint 隔离单个失败）。"""
     deleted, failed = 0, []
-    # 用独立引擎直连执行级联 DELETE（避开 ORM autoflush/greenlet 问题）
+    # 用独立引擎直连执行级联 DELETE（避开 ORM autoflush/greenlet 问题）。
+    # 修复：此前这里不挂 PRAGMA——foreign_keys 为 OFF、busy_timeout 退回 5s，
+    # 删除"成功"但留下孤儿行。挂上与主库一致的 PRAGMA（FK 开启后顺序由
+    # _cascade_sweeps 保证：子表先于父表）。
     from app.core.config import settings
+    from app.db.session import register_sqlite_pragmas
     from sqlalchemy.ext.asyncio import create_async_engine
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    register_sqlite_pragmas(engine)
+    # schema 在事务外收集一次（Inspector 只读，不参与事务）
+    plans = await _precompute_cascade(engine)
     try:
         # 先校验归属
         valid_ids = []
@@ -141,6 +234,12 @@ async def batch_delete(data: DeleteIn, db: AsyncSession = Depends(get_db),
                         text("SELECT id FROM companies WHERE id=:cid"), {"cid": cid})
                     if not r2.scalar():
                         raise RuntimeError("not found")
+                    # 修复：按真实 schema 动态兜底——静态清单只覆盖 25 张直接
+                    # 引用表，schema 里实际有 80+ 张带 company_id/agent_id 的表，
+                    # 删除"成功"后留下大量孤儿行（统计口径被污染）。
+                    # 顺序：①agent 维度子表 → ②公司维度叶子表（静态链的父表除外）
+                    # → ③原静态链（间接子表 + agents/departments）→ ④公司本体。
+                    await _run_cascade_sweeps(trans, cid, plans)
                     for sql in CASCADE_SQLS:
                         await trans.execute(text(sql), {"cid": cid})
                     await trans.execute(

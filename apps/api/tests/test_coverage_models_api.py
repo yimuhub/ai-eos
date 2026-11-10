@@ -411,40 +411,66 @@ async def test_provider_model_discovery(client, make_user, monkeypatch):
     assert "ValueError" in r.json()["error"]
 
 
-async def test_batch_import_and_convert_config(client, make_user):
+async def test_batch_import_and_convert_config(client, make_user, make_company,
+                                               monkeypatch):
+    """更新到修复后的契约（B-099/B-100）：
+    - batch-import 必须带 company_id 且需要该公司 MANAGE；落库挂公司名下
+    - convert-config 是进程级全局设置 → 仅超管可写，任何登录用户可读
+    """
     user = await make_user()
+    co = await make_company(user)
     h = user["headers"]
 
+    async def _set_superadmin(flag: bool):
+        async with AsyncSessionLocal() as s:
+            row = await s.get(User, user["id"])
+            row.is_superadmin = flag
+            await s.commit()
+
+    # 非超管且无该公司 → 404（不泄露公司存在性）
     r = await client.post("/models/providers/batch-import", json={
-        "name_prefix": "Hermes", "base_url": VALID_URL,
+        "company_id": co["id"], "name_prefix": "Hermes", "base_url": VALID_URL,
         "model_ids": ["m1", "m2"]}, headers=h)
+    # make_company 的 owner 具备 MANAGE → 通过
     assert r.status_code == 200, r.text
     assert r.json()["imported_count"] == 2
-    # 再次导入同 provider+model → 跳过
+    # 落库挂在该公司名下（不再 company_id=None 全平台可见）
+    async with AsyncSessionLocal() as s:
+        rows = (await s.execute(select(Model).where(
+            Model.name.like("Hermes-%")))).scalars().all()
+        assert rows and all(m.company_id == co["id"] for m in rows), \
+            [(m.name, m.company_id) for m in rows]
+    # 再次导入同 provider+model（同公司）→ 跳过
     r = await client.post("/models/providers/batch-import", json={
-        "name_prefix": "Hermes", "base_url": VALID_URL,
+        "company_id": co["id"], "name_prefix": "Hermes", "base_url": VALID_URL,
         "model_ids": ["m1", "m3"]}, headers=h)
     assert r.json()["imported"] == ["m3"]
     assert r.json()["skipped_existing"] == ["m1"]
 
     r = await client.post("/models/providers/batch-import", json={
-        "name_prefix": "x", "provider_type": "nope", "base_url": VALID_URL,
-        "model_ids": []}, headers=h)
+        "company_id": co["id"], "name_prefix": "x", "provider_type": "nope",
+        "base_url": VALID_URL, "model_ids": []}, headers=h)
     assert r.status_code == 400
     r = await client.post("/models/providers/batch-import", json={
-        "name_prefix": "x", "base_url": VALID_URL, "api_key_env": "JWT_SECRET",
-        "model_ids": []}, headers=h)
+        "company_id": co["id"], "name_prefix": "x", "base_url": VALID_URL,
+        "api_key_env": "JWT_SECRET", "model_ids": []}, headers=h)
     assert r.status_code == 400
     r = await client.post("/models/providers/batch-import", json={
-        "name_prefix": "x", "base_url": "http://169.254.169.254/x",
-        "model_ids": []}, headers=h)
+        "company_id": co["id"], "name_prefix": "x",
+        "base_url": "http://169.254.169.254/x", "model_ids": []}, headers=h)
     assert r.status_code == 400
 
+    # convert-config：读任何登录用户可以；写仅超管（B-100）
     r = await client.get("/models/convert-config", headers=h)
     assert r.status_code == 200 and "convert_model_id" in r.json()
     r = await client.post("/models/convert-config", json={
         "convert_model_id": "cheap-model"}, headers=h)
+    assert r.status_code == 403
+    await _set_superadmin(True)
+    r = await client.post("/models/convert-config", json={
+        "convert_model_id": "cheap-model"}, headers=h)
     assert r.status_code == 200 and r.json()["convert_model_id"] == "cheap-model"
+    await _set_superadmin(False)
     r = await client.get("/models/convert-config", headers=h)
     assert r.json()["convert_model_id"] == "cheap-model"
 

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.core.permissions import Capability, require_company_scope
+from app.core.scope import ensure_agent_access
 from app.learning_engine import add_growth_event
 from app.models.agent import Agent
 from app.models.learning import GrowthEventType
@@ -20,6 +21,7 @@ router = APIRouter(prefix="/skill-growth", tags=["skill-growth"],
 # ---------- 技能树 ----------
 
 class NodeIn(BaseModel):
+    company_id: str                      # 修复：此前无 company_id 字段，节点一律落 NULL=全平台可见
     key: str
     name: str
     description: str | None = None
@@ -33,7 +35,16 @@ async def create_node(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    node = SkillNode(id=new_id(), **data.model_dump())
+    """新建技能节点（挂在指定公司下；需要组织变更能力）。
+
+    修复：此前零鉴权且 company_id 恒为 NULL——任何登录用户可以创建
+    全平台可见的技能树节点，污染所有租户的 /skill-growth/tree。
+    """
+    from app.api.deps import assert_company_capability
+    await assert_company_capability(db, user.id, data.company_id,
+                                    Capability.MANAGE)
+    payload = data.model_dump(exclude={"company_id"})
+    node = SkillNode(id=new_id(), company_id=data.company_id, **payload)
     db.add(node)
     await db.commit()
     return {"id": node.id, "key": node.key}
@@ -70,8 +81,8 @@ async def acquire_skill(
 ):
     """Agent 获得新技能（BEGINNER 起步，附证据）。"""
     a = await db.get(Agent, agent_id)
-    if not a:
-        raise HTTPException(404, "Agent not found")
+    # 修复：此前无归属校验（router 级依赖只拦带 company_id 的端点）
+    await ensure_agent_access(db, user, a, Capability.OPERATE)
     node = await db.get(SkillNode, data.skill_node_id)
     if not node:
         raise HTTPException(404, "Skill node not found")
@@ -122,6 +133,8 @@ async def add_evidence(
     asn = await db.get(AgentSkillNode, asn_id)
     if not asn:
         raise HTTPException(404, "not found")
+    a = await db.get(Agent, asn.agent_id)
+    await ensure_agent_access(db, user, a, Capability.OPERATE)  # 修复：补归属校验
     ev_list = list(asn.evidence or [])
     ev_list.append({"type": data.evidence_type, "ref": data.ref_id,
                     "note": data.note,
@@ -154,6 +167,8 @@ async def upgrade_skill(
     asn = await db.get(AgentSkillNode, asn_id)
     if not asn:
         raise HTTPException(404, "not found")
+    a0 = await db.get(Agent, asn.agent_id)
+    await ensure_agent_access(db, user, a0, Capability.OPERATE)  # 修复：补归属校验
 
     cur = LEVEL_ORDER[asn.level.value]
     tgt = LEVEL_ORDER[data.new_level.value]
@@ -200,6 +215,8 @@ async def rollback_skill(
     asn = await db.get(AgentSkillNode, asn_id)
     if not asn:
         raise HTTPException(404, "not found")
+    a0 = await db.get(Agent, asn.agent_id)
+    await ensure_agent_access(db, user, a0, Capability.OPERATE)  # 修复：补归属校验
     old = asn.level
     asn.level = to_level
     a = await db.get(Agent, asn.agent_id)
@@ -219,6 +236,8 @@ async def skill_matrix(
     user: User = Depends(get_current_user),
 ):
     """Agent Skill Matrix（合并成长中心 + 技能中心两套数据源）。"""
+    a0 = await db.get(Agent, agent_id)
+    await ensure_agent_access(db, user, a0, Capability.VIEW)  # 修复：补读归属
     from app.models.skill import AgentSkill as AgentSkillRow, Skill as SkillRow
     out = []
     seen_names: set[str] = set()
@@ -268,8 +287,8 @@ async def acquire_skill_batch(
 ):
     """Agent 批量获得新技能（BEGINNER 起步）。"""
     a = await db.get(Agent, agent_id)
-    if not a:
-        raise HTTPException(404, "Agent not found")
+    # 修复：此前无归属校验
+    await ensure_agent_access(db, user, a, Capability.OPERATE)
 
     added = []
     skipped = []

@@ -210,9 +210,14 @@ async def zip_delivery(company_id: str = Query(...),
             response_model=DeliveryAgentFolderDetailOut)
 async def agent_folder(aid: str, db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
-    from app.api.deps import assert_agent_owned
+    # 修复：此处用公司级 assert_agent_owned，而同文件 by_agent 用
+    # agent_read_scope 行级口径——看不到某 Agent 的成员仍可读其交付清单。
+    # 对齐为行级 VIEW。
+    from app.core.scope import ensure_agent_access
+    from app.core.permissions import Capability
 
-    a = await assert_agent_owned(db, user.id, aid)
+    a = await db.get(Agent, aid)
+    await ensure_agent_access(db, user, a, Capability.VIEW)
     assets = (await db.execute(select(Asset).where(
         Asset.agent_id == str(a.id)).order_by(Asset.created_at.desc())
     )).scalars().all()

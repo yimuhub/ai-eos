@@ -52,7 +52,9 @@ def _user_dep(user: Annotated[User, Depends(get_current_user)]):
 
 
 @router.get("/platform")
-async def get_platform_info(company_id: str = Query(...)):
+async def get_platform_info(company_id: str = Query(...),
+                            user: User = Depends(get_current_user)):
+    # 修复：此前无任何鉴权，向外网暴露 OS 版本/机型指纹。
     return {"os": get_platform()["os"], "os_name": get_platform()["os_name"],
             "os_version": get_platform()["os_version"], "machine": get_platform()["machine"]}
 
@@ -92,7 +94,13 @@ async def list_rules(company_id: str = Query(...),
 async def create_rule(data: AliasIn, company_id: str = Query(...),
                       user: Annotated[User, Depends(get_current_user)] = None,
                       db: AsyncSession = Depends(get_db)):
-    await assert_company_owned(db, user.id, company_id)
+    # 修复：此前任意角色（含只读成员）可自建规则——把 app_path 指向任意
+    # 可执行文件再 /run 触发，等于成员到服务器的提权路径。现在建/删规则
+    # 需要 MANAGE（老板级）：app_path 覆盖是设计能力（覆盖扫描结果），
+    # 收口在"谁能建规则"而不是"路径从哪来"。
+    from app.api.deps import assert_company_capability
+    from app.core.permissions import Capability as _Cap
+    await assert_company_capability(db, user.id, company_id, _Cap.MANAGE)
     alias = data.alias.strip().lower()
     if not alias:
         raise HTTPException(400, "口语词不能为空")
@@ -122,8 +130,10 @@ async def delete_rule(rule_id: str, company_id: str = Query(...),
                       db: AsyncSession = Depends(get_db)):
     # 原实现把「记录的公司 == 调用者传入的公司」当成鉴权——两边都来自调用者，
     # 等于没有校验：传别人的 company_id 就能删掉别人的规则。
-    from app.api.deps import assert_company_owned
-    await assert_company_owned(db, user.id, company_id)
+    # 规则管理升为 MANAGE（与创建一致）。
+    from app.api.deps import assert_company_capability
+    from app.core.permissions import Capability as _Cap
+    await assert_company_capability(db, user.id, company_id, _Cap.MANAGE)
     r = await db.get(AppAliasRule, rule_id)
     if not r or r.company_id != company_id:
         raise HTTPException(404, "not found")
@@ -163,7 +173,10 @@ async def run_app(data: dict, company_id: str = Query(...),
     rule_id = data.get("rule_id")
     if not text and not rule_id:
         raise HTTPException(400, "empty request")
-    await assert_company_owned(db, user.id, company_id)
+    # 修复：执行本机应用此前任意角色可触发（只读成员也能拉起进程）。
+    from app.api.deps import assert_company_capability
+    from app.core.permissions import Capability as _Cap
+    await assert_company_capability(db, user.id, company_id, _Cap.OPERATE)
     if rule_id:
         r = await db.get(AppAliasRule, rule_id)
         if not r or r.company_id != company_id:

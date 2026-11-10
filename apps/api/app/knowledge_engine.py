@@ -7,7 +7,7 @@ character bigrams), vector-ready for future pgvector swap.
 import re
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.knowledge import KBChunk, KBDocument, KBDocumentStatus
@@ -95,7 +95,8 @@ async def ingest_document(db: AsyncSession, doc: KBDocument) -> int:
 
 async def retrieve(db: AsyncSession, company_id: str, query: str,
                    top_k: int = 5, project_id: str | None = None,
-                   limit: int | None = 200) -> list[dict]:
+                   limit: int | None = 200,
+                   visible_agent_ids: set[str] | None = None) -> list[dict]:
     """关键词重合度检索，返回 top_k 块。向量检索可在此替换。
 
     limit：在 SQL 层截断候选 chunk 数（默认 200），避免全表 chunk 拉进
@@ -104,7 +105,18 @@ async def retrieve(db: AsyncSession, company_id: str, query: str,
     知识库一大，真正相关的块可能根本进不了候选集，检索会随数据增长悄悄变差。
     这里取「最新入库优先」作为确定性兜底，向量检索接上后可替换为相似度排序。
     """
-    q = select(KBChunk).where(KBChunk.company_id == company_id)
+    q = select(KBChunk).join(
+        KBDocument, KBChunk.document_id == KBDocument.id).where(
+        KBChunk.company_id == company_id)
+    # 修复：scope=private 的块此前对全公司任意角色可检索（与 kb2 两级库
+    # 的隔离设计不一致）。visible_agent_ids=None = 不过滤（引擎内部调用方
+    # 传 None）；用户检索入口必须传可见 Agent 集合。
+    if visible_agent_ids is not None:
+        if visible_agent_ids:
+            q = q.where(or_(KBDocument.scope == "global",
+                            KBDocument.agent_id.in_(visible_agent_ids)))
+        else:
+            q = q.where(KBDocument.scope == "global")
     if project_id:
         doc_ids_q = await db.execute(select(KBDocument.id).where(
             KBDocument.project_id == project_id))
