@@ -197,11 +197,12 @@ export default function DashboardPage() {
       }
     } catch { /* 事件拉取失败不打扰 */ }
   }, []);
-  useEffect(() => {
-    loadBriefing();
-    const t = window.setInterval(loadBriefing, 30000);
-    return () => window.clearInterval(t);
-  }, [loadBriefing]);
+  // 修复：简报轮询此前是裸 setInterval——页面在后台也每 30s 打一次后端
+  // 聚合（用户看不见的刷新是纯粹成本）。改用与上方 bootstrap 同款的
+  // 可见性感知轮询：后台暂停、切回前台立即补一次。useVisibilityInterval
+  // 只管"定时"，首帧加载仍需手动触发一次。
+  loadBriefing();
+  useVisibilityInterval(loadBriefing, 30000);
 
   /* 指挥中心需要"实时"：但一轮只打一个 bootstrap，15 秒足够；
      页面在后台时依旧不打后端（用户看不见的刷新是纯粹成本）。
