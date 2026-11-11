@@ -64,7 +64,7 @@ jobs:
           cp packaging/mac-signing/"AI-EOS-Mac-trust-activate.command" out/mac/ 2>/dev/null || echo "  (信任激活脚本缺失，跳过)"
           chmod +x out/mac/"AI-EOS-Mac-trust-activate.command" 2>/dev/null || true
           ls -lh out/mac/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-mac
           path: out/mac
@@ -97,7 +97,7 @@ jobs:
           New-Item -ItemType Directory -Force out/win | Out-Null
           Copy-Item desktop\dist\*.exe out/win/ -ErrorAction SilentlyContinue
           Get-ChildItem out/win | Format-Table Name, Length
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-win
           path: out/win
@@ -124,7 +124,7 @@ jobs:
           mkdir -p out/linux
           cp desktop/dist/*.AppImage desktop/dist/*.deb out/linux/ 2>/dev/null
           ls -lh out/linux/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-linux
           path: out/linux
@@ -191,7 +191,7 @@ jobs:
           AV=$(python3 -c "import json;print(json.load(open('mobile/app.json'))['expo']['version'])")
           cp mobile/android/app/build/outputs/apk/release/app-release.apk "out/android/AI-EOS-Android-v${AV}.apk"
           ls -lh out/android/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: android-apk
           path: out/android
