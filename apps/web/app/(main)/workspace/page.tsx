@@ -710,6 +710,10 @@ export default function WorkspacePage() {
       picking={picking}
       onPick={pickAgent}
       onCancel={() => setPicking(false)}
+      leftHidden={classic ? false : layout.leftHidden}
+      outHidden={layout.rightHidden}
+      onExpandLeft={toggleLeft}
+      onToggleOut={toggleRight}
     />
   ) : (
     <WorkspaceChat
@@ -922,15 +926,33 @@ function BootState({ state, err, onRetry }: {
 
 /* ---------------- 新对话：挑人 ---------------- */
 
-function NewChat({ agents, picking, onPick, onCancel }: {
+function NewChat({ agents, picking, onPick, onCancel,
+                    leftHidden, outHidden, onExpandLeft, onToggleOut }: {
   agents: WsAgent[];
   picking: boolean;
   onPick: (a: WsAgent) => void;
   onCancel: () => void;
+  leftHidden: boolean;
+  outHidden: boolean;
+  onExpandLeft: () => void;
+  onToggleOut: () => void;
 }) {
   return (
     <div className="flex h-full min-w-0 flex-col" style={{ background: "var(--background)" }}>
       <div className="flex items-center gap-2.5 px-4 shrink-0" style={{ height: 52, borderBottom: "1px solid var(--border)" }}>
+        {/* 修复：NewChat 此前没有任何收展入口——两侧面板收起 + 中间停在
+            "还没选员工"时，页面上不存在恢复按钮（只剩看不见的 ⌘B/⌘J），
+            用户会困在空白中间栏里。补上与 WorkspaceChat 同款的按钮。 */}
+        {leftHidden && (
+          <button type="button" onClick={onExpandLeft} title="展开左栏 ⌘B" aria-label="展开左栏"
+            className="w-8 h-8 -ml-1 rounded-lg flex items-center justify-center hover:bg-white/[0.06]"
+            style={{ color: "var(--muted)" }}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"
+              strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" />
+            </svg>
+          </button>
+        )}
         <h1 className="text-sm font-semibold">{picking ? "新对话" : "开始工作"}</h1>
         <p className="text-[10px]" style={{ color: "var(--muted)" }}>选一个员工，直接在中间下指令</p>
         <NotificationBell className="ml-auto" />
@@ -941,6 +963,15 @@ function NewChat({ agents, picking, onPick, onCancel }: {
             取消
           </button>
         )}
+        <button type="button" onClick={onToggleOut} title={outHidden ? "展开右栏 ⌘J" : "收起右栏 ⌘J"}
+          aria-label={outHidden ? "展开右栏" : "收起右栏"}
+          className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-white/[0.06]"
+          style={{ color: "var(--muted)" }}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"
+            strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" />
+          </svg>
+        </button>
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto ws-scroll p-6">
         {!agents.length ? (
