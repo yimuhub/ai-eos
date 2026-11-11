@@ -83,9 +83,15 @@ jobs:
       - name: 安装依赖
         working-directory: desktop
         run: npm ci --no-audit --no-fund
-      - name: 构建 NSIS 安装器 + portable 绿色版
+      # 修复：win.artifactName 是 NSIS/portable 两个 target 共用的级别配置——
+      # 后构建的覆盖先构建的，Release 里只剩一个 exe（5.16.1 实测只剩 setup）。
+      # 拆成两步构建，portable 用 -c.artifactName 覆盖出独立命名。
+      - name: 构建 NSIS 安装器（win-setup.exe）
         working-directory: desktop
-        run: npx electron-builder --win
+        run: npx electron-builder --win nsis
+      - name: 构建 portable 绿色版（win-portable.exe）
+        working-directory: desktop
+        run: npx electron-builder --win portable -c.artifactName="AI-EOS-${version}-win-portable.${ext}"
       - name: 收集产物
         run: |
           New-Item -ItemType Directory -Force out/win | Out-Null
