@@ -209,6 +209,11 @@ async def accept_invite(token: str, db: AsyncSession = Depends(get_db),
             raise HTTPException(409, "你已被移出该公司，请联系管理员恢复")
         raise HTTPException(409, "你已经是该公司成员")
 
+    # 修复（配额后门）：e4cf6b3 给员工创建/组织预设/组织综合三条路都装了
+    # 席位闸门，de56385 新增的邀请入口漏了——被邀请人凭链接绕过席位上限。
+    from app.services import subscription_service
+    await subscription_service.enforce_seat_limit(
+        db, row.company_id, adding=1, label="邀请加入")
     member = CompanyMember(company_id=row.company_id, user_id=user.id,
                            role=row.role, status="active",
                            invited_by=row.created_by)

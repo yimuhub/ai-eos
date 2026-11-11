@@ -256,20 +256,44 @@ async def enforce_seat_limit(db: AsyncSession, company_id: str, *,
         "请先升级套餐（提交升级订单 → 平台确认收款 → 立即生效）。")
 
 
+# 配额闸门的 60s 进程内缓存。每个 LLM 调用（含每轮工具调用、每条群聊
+# 发言）都会走到这里——不加缓存时每次都对 token_usages 做"本月求和"的
+# 聚合扫描，活跃公司上万行流水被反复全读，是可感知的全局拖慢。月度配额
+# 对 60 秒内的超量完全不敏感（一次调用至多几万 token，月额度以百万计），
+# TTL 过期后自然回到精确口径。进程内字典即可：后台 worker 与请求处理
+# 同进程，多 uvicorn worker 各自持有一份也只会多查几次库，不影响正确性。
+_QUOTA_CACHE: dict[str, tuple[float, bool]] = {}
+_QUOTA_TTL_S = 60.0
+
+
 async def enforce_token_quota(db: AsyncSession, company_id: str,
                               now: datetime | None = None) -> None:
     """月度 token 配额闸门：到顶 → 402（Payment Required）。
 
     在每次 LLM 调用前执行；`quota=None` 视为不限量。统计口径与
-    `/billing/usage` 一致（`token_usages` 流水求和），不做估算。
+    `/billing/usage` 一致（`token_usages` 流水求和），不做估算；
+    结果按公司缓存 60 秒（见 _QUOTA_CACHE 说明）。
     """
+    import time as _time
+
+    current = _naive_utc(now) or utcnow()
+    cache_key = f"{company_id}:{current.year}-{current.month}"
+    cached = _QUOTA_CACHE.get(cache_key)
+    if cached is not None and (_time.monotonic() - cached[0]) < _QUOTA_TTL_S:
+        if cached[1]:
+            raise HTTPException(
+                402, "本月 token 配额已用尽（缓存判定）。模型调用已停止，"
+                "下月 1 日自动恢复；如需立即恢复请升级套餐，或等待 1 分钟后重试。")
+        return
     sub = await get_or_create(db, company_id, now)
     _, quota = effective_limits(sub, now)
     if quota is None:
         return
     used = await tokens_used_this_month(db, company_id, now)
     if used < quota:
+        _QUOTA_CACHE[cache_key] = (_time.monotonic(), False)
         return
+    _QUOTA_CACHE[cache_key] = (_time.monotonic(), True)
     if quota == 0:
         raise HTTPException(
             402,

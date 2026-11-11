@@ -168,17 +168,25 @@ async def _download_result(client: httpx.AsyncClient, url: str,
         ext = {".png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp",
                "video/mp4": ".mp4", "video/webm": ".webm"}.get(
                    ctype, default_ext)
-        chunks: list[bytes] = []
-        total = 0
-        async for chunk in r.aiter_bytes():
-            total += len(chunk)
-            if total > _MAX_DOWNLOAD_BYTES:
-                raise HTTPException(502, "生成结果超过 200MB 上限，已放弃下载。")
-            chunks.append(chunk)
+    # 修复：此前把整个文件攒在内存（chunks 列表，上限 200MB）——多个视频
+    # 并发下载时内存峰值可达数 GB。改为边流式收边写临时文件，超限即删。
     root = storage_root() / "media"
     root.mkdir(parents=True, exist_ok=True)
     dest = ensure_within(root, root / f"{row.id}{ext}")
-    dest.write_bytes(b"".join(chunks))
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    total = 0
+    try:
+        with open(tmp, "wb") as fh:
+            async for chunk in r.aiter_bytes():
+                total += len(chunk)
+                if total > _MAX_DOWNLOAD_BYTES:
+                    raise HTTPException(
+                        502, "生成结果超过 200MB 上限，已放弃下载。")
+                fh.write(chunk)
+        tmp.replace(dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return f"media/{row.id}{ext}"
 
 

@@ -752,10 +752,18 @@ async def group_chat_stream(
                     if ag is None:
                         raise RuntimeError("员工已不存在")
                     async with _company_semaphore(company_id):
+                        # 修复（同事互见）：prompt 此前用**开局快照**构造且
+                        # 发言完成后不回写 history——并行下每个 Agent 看到的
+                        # 都只有老板那句话，后发言者完全看不到先发言者说了
+                        # 什么，与"像开会"的语义直接矛盾。现在在拿到并发
+                        # 闸门的那一刻取最新 history 构造，发言完成后把
+                        # 本轮发言追加进 history（事件循环内无 await 间隔，
+                        # append 无竞态）。下一位拿到闸门的同事即可看见。
                         out = await _agent_speak(
                             adb, ModelGateway(adb), ag, data.message,
                             [f"{n}: {t}" for n, t in history],
                             emit=emit_agent)
+                        history.append((agent_name, out["text"]))
             except Exception as e:
                 logger.warning("群聊单个 Agent 发言失败 agent=%s: %s",
                                agent_name, e, exc_info=True)
