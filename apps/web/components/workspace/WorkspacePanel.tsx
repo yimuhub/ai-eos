@@ -51,8 +51,9 @@ export default function WorkspacePanel({
 }) {
   return (
     <div className="flex h-full min-w-0 flex-col" style={{ background: "var(--surface)" }}>
-      <div className="flex items-center gap-1 px-2 shrink-0"
-        style={{ height: 46, borderBottom: "1px solid var(--border)" }}>
+      {/* 头栏 52px：与中间对话头同一条节奏线（此前 46px，两栏并排时高矮不一） */}
+      <div className="flex items-center gap-1.5 px-2.5 shrink-0"
+        style={{ height: 52, borderBottom: "1px solid var(--border)" }}>
         <div className="flex items-center gap-1 min-w-0 overflow-x-auto ws-scroll">
           <PaneTab active={active === OUT_ID} onClick={() => onActivate(OUT_ID)}>
             <span aria-hidden>▣</span>产出
@@ -66,18 +67,18 @@ export default function WorkspacePanel({
           ))}
           {showPicker && (
             <button type="button" onClick={onOpenPicker} title="打开页面（⌘K）" aria-label="打开页面"
-              className="w-7 h-7 rounded-lg flex items-center justify-center text-xs shrink-0 hover:bg-white/[0.06]"
+              className="w-7 h-8 rounded-lg flex items-center justify-center text-sm shrink-0 hover:bg-white/[0.06]"
               style={{ color: "var(--muted)" }}>
               ＋
             </button>
           )}
         </div>
 
-        <div className="ml-auto flex items-center gap-1 shrink-0 pl-2"
+        <div className="ml-auto flex items-center gap-1 shrink-0 pl-1.5"
           style={{ background: "var(--surface)" }}>
           {!compact && (
             <button type="button" onClick={onToggleFocus} title={focus ? "回到对话" : "展开工作区"}
-              className="flex items-center gap-1.5 h-7 px-2 rounded-lg text-[11px] hover:bg-white/[0.06]"
+              className="flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-[11px] hover:bg-white/[0.06]"
               style={{ color: focus ? "#c7c8ff" : "var(--muted)", border: "1px solid transparent" }}>
               <span aria-hidden>{focus ? "⇤" : "⤢"}</span>
               <span className="hidden sm:inline">{focus ? "回到对话" : "展开"}</span>
@@ -85,7 +86,7 @@ export default function WorkspacePanel({
           )}
           <button type="button" onClick={onCollapse} title={compact ? "回到对话" : "收起右栏 ⌘J"}
             aria-label={compact ? "回到对话" : "收起右栏"}
-            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white/[0.06]"
+            className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-white/[0.06]"
             style={{ color: "var(--muted)" }}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"
               strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -123,21 +124,25 @@ function PaneTab({ active, onClick, onClose, closeLabel, children }: {
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center h-7 rounded-lg shrink-0"
+    <div className={`group flex items-center h-8 rounded-lg shrink-0 transition-colors ${
+      onClose ? "" : ""
+    }`}
       style={active
-        ? { background: "rgba(99,102,241,0.16)", border: "1px solid rgba(99,102,241,0.32)" }
+        ? { background: "rgba(99,102,241,0.18)", border: "1px solid rgba(99,102,241,0.38)" }
         : { border: "1px solid transparent" }}>
       <button type="button" onClick={onClick} aria-current={active ? "page" : undefined}
-        className={`flex items-center gap-1.5 h-full text-[11px] rounded-lg ${
-          onClose ? "pl-2.5 pr-1" : "px-2.5"
-        }`}
+        className={`flex items-center gap-1.5 h-full text-[12px] rounded-lg ${
+          onClose ? "pl-2.5 pr-1" : "px-3"
+        } ${active ? "font-medium" : "hover:text-[var(--foreground)]"}`}
         style={{ color: active ? "#fff" : "var(--muted)" }}>
         {children}
       </button>
       {onClose && (
         <button type="button" onClick={onClose} aria-label={closeLabel} title={closeLabel}
-          className="w-5 h-5 mr-1 rounded flex items-center justify-center text-[10px] hover:bg-white/15"
-          style={{ color: "#6b6c7a" }}>
+          className={`w-5 h-5 mr-1 rounded flex items-center justify-center text-[10px] hover:bg-white/15 ${
+            active ? "" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+          } transition-opacity`}
+          style={{ color: "#8b8c9c" }}>
           ✕
         </button>
       )}

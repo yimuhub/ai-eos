@@ -37,7 +37,7 @@ const RIGHT_MAX = 760;
 const CENTER_MIN = 420;
 const SPLITTER_W = 7;
 
-const DEFAULT_LAYOUT = { left: 252, right: 540, leftHidden: false, rightHidden: false };
+const DEFAULT_LAYOUT = { left: 252, right: 540, pageRight: 0, leftHidden: false, rightHidden: false };
 type LayoutState = typeof DEFAULT_LAYOUT;
 
 function readLayout(): LayoutState {
@@ -48,6 +48,7 @@ function readLayout(): LayoutState {
     return {
       left: Number.isFinite(d.left) ? d.left : DEFAULT_LAYOUT.left,
       right: Number.isFinite(d.right) ? d.right : DEFAULT_LAYOUT.right,
+      pageRight: Number.isFinite(d.pageRight) ? d.pageRight : 0,
       leftHidden: !!d.leftHidden,
       rightHidden: !!d.rightHidden,
     };
@@ -309,10 +310,16 @@ export default function WorkspacePage() {
     ? Math.min(RIGHT_MAX, Math.max(RIGHT_MIN, sideBudget - (railHidden ? 0 : LEFT_MIN)))
     : RIGHT_MAX;
   const rightW = layout.rightHidden ? 0 : clamp(layout.right, RIGHT_MIN, maxRight);
-  // 打开功能页：右栏直接占窗口一半，左栏让位，中栏仍保留可读宽度
-  const pageRightW = rowW > 0
-    ? clamp(Math.round(rowW / 2), RIGHT_MIN, Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, rowW - CENTER_MIN - SPLITTER_W)))
-    : Math.round(RIGHT_MAX / 2);
+  // 打开功能页：右栏默认占窗口一半，左栏让位，中栏仍保留可读宽度；
+  // pageRight 是用户拖出来的宽度（持久化），0 = 尚未拖过、用自动半宽。
+  // 页面模式上限不套 RIGHT_MAX——详情页/表格类内容更需要宽度，
+  // 中栏可读宽度由 maxPageRight 兜底（≥ CENTER_MIN）。
+  const maxPageRight = Number.isFinite(sideBudget)
+    ? Math.max(RIGHT_MIN, sideBudget - (railHidden ? 0 : LEFT_MIN))
+    : RIGHT_MAX;
+  const pageRightW = layout.rightHidden ? 0 : clamp(
+    layout.pageRight > 0 ? layout.pageRight : (rowW > 0 ? Math.round(rowW / 2) : Math.round(RIGHT_MAX / 2)),
+    RIGHT_MIN, maxPageRight);
   const effectiveRightW = pageWide ? pageRightW : rightW;
   const maxLeft = Number.isFinite(sideBudget)
     ? Math.min(LEFT_MAX, Math.max(LEFT_MIN, sideBudget - rightW))
@@ -806,7 +813,17 @@ export default function WorkspacePage() {
 
                   {!layout.rightHidden && (
                     <>
-                      {!pageWide && (
+                      {pageWide ? (
+                        <Splitter
+                          side="right"
+                          label="调整页面宽度"
+                          value={pageRightW}
+                          min={RIGHT_MIN}
+                          max={maxPageRight}
+                          onChange={(v) => setLayoutPersist((p) => ({ ...p, pageRight: v }))}
+                          onReset={() => setLayoutPersist((p) => ({ ...p, pageRight: 0 }))}
+                        />
+                      ) : (
                         <Splitter
                           side="right"
                           label="调整右栏宽度"
