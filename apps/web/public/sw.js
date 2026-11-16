@@ -47,8 +47,13 @@ async function networkFirst(request) {
     }
     return res;
   } catch {
-    const cached = await cache.match(SHELL);
-    if (cached) return cached;
+    // 修复：离线回退只允许发生在目标本身就是 /m 外壳时——此前任何导航
+    // 失败都会把缓存的移动端界面冒充成目标页面返回（用户在 /login 突然
+    // 看到移动端布局，URL 与内容对不上）。其他页面如实交给浏览器错误态。
+    if (new URL(request.url).pathname === SHELL) {
+      const cached = await cache.match(SHELL);
+      if (cached) return cached;
+    }
     return new Response("离线：请连接网络后重试。", {
       status: 503,
       headers: { "Content-Type": "text/plain; charset=utf-8" },

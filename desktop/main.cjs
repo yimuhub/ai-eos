@@ -92,13 +92,26 @@ function ensureDirs() {
 }
 
 // ---------- HTTP 健康探测（避免引入依赖） ----------
-function probe(url, timeoutMs = 2000) {
+// 只认 2xx：前端页面才返回 200；API 端口对 GET /login 会回 405、对 / 回 404——
+// 修复前"任何 <500 的状态"都算活着，客户端曾把 API 的 404 JSON 当成前端
+// 加载出来，用户看到的就是一片空白（dark 背景上一行小字 JSON）。
+function probe(url, timeoutMs = 8000) {
   return new Promise((resolve) => {
     let settled = false;
     const done = (v) => { if (!settled) { settled = true; resolve(v); } };
     const req = http.get(url, (res) => {
-      res.resume();
-      done(res.statusCode >= 200 && res.statusCode < 500);
+      // 只认 2xx（此前 404/405 的 API JSON 也算"活着"），并确认响应体
+      // 确实是 AI-EOS 前端——同机其他项目（如 3000 端口的服务）同样返回
+      // 200，只看状态码会把别人的页面加载进客户端窗口。
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => {
+        if (body.length < 65536) body += chunk;
+      });
+      res.on("end", () => {
+        const ok2xx = res.statusCode >= 200 && res.statusCode < 300;
+        done(ok2xx && body.includes("AI-EOS"));
+      });
     });
     req.on("error", () => done(false));
     req.setTimeout(timeoutMs, () => { req.destroy(); done(false); });
@@ -305,6 +318,8 @@ function guideHtml() {
   <div class="card">
     <h1><span class="dot"></span>AI-EOS 服务未检测到</h1>
     <div class="sub">客户端是「壳」，需要一个正在运行的 AI-EOS 服务（前端 + 后端）。</div>
+    <div class="hint">⚠️ 前端地址请填「浏览器能打开界面」的那个（便携版默认 http://localhost:8000）；
+不要填后端 API 地址——后端返回的是 JSON，客户端窗口会显示空白。</div>
     <div class="box">
       正在尝试连接 <b>${safeFrontUrl}</b><br>
       ${repo
@@ -1298,8 +1313,10 @@ const SMOKE = process.env.AI_EOS_DESKTOP_SMOKE === "1";
 async function connectAndLoad() {
   const s = currentSettings();
 
-  // 1) 目标前端在监听 → 直接加载
-  if (await probe(s.frontUrl + "/", 2500)) {
+  // 1) 目标前端在监听 → 直接加载。探测 /login（前端保证 200 的页面），
+  //    而不是 /：避免把同一台机器上另一端口跑着的 API（GET / 是 404）
+  //    误判成"前端就绪"。
+  if (await probe(s.frontUrl + "/login", 2500)) {
     log(`前端 ${s.frontUrl} 就绪，加载`);
     if (!mainWindow) createWindow();
     mainWindow.loadURL(s.frontUrl);
@@ -1317,13 +1334,13 @@ async function connectAndLoad() {
         log("后端未就绪");
       }
     }
-    if (await probe(`http://localhost:${DEFAULT_FRONT_PORT}/`, 1500)) {
+    if (await probe(`http://localhost:${DEFAULT_FRONT_PORT}/login`, 1500)) {
       if (!mainWindow) createWindow();
       mainWindow.loadURL(`http://localhost:${DEFAULT_FRONT_PORT}`);
       return true;
     }
     await startFront();
-    const ok = await waitReady(`http://localhost:${DEFAULT_FRONT_PORT}`, 90, 2000);
+    const ok = await waitReady(`http://localhost:${DEFAULT_FRONT_PORT}/login`, 90, 2000);
     if (ok) {
       if (!mainWindow) createWindow();
       mainWindow.loadURL(`http://localhost:${DEFAULT_FRONT_PORT}`);
