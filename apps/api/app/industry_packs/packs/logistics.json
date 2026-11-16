@@ -1,0 +1,92 @@
+{
+  "id": "logistics",
+  "name": "物流货运",
+  "version": "0.1.0",
+  "description": "面向公路货运与物流公司的行业包，覆盖报价调度、在途跟踪、异常处理与月度对账的运输经营闭环。",
+  "terms": {
+    "运单": ["货单", "托运单", "提单"],
+    "调度": ["派车", "车辆调度"],
+    "空驶": ["空载", "放空"],
+    "回单": ["签收回单", "POD"],
+    "在途跟踪": ["轨迹跟踪", "位置跟踪"],
+    "对账": ["运费对账", "月结对账"],
+    "货损货差": ["运输异常", "货差理赔"]
+  },
+  "custom_fields": [
+    {"entity": "workorder", "key": "waybill_no", "label": "运单号", "type": "text", "options": [], "required": true, "description": "运单唯一编号，提货、在途、签收与对账全环节以此串联。"},
+    {"entity": "workorder", "key": "origin", "label": "起运地", "type": "text", "options": [], "required": false, "description": "货物起运城市与详细地址，用于线路匹配与里程计算。"},
+    {"entity": "workorder", "key": "destination", "label": "目的地", "type": "text", "options": [], "required": false, "description": "目的地城市与卸货地址，用于送达时效与回程配载参考。"},
+    {"entity": "workorder", "key": "cargo_type", "label": "货物类型", "type": "select", "options": ["普货", "冷链", "易碎", "大件", "危险品"], "required": false, "description": "货物属性，决定车辆车型、资质要求与装卸规范。"},
+    {"entity": "workorder", "key": "vehicle_no", "label": "承运车牌", "type": "text", "options": [], "required": false, "description": "实际承运车辆牌照，运费、油耗与违章按车归集。"},
+    {"entity": "workorder", "key": "driver_name", "label": "承运司机", "type": "text", "options": [], "required": false, "description": "执行运输任务的司机姓名，司机按运单累计考核准时率。"},
+    {"entity": "workorder", "key": "freight_amount", "label": "运费金额", "type": "number", "options": [], "required": false, "description": "本单约定运费，装卸、等待等附加费一并计入对账。"},
+    {"entity": "workorder", "key": "pod_status", "label": "运单状态", "type": "select", "options": ["待提货", "已提货", "在途", "已签收", "异常"], "required": false, "description": "运单流转状态，超时未更新自动触发跟踪提醒。"},
+    {"entity": "order", "key": "customer_rate", "label": "协议运价", "type": "number", "options": [], "required": false, "description": "客户线路协议价（按吨或按方计），低于成本价的报价需审批。"},
+    {"entity": "order", "key": "settlement_cycle", "label": "结算周期", "type": "select", "options": ["月结", "票结", "预付"], "required": false, "description": "客户结算模式，月结客户进入月度对账流程，票结随单开票。"},
+    {"entity": "product", "key": "line_code", "label": "线路编码", "type": "text", "options": [], "required": false, "description": "固定线路编码，用于线路成本、毛利与调度匹配分析。"},
+    {"entity": "product", "key": "distance_km", "label": "线路里程", "type": "number", "options": [], "required": false, "description": "线路标准里程（公里），油耗与空驶率计算的基准。"},
+    {"entity": "employee", "key": "license_type", "label": "准驾车型", "type": "select", "options": ["A2", "B2", "C1"], "required": false, "description": "司机准驾车型，危险品与大型车辆需匹配对应资质。"},
+    {"entity": "employee", "key": "safety_score", "label": "安全分", "type": "number", "options": [], "required": false, "description": "司机安全驾驶评分，低于阈值限制派单并要求培训。"}
+  ],
+  "workflow_templates": [
+    {
+      "id": "quote-and-dispatch",
+      "name": "报价与调度派车",
+      "description": "询价登记、报价审批、车辆匹配到派车确认的接单流程。",
+      "steps": [
+        {"name": "询价登记", "type": "agent_task", "detail": "登记客户询价的线路、货量、货物类型与时效要求，自动匹配历史成交价与线路成本测算，生成带毛利预估的报价区间建议。"},
+        {"name": "报价审批", "type": "approval", "detail": "低于线路成本价的报价与大客户协议价调整推送调度主管审批，通过后报价生效并通知客户经理在时效内回复客户。"},
+        {"name": "车辆匹配", "type": "agent_task", "detail": "按货物类型匹配合规车型与司机资质，结合车辆实时位置、回程方向与安全分生成派车方案，优先安排顺路单消化回程空驶。"},
+        {"name": "派车确认", "type": "agent_task", "detail": "向选中司机推送派车任务并跟踪确认接单，同步下发装货地址、联系人与装卸注意事项，接单结果实时回写运单状态。"}
+      ]
+    },
+    {
+      "id": "in-transit-tracking",
+      "name": "在途跟踪与异常处理",
+      "description": "轨迹采集、异常判定、处置执行到回单归档的运输履约流程。",
+      "steps": [
+        {"name": "轨迹采集", "type": "agent_task", "detail": "定时获取在途车辆定位与运单节点信息（提货、发车、到达、签收），对超两小时未更新的运单电话核实并登记原因。"},
+        {"name": "异常判定", "type": "condition", "detail": "自动识别延误、偏航、货损货差与司机异常求助等情形，影响交付时效的立即通知客户协商新到货时间，涉及货损的同步启动理赔流程。"},
+        {"name": "异常处置", "type": "agent_task", "detail": "按异常类型执行车辆改派、卸货协调、现场拍照取证与责任登记，处置进展实时同步客服与客户经理，直至异常闭环。"},
+        {"name": "回单归档", "type": "agent_task", "detail": "签收完成后回收签收回单并核对接收数量与外箱状态，电子回单归档至对应运单，纸质回单定期集中寄送客户用于对账。"}
+      ]
+    },
+    {
+      "id": "monthly-reconciliation",
+      "name": "月度对账结算",
+      "description": "运费归集、对账核对、差异审批到开票回款的结算流程。",
+      "steps": [
+        {"name": "运费归集", "type": "agent_task", "detail": "按客户汇总当月已完成运单的运费、装卸等待等附加费与理赔扣款，逐单核对签收回单齐备情况，缺单先行催收。"},
+        {"name": "对账单核对", "type": "agent_task", "detail": "生成客户月度对账单并与客户口径核对，差异项逐单列明原因（重量偏差、附加费争议），协商一致后锁定结算金额。"},
+        {"name": "差异审批", "type": "approval", "detail": "对账差异与理赔扣款方案推送结算主管审批，明确费用承担方与调整金额，审批后同步更新应收账款与承运商应付台账。"},
+        {"name": "开票回款", "type": "agent_task", "detail": "按锁定金额提交开票申请并跟踪回款到账，逾期未回的转入催收流程，同时输出该客户的回款周期与信用评估供续约参考。"}
+      ]
+    }
+  ],
+  "metric_defs": [
+    {"key": "on_time_rate", "name": "准时到达率", "unit": "%", "direction": "higher_better", "description": "约定时限内签收运单数÷应到达运单总数×100%，客户原因导致的等待经确认后剔除。"},
+    {"key": "empty_rate", "name": "空驶率", "unit": "%", "direction": "lower_better", "description": "空驶里程÷总行驶里程×100%，按线路与车辆分解，回程配载优先消化。"},
+    {"key": "profit_per_vehicle", "name": "单车毛利", "unit": "元", "direction": "higher_better", "description": "（运费收入-油耗-路桥费-司机人工-维修保养）÷统计车辆数，按月核算并对比线路差异。"},
+    {"key": "damage_rate", "name": "货损货差率", "unit": "%", "direction": "lower_better", "description": "发生货损货差运单数÷总运单数×100%，按货物类型与线路分解归因。"},
+    {"key": "claim_amount_rate", "name": "理赔率", "unit": "%", "direction": "lower_better", "description": "理赔支出金额÷运费收入×100%，含保价与未保价赔付，超阈值调整承运策略。"},
+    {"key": "vehicle_utilization", "name": "车辆利用率", "unit": "%", "direction": "higher_better", "description": "重载里程÷总行驶里程×100%，与空驶率互补，反映配载与调度效率。"},
+    {"key": "receivable_days", "name": "运费回款周期", "unit": "天", "direction": "lower_better", "description": "应收运费平均余额÷日均确认运费收入，月结客户单独监控账期执行。"},
+    {"key": "exception_resolution_hours", "name": "异常处理时长", "unit": "小时", "direction": "lower_better", "description": "异常发生至闭环的平均小时数，按异常类型分解考核处置时效。"},
+    {"key": "fuel_cost_rate", "name": "油耗成本占比", "unit": "%", "direction": "lower_better", "description": "油费÷运费收入×100%，结合里程与载重分析异常油耗线路。"}
+  ],
+  "agent_roster": [
+    {"name": "调度主管", "department": "project-management", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责派车调度与运力匹配，消化回程空驶并处理运力异常。"},
+    {"name": "客服专员", "department": "support", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "跟踪在途运单与客户沟通，处理异常上报与回单归档。"},
+    {"name": "结算专员", "department": "finance", "capabilities": ["persistent_memory", "computer_use", "scheduled_work"], "mission": "负责月度对账、开票与回款跟踪，维护理赔扣款与应收台账。"},
+    {"name": "安全与车管专员", "department": "engineering", "capabilities": ["computer_use", "persistent_memory"], "mission": "管理司机安全分与车辆维保计划，分析油耗与违章数据。"}
+  ],
+  "kb_seed_topics": [
+    "线路成本测算模型（油耗、路桥、人工）",
+    "派车调度规则与回程配载优先策略",
+    "在途异常分级处置与客户告知口径",
+    "货损货差取证与理赔流程",
+    "月度对账差异类型与处理规范",
+    "司机安全分考核与培训要求",
+    "危险品与大件运输资质合规要点"
+  ]
+}

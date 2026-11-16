@@ -35,44 +35,12 @@ router = APIRouter(prefix="/mcp", tags=["mcp"])
 MCP_PROTOCOL_VERSION = "2025-06-18"
 
 # ---------------- tools 定义（出站） ----------------
-TOOLS = [
-    {"name": "aieos.create_task",
-     "description": "在 AI-EOS 数字公司里创建任务并可指派给某位数字员工（按名字）。",
-     "inputSchema": {"type": "object",
-                     "properties": {
-                         "title": {"type": "string"},
-                         "description": {"type": "string"},
-                         "agent_name": {"type": "string",
-                                         "description": "可选：指派给哪位员工（按名字匹配）"}},
-                     "required": ["title"]}},
-    {"name": "aieos.list_tasks",
-     "description": "列出公司任务（可按状态过滤：TODO/RUNNING/PAUSED/COMPLETED/FAILED/CANCELLED）。",
-     "inputSchema": {"type": "object",
-                     "properties": {"status": {"type": "string"},
-                                     "limit": {"type": "integer"}}}},
-    {"name": "aieos.task_trace",
-     "description": "查看某任务的节点级执行轨迹（每 Agent 每步 + token 成本 + 检查点）。",
-     "inputSchema": {"type": "object",
-                     "properties": {"task_id": {"type": "string"}},
-                     "required": ["task_id"]}},
-    {"name": "aieos.run_workflow",
-     "description": "触发公司里的一条工作流（按 id 或名字），后台执行。",
-     "inputSchema": {"type": "object",
-                      "properties": {"workflow": {"type": "string",
-                                                  "description": "工作流 id 或名字"}},
-                      "required": ["workflow"]}},
-    {"name": "aieos.search_kb",
-     "description": "检索公司知识库（两级 RAG）。",
-     "inputSchema": {"type": "object",
-                     "properties": {"query": {"type": "string"}},
-                     "required": ["query"]}},
-    {"name": "aieos.get_briefing",
-     "description": "拉取 CEO 晨间简报（昨日完成/今日计划/需要你决策/今日成本）。",
-     "inputSchema": {"type": "object"}},
-    {"name": "aieos.list_agents",
-     "description": "列出公司数字员工（名字/角色/状态）。",
-     "inputSchema": {"type": "object"}},
-]
+# V6 M1：schema 收编进工具总线事实源（app/toolbus/server_tools.py）。
+# 执行仍在下方 _execute_tool——它持有用户上下文（build_ctx 行级范围）。
+# 新基座工具要对外暴露时，在 server_tools 加 expose_mcp=True 的 spec。
+from app.toolbus.server_tools import server_mcp_descriptors
+
+TOOLS = server_mcp_descriptors()
 
 
 class McpCallIn(BaseModel):

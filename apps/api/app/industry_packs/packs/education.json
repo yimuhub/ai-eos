@@ -1,0 +1,92 @@
+{
+  "id": "education",
+  "name": "教育培训",
+  "version": "0.1.0",
+  "description": "面向教培机构的行业包，覆盖试听跟进、续费预警、排课优化与转介绍的增长运营闭环。",
+  "terms": {
+    "续费": ["续报", "续班"],
+    "满班率": ["班容利用率", "开班饱和度"],
+    "课消": ["课时消耗", "上课核销"],
+    "试听": ["体验课", "试听课"],
+    "转介绍": ["老带新", "推荐报名"],
+    "退费": ["学费退还", "退费申请"],
+    "课包": ["课时包", "课程套餐"]
+  },
+  "custom_fields": [
+    {"entity": "customer", "key": "grade", "label": "在读年级", "type": "text", "options": [], "required": false, "description": "学员当前年级，用于班型匹配与升学关键期营销。"},
+    {"entity": "customer", "key": "guardian_name", "label": "监护人姓名", "type": "text", "options": [], "required": false, "description": "未成年人学员的监护人姓名，缴费与通知的唯一联系人。"},
+    {"entity": "customer", "key": "guardian_phone", "label": "监护人电话", "type": "text", "options": [], "required": false, "description": "监护人联系电话，试听与续费触达使用，注意保护未成年人隐私。"},
+    {"entity": "customer", "key": "source_channel", "label": "来源渠道", "type": "select", "options": ["地推", "转介绍", "线上投放", "自然到访", "异业合作"], "required": false, "description": "学员首次来源渠道，用于渠道ROI与转介绍裂变分析。"},
+    {"entity": "product", "key": "course_type", "label": "课程类型", "type": "select", "options": ["学科辅导", "素质教育", "艺术", "体育", "成人职业"], "required": false, "description": "课程品类，决定排课模式与合规要求（学科类另受监管约束）。"},
+    {"entity": "product", "key": "class_size_cap", "label": "班容上限", "type": "number", "options": [], "required": false, "description": "班级最大人数，满班率与排班的基准约束。"},
+    {"entity": "product", "key": "price_per_hour", "label": "课时单价", "type": "number", "options": [], "required": false, "description": "折算后的每课时价格，用于退费按比例计算与收入确认。"},
+    {"entity": "order", "key": "total_hours", "label": "总课时", "type": "number", "options": [], "required": false, "description": "已购课时包总课时数，赠课单独标注不计入营收口径。"},
+    {"entity": "order", "key": "consumed_hours", "label": "已消课时", "type": "number", "options": [], "required": false, "description": "实际核销课时数，课消进度驱动续费预警时点。"},
+    {"entity": "order", "key": "fee_type", "label": "缴费方式", "type": "select", "options": ["全款", "分期", "赠课", "老带新优惠"], "required": false, "description": "缴费与优惠方式，分期订单跟踪应收与逾期。"},
+    {"entity": "employee", "key": "teacher_title", "label": "教学职级", "type": "select", "options": ["主讲教师", "助教", "教研", "教务"], "required": false, "description": "教职工职级，排课与课酬按职级与课时饱和度核算。"},
+    {"entity": "employee", "key": "cert_no", "label": "教师资格证号", "type": "text", "options": [], "required": false, "description": "教师资格证编号，学科类课程主讲必须持证上岗。"},
+    {"entity": "workorder", "key": "followup_stage", "label": "跟进阶段", "type": "select", "options": ["试听前", "试听后", "在读维护", "续费期", "休眠召回"], "required": false, "description": "学员跟进所处阶段，驱动对应跟进话术与任务时限。"},
+    {"entity": "workorder", "key": "intent_level", "label": "意向等级", "type": "select", "options": ["H", "A", "B", "C"], "required": false, "description": "跟进意向分级，H与A级当日跟进，C级进入社群培育。"}
+  ],
+  "workflow_templates": [
+    {
+      "id": "trial-followup-conversion",
+      "name": "试听跟进转化",
+      "description": "试听安排、24小时回访、意向分级到报名办理的转化流程。",
+      "steps": [
+        {"name": "试听安排", "type": "agent_task", "detail": "登记试听学员的基础信息与意向科目，匹配合适的班级与上课时段，试听前一天向监护人发送到访提醒、路线与课前须知。"},
+        {"name": "试听后回访", "type": "agent_task", "detail": "试听结束后24小时内回访监护人，反馈孩子课堂表现与教师专业点评，解答费用与师资疑问并给出班型与课时包推荐。"},
+        {"name": "意向判定", "type": "condition", "detail": "按回访结果分级：明确意向的当天推进报名；犹豫的转入48小时二次跟进并申请限时权益；无意向的进入社群培育池。"},
+        {"name": "报名办理", "type": "agent_task", "detail": "确认报名后办理缴费、开卡与分班入班，同步建立学员档案与首月跟进计划，赠送课时单独标注以保证收入口径准确。"}
+      ]
+    },
+    {
+      "id": "renewal-warning",
+      "name": "续费预警与续班",
+      "description": "按剩余课时滚动预警，班主任沟通续费并闭环审批办理。",
+      "steps": [
+        {"name": "续费预警名单", "type": "agent_task", "detail": "按剩余课时数滚动生成续费预警名单，设置剩余10课时与5课时两级预警，自动分配到对应班主任的当日跟进任务。"},
+        {"name": "续费沟通", "type": "agent_task", "detail": "班主任按预警名单逐一沟通续费，向家长展示学习成果报告与下阶段提升规划，收集疑虑与诉求并记录进跟进档案。"},
+        {"name": "意向分流", "type": "condition", "detail": "按沟通结果分流：愿续的直接办理并匹配调班需求；犹豫的申请保留学位与优惠方案；明确不续的做原因归档与挽留评估。"},
+        {"name": "续费审批与办理", "type": "approval", "detail": "折扣超出标准权限的续费方案推送校长审批，通过后办理缴费与课时入账，未续费学员自动转入休眠召回池持续培育。"}
+      ]
+    },
+    {
+      "id": "class-scheduling-optimization",
+      "name": "排课与满班优化",
+      "description": "资源盘点、排课方案生成、审批到通知确认的排课流程。",
+      "steps": [
+        {"name": "资源盘点", "type": "agent_task", "detail": "盘点教师可用时段、教室占用与各班剩余学位，识别接近满班、严重不满与教师饱和异常的班级，形成排课调整基础数据。"},
+        {"name": "排课方案生成", "type": "agent_task", "detail": "按学员连续性与教师饱和度生成排课调整方案，合并不满班级、新开候补班级，标注受影响学员名单与过渡安排。"},
+        {"name": "排课审批", "type": "approval", "detail": "排课调整方案推送教学负责人审批，重点核对教师工时合规性、学员课表冲突与教室容量限制，通过后生成新版课表。"},
+        {"name": "通知与确认", "type": "agent_task", "detail": "向受影响学员的监护人推送新课表与调整原因说明，收集确认与异议反馈，异议集中的班级自动回滚方案并重新生成调整。"}
+      ]
+    }
+  ],
+  "metric_defs": [
+    {"key": "renewal_rate", "name": "续费率", "unit": "%", "direction": "higher_better", "description": "统计期续费人数÷到期应续人数×100%，按课程类型与校区分解，赠课学员单独口径。"},
+    {"key": "class_fill_rate", "name": "满班率", "unit": "%", "direction": "higher_better", "description": "在读人数÷班容上限×100%，按班级统计，低于60%的班级评估合并。"},
+    {"key": "trial_conversion_rate", "name": "试听转化率", "unit": "%", "direction": "higher_better", "description": "试听后报名人数÷试听人数×100%，按来源渠道分解考核渠道质量。"},
+    {"key": "hours_consumption_rate", "name": "课消率", "unit": "%", "direction": "higher_better", "description": "已消课时÷已售课时×100%，课消滞后影响收入确认与续费预警时点。"},
+    {"key": "refund_rate", "name": "退费率", "unit": "%", "direction": "lower_better", "description": "退费金额÷同期收款金额×100%，退费学员按原因分类（搬迁、效果、服务）归因。"},
+    {"key": "referral_rate", "name": "转介绍率", "unit": "%", "direction": "higher_better", "description": "经老学员转介绍的新报名人数÷新增报名总人数×100%，转介绍双方权益单独核算。"},
+    {"key": "avg_revenue_per_student", "name": "生均收入", "unit": "元", "direction": "higher_better", "description": "确认收入÷在读学员数，与续费率、课消率联动观察经营质量。"},
+    {"key": "teacher_utilization", "name": "教师课时饱和度", "unit": "%", "direction": "higher_better", "description": "教师实际上课课时÷标准课时上限×100%，超过100%表示排课超载需调整。"},
+    {"key": "installment_overdue_rate", "name": "分期应收逾期率", "unit": "%", "direction": "lower_better", "description": "逾期未收分期款÷应收分期总额×100%，逾期学员暂停赠送权益与续费优惠。"}
+  ],
+  "agent_roster": [
+    {"name": "课程顾问", "department": "sales", "capabilities": ["web_browsing", "persistent_memory", "self_learning"], "mission": "负责试听邀约与转化跟进，执行报名办理与优惠申请。"},
+    {"name": "班主任", "department": "support", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责在读学员服务、续费预警沟通与家长关系维护。"},
+    {"name": "教务专员", "department": "project-management", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责排课、调班与教师课时管理，保障满班率与课消节奏。"},
+    {"name": "校区运营", "department": "marketing", "capabilities": ["web_browsing", "self_learning"], "mission": "分析渠道投放ROI与转介绍裂变，策划招生活动与社群培育。"}
+  ],
+  "kb_seed_topics": [
+    "试听转化标准流程与家长沟通话术",
+    "续费预警时点设置与学习成果报告模板",
+    "退费政策与按课时比例计算规则",
+    "学科类培训合规要求（持证、收费、广告）",
+    "满班率提升与班级合并的运营标准",
+    "转介绍权益设计与裂变活动规范",
+    "教师课时饱和度与课酬核算办法"
+  ]
+}

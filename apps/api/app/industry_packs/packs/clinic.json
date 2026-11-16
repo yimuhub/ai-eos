@@ -1,0 +1,92 @@
+{
+  "id": "clinic",
+  "name": "医疗诊所",
+  "version": "0.1.0",
+  "description": "面向诊所与门诊部的合规敏感行业包，覆盖预约履约、随访召回、经营分析，全程执行患者信息脱敏。",
+  "terms": {
+    "复诊": ["再次就诊", "复诊预约"],
+    "随访": ["回访", "诊后随访"],
+    "爽约": ["未到诊", "预约失约"],
+    "处方": ["处方笺", "Rx"],
+    "脱敏": ["隐私保护", "数据去标识"],
+    "履约率": ["到诊率", "预约兑现率"],
+    "随访计划": ["随访方案", "复诊计划"]
+  },
+  "custom_fields": [
+    {"entity": "customer", "key": "patient_no", "label": "患者编号", "type": "text", "options": [], "required": true, "description": "患者唯一编号，对外展示与任务记录一律使用编号，禁止明文姓名外发。"},
+    {"entity": "customer", "key": "visit_type", "label": "就诊类型", "type": "select", "options": ["初诊", "复诊"], "required": false, "description": "本次或最近一次就诊类型，用于复诊率与初诊转化统计。"},
+    {"entity": "customer", "key": "allergy_history", "label": "过敏史", "type": "text", "options": [], "required": false, "description": "药物与食物过敏记录，接诊与随访沟通时强制核对提示。"},
+    {"entity": "customer", "key": "chronic_tag", "label": "慢病标签", "type": "select", "options": ["高血压", "糖尿病", "慢阻肺", "无"], "required": false, "description": "慢病管理标签，驱动随访计划模板与复诊提醒周期。"},
+    {"entity": "customer", "key": "privacy_level", "label": "敏感等级", "type": "select", "options": ["普通", "高敏感"], "required": false, "description": "档案敏感分级，高敏感档案的查看与导出需双人复核留痕。"},
+    {"entity": "order", "key": "dept", "label": "就诊科室", "type": "select", "options": ["全科", "口腔", "中医", "儿科", "妇科"], "required": false, "description": "接诊科室，用于科室维度经营分析与医生产值统计。"},
+    {"entity": "order", "key": "charge_type", "label": "结算类型", "type": "select", "options": ["自费", "医保", "商保直付"], "required": false, "description": "费用结算方式，医保单据按医保目录与限频规则核对。"},
+    {"entity": "order", "key": "diagnosis_code", "label": "诊断编码", "type": "text", "options": [], "required": false, "description": "按ICD-10编码记录主要诊断，用于病种结构与合规检查。"},
+    {"entity": "workorder", "key": "followup_type", "label": "随访类型", "type": "select", "options": ["术后随访", "用药随访", "检查提醒", "满意度回访"], "required": false, "description": "随访任务类型，不同类型对应不同话术模板与随访周期。"},
+    {"entity": "workorder", "key": "followup_date", "label": "计划随访日", "type": "date", "options": [], "required": false, "description": "计划执行随访的日期，逾期未执行的自动升级重派。"},
+    {"entity": "workorder", "key": "followup_status", "label": "随访状态", "type": "select", "options": ["待随访", "已完成", "失访"], "required": false, "description": "随访执行状态，失访需登记原因并保留再次触达渠道。"},
+    {"entity": "product", "key": "batch_no", "label": "药品批号", "type": "text", "options": [], "required": false, "description": "药品与耗材批号，用于效期管理与追溯，近效期自动预警。"},
+    {"entity": "product", "key": "expiry_date", "label": "有效期至", "type": "date", "options": [], "required": false, "description": "药品耗材有效期，到期前90天、30天两级预警并控制采购。"},
+    {"entity": "employee", "key": "license_no", "label": "执业证号", "type": "text", "options": [], "required": false, "description": "医师或护士执业证书编号，排班与处方权限校验依据。"}
+  ],
+  "workflow_templates": [
+    {
+      "id": "appointment-reminder",
+      "name": "预约提醒与履约管理",
+      "description": "次日预约汇总、分时段提醒、爽约处理与履约统计。",
+      "steps": [
+        {"name": "次日预约汇总", "type": "agent_task", "detail": "每日下班前汇总次日全部预约记录，按科室与时段排序，核对医生排班与诊室资源占用，发现预约冲突时提前协调改期。"},
+        {"name": "分时段提醒", "type": "agent_task", "detail": "按预约时段提前推送提醒，首次提醒含到诊指引与携带资料，前2小时二次提醒；高敏感档案的提醒内容仅使用患者编号。"},
+        {"name": "爽约处理", "type": "condition", "detail": "预约超时30分钟未到诊即标记爽约，立即电话确认改期意向；对累计爽约两次以上的患者，后续预约调整为到店现场取号。"},
+        {"name": "履约统计", "type": "agent_task", "detail": "每日汇总各科室预约量、到诊率与爽约率，定位爽约集中的时段与渠道，输出放号节奏、提醒频次与号源投放的优化建议。"}
+      ]
+    },
+    {
+      "id": "followup-recall",
+      "name": "随访与复诊召回",
+      "description": "按随访计划生成名单、执行随访、意向分级到复诊召回统计。",
+      "steps": [
+        {"name": "随访名单生成", "type": "agent_task", "detail": "按随访计划模板生成每日待随访名单，区分术后、用药与检查提醒类型，核对档案敏感等级后以脱敏形式下发任务。"},
+        {"name": "随访执行", "type": "agent_task", "detail": "按随访话术模板执行电话或消息随访，记录恢复情况、用药依从性与不适反馈，出现异常症状提示及时就诊并上报医生。"},
+        {"name": "随访结果分级", "type": "condition", "detail": "按随访结果分级：需复诊的登记复诊预约；情况稳定的进入下一随访周期；表达不满的转客服关怀并生成投诉处理工单。"},
+        {"name": "召回效果统计", "type": "agent_task", "detail": "每周统计随访完成率、失访率与随访后的复诊转化率，横向对比不同随访模板的效果差异，持续优化随访周期与话术库。"}
+      ]
+    },
+    {
+      "id": "privacy-compliance-patrol",
+      "name": "敏感数据合规巡检",
+      "description": "扫描患者数据访问与导出行为，处置违规并固化合规规则。",
+      "steps": [
+        {"name": "访问与导出扫描", "type": "agent_task", "detail": "每日扫描患者档案的查询、导出与外发操作日志，重点标记非诊疗必需的批量查询、非常用设备登录与异常时段访问行为。"},
+        {"name": "风险判定", "type": "condition", "detail": "命中高风险行为（批量导出、明文传输证件号）立即阻断并冻结账号；低风险行为记录留痕并提示操作人合规要求。"},
+        {"name": "整改工单", "type": "agent_task", "detail": "对确认的违规行为生成整改工单，明确责任人、整改措施与完成时限，同步评估影响范围并判断是否需要上报负责人处理。"},
+        {"name": "合规复核", "type": "approval", "detail": "整改完成后由合规负责人复核确认关闭，每月输出合规巡检报告，将高频违规点固化为制度条款与系统自动校验规则。"}
+      ]
+    }
+  ],
+  "metric_defs": [
+    {"key": "revisit_rate", "name": "复诊率", "unit": "%", "direction": "higher_better", "description": "统计期内复诊人次÷总诊疗人次×100%，按科室与病种分解，慢病随访口径单独统计。"},
+    {"key": "appointment_show_rate", "name": "预约履约率", "unit": "%", "direction": "higher_better", "description": "实际到诊人次÷预约总人次×100%，改期后按时到诊计入履约，爽约与主动取消分开统计。"},
+    {"key": "no_show_rate", "name": "爽约率", "unit": "%", "direction": "lower_better", "description": "爽约人次÷预约总人次×100%，爽约时段的号源损失按释放率折算评估。"},
+    {"key": "avg_ticket", "name": "客单价", "unit": "元", "direction": "higher_better", "description": "医疗收入÷诊疗人次，药耗与诊查费分项列示，医保与自费口径分开统计。"},
+    {"key": "revenue_per_doctor", "name": "医生人均产值", "unit": "元", "direction": "higher_better", "description": "科室医疗收入÷出诊医生数，剔除纯药收入后的口径用于绩效参考。"},
+    {"key": "followup_completion_rate", "name": "随访完成率", "unit": "%", "direction": "higher_better", "description": "已完成随访任务数÷计划随访任务数×100%，失访单独统计并分析原因。"},
+    {"key": "near_expiry_drug_rate", "name": "药品近效期占比", "unit": "%", "direction": "lower_better", "description": "效期6个月内药品金额÷药品库存总金额×100%，近效期药品优先调拨使用。"},
+    {"key": "complaint_rate", "name": "投诉率", "unit": "%", "direction": "lower_better", "description": "有效投诉件数÷诊疗人次×100%，投诉量少时按千人次口径辅助观察，按服务、医疗、收费分类归因。"},
+    {"key": "drug_revenue_share", "name": "药占比", "unit": "%", "direction": "lower_better", "description": "药品收入÷医疗总收入×100%，监控药占比合理性，超出区域参考值需开展处方点评。"}
+  ],
+  "agent_roster": [
+    {"name": "前台助理", "department": "support", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责预约提醒、到诊接待与爽约改期，严格执行患者信息脱敏要求。"},
+    {"name": "随访专员", "department": "support", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "按随访计划执行诊后随访与复诊召回，记录反馈并异常上报医生。"},
+    {"name": "运营分析专员", "department": "marketing", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "分析复诊率、履约率与科室产值，输出运营优化建议且不接触患者明文信息。"},
+    {"name": "合规巡检员", "department": "legal", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "巡检档案访问与导出行为，处置违规并输出合规整改报告。"}
+  ],
+  "kb_seed_topics": [
+    "患者隐私保护与脱敏展示规范（编号制）",
+    "随访计划模板与随访话术标准",
+    "预约放号策略与爽约处理规则",
+    "处方点评与合理用药基本要求",
+    "药品效期管理与近效期处置流程",
+    "医疗广告与宣传的合规红线",
+    "病历与随访记录的保存期限要求"
+  ]
+}

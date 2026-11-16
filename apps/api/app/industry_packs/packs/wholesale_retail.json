@@ -1,0 +1,92 @@
+{
+  "id": "wholesale-retail",
+  "name": "批发零售",
+  "version": "0.1.0",
+  "description": "面向批发与连锁零售企业的行业包，覆盖补货预警、门店调拨、促销复盘与月度盘点的运营闭环。",
+  "terms": {
+    "SKU": ["最小存货单位", "单品", "款号"],
+    "动销率": ["动销比", "销售活跃度"],
+    "库转天数": ["库存周转天数", "存货周转天数"],
+    "缺货率": ["断货率", "缺货比例"],
+    "盘点": ["库存盘点", "存货清点"],
+    "促销档期": ["活动档期", "大促档期"],
+    "账期": ["信用账期", "付款周期"]
+  },
+  "custom_fields": [
+    {"entity": "product", "key": "barcode", "label": "条形码", "type": "text", "options": [], "required": false, "description": "商品国标条码（EAN-13），用于扫码收货、收银与盘点匹配。"},
+    {"entity": "product", "key": "specification", "label": "规格型号", "type": "text", "options": [], "required": false, "description": "商品规格与包装单位，如500ml×24瓶/箱，用于批发报价与收货核对。"},
+    {"entity": "product", "key": "purchase_price", "label": "采购进价", "type": "number", "options": [], "required": false, "description": "最近一次采购的不含税进价，作为毛利测算与调拨作价的基准。"},
+    {"entity": "product", "key": "retail_price", "label": "零售标价", "type": "number", "options": [], "required": false, "description": "门店零售挂牌价，与促销价、会员价联动计算毛利。"},
+    {"entity": "product", "key": "shelf_life_days", "label": "保质期天数", "type": "number", "options": [], "required": false, "description": "商品保质期天数，用于近效期预警与先进先出管理，无保质期商品填0。"},
+    {"entity": "product", "key": "supplier_code", "label": "主供应商编码", "type": "text", "options": [], "required": false, "description": "默认供货商编码，补货建议自动按此供应商生成采购申请。"},
+    {"entity": "order", "key": "order_type", "label": "订单类型", "type": "select", "options": ["批发", "零售", "团购", "代发"], "required": false, "description": "区分批发大单与门店零售，批发单走账期结算，零售单现结。"},
+    {"entity": "order", "key": "store_code", "label": "门店编号", "type": "text", "options": [], "required": false, "description": "下单或收货门店编码，用于门店级销量、库存与业绩归集。"},
+    {"entity": "order", "key": "settlement_type", "label": "结算方式", "type": "select", "options": ["现结", "账期", "代销", "预付"], "required": false, "description": "与客户约定的结算模式，驱动对账单生成与催收节奏。"},
+    {"entity": "customer", "key": "customer_level", "label": "客户等级", "type": "select", "options": ["战略大客户", "批发客户", "会员", "散客"], "required": false, "description": "客户分级决定价格政策与账期，等级调整需采购或店长审批。"},
+    {"entity": "customer", "key": "credit_limit", "label": "信用额度", "type": "number", "options": [], "required": false, "description": "允许的最高赊购余额，超限订单自动拦截并转人工审批。"},
+    {"entity": "customer", "key": "last_purchase_date", "label": "最近采购日期", "type": "date", "options": [], "required": false, "description": "客户最近一次下单日期，用于流失预警与复购唤醒。"},
+    {"entity": "employee", "key": "store_code", "label": "所属门店", "type": "text", "options": [], "required": false, "description": "员工归属门店编码，用于人效、排班与业绩提成归集。"}
+  ],
+  "workflow_templates": [
+    {
+      "id": "replenishment-and-transfer",
+      "name": "补货预警与门店调拨",
+      "description": "每日监测库存与动销，自动生成补货或调拨建议并跟踪到货。",
+      "steps": [
+        {"name": "库存与动销数据汇总", "type": "agent_task", "detail": "每日晨间汇总各门店与仓的可用库存、昨日销量与近7天动销，标记低于安全库存或存在断货风险的SKU，形成补货预警清单。"},
+        {"name": "补货需求判定", "type": "condition", "detail": "按安全库存、近7天日均销量与到货周期计算建议补货量；仓内有货优先转门店调拨，仓内不足转采购申请，滞销品优先调拨消化。"},
+        {"name": "补货与调拨单生成", "type": "agent_task", "detail": "生成门店间调拨单或采购申请单，注明数量、到货时限与承运方式，核对信用额度与在途未到货，避免重复下单，同步通知收货方与供应商。"},
+        {"name": "补货审批", "type": "approval", "detail": "将补货与调拨单汇总推送店长或采购负责人审批，附金额、毛利影响与缺货损失预估，审批通过后自动下发生效。"},
+        {"name": "到货跟踪与上架核对", "type": "agent_task", "detail": "跟踪在途订单的发货与到货状态，到货后核对实收数量与效期，差异登记并及时反馈供应商，闭单后更新库存台账。"}
+      ]
+    },
+    {
+      "id": "promotion-review",
+      "name": "促销档期复盘",
+      "description": "促销结束后归集数据、评估让利效果并转化为下档期执行方案。",
+      "steps": [
+        {"name": "档期数据归集", "type": "agent_task", "detail": "促销结束后归集档期内销售额、销量、毛利、客流与新增会员数据，按门店与SKU两个维度拆分，并与非促销基线周期对比。"},
+        {"name": "效果评估判定", "type": "condition", "detail": "对比毛利率与销量增幅判定档期效果：毛利下滑但销量未达增幅目标的SKU标记为无效让利，纳入下次选品剔除清单。"},
+        {"name": "复盘报告生成", "type": "agent_task", "detail": "输出促销复盘报告，涵盖整体达成、TOP与末位SKU、让利毛损、缺货与退换情况，并给出下档期选品与定价建议。"},
+        {"name": "复盘审阅", "type": "approval", "detail": "复盘报告推送市场与运营负责人审阅，审定后的选品、定价与赠品策略转化为下一档期执行方案，并归档备查供追踪。"}
+      ]
+    },
+    {
+      "id": "monthly-stocktaking",
+      "name": "月度盘点与盘损处理",
+      "description": "月末组织盘点、分析账实差异并闭环盘损处理与整改。",
+      "steps": [
+        {"name": "盘点任务生成", "type": "agent_task", "detail": "按门店生成月末盘点任务与盘点表，区分全盘与循环盘点范围，明确盘点时点和停止收发货窗口，安排双人交叉盘点以防漏盘。"},
+        {"name": "差异分析", "type": "agent_task", "detail": "盘点完成后自动比对账面与实盘差异，按SKU输出盘盈盘亏数量与金额，定位差异集中的门店与品类，结合损耗记录初判原因。"},
+        {"name": "差异处理审批", "type": "approval", "detail": "差异清单与初判原因推送店长与财务共同审批，明确报损、报溢或追责的处理口径，审批通过后调整库存并留存处理凭证。"},
+        {"name": "盘损台账更新", "type": "agent_task", "detail": "将审批后的盘损结果计入门店盘损台账并更新月度盘损率，对连续两个月盘损率超标的门店自动生成专项整改建议并跟踪落实。"}
+      ]
+    }
+  ],
+  "metric_defs": [
+    {"key": "inventory_turnover_days", "name": "库存周转天数", "unit": "天", "direction": "lower_better", "description": "平均库存成本÷日均销售成本；日均销售成本=期间销售出库成本÷期间自然日数，按品类与门店双维度统计。"},
+    {"key": "stockout_rate", "name": "缺货率", "unit": "%", "direction": "lower_better", "description": "营业时段内缺货SKU时点数÷（SKU总数×盘点时点数）×100%，另按缺货导致的销售损失金额口径复核。"},
+    {"key": "sell_through_rate", "name": "动销率", "unit": "%", "direction": "higher_better", "description": "期间有销售记录的SKU数÷在售SKU总数×100%，用于识别滞销与淘汰品。"},
+    {"key": "gross_margin_rate", "name": "毛利率", "unit": "%", "direction": "higher_better", "description": "（销售收入-销售成本）÷销售收入×100%，促销让利、赠品与积分兑换成本计入销售成本。"},
+    {"key": "shrinkage_rate", "name": "盘损率", "unit": "%", "direction": "lower_better", "description": "盘点差异金额（盘亏-盘盈）÷账面库存金额×100%，按门店与品类分解追踪。"},
+    {"key": "sss_growth", "name": "同店销售额增长率", "unit": "%", "direction": "higher_better", "description": "（本期同店销售额-上年同期同店销售额）÷上年同期同店销售额×100%，同店指开业满12个月的门店。"},
+    {"key": "avg_ticket", "name": "客单价", "unit": "元", "direction": "higher_better", "description": "零售销售额÷成交小票数；批发口径按订单金额÷订单数单独统计。"},
+    {"key": "supplier_fill_rate", "name": "供应商到货及时率", "unit": "%", "direction": "higher_better", "description": "按约定交期足额到货的订单数÷下单总数×100%，用于考核供应商履约并校准补货提前期。"},
+    {"key": "inventory_sales_ratio", "name": "库销比", "unit": "个", "direction": "lower_better", "description": "期末库存数量÷期间销售数量，超过品类基准值提示积压，用于补货节奏与清仓决策。"}
+  ],
+  "agent_roster": [
+    {"name": "采购专员", "department": "supply-chain", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责补货预警研判、采购申请与供应商到货跟踪，维护安全库存与主供商品清单。"},
+    {"name": "店长", "department": "company", "capabilities": ["web_browsing", "persistent_memory"], "mission": "负责门店销售、盘点与人员管理，审核补货调拨单并跟进盘损整改。"},
+    {"name": "库存专员", "department": "supply-chain", "capabilities": ["computer_use", "scheduled_work"], "mission": "每日核对库存与在途数据，执行调拨与盘点差异处理，维护商品主数据。"},
+    {"name": "促销运营", "department": "marketing", "capabilities": ["web_browsing", "self_learning"], "mission": "策划与复盘促销档期，输出选品定价建议并跟踪动销与毛利表现。"}
+  ],
+  "kb_seed_topics": [
+    "安全库存与补货点设置规则",
+    "门店间调拨与库存共享管理制度",
+    "促销档期选品、定价与让利审批规范",
+    "月度盘点流程与盘损追责口径",
+    "商品主数据维护规范（条码、规格、进价）",
+    "批发客户信用额度与账期管理政策",
+    "近效期与滞销商品的退换货处理流程"
+  ]
+}

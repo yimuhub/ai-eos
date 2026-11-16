@@ -1,0 +1,103 @@
+{
+  "id": "construction",
+  "name": "建筑装修",
+  "version": "0.1.0",
+  "description": "面向建筑装修与工程企业的行业包，覆盖报价签约、进度款申请、变更签证与竣工结算的项目管理闭环。",
+  "terms": {
+    "变更签证": ["工程签证", "设计变更", "现场签证"],
+    "进度款": ["工程进度款", "中期款"],
+    "竣工结算": ["工程结算", "结算书"],
+    "劳务班组": ["劳务队伍", "分包班组"],
+    "隐蔽工程": ["隐蔽项", "隐蔽验收"],
+    "增项": ["追加项目", "工程加项"],
+    "工期": ["合同工期", "总工期"]
+  },
+  "custom_fields": [
+    {"entity": "workorder", "key": "project_code", "label": "项目编号", "type": "text", "options": [], "required": true, "description": "项目唯一编号，所有工单、材料与劳务记录按项目归集。"},
+    {"entity": "workorder", "key": "milestone", "label": "施工阶段", "type": "select", "options": ["拆除改造", "水电隐蔽", "泥瓦", "木工", "油漆涂饰", "安装收尾", "竣工交付"], "required": false, "description": "工单所属施工节点，进度款申请按节点完成情况校验。"},
+    {"entity": "workorder", "key": "completion_pct", "label": "完成百分比", "type": "number", "options": [], "required": false, "description": "节点工程量完成比例，由现场反馈与影像佐证后更新。"},
+    {"entity": "workorder", "key": "acceptance_status", "label": "验收状态", "type": "select", "options": ["待验收", "验收合格", "整改中"], "required": false, "description": "节点验收结论，隐蔽工程验收合格方可进入下道工序。"},
+    {"entity": "customer", "key": "house_address", "label": "施工地址", "type": "text", "options": [], "required": false, "description": "施工房产地址与门牌信息，供排期、进场与验收使用。"},
+    {"entity": "customer", "key": "contract_amount", "label": "合同金额", "type": "number", "options": [], "required": false, "description": "签约合同总价（不含后续变更），变更后以结算金额为准复核。"},
+    {"entity": "order", "key": "change_amount", "label": "变更金额", "type": "number", "options": [], "required": false, "description": "本单关联的签证变更金额，正为增项、负为减项，累计影响结算总价。"},
+    {"entity": "order", "key": "payment_stage", "label": "款项阶段", "type": "select", "options": ["定金", "首期款", "中期款", "尾款", "结算款"], "required": false, "description": "当前应收款项阶段，与合同付款节点和回款台账联动。"},
+    {"entity": "order", "key": "settlement_amount", "label": "结算金额", "type": "number", "options": [], "required": false, "description": "竣工结算审定金额，含合同价与全部签证变更的合计。"},
+    {"entity": "product", "key": "specification", "label": "品牌型号", "type": "text", "options": [], "required": false, "description": "进场材料的品牌、型号与规格，用于封样比对与验收核对。"},
+    {"entity": "product", "key": "inbound_qty", "label": "进场数量", "type": "number", "options": [], "required": false, "description": "材料实际进场数量与日期，超量进场自动预警资金占用。"},
+    {"entity": "employee", "key": "crew_name", "label": "所属班组", "type": "text", "options": [], "required": false, "description": "工人所属劳务班组名称，劳务结算与出勤按班组归集。"},
+    {"entity": "employee", "key": "work_type", "label": "工种", "type": "select", "options": ["水电工", "瓦工", "木工", "油漆工", "杂工"], "required": false, "description": "工人技术工种，派工时按工种与持证要求匹配。"},
+    {"entity": "employee", "key": "daily_wage", "label": "日工资", "type": "number", "options": [], "required": false, "description": "工人约定日工资标准，劳务费用与项目成本按此归集。"}
+  ],
+  "workflow_templates": [
+    {
+      "id": "quotation-to-contract",
+      "name": "报价到签约",
+      "description": "从量房需求整理到报价审批、合同签署与技术交底的成交流程。",
+      "steps": [
+        {"name": "量房与需求整理", "type": "agent_task", "detail": "整理量房尺寸数据、客户需求清单与装修意向档次，核对户型图与现场特殊事项备注，形成报价输入资料并列出待确认项。"},
+        {"name": "报价单编制", "type": "agent_task", "detail": "按工程量清单与内部定额生成报价单，分列主材、辅材、人工与管理费，对易超支项目给出风险提示与替代材料备选方案。"},
+        {"name": "报价审批", "type": "approval", "detail": "报价单推送预算员与经营负责人审批，重点复核毛利率、漏项错项与低于成本价的清单项，审批通过后方可向客户正式报出。"},
+        {"name": "合同签署与交底", "type": "agent_task", "detail": "核对合同价款、工期、付款节点与增减项条款后安排签署，同步组织设计、施工、材料三方交底并归档合同资料。"}
+      ]
+    },
+    {
+      "id": "progress-payment",
+      "name": "进度款申请与回款",
+      "description": "按节点校验产值与验收情况，发起请款审批并跟踪回款。",
+      "steps": [
+        {"name": "节点完成校验", "type": "condition", "detail": "校验当前节点工程量、验收状态与影像记录是否齐备，隐蔽工程须有验收合格记录，未达标节点不得发起进度款申请。"},
+        {"name": "产值与签证汇总", "type": "agent_task", "detail": "汇总本期完成产值、累计已付款与在手签证金额，按合同付款节点比例计算本期应请款金额，编制进度款申请单及附件清单。"},
+        {"name": "请款审批", "type": "approval", "detail": "进度款申请单先经项目经理与财务复核，再推送客户或业主方确认，明确付款金额、约定到账日与收款账户，审批链路全程留痕。"},
+        {"name": "回款跟踪", "type": "agent_task", "detail": "按约定到账日跟踪回款，逾期3天启动提醒、7天启动书面催告，回款情况同步更新项目资金计划与材料付款安排。"}
+      ]
+    },
+    {
+      "id": "change-visa-management",
+      "name": "变更签证管理",
+      "description": "变更登记、造价工期测算、双方确认到台账更新的签证闭环。",
+      "steps": [
+        {"name": "变更登记", "type": "agent_task", "detail": "登记变更事项内容、发起方与紧急程度，留存现场照片、图纸与沟通记录作为依据，杜绝无书面记录的口头变更。"},
+        {"name": "造价与工期测算", "type": "agent_task", "detail": "测算变更涉及的工程量、材料与人工成本及工期影响，出具增减金额与顺延天数，并评估对后续工序衔接的连锁影响。"},
+        {"name": "双方确认审批", "type": "approval", "detail": "签证单经公司内部预算与项目审批后送客户书面签认，未经确认的变更不得先行施工，重大变更须以补充协议形式落定。"},
+        {"name": "台账更新", "type": "agent_task", "detail": "确认后的签证自动计入项目变更台账，同步更新结算预估金额、材料采购计划与总工期，月末输出签证对毛利的影响分析。"}
+      ]
+    },
+    {
+      "id": "completion-settlement",
+      "name": "竣工结算",
+      "description": "竣工验收资料归集、工程量核对到结算书审批与尾款回收。",
+      "steps": [
+        {"name": "竣工资料归集", "type": "agent_task", "detail": "归集竣工验收单、隐蔽验收记录、签证变更单与材料进场凭证，逐项核对资料完整性与签字盖章，缺失项限期补齐后归档。"},
+        {"name": "工程量核对", "type": "agent_task", "detail": "按合同清单与签证单逐项核对实际工程量，与过程累计产值对齐，对差异项列明原因并准备现场影像等佐证材料备查。"},
+        {"name": "结算书编制与审批", "type": "approval", "detail": "编制含合同价、签证增减、扣款事项的结算书，经预算员与项目经理复核后推送客户审定，审定结果作为尾款与质保金依据。"},
+        {"name": "尾款与质保金跟踪", "type": "agent_task", "detail": "按结算审定金额跟踪尾款到账进度与质保金到期时间，质保期到期前发起客户质保回访，确认无质量问题的按期申请退还质保金。"}
+      ]
+    }
+  ],
+  "metric_defs": [
+    {"key": "project_gross_margin", "name": "项目毛利率", "unit": "%", "direction": "higher_better", "description": "（结算收入-直接成本）÷结算收入×100%；直接成本含材料、劳务、机械与分包，管理费另计。"},
+    {"key": "schedule_variance", "name": "进度偏差", "unit": "天", "direction": "lower_better", "description": "关键节点实际完成日期-计划完成日期，正值即延误，按周更新并标注延误原因归类。"},
+    {"key": "collection_cycle", "name": "回款周期", "unit": "天", "direction": "lower_better", "description": "应收账款平均余额÷日均确认产值，或按单项目（回款日期-应款日期）均值计算。"},
+    {"key": "change_amount_rate", "name": "变更率", "unit": "%", "direction": "lower_better", "description": "签证变更总金额÷合同金额×100%，变更率过高反映前期勘查或报价漏项问题。"},
+    {"key": "acceptance_pass_rate", "name": "一次验收合格率", "unit": "%", "direction": "higher_better", "description": "一次验收合格节点数÷验收节点总数×100%，隐蔽工程单独统计并强制达标。"},
+    {"key": "rework_rate", "name": "返工率", "unit": "%", "direction": "lower_better", "description": "返工工单数÷施工工单总数×100%，返工工时与材料损失计入项目成本。"},
+    {"key": "material_cost_rate", "name": "材料成本占比", "unit": "%", "direction": "lower_better", "description": "材料成本÷结算收入×100%，与报价材料占比对比反映采购与损耗管控。"},
+    {"key": "labor_cost_rate", "name": "人工成本占比", "unit": "%", "direction": "lower_better", "description": "劳务费用÷结算收入×100%，按班组与工种分解核对与定额差异。"},
+    {"key": "overdue_receivable_rate", "name": "逾期应收占比", "unit": "%", "direction": "lower_better", "description": "逾期未收款项÷应收款项总额×100%，逾期以合同约定付款节点的次日起算。"}
+  ],
+  "agent_roster": [
+    {"name": "项目经理", "department": "project-management", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "统筹项目进度、验收与劳务安排，跟踪进度偏差并发起赶工或签证。"},
+    {"name": "预算造价员", "department": "finance", "capabilities": ["persistent_memory", "computer_use"], "mission": "负责报价编制、变更测算与结算书编制，监控项目毛利率与成本异常。"},
+    {"name": "材料员", "department": "supply-chain", "capabilities": ["computer_use", "persistent_memory"], "mission": "管理材料进场验收与库存占用，跟踪供应商到货与封样比对。"},
+    {"name": "回款与合同专员", "department": "sales", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "跟进进度款请款与回款催收，维护合同台账与客户沟通记录。"}
+  ],
+  "kb_seed_topics": [
+    "装修工程报价定额与工程量计算规则",
+    "隐蔽工程验收标准与影像留证要求",
+    "变更签证的签认流程与法律效力要点",
+    "进度款申请的合同节点与请款比例约定",
+    "劳务班组结算与工资支付合规要求（含实名制）",
+    "常见增项争议与客户沟通话术规范",
+    "竣工结算资料清单与归档标准"
+  ]
+}

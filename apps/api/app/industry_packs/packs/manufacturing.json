@@ -1,0 +1,111 @@
+{
+  "id": "manufacturing",
+  "name": "制造业",
+  "version": "0.1.0",
+  "description": "面向中小离散制造企业的行业包，打通订单评审、MRP运算、排产报工、质检入库到对账开票的全流程。",
+  "terms": {
+    "工单": ["生产工单", "制令单", "加工单"],
+    "MRP": ["物料需求计划", "Material Requirements Planning"],
+    "BOM": ["物料清单", "产品结构表"],
+    "OEE": ["设备综合效率", "全局设备效率"],
+    "报工": ["工序报工", "完工汇报"],
+    "良品率": ["合格率", "直通率", "一次合格率"],
+    "排产": ["生产排程", "生产计划编排"]
+  },
+  "custom_fields": [
+    {"entity": "order", "key": "contract_no", "label": "合同编号", "type": "text", "options": [], "required": false, "description": "销售合同或订单协议编号，对账开票与应收核算的关联依据。"},
+    {"entity": "order", "key": "delivery_date", "label": "客户交期", "type": "date", "options": [], "required": false, "description": "合同约定的交货日期，排产与准时交付率的考核基准。"},
+    {"entity": "order", "key": "order_type", "label": "订单类型", "type": "select", "options": ["量产单", "试制单", "样品单", "备库单"], "required": false, "description": "区分量产与试制订单，试制单走小批量评审通道。"},
+    {"entity": "customer", "key": "credit_terms", "label": "结算账期", "type": "select", "options": ["现结", "月结30天", "月结60天", "承兑汇票"], "required": false, "description": "客户约定的结算方式与账期，接单评审时校验信用占用。"},
+    {"entity": "product", "key": "bom_version", "label": "BOM版本", "type": "text", "options": [], "required": false, "description": "产品当前生效的物料清单版本，MRP运算按此版本展开。"},
+    {"entity": "product", "key": "unit_cost", "label": "单位标准成本", "type": "number", "options": [], "required": false, "description": "含材料、人工与制造费用的单件标准成本，用于报价与毛利测算。"},
+    {"entity": "product", "key": "safety_stock", "label": "安全库存", "type": "number", "options": [], "required": false, "description": "常备物料或成品的安全库存量，低于此值触发补货预警。"},
+    {"entity": "workorder", "key": "batch_no", "label": "生产批次号", "type": "text", "options": [], "required": false, "description": "生产批次唯一编号，质量追溯与召回按批次穿透到原料。"},
+    {"entity": "workorder", "key": "process_route", "label": "工艺路线", "type": "text", "options": [], "required": false, "description": "工单依次经过的工序序列与标准工时，报工按路线节点采集。"},
+    {"entity": "workorder", "key": "planned_qty", "label": "计划数量", "type": "number", "options": [], "required": false, "description": "本工单计划投产数量，与完工、不良数量对比计算达成率。"},
+    {"entity": "workorder", "key": "qualified_qty", "label": "合格数量", "type": "number", "options": [], "required": false, "description": "检验合格入库数量，良品率与入库对账的数量口径。"},
+    {"entity": "workorder", "key": "defect_qty", "label": "不良数量", "type": "number", "options": [], "required": false, "description": "检验判定不良的数量，按不良代码归类统计以定位质量根因。"},
+    {"entity": "workorder", "key": "quality_status", "label": "质检状态", "type": "select", "options": ["待检", "检验中", "合格", "不合格", "让步接收"], "required": false, "description": "批次检验流转状态，不合格与让步接收需质量负责人审批。"},
+    {"entity": "workorder", "key": "equipment_code", "label": "责任机台", "type": "text", "options": [], "required": false, "description": "承担本工序加工的设备编号，OEE与良品率按机台归集。"},
+    {"entity": "employee", "key": "work_type", "label": "工种", "type": "select", "options": ["操作工", "机修工", "质检员", "仓储员", "计划员"], "required": false, "description": "员工技术工种，排班派工与技能矩阵维护依据。"},
+    {"entity": "employee", "key": "shift", "label": "班次", "type": "select", "options": ["白班", "中班", "夜班"], "required": false, "description": "员工所属班次，报工工时与设备负荷按班次拆分核算。"}
+  ],
+  "workflow_templates": [
+    {
+      "id": "order-to-delivery",
+      "name": "订单评审到交付主流程",
+      "description": "覆盖接单评审、MRP运算、排产审批、领料报工、质检入库到对账开票的制造主链路。",
+      "steps": [
+        {"name": "接单评审", "type": "agent_task", "detail": "汇总新订单的产品型号、数量、交期与客户信用，核对在手订单与在产工单，识别交期冲突与产能风险，输出评审结论清单供计划员确认。"},
+        {"name": "交期与物料可行性判定", "type": "condition", "detail": "根据评审结论判断订单是否可接：物料齐套且产能可满足交期则转入MRP运算；存在缺口则生成缺料与加班补产能方案，返回销售与客户协商交期。"},
+        {"name": "MRP运算与缺料分析", "type": "agent_task", "detail": "按BOM展开订单需求，扣除现有库存、在途采购与在制占用，计算净需求与建议下单量，结合采购提前期生成缺料表和采购申请单。"},
+        {"name": "排产计划编制", "type": "agent_task", "detail": "依据订单优先级、设备产能与工艺路线编制作业计划，安排各工序的起止时间与责任班组，标注瓶颈工序并给出插单、加班等赶工建议。"},
+        {"name": "生产计划审批", "type": "approval", "detail": "将排产计划、关键物料齐套情况与交期承诺推送生产负责人审批，附产能负荷与风险提示，审批通过后冻结计划版本并下发车间执行。"},
+        {"name": "领料报工跟踪", "type": "agent_task", "detail": "按工单生成领料单并跟踪车间领料，逐工序采集报工数据（完工数量、工时、不良数），每日汇总进度与计划对比，延误超半日即预警。"},
+        {"name": "过程与成品质检", "type": "agent_task", "detail": "按检验规范触发首件、巡检与入库检验，登记质检单与不良代码，统计各批次良品率，不合格批次自动流转到质量异常处理流程。"},
+        {"name": "入库与对账开票", "type": "agent_task", "detail": "合格成品办理入库并核销工单，按订单汇总发货与签收记录，定期生成对账单与开票申请，跟踪应收款到账并同步销售与财务。"}
+      ]
+    },
+    {
+      "id": "quality-abort-handling",
+      "name": "质量异常闭环处理",
+      "description": "从质检数据聚合、异常分级到不合格品评审、整改验证的质量闭环流程。",
+      "steps": [
+        {"name": "质检数据汇总", "type": "agent_task", "detail": "每日从质检单聚合各工序、各设备的良品率与不良代码分布，定位连续低于目标值的批次与机台，形成质量异常清单。"},
+        {"name": "异常分级判定", "type": "condition", "detail": "按不良影响面分级：仅单批次轻微软陷转入普通整改；批量性、重复性或涉及客诉的异常升级为重大质量事故并通知质量负责人。"},
+        {"name": "不合格品评审", "type": "approval", "detail": "整理不合格品的数量、不良描述与处置建议（返工、让步接收、报废），推送给质量负责人与生产负责人会签，确定处置方案与责任工序。"},
+        {"name": "整改措施跟进", "type": "agent_task", "detail": "为确认的异常生成整改工单，指派责任工序限期整改，跟踪整改执行与再次检验结果，逾期未完成自动升级提醒。"},
+        {"name": "纠正措施验证与归档", "type": "agent_task", "detail": "整改关闭后连续跟踪三批次的良品率回归情况，验证措施有效性，将异常原因、措施与验证结论沉淀为质量案例库供检索。"}
+      ]
+    },
+    {
+      "id": "equipment-oee-watch",
+      "name": "设备OEE日监控",
+      "description": "每日采集报工与停机数据计算OEE，对低效机台预警并生成维保改善建议。",
+      "steps": [
+        {"name": "停机与产量数据采集", "type": "agent_task", "detail": "每日从报工与设备点检记录采集各机台的运行时长、停机原因分类、计划节拍与实际产量，对缺失或异常数据向责任班组发出补录提醒。"},
+        {"name": "OEE计算与对标", "type": "agent_task", "detail": "按OEE等于时间开动率乘性能开动率乘良品率，计算各机台当日与本周指标，与历史基准和目标值对比，输出排名与劣化幅度。"},
+        {"name": "低效预警判定", "type": "condition", "detail": "OEE连续两天低于目标值或单日下滑超过10个百分点的机台触发预警；换模、计划保养等计划性停机不计入异常，避免误报。"},
+        {"name": "维保与改善建议", "type": "agent_task", "detail": "结合停机原因帕累托分析定位主要损失，生成维保申请或换模优化建议，推送给设备管理员并跟踪执行与效果复评。"}
+      ]
+    },
+    {
+      "id": "monthly-cost-inventory-check",
+      "name": "月度成本与库存体检",
+      "description": "每月归集制造成本与库存数据，输出单位成本波动分析与呆滞物料处置建议。",
+      "steps": [
+        {"name": "成本数据归集", "type": "agent_task", "detail": "按工单归集当月直接材料、直接人工与制造费用，与标准成本逐项对比，标记超支工序、异常用料与异常工时差异清单。"},
+        {"name": "库存结构分析", "type": "agent_task", "detail": "统计原材料、在制品与成品的库存金额及周转天数，识别超安全库存与呆滞超过90天未动用的物料清单并标记责任仓。"},
+        {"name": "异常处置判定", "type": "condition", "detail": "单位成本连续两月上升的物料转入专项分析；呆滞物料按可改制、退供应商、折价出售三类归类，形成处置建议清单。"},
+        {"name": "处置审批与跟进", "type": "approval", "detail": "呆滞物料处置与成本改善方案推送财务与生产负责人审批，通过后限期执行并纳入下月复盘，跟踪验证改善效果。"}
+      ]
+    }
+  ],
+  "metric_defs": [
+    {"key": "oee", "name": "设备综合效率", "unit": "%", "direction": "higher_better", "description": "OEE=时间开动率×性能开动率×良品率；时间开动率=实际运行时间÷计划运行时间，性能开动率=（实际产量×理论节拍）÷运行时间，良品率=良品数÷实际产量，按机台日统计。"},
+    {"key": "first_pass_yield", "name": "一次良品率", "unit": "%", "direction": "higher_better", "description": "一次检验合格数÷投入总数×100%，经返工返修后合格的不计入一次合格，按工序与批次双维度统计。"},
+    {"key": "on_time_delivery_rate", "name": "订单准时交付率", "unit": "%", "direction": "higher_better", "description": "准时足额交付订单数÷应交付订单总数×100%，以合同交期当日或之前完成发货签收为准，客户原因延期的经确认后剔除。"},
+    {"key": "capacity_utilization", "name": "产能利用率", "unit": "%", "direction": "higher_better", "description": "实际完成标准工时÷理论可用标准工时×100%，理论工时按设备台数×日历班次工时计算。"},
+    {"key": "inventory_turnover_days", "name": "库存周转天数", "unit": "天", "direction": "lower_better", "description": "平均库存金额÷日均出库成本；日均出库成本=期间领料与销售出库成本合计÷期间自然日数，按原料、在制、成品分别统计。"},
+    {"key": "scrap_rate", "name": "报废率", "unit": "%", "direction": "lower_better", "description": "报废品数量÷投产总数×100%，材质类与加工类报废分开统计以区分供应与制造责任。"},
+    {"key": "plan_completion_rate", "name": "排产达成率", "unit": "%", "direction": "higher_better", "description": "按计划完工的工单数÷计划工单总数×100%，周与月两个粒度考核，插单与改期计划以审批后版本为准。"},
+    {"key": "downtime_hours", "name": "非计划停机时长", "unit": "小时", "direction": "lower_better", "description": "统计期内故障、缺料待料与换模超时造成的停机时长合计，计划保养不计入，按机台与原因归类分析。"},
+    {"key": "unit_mfg_cost", "name": "单位制造成本", "unit": "元", "direction": "lower_better", "description": "（直接材料+直接人工+制造费用）÷合格入库数量，与标准成本对比输出差异率。"},
+    {"key": "ar_overdue_rate", "name": "逾期应收占比", "unit": "%", "direction": "lower_better", "description": "逾期应收账款余额÷应收账款总额×100%，逾期以合同账期到期日的次日起算。"}
+  ],
+  "agent_roster": [
+    {"name": "生产计划专员", "department": "supply-chain", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责订单评审、MRP运算与排产编制，每日跟踪工单进度偏差并预警交期风险。"},
+    {"name": "质检专员", "department": "testing", "capabilities": ["computer_use", "self_learning"], "mission": "每日聚合质检单数据，监控良品率异常批次，起草整改建议与质量日报。"},
+    {"name": "设备管理员", "department": "engineering", "capabilities": ["computer_use", "persistent_memory"], "mission": "监控各机台OEE与停机记录，发起维保申请并跟踪点检保养计划执行。"},
+    {"name": "销售跟单员", "department": "sales", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "跟进订单评审、发货签收与对账开票，维护客户交期沟通与应收提醒。"}
+  ],
+  "kb_seed_topics": [
+    "OEE计算口径与停机原因分类标准",
+    "BOM结构与MRP运算规则（净需求、提前期、安全库存）",
+    "工序报工操作规范与常见数据异常处理",
+    "不合格品评审流程与让步接收管理制度",
+    "排产优先级规则（交期优先、瓶颈工序优先、换模最小化）",
+    "ISO9001质量管理体系要点与受控文件清单",
+    "应收账款对账开票流程与账期政策"
+  ]
+}

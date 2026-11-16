@@ -1,0 +1,90 @@
+{
+  "id": "restaurant",
+  "name": "餐饮",
+  "version": "0.1.0",
+  "description": "面向连锁餐饮门店的行业包，覆盖经营日报、食材损耗分析、每周排班建议与会员复购的门店运营闭环。",
+  "terms": {
+    "翻台率": ["台周转率", "翻桌率"],
+    "食材成本率": ["食材成本占比", "原料成本率"],
+    "损耗率": ["报损率", "食材损耗"],
+    "人效": ["人均产出", "人效比"],
+    "排班": ["班表", "排班表"],
+    "出品率": ["出成率", "出品合格率"],
+    "餐期": ["高峰时段", "饭点"]
+  },
+  "custom_fields": [
+    {"entity": "product", "key": "dish_category", "label": "菜品分类", "type": "select", "options": ["凉菜", "热菜", "汤羹", "主食", "甜品", "饮品", "酒水"], "required": false, "description": "菜品所属分类，用于菜单结构分析与毛利组合优化。"},
+    {"entity": "product", "key": "standard_cost", "label": "菜品标准成本", "type": "number", "options": [], "required": false, "description": "按配方卡核算的单份标准食材成本，用于理论毛利与损耗对比。"},
+    {"entity": "product", "key": "sell_price", "label": "售卖价格", "type": "number", "options": [], "required": false, "description": "当前菜单售价，调价需店长审批并同步外卖平台价格。"},
+    {"entity": "order", "key": "dine_type", "label": "用餐方式", "type": "select", "options": ["堂食", "外卖", "自提", "宴会"], "required": false, "description": "订单用餐渠道，堂食与外卖分开统计毛利与人效。"},
+    {"entity": "order", "key": "table_no", "label": "桌台号", "type": "text", "options": [], "required": false, "description": "堂食订单关联桌台，用于翻台率与上菜时长统计。"},
+    {"entity": "order", "key": "guest_count", "label": "用餐人数", "type": "number", "options": [], "required": false, "description": "账单对应用餐人数，用于人均消费统计与餐具损耗核对。"},
+    {"entity": "order", "key": "delivery_platform", "label": "外卖平台", "type": "select", "options": ["美团外卖", "饿了么", "抖音团购", "小程序"], "required": false, "description": "外卖订单来源平台，用于平台佣金与活动费用核算。"},
+    {"entity": "employee", "key": "position", "label": "岗位", "type": "select", "options": ["店长", "前厅", "后厨", "收银", "传菜", "保洁"], "required": false, "description": "员工所属岗位，排班与工时统计按岗位分开核算。"},
+    {"entity": "employee", "key": "shift", "label": "常用班次", "type": "select", "options": ["早班", "中班", "晚班", "通班"], "required": false, "description": "员工常排班次，排班建议生成时优先匹配个人班次偏好。"},
+    {"entity": "employee", "key": "health_cert_expiry", "label": "健康证到期日", "type": "date", "options": [], "required": false, "description": "员工健康证有效期，到期前30天自动提醒补办，避免合规风险。"},
+    {"entity": "customer", "key": "member_balance", "label": "会员卡余额", "type": "number", "options": [], "required": false, "description": "会员储值卡余额，用于储值催耗与流失预警。"},
+    {"entity": "customer", "key": "preference", "label": "口味偏好", "type": "text", "options": [], "required": false, "description": "会员忌口与口味偏好记录，桌台服务与菜品推荐时引用。"}
+  ],
+  "workflow_templates": [
+    {
+      "id": "daily-ops-report",
+      "name": "门店经营日报",
+      "description": "每日归集营业数据、对比目标生成日报并闭环异常整改。",
+      "steps": [
+        {"name": "营业数据归集", "type": "agent_task", "detail": "每日晨间归集昨日堂食、外卖、宴会营业额，客流、开台数、菜品销量与退菜记录，并与收银系统数字逐项核对。"},
+        {"name": "目标达成判定", "type": "condition", "detail": "营业额、食材成本率与人效三项对照周目标判定偏差，单项偏差超5%列入异常项，连续三天未达标的触发专项分析。"},
+        {"name": "日报生成与推送", "type": "agent_task", "detail": "生成包含目标达成率、同比环比、TOP与末位菜品、异常项原因说明的门店日报，在晨会开始前推送店长并同步区域运营负责人。"},
+        {"name": "整改跟踪", "type": "agent_task", "detail": "对日报异常项生成整改任务并明确责任人与完成时限，次日日报自动复核整改效果，连续未改善的升级至区域运营跟进处理。"}
+      ]
+    },
+    {
+      "id": "spoilage-analysis",
+      "name": "食材损耗分析",
+      "description": "每日归集进货与报损数据，定位损耗异常并输出订货与索赔建议。",
+      "steps": [
+        {"name": "进货与报损归集", "type": "agent_task", "detail": "每日归集各门店的进货验收数量、验收退回、报损与报废记录，按食材品类汇总损耗金额，并与近7天日均用量对比。"},
+        {"name": "损耗异常判定", "type": "condition", "detail": "单品类损耗率超过设定阈值或连续三日上升时判定异常，区分验收退回（供应商责任）与店内损耗（操作责任）两类归因。"},
+        {"name": "改善建议生成", "type": "agent_task", "detail": "对异常品类输出订货量调整、验收标准强化或储存条件整改建议，涉及供应商责任的自动生成索赔与换货清单并跟进处理结果。"},
+        {"name": "采购调整审批", "type": "approval", "detail": "订货量调整与供应商处理方案推送店长与采购负责人共同审批，通过后更新订货模板，并纳入下周备货与验收计划执行。"}
+      ]
+    },
+    {
+      "id": "weekly-scheduling",
+      "name": "每周排班建议",
+      "description": "基于客流预估生成排班草案，审批发布并核对人力成本。",
+      "steps": [
+        {"name": "客流预估", "type": "agent_task", "detail": "结合历史同期客流、天气预报、节假日与周边活动预估下周各餐期客流，输出分餐段、分岗位的工时需求测算表。"},
+        {"name": "排班草案生成", "type": "agent_task", "detail": "按人效标准与员工可用时间生成排班草案，优先匹配员工常用班次与岗位技能，明确标注高峰缺口时段与人力富余时段。"},
+        {"name": "排班审批", "type": "approval", "detail": "排班草案推送店长审批，允许微调具体班次但人力成本率不得超过周预算线，审批通过后自动发布并逐人通知确认。"},
+        {"name": "执行核对", "type": "agent_task", "detail": "每日核对实际出勤与排班的差异，登记加班、缺勤与临时调班记录，月末汇总人力成本率并反馈用于下期排班优化。"}
+      ]
+    }
+  ],
+  "metric_defs": [
+    {"key": "table_turnover", "name": "翻台率", "unit": "个", "direction": "higher_better", "description": "营业时段开台数÷可用台位数，宴会包间按最低消费时长折算，堂食口径不含外卖。"},
+    {"key": "food_cost_rate", "name": "食材成本率", "unit": "%", "direction": "lower_better", "description": "食材实际耗用成本÷营业收入×100%，与标准成本率对比反映出品管控与损耗水平。"},
+    {"key": "spoilage_rate", "name": "损耗率", "unit": "%", "direction": "lower_better", "description": "报损与报废金额÷同期进货金额×100%，验收退回部分单独统计不计入店内损耗。"},
+    {"key": "revenue_per_labor", "name": "人效", "unit": "元", "direction": "higher_better", "description": "营业收入÷当日在岗人数，按堂食与外卖分渠道核算，用于排班与定编。"},
+    {"key": "avg_ticket", "name": "客单价", "unit": "元", "direction": "higher_better", "description": "营业收入÷开台数（账单数），外卖口径按订单数计算，宴会单独立项统计。"},
+    {"key": "labor_cost_rate", "name": "人力成本率", "unit": "%", "direction": "lower_better", "description": "（工资+社保+福利）÷营业收入×100%，加班与临时工费用全额计入。"},
+    {"key": "member_repurchase_rate", "name": "会员复购率", "unit": "%", "direction": "higher_better", "description": "当月有二次及以上消费的会员数÷当月消费会员总数×100%，储值会员与普通会员分开统计。"},
+    {"key": "dish_gross_margin", "name": "菜品毛利率", "unit": "%", "direction": "higher_better", "description": "（菜品售价-标准成本）÷菜品售价×100%，末位毛利率菜品纳入菜单优化淘汰评估。"},
+    {"key": "complaint_count", "name": "有效客诉件数", "unit": "个", "direction": "lower_better", "description": "统计期内有效客诉件数（含平台差评转投诉），按前厅、出品、卫生分类归因。"}
+  ],
+  "agent_roster": [
+    {"name": "门店店长", "department": "company", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "负责门店经营目标达成，审阅经营日报与排班，处理异常与客诉升级。"},
+    {"name": "采购与供应链专员", "department": "supply-chain", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "管理食材订货与供应商验收索赔，监控损耗率并优化订货模板。"},
+    {"name": "排班助理", "department": "hr", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "每周生成排班建议与工时测算，跟踪人力成本率与出勤差异。"},
+    {"name": "会员运营", "department": "marketing", "capabilities": ["web_browsing", "self_learning"], "mission": "策划会员储值与复购活动，监控会员流失并输出召回方案。"}
+  ],
+  "kb_seed_topics": [
+    "菜品配方卡与标准成本核算办法",
+    "食材验收标准与供应商索赔流程",
+    "门店报损、报废的操作规范与审批权限",
+    "分餐段排班与人效标准（前厅/后厨）",
+    "外卖平台佣金、活动费用与毛利核算口径",
+    "会员储值、催耗与合规注意事项",
+    "食品安全与员工健康证管理要求"
+  ]
+}

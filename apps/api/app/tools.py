@@ -1,13 +1,14 @@
-"""Agent 工具注册表：任务执行 / 私聊 / 群聊共用同一套定义与执行器。
+"""Agent 工具兼容层：真正的注册表与执行已迁入 app/toolbus/（V6 M1）。
 
-此前三处各写一份 `if name == ...`：聊天里能用 web_search，任务链里
-一个工具都传不下去（`chat_with_agent_models` 根本不带 tools），
-能力包提示词里还写着并不存在的 `browser_fetch`。结果就是"会网页浏览"
-只是提示词幻觉。本模块收敛为：
+历史说明（为什么这个模块存在）：任务执行 / 私聊 / 群聊过去三处各写一份
+`if name == ...`，聊天里能用 web_search，任务链里一个工具都传不下去，
+能力包提示词里还写着并不存在的 `browser_fetch`——"会网页浏览"只是提示词
+幻觉。V5.4 收敛为单一执行入口 + 统一 schema；V6 M1 把注册、描述、授权
+升级为工具总线（app/toolbus/），本模块保留为兼容层：
 
-* `TOOLS` —— OpenAI function-calling 的 JSON Schema（模型看到的就是它）；
-* `execute_tool` —— 唯一执行入口，网络类工具统一走 browser_agent 的
-  SSRF 闸门与审计日志；
+* `TOOLS` / `TOOL_NAMES` —— 内置 web 工具的 schema（存量调用方不受影响；
+  新代码请用 `app.toolbus.resolve_agent_tool_schemas`）；
+* `execute_tool` —— 转发到 `toolbus.execute_bus_tool`；
 * `parse_text_tool_calls` —— 兼容只会把 tool_call 输出成文本的模型。
 
 安全边界：工具参数来自模型（不可信）。抓取复用 `fetch_page_text`
@@ -15,122 +16,30 @@
 """
 from __future__ import annotations
 
-import json
 import re
 
-from app.core.logging_config import get_logger
+from app.toolbus import (MAX_TOOL_CALLS, MAX_TOOL_RESULT_CHARS,
+                         MAX_TOOL_ROUNDS, execute_bus_tool, get_tool,
+                         tool_schemas)
+from app.toolbus.builtin import computer_tools  # noqa: F401 — 注册副作用
 
-logger = get_logger(__name__)
-
-# 单次工具结果回填上限：工具结果会和历史消息一起进下一轮 prompt，
-# 不截断会让上下文迅速膨胀（一次抓取 8000 字 × 多轮）。
-MAX_TOOL_RESULT_CHARS = 6000
-MAX_TOOL_ROUNDS = 4
-MAX_TOOL_CALLS = 12
-
-WEB_SEARCH_TOOL: dict = {
-    "type": "function",
-    "function": {
-        "name": "web_search",
-        "description": "联网搜索实时信息，返回标题、链接、摘要。"
-                       "需要外部事实、市场规模、政策、新闻、价格等数据时先搜索再回答。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "搜索关键词"},
-                "max_results": {"type": "integer", "minimum": 1, "maximum": 10,
-                                "default": 5},
-            },
-            "required": ["query"],
-        },
-    },
-}
-
-WEB_FETCH_TOOL: dict = {
-    "type": "function",
-    "function": {
-        "name": "web_fetch",
-        "description": "抓取指定网页并提取正文纯文本。搜索结果只有摘要，"
-                       "写报告前用它对关键来源取正文并核对数字。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "url": {"type": "string", "description": "http/https 地址"},
-                "max_chars": {"type": "integer", "minimum": 500, "maximum": 12000,
-                              "default": 6000},
-            },
-            "required": ["url"],
-        },
-    },
-}
-
-TOOLS: list[dict] = [WEB_SEARCH_TOOL, WEB_FETCH_TOOL]
+# 内置 web 工具的 OpenAI schema（从总线事实源导出，文案与历史版本一致）
+TOOLS: list[dict] = tool_schemas(
+    [get_tool("web_search"), get_tool("web_fetch")])
 TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
 
-
-def _truncate(value, limit: int = MAX_TOOL_RESULT_CHARS):
-    text = json.dumps(value, ensure_ascii=False, default=str)
-    if len(text) <= limit:
-        return value
-    return {"truncated": True, "preview": text[:limit]}
+# 兼容别名：聊天链路把电脑工具 schema 拼进自己的 tools 列表用
+COMPUTER_TOOL_SCHEMAS = computer_tools.computer_tool_schemas()
 
 
-async def execute_tool(name: str, args: dict, *, company_id: str | None = None,
-                       agent_id: str | None = None) -> dict:
-    """执行一个工具。错误一律转成结构化结果返回给模型，不抛给运行时。
-
-    抛异常会让整个任务失败，而模型完全有能力在"这次抓取失败"后换一个
-    来源；把它变成 tool 消息里的 error 字段才是正确的降级方式。
-    """
-    args = args if isinstance(args, dict) else {}
-    try:
-        if name == "web_search":
-            from app.skill_system import execute_skill
-            query = str(args.get("query") or "").strip()
-            if not query:
-                return {"error": "缺少 query"}
-            try:
-                max_results = int(args.get("max_results") or 5)
-            except (TypeError, ValueError):
-                max_results = 5
-            res = await execute_skill("web_search", {
-                "query": query, "max_results": max(1, min(max_results, 10))})
-            return _truncate(res.get("result") or res)
-
-        if name == "web_fetch":
-            url = str(args.get("url") or "").strip()
-            if not url:
-                return {"error": "缺少 url"}
-            if not url.lower().startswith(("http://", "https://")):
-                return {"error": "只允许 http/https 地址"}
-            try:
-                max_chars = int(args.get("max_chars") or 6000)
-            except (TypeError, ValueError):
-                max_chars = 6000
-            # 独立短会话：fetch_page_text 会写审计日志并 commit，
-            # 不能让它把任务执行中的未提交状态一起提交/回滚。
-            from app.db.session import AsyncSessionLocal
-            from app.browser_agent import fetch_page_text
-            async with AsyncSessionLocal() as tdb:
-                page = await fetch_page_text(
-                    tdb, company_id or "", agent_id, url,
-                    max_chars=max(500, min(max_chars, 12000)))
-            if page.get("error"):
-                return {"error": page["error"], "url": url}
-            if not page.get("allowed", True):
-                return {"error": page.get("deny_reason") or "目标地址被拒绝",
-                        "url": url}
-            return _truncate({
-                "url": url,
-                "title": page.get("title_m") or "",
-                "text": page.get("text") or "",
-                "rendered": bool(page.get("rendered")),
-            })
-
-        return {"error": f"未知工具: {name}"}
-    except Exception as exc:  # 工具失败不拖垮任务
-        logger.warning("工具执行失败 name=%s: %s", name, exc, exc_info=True)
-        return {"error": f"{type(exc).__name__}: {exc}"[:300]}
+async def execute_tool(name: str, args, *, company_id: str | None = None,
+                       agent_id: str | None = None,
+                       user_id: str | None = None,
+                       task_id: str | None = None) -> dict:
+    """执行一个工具（转发总线）。错误一律转成结构化结果，不抛给运行时。"""
+    return await execute_bus_tool(name, args, company_id=company_id,
+                                  agent_id=agent_id, user_id=user_id,
+                                  task_id=task_id)
 
 
 _TEXT_TOOL_RE = re.compile(
@@ -167,7 +76,7 @@ def available_tool_names() -> list[str]:
 
 
 def tool_system_prompt() -> str:
-    """给模型的工具使用纪律（与 TOOLS 的 schema 配套）。"""
+    """给模型的工具使用纪律（与总线 schema 配套）。"""
     return (
         "【工具与取证】你可以调用 web_search（联网搜索）和 web_fetch（抓取网页正文）。"
         "涉及外部事实、市场规模、政策法规、竞品动态、价格与新闻时，"

@@ -27,6 +27,10 @@ class NodeType(str, enum.Enum):
     APPROVAL = "APPROVAL"        # 人工审批
     HUMAN_INPUT = "HUMAN_INPUT"  # 人工输入
     SUB_WORKFLOW = "SUB_WORKFLOW"
+    # V6 M1-e：基座三节点——工作流从此能直调外部 API / 总线工具 / 改数据形态
+    HTTP = "HTTP"                # 调外部 HTTP API（公网闸门 + 凭据引用）
+    TOOL = "TOOL"                # 调工具总线里的工具（web/computer/动态）
+    TRANSFORM = "TRANSFORM"      # 数据形态转换（模板映射 ctx → 输出）
 
 
 class RunStatus(str, enum.Enum):

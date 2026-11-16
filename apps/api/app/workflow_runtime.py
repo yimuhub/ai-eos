@@ -185,7 +185,139 @@ class WorkflowRuntime:
         if node.node_type == NodeType.PARALLEL:
             return {"fanned_out": True}
 
+        if node.node_type == NodeType.HTTP:
+            return await self._exec_http_node(node)
+
+        if node.node_type == NodeType.TOOL:
+            return await self._exec_tool_node(node)
+
+        if node.node_type == NodeType.TRANSFORM:
+            return self._exec_transform_node(node, ctx)
+
         raise RuntimeError(f"Unknown node type {node.node_type}")
+
+    # ---------------- 基座三节点（V6 M1-e） ----------------
+
+    def _resolve_company(self) -> str:
+        company_id = self.exec_input_company()
+        if not company_id:
+            # 同步查询（调用点都持有会话）；没有就向上抛，让节点失败可诊断
+            return ""
+        return company_id
+
+    async def _exec_http_node(self, node: WorkflowNode) -> dict:
+        """HTTP 节点：直调外部 API。
+
+        安全：endpoint 走工具总线同款公网闸门（回环放行、私网/元数据拒绝）；
+        凭据不进 config——auth_secret_ref 指向 company_secrets，取值走保险库。
+        非 2xx 不抛异常（返回结构化结果给 CONDITION 分支），网络异常才失败。
+        """
+        import json as _json
+
+        from app.core.http_client import http_client
+        from app.toolbus.dispatch import _assert_public_http_url
+
+        cfg = node.config or {}
+        url = str(cfg.get("url") or "").strip()
+        if not url:
+            raise RuntimeError("HTTP 节点缺少 url")
+        _assert_public_http_url(url)
+        method = str(cfg.get("method") or "GET").upper()
+        if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+            raise RuntimeError(f"不支持的 HTTP 方法 {method}")
+        timeout = min(max(1, int(cfg.get("timeout_seconds") or 15)), 120)
+
+        headers = {str(k): str(v) for k, v in
+                   (cfg.get("headers") or {}).items()}
+        secret_ref = cfg.get("auth_secret_ref")
+        if secret_ref:
+            from sqlalchemy import select as _select
+            from app.models.company_secret import CompanySecret
+            from app.services.secret_vault import decrypt
+            row = (await self.db.execute(
+                _select(CompanySecret).where(
+                    CompanySecret.company_id == self._resolve_company(),
+                    CompanySecret.name == secret_ref))).scalars().first()
+            if row is None:
+                raise RuntimeError(f"HTTP 节点凭据 {secret_ref} 不存在")
+            headers["Authorization"] = f"Bearer {decrypt(row.ciphertext)}"
+
+        body = cfg.get("body")
+        if body is not None and not isinstance(body, (str, type(None))):
+            body = _json.dumps(body, ensure_ascii=False)
+        async with http_client(timeout=timeout) as client:
+            resp = await client.request(
+                method, url, headers=headers,
+                content=body if method in ("POST", "PUT", "PATCH") else None)
+        text = (resp.text or "")[:8000]
+        out = {"ok": 200 <= resp.status_code < 300,
+               "status": resp.status_code, "body": text}
+        try:
+            out["json"] = _json.loads(text)
+        except (_json.JSONDecodeError, ValueError):
+            pass
+        return out
+
+    async def _exec_tool_node(self, node: WorkflowNode) -> dict:
+        """TOOL 节点：调工具总线（web/电脑/公司登记的动态工具）。
+
+        电脑工具会经过 approval_gate——审批被 hold 时本节点产出
+        awaiting_approval 结果并继续（人工批准后重跑该工作流）。
+        """
+        from app.toolbus import execute_bus_tool, get_tool
+
+        cfg = node.config or {}
+        tool_name = str(cfg.get("tool_name") or "").strip()
+        if not tool_name:
+            raise RuntimeError("TOOL 节点缺少 tool_name")
+        company_id = self._resolve_company()
+        if not get_tool(tool_name):
+            from app.toolbus import has_db_tool
+            if not company_id or not await has_db_tool(self.db, company_id,
+                                                       tool_name):
+                raise RuntimeError(f"工具 {tool_name} 未注册（内置或本公司动态工具）")
+        result = await execute_bus_tool(
+            tool_name, cfg.get("arguments") or {}, company_id=company_id,
+            user_id=self.exec.started_by)
+        return {"tool": tool_name, "result": result}
+
+    def _exec_transform_node(self, node: WorkflowNode, ctx: dict) -> dict:
+        """TRANSFORM 节点：把上游产出映射成下游需要的形状。
+
+        模板语法：`"{{节点key.路径.字段}}"` 取上游 step 输出；
+        `"{{input.xxx}}"` 取执行入参；非字符串 = 字面量。
+        取不到的路径解析为 None（宁可显式空值也不静默串改上一节点的数据）。
+        """
+        cfg = node.config or {}
+        mapping = cfg.get("set") or {}
+        if not isinstance(mapping, dict):
+            raise RuntimeError("TRANSFORM 节点 config.set 必须是对象")
+        sources = {"input": dict(self.exec.input_data or {})}
+        sources.update({k: v for k, v in ctx.items()})
+
+        def lookup(root_key: str, path: list[str]):
+            cur = sources.get(root_key)
+            for seg in path:
+                if isinstance(cur, dict):
+                    cur = cur.get(seg)
+                elif isinstance(cur, list) and seg.lstrip("-").isdigit():
+                    try:
+                        cur = cur[int(seg)]
+                    except IndexError:
+                        return None
+                else:
+                    return None
+            return cur
+
+        data: dict = {}
+        for out_key, tpl in mapping.items():
+            if isinstance(tpl, str) and tpl.startswith("{{") \
+                    and tpl.endswith("}}"):
+                parts = tpl[2:-2].strip().split(".")
+                data[out_key] = lookup(parts[0], parts[1:])
+            else:
+                data[out_key] = tpl
+        return {"data": data}
 
 
 async def transition_task(db: AsyncSession, task: Task, new_status: TaskStatus):

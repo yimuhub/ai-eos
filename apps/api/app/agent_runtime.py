@@ -249,16 +249,18 @@ async def run_agent_on_task(
                           project_id=str(getattr(task, "project_id", None) or "") or None,
                           task_id=str(task.id), user_id=None)
 
-        # ---- 工具循环：任务链过去只做一次 LLM 调用，模型手里没有任何工具，
-        # "自动抓数据"只能靠编。现在把 web_search / web_fetch 真正下发，
-        # 并在有 tool_calls 时执行、回填、再问，直到模型给出最终回答。
+        # ---- 工具循环：工具统一走 app/toolbus 总线。V6 M1 起按 Agent 解析
+        # 可用工具（web 内置 + 能力包的电脑工具 + 授权的动态工具），
+        # "模型看到的 = 真的能执行的"——不可执行的宣传名永不进 schema。
         from app.tools import (MAX_TOOL_CALLS, MAX_TOOL_RESULT_CHARS,
-                               MAX_TOOL_ROUNDS, TOOLS as AGENT_TOOLS,
-                               execute_tool, parse_text_tool_calls,
-                               strip_text_tool_calls)
+                               MAX_TOOL_ROUNDS, execute_tool,
+                               parse_text_tool_calls, strip_text_tool_calls)
+        from app.toolbus import resolve_agent_tool_schemas
+
+        agent_tools = await resolve_agent_tool_schemas(db, agent)
 
         llm_result = await gateway.chat_with_agent_models(
-            model_ids, messages, tools=AGENT_TOOLS)
+            model_ids, messages, tools=agent_tools or None)
         # 网关已在会话里写下用量流水：立刻提交，别让写事务跨工具轮持有
         # SQLite 写锁——并发的工作台对话落库会 busy_timeout 15s 超时报
         # "database is locked"（测评 B-080 的另一半根因）。
@@ -312,7 +314,7 @@ async def run_agent_on_task(
                                           default=str)[:MAX_TOOL_RESULT_CHARS],
                 })
             llm_result = await gateway.chat_with_agent_models(
-                model_ids, messages, tools=AGENT_TOOLS)
+                model_ids, messages, tools=agent_tools or None)
             # 同上：每轮工具调用后立即释放写事务（含上一轮网关用量流水）
             await db.commit()
             rounds += 1

@@ -57,10 +57,14 @@ CAPABILITY_PACKS: dict[str, dict] = {
         "label": "🧠 持久记忆",
         "description": "跨任务记住经验和偏好，越用越懂你的业务",
         "risk": "low",
-        "tools": ["memory_write", "memory_recall"],
+        # V6 M1：memory_write/memory_recall 没有模型可调的执行器（记忆由
+        # memory_engine 在任务前后自动读写），从工具清单移除——总线只下发
+        # 真的能执行的，"宣传了但不存在"的工具名是幻觉源头。
+        "tools": [],
         "system_prompt": (
-            "你具备【持久记忆】能力：你的重要发现、用户偏好、踩过的坑都会写入长期记忆，"
-            "下次任务自动带上。回复时如果记忆里有相关历史经验，明确引用它。"
+            "你具备【持久记忆】能力：你的重要发现、用户偏好、踩过的坑都会在任务"
+            "结束后自动写入长期记忆，下次任务自动带上，无需你调用工具。"
+            "回复时如果记忆里有相关历史经验，明确引用它。"
         ),
         "engines": ["memory_engine"],
         "defaults": {"memory_types": ["EPISODIC", "SEMANTIC", "PREFERENCE"], "ttl_days": 90},

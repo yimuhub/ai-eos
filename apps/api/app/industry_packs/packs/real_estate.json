@@ -1,0 +1,92 @@
+{
+  "id": "real-estate",
+  "name": "房地产中介",
+  "version": "0.1.0",
+  "description": "面向房地产中介门店的行业包，覆盖房源录入、客源匹配、带看跟进与签约过户的成交闭环。",
+  "terms": {
+    "房源": ["委托房源", "盘源", "在售房源"],
+    "客源": ["意向客户", "购房客户"],
+    "带看": ["实地看房", "约看"],
+    "去化周期": ["消化周期", "房源在售天数"],
+    "独家委托": ["独家房源", "独家协议"],
+    "权证": ["过户办证", "产权交易"],
+    "实勘": ["实地勘验", "房屋勘验"]
+  },
+  "custom_fields": [
+    {"entity": "product", "key": "house_type", "label": "房源类型", "type": "select", "options": ["住宅", "公寓", "商铺", "写字楼", "别墅"], "required": false, "description": "物业类型，决定客群匹配范围与税费计算方式。"},
+    {"entity": "product", "key": "listing_status", "label": "房源状态", "type": "select", "options": ["待核实", "在售", "已售", "下架"], "required": false, "description": "房源当前流转状态，状态变更需同步核验委托协议有效性。"},
+    {"entity": "product", "key": "entrust_type", "label": "委托方式", "type": "select", "options": ["独家", "普通", "钥匙托管"], "required": false, "description": "业主委托方式，独家与钥匙托管的房源优先推荐并考核维护责任。"},
+    {"entity": "product", "key": "area_sqm", "label": "建筑面积", "type": "number", "options": [], "required": false, "description": "产权登记建筑面积，单价计算（挂牌价÷面积）的基准。"},
+    {"entity": "product", "key": "listing_price", "label": "挂牌价", "type": "number", "options": [], "required": false, "description": "业主委托挂牌价格，调价需业主书面确认并同步各渠道。"},
+    {"entity": "product", "key": "key_no", "label": "钥匙编号", "type": "text", "options": [], "required": false, "description": "钥匙托管编号与保管位置，带看前核对可用性，防止重复带看冲突。"},
+    {"entity": "customer", "key": "customer_type", "label": "客源类型", "type": "select", "options": ["买方", "卖方", "租赁", "租售都有"], "required": false, "description": "客户需求方向，决定匹配房源池与佣金构成。"},
+    {"entity": "customer", "key": "budget_min", "label": "预算下限", "type": "number", "options": [], "required": false, "description": "客户预算区间下限，与预算上限共同约束房源匹配。"},
+    {"entity": "customer", "key": "intent_district", "label": "意向区域", "type": "text", "options": [], "required": false, "description": "客户意向商圈与小区清单，用于新房源上架的即时匹配推送。"},
+    {"entity": "workorder", "key": "task_type", "label": "交易任务类型", "type": "select", "options": ["带看", "签约", "贷款", "过户", "交房"], "required": false, "description": "交易环节任务类型，各环节有明确时限与资料清单。"},
+    {"entity": "workorder", "key": "viewing_time", "label": "带看日期", "type": "date", "options": [], "required": false, "description": "预约带看时间，带看后24小时内必须回填客户反馈。"},
+    {"entity": "workorder", "key": "viewing_feedback", "label": "带看反馈", "type": "text", "options": [], "required": false, "description": "客户对房源的接受度与异议记录，用于房源匹配策略调整。"},
+    {"entity": "order", "key": "deal_price", "label": "成交价", "type": "number", "options": [], "required": false, "description": "买卖双方签约成交价格，与挂牌价对比反映议价幅度。"},
+    {"entity": "order", "key": "commission_rate", "label": "佣金费率", "type": "number", "options": [], "required": false, "description": "合同约定佣金费率，低于公司底线的佣金方案需审批。"}
+  ],
+  "workflow_templates": [
+    {
+      "id": "listing-intake-publish",
+      "name": "房源录入与实勘发布",
+      "description": "业主委托登记、实勘拍照、上架审核到多渠道发布的房源供给流程。",
+      "steps": [
+        {"name": "委托登记", "type": "agent_task", "detail": "登记业主委托信息、产权状况与心理报价预期，核验房产证与业主身份材料，确认委托方式与委托期限并完成协议签署。"},
+        {"name": "实勘与拍照", "type": "agent_task", "detail": "预约上门实勘时间，完成房屋多角度拍照、户型测绘与瑕疵记录，提炼房源卖点与目标客群，并标注看房便利程度。"},
+        {"name": "上架审核", "type": "approval", "detail": "房源信息推送店长审核挂牌价合理性、描述真实性、图片合规与委托手续齐备性，审核通过后发布，记录留痕杜绝虚假房源。"},
+        {"name": "多渠道发布与维护", "type": "agent_task", "detail": "按各渠道规范将房源发布至线上平台与门店橱窗，设置每七日业主回访的维护计划，跟踪浏览量、来电与咨询转化情况。"}
+      ]
+    },
+    {
+      "id": "match-and-viewing",
+      "name": "客源匹配与带看跟进",
+      "description": "需求画像维护、房源匹配、带看安排到反馈归档的撮合流程。",
+      "steps": [
+        {"name": "需求画像更新", "type": "agent_task", "detail": "持续维护客源需求画像，包括预算区间、意向区域、户型与学区要求，每次沟通后及时更新意向变化并标记高意向客户。"},
+        {"name": "房源匹配推荐", "type": "agent_task", "detail": "按客源画像匹配在售房源生成推荐清单，附单价、税费测算与优劣势对比，新上架房源实时推送给匹配客源的经纪人跟进。"},
+        {"name": "带看安排", "type": "agent_task", "detail": "协调业主、客户与钥匙保管时间安排带看，提前发送看房路线与注意事项，同一房源多组客户错峰安排以避免撞单。"},
+        {"name": "反馈归档与升级", "type": "condition", "detail": "带看后24小时内回填客户反馈：有意向的转入议价环节；需再看的登记复看计划；否决的分析原因并修正匹配策略。"}
+      ]
+    },
+    {
+      "id": "deal-transaction",
+      "name": "签约过户与交房",
+      "description": "议价签约、贷款资金监管、过户办证到交房佣金结算的交易流程。",
+      "steps": [
+        {"name": "议价与签约审核", "type": "approval", "detail": "撮合买卖双方就价格与条款达成一致，签约前核验产权清晰、抵押解押与购房资格，合同文本经权证专员复核后正式签署。"},
+        {"name": "贷款与资金监管", "type": "agent_task", "detail": "跟进买方贷款申请与银行审批进度，引导定金与房款进入资金监管账户，按时间节点跟踪放款、解押与首付款支付的衔接。"},
+        {"name": "过户办证", "type": "agent_task", "detail": "预约不动产登记与税务申报办理，按清单准备过户资料并组织双方到场确认，缴税与新产权证出证进度每日同步买卖双方。"},
+        {"name": "交房与佣金结算", "type": "agent_task", "detail": "组织水电燃气物业费用的交割与家具家电清单核对，完成交房确认书签署，按合同约定节点申请佣金结算并跟踪到账情况。"}
+      ]
+    }
+  ],
+  "metric_defs": [
+    {"key": "viewing_conversion_rate", "name": "带看转化率", "unit": "%", "direction": "higher_better", "description": "成交单数÷带看次数×100%，按经纪人、区域与价格段分解考核匹配质量。"},
+    {"key": "days_on_market", "name": "房源去化周期", "unit": "天", "direction": "lower_better", "description": "成交房源（成交日期-委托录入日期）的平均天数，按户型与总价段分解。"},
+    {"key": "exclusive_rate", "name": "独家委托率", "unit": "%", "direction": "higher_better", "description": "独家委托房源数÷有效房源总数×100%，独家房源维护责任到人。"},
+    {"key": "commission_per_deal", "name": "单均佣金收入", "unit": "元", "direction": "higher_better", "description": "佣金收入÷成交单数，租赁单与买卖单分开口径统计。"},
+    {"key": "viewings_per_agent", "name": "人均周带看量", "unit": "个", "direction": "higher_better", "description": "周带看次数÷在岗经纪人数，结合带看转化率评估跟进行为。"},
+    {"key": "deal_completion_rate", "name": "交易履约率", "unit": "%", "direction": "higher_better", "description": "顺利完结过户交房的订单数÷签约订单总数×100%，毁约单按责任方归因。"},
+    {"key": "listing_price_variance", "name": "议价幅度", "unit": "%", "direction": "lower_better", "description": "（挂牌价-成交价）÷挂牌价×100%，反映市场行情与议价能力，用于业主调价建议。"},
+    {"key": "new_listing_rate", "name": "有效房源新增率", "unit": "%", "direction": "higher_better", "description": "本周新增有效房源数÷期初有效房源数×100%，保障客源匹配的房源池供给。"},
+    {"key": "referral_deal_rate", "name": "老客转介绍成交占比", "unit": "%", "direction": "higher_better", "description": "经老客户转介绍成交的单数÷总成交单数×100%，转介绍佣金激励单独核算。"}
+  ],
+  "agent_roster": [
+    {"name": "经纪人助理", "department": "sales", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "负责客源维护、带看安排与反馈归档，跟进意向客户转化。"},
+    {"name": "门店店长", "department": "company", "capabilities": ["web_browsing", "persistent_memory"], "mission": "审核房源上架与佣金方案，分析带看转化与房源去化并调配人力。"},
+    {"name": "权证专员", "department": "legal", "capabilities": ["persistent_memory", "computer_use"], "mission": "负责合同复核、贷款过户跟进与资金监管节点控制。"},
+    {"name": "房源维护专员", "department": "support", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "执行房源实勘、业主回访与状态维护，保障房源信息真实有效。"}
+  ],
+  "kb_seed_topics": [
+    "房源实勘拍摄与信息录入规范",
+    "委托协议类型与独家房源维护责任",
+    "带看撞单判定与客户归属规则",
+    "交易税费测算（住宅/公寓/商铺差异）",
+    "资金监管与贷款过户节点流程",
+    "购房资格核验与限购政策要点",
+    "佣金收退规则与客诉处理口径"
+  ]
+}

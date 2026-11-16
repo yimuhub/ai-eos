@@ -72,25 +72,10 @@ WEB_FETCH_TOOL = {
 }
 
 
-COMPUTER_TOOLS = [
-    {"type": "function", "function": {"name": "computer_screenshot", "description": "Take a screenshot. No params needed.", "parameters": {"type": "object", "properties": {}, "required": []}}},
-    {"type": "function", "function": {"name": "computer_run_shell", "description": "Run a read-only shell command (ls/cat/pwd/find/...). Requires run_shell permission.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
-    {"type": "function", "function": {"name": "computer_run_write", "description": "Run a write shell command (mv/cp/mkdir/rm/touch). Requires run_write permission. Use --dry-run first.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}, "dry_run": {"type": "boolean", "default": False}}, "required": ["command"]}}},
-    {"type": "function", "function": {"name": "computer_click", "description": "Click at (x, y) on screen.", "parameters": {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}}, "required": ["x", "y"]}}},
-    {"type": "function", "function": {"name": "computer_type_text", "description": "Type text into focused field.", "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}},
-    {"type": "function", "function": {"name": "computer_run_app", "description": "Launch an application.", "parameters": {"type": "object", "properties": {"app": {"type": "string"}}, "required": ["app"]}}},
-    # 无障碍树（macOS）：读界面结构、按元素引用操作，不需要截图与坐标猜测。
-    {"type": "function", "function": {"name": "computer_list_windows", "description": "List on-screen apps and their windows (process name + window index/title). Use this before other accessibility tools.", "parameters": {"type": "object", "properties": {"app": {"type": "string", "description": "可选：只看这个进程"}}, "required": []}}},
-    {"type": "function", "function": {"name": "computer_accessibility_snapshot", "description": "Read a window's UI element tree as structured data (ref/role/title/geometry) — no screenshot. Returns refs you can click or write into.", "parameters": {"type": "object", "properties": {"app": {"type": "string", "description": "进程名，省略则取前台应用"}, "window": {"type": "integer", "default": 1}, "max_nodes": {"type": "integer", "default": 80}, "max_depth": {"type": "integer", "default": 2}}, "required": []}}},
-    {"type": "function", "function": {"name": "computer_get_window", "description": "Overview of one window: title, position, size, top-level element count, focused element role.", "parameters": {"type": "object", "properties": {"app": {"type": "string"}, "window": {"type": "integer", "default": 1}}, "required": ["app"]}}},
-    {"type": "function", "function": {"name": "computer_find_element", "description": "Find UI elements whose title/role contains a text query; returns their refs and centers. Prefer this over guessing coordinates.", "parameters": {"type": "object", "properties": {"app": {"type": "string"}, "window": {"type": "integer", "default": 1}, "query": {"type": "string"}, "role": {"type": "string", "description": "可选：按 AX 角色过滤，如 AXButton"}}, "required": ["query"]}}},
-    {"type": "function", "function": {"name": "computer_click_element", "description": "Press a UI element by its ref (from accessibility_snapshot/find_element). Does not move the mouse and does not need a screenshot.", "parameters": {"type": "object", "properties": {"ref": {"type": "string"}, "action": {"type": "string", "enum": ["AXPress", "AXPick"], "default": "AXPress"}}, "required": ["ref"]}}},
-    {"type": "function", "function": {"name": "computer_set_value", "description": "Write text into a UI element by its ref (AXValue) — safer and more reliable than typing, and it cannot land in a terminal.", "parameters": {"type": "object", "properties": {"ref": {"type": "string"}, "value": {"type": "string"}}, "required": ["ref", "value"]}}},
-    # 文件一路：改代码走这里，不走键鼠。写之前自动留备份，返回值带 unified diff。
-    {"type": "function", "function": {"name": "computer_read_file", "description": "Read a text file from disk (path may be absolute or relative to the repo root). Use offset/limit for long files instead of reading everything.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer", "default": 1, "description": "起始行（1 基）"}, "limit": {"type": "integer", "default": 400, "description": "读取行数"}}, "required": ["path"]}}},
-    {"type": "function", "function": {"name": "computer_write_file", "description": "Create or overwrite a whole text file. The original is backed up before writing and the response contains the unified diff. Call with dry_run=true first to preview the diff. Requires write_file permission.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "dry_run": {"type": "boolean", "default": False}}, "required": ["path", "content"]}}},
-    {"type": "function", "function": {"name": "computer_apply_patch", "description": "Edit a file with anchored replacements — preferred over write_file for existing code. Each edit needs `old` text copied verbatim (unique unless replace_all=true) and `new` text; any edit that fails aborts the whole patch. Requires apply_patch permission.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"old": {"type": "string"}, "new": {"type": "string"}, "replace_all": {"type": "boolean", "default": False}}, "required": ["old", "new"]}}, "dry_run": {"type": "boolean", "default": False}}, "required": ["path", "edits"]}}},
-]
+# 电脑工具 schema 收编进工具总线（app/toolbus/computer_tools.py）：任务链与
+# 聊天从此用同一份 schema、同一个执行器、同一道审批门（V6 M1）。
+from app.toolbus.computer_tools import computer_tool_schemas as _computer_tool_schemas
+COMPUTER_TOOLS = _computer_tool_schemas()
 
 def _parse_text_tool_calls(content: str) -> list[dict]:
     """解析 agnes 等模型以文本形式输出的 <tool_call> 标记。"""
@@ -108,16 +93,20 @@ def _parse_text_tool_calls(content: str) -> list[dict]:
 
 async def execute_skill_safe(db, fname, args, *, company_id: str | None = None,
                              agent_id: str | None = None):
-    """执行一个工具调用。网络类工具统一走 app.tools.execute_tool。
+    """执行一个工具调用：统一走 app/toolbus 总线，总线没有的退回技能库。
 
-    execute_tool 里 web_fetch 会复用 browser_agent 的 SSRF 闸门并写审计日志；
-    这里把 company_id/agent_id 一并传下去，审计记录才带得上租户与 Agent。
+    V6 M1 起 in-code 工具（web/computer）与公司登记的动态工具
+    （外部 MCP 等）都在总线里执行——web_fetch 的 SSRF 闸门与审计、
+    computer_* 的审批门与硬拦截都在总线一层收口。
+    computer_* 分支在本文件的部分调用点仍有专门处理（收集 actions
+    给前端展示"我做了什么"），总线执行器与它们走同一个 approval_gate。
     """
-    from app.tools import TOOL_NAMES, execute_tool
+    from app.toolbus import execute_bus_tool, get_tool, has_db_tool
 
-    if fname in TOOL_NAMES:
-        return await execute_tool(fname, args if isinstance(args, dict) else {},
-                                  company_id=company_id, agent_id=agent_id)
+    args = args if isinstance(args, dict) else {}
+    if get_tool(fname) is not None or await has_db_tool(db, company_id, fname):
+        return await execute_bus_tool(fname, args, company_id=company_id,
+                                      agent_id=agent_id)
     from app.skill_system import execute_skill
     res = await execute_skill(fname, args)
     return res.get("result") or res

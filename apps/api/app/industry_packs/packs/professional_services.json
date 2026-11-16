@@ -1,0 +1,91 @@
+{
+  "id": "professional-services",
+  "name": "专业服务（律所/财税/咨询）",
+  "version": "0.1.0",
+  "description": "面向律所、财税与咨询公司的行业包，覆盖案件立项、工时归集、账单出具与应收催收的项目制经营闭环。",
+  "terms": {
+    "工时": ["计时工时", "Timesheet", "小时记录"],
+    "案件": ["项目", "Matter", "委托事项"],
+    "立项": ["开案", "项目立项"],
+    "账单": ["Invoice", "请款单", "账单明细"],
+    "应收账龄": ["账龄", "AR Aging"],
+    "计费标准": ["小时费率", "收费标准"],
+    "实收率": ["回款率", "Realization Rate"]
+  },
+  "custom_fields": [
+    {"entity": "customer", "key": "client_type", "label": "客户类型", "type": "select", "options": ["常年顾问", "专项委托", "诉讼代理", "咨询项目"], "required": false, "description": "委托模式分类，常年顾问按年费管理，专项与诉讼按案件工时计费。"},
+    {"entity": "customer", "key": "engagement_partner", "label": "负责合伙人", "type": "text", "options": [], "required": false, "description": "客户归属合伙人，项目立项与账单折扣需其审批。"},
+    {"entity": "customer", "key": "retainer_fee", "label": "年度顾问费", "type": "number", "options": [], "required": false, "description": "常年顾问合同年费，用于按月摊销确认收入与续约评估。"},
+    {"entity": "workorder", "key": "case_no", "label": "案件编号", "type": "text", "options": [], "required": true, "description": "项目唯一编号，工时、费用与账单均按案件编号归集。"},
+    {"entity": "workorder", "key": "case_type", "label": "案件类型", "type": "select", "options": ["诉讼", "非诉讼", "常年顾问", "专项咨询"], "required": false, "description": "案件业务类型，决定工作流模板、风险等级与计费方式。"},
+    {"entity": "workorder", "key": "billing_type", "label": "计费方式", "type": "select", "options": ["计时收费", "固定收费", "计件收费", "风险代理"], "required": false, "description": "案件计费模式，风险代理需预审回收条件与分成比例。"},
+    {"entity": "workorder", "key": "budget_hours", "label": "预算工时", "type": "number", "options": [], "required": false, "description": "案件预算工时总额，实际工时超预算80%时预警复核。"},
+    {"entity": "workorder", "key": "case_status", "label": "案件状态", "type": "select", "options": ["立项", "进行中", "已结案", "归档"], "required": false, "description": "案件生命周期状态，结案需完成成果归档与费用清理。"},
+    {"entity": "employee", "key": "title", "label": "职级", "type": "select", "options": ["合伙人", "资深顾问", "项目经理", "助理"], "required": false, "description": "人员职级，决定默认计费费率与工时复核层级。"},
+    {"entity": "employee", "key": "hourly_rate", "label": "标准小时费率", "type": "number", "options": [], "required": false, "description": "该职级对外计费的标准费率，账单按实际费率与折扣计算。"},
+    {"entity": "employee", "key": "practice_area", "label": "业务领域", "type": "text", "options": [], "required": false, "description": "人员专长领域（如IPO、税务、劳动法），派案时按领域匹配。"},
+    {"entity": "order", "key": "invoiced_amount", "label": "已开票金额", "type": "number", "options": [], "required": false, "description": "案件累计开票金额，与工时产值对比计算实收率。"},
+    {"entity": "order", "key": "paid_amount", "label": "已回款金额", "type": "number", "options": [], "required": false, "description": "案件累计到账金额，用于账龄分析与催收分级。"}
+  ],
+  "workflow_templates": [
+    {
+      "id": "case-intake-conflict-check",
+      "name": "案件立项与利益冲突检索",
+      "description": "委托信息收集、冲突检索、立项审批到档案建卡的开案流程。",
+      "steps": [
+        {"name": "委托信息收集", "type": "agent_task", "detail": "收集委托方主体信息、对方当事人名单、案件背景材料与拟收费方案，核对委托范围边界与保密要求，形成立项资料清单。"},
+        {"name": "利益冲突检索", "type": "agent_task", "detail": "以委托方及对方当事人在既有客户与案件库中做利益冲突检索，命中冲突的列明在办案件与冲突类型，出具检索结论。"},
+        {"name": "立项审批", "type": "approval", "detail": "冲突检索通过后提交负责合伙人审批立项，核定承办团队、预算工时与收费方案，审批通过后建立案件档案并分配编号，同步约定结案标准。"},
+        {"name": "档案与预算建卡", "type": "agent_task", "detail": "建立案件电子档案与预算卡，录入关键期限、开庭或交付里程碑，配置工时归集模板，并通知承办团队成员确认分工到位。"}
+      ]
+    },
+    {
+      "id": "timesheet-billing",
+      "name": "工时归集与账单出具",
+      "description": "每日工时核对、月末账单编制、合伙人审阅到回款核销。",
+      "steps": [
+        {"name": "每日工时核对", "type": "agent_task", "detail": "每日核对团队成员工时录入的完整性与规范性，对缺录人员发出补录提醒，校验工作描述是否写明事项、成果与时长。"},
+        {"name": "月度账单编制", "type": "agent_task", "detail": "月末按案件计费方式汇总当期工时或固定费用，套用费率与约定折扣生成账单草稿，附工作成果摘要与代垫费用明细。"},
+        {"name": "账单审阅", "type": "approval", "detail": "账单草稿推送负责合伙人审阅，重点核对折扣适用、超预算工时说明与代垫费用凭证，审定后出具正式账单并发送客户。"},
+        {"name": "回款跟踪", "type": "agent_task", "detail": "按约定账期跟踪每笔账单的回款到账情况，完成入账核对与销账处理，逾期未回的及时反馈合伙人并纳入账龄统计。"}
+      ]
+    },
+    {
+      "id": "ar-aging-collection",
+      "name": "应收账龄分级催收",
+      "description": "每月账龄分析、分级判定、催收执行到升级决策的应收管理。",
+      "steps": [
+        {"name": "账龄分析", "type": "agent_task", "detail": "每月生成应收账龄分析表，按客户与案件列示未回款金额与逾期天数，单独标注常年顾问未摊销与风险代理未回收部分。"},
+        {"name": "催收分级判定", "type": "condition", "detail": "按逾期天数分级：30天内委婉提醒续办；90天内正式催款函并暂停新增服务；超180天或风险项目提交合伙人专项决策。"},
+        {"name": "催收执行", "type": "agent_task", "detail": "执行分级催收动作，起草还款提醒函与正式催款函并记录每次沟通结果，对承诺分期付款的客户登记还款计划并按期复核落实。"},
+        {"name": "升级处理", "type": "approval", "detail": "超期严重或拟采取法律途径的应收提交合伙人会议决策，明确停服、诉讼或核销方案，决策结果记入客户信用档案。"}
+      ]
+    }
+  ],
+  "metric_defs": [
+    {"key": "utilization_rate", "name": "工时利用率", "unit": "%", "direction": "higher_better", "description": "计费工时÷标准工时×100%；标准工时按每人每周40小时扣除行政与假期估算。"},
+    {"key": "revenue_per_head", "name": "人均产值", "unit": "元", "direction": "higher_better", "description": "统计期确认收入÷期末在职专业人数，合伙人单独口径另行统计。"},
+    {"key": "realization_rate", "name": "实收率", "unit": "%", "direction": "higher_better", "description": "实际确认收入÷（标准费率×计费工时）×100%，反映折扣与核销对产值的侵蚀。"},
+    {"key": "collection_rate", "name": "账单回收率", "unit": "%", "direction": "higher_better", "description": "已回款金额÷已开票金额×100%，按账龄区间分解观察回款质量。"},
+    {"key": "ar_overdue_90_rate", "name": "账龄超90天应收占比", "unit": "%", "direction": "lower_better", "description": "逾期90天以上应收余额÷应收总额×100%，超过15%触发专项清收。"},
+    {"key": "avg_case_cycle", "name": "平均结案周期", "unit": "天", "direction": "lower_better", "description": "结案日期-立项日期的均值，诉讼案件按审限单独口径统计。"},
+    {"key": "budget_hours_variance", "name": "工时预算偏差率", "unit": "%", "direction": "lower_better", "description": "（实际工时-预算工时）÷预算工时×100%，超20%需分析范围蔓延或低效成因。"},
+    {"key": "write_off_rate", "name": "核销折让率", "unit": "%", "direction": "lower_better", "description": "核销与折让金额÷标准费率产值×100%，反映计费争议与坏账损失。"},
+    {"key": "billable_hours_per_head", "name": "人均计费工时", "unit": "小时", "direction": "higher_better", "description": "计费工时合计÷专业人数，按职级分层对比考核工作饱和度。"}
+  ],
+  "agent_roster": [
+    {"name": "项目会计", "department": "finance", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责工时归集、账单编制与回款核销，维护应收账龄并执行催收提醒。"},
+    {"name": "项目助理", "department": "support", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "协助案件资料整理、期限提醒与里程碑跟踪，保障项目按时交付。"},
+    {"name": "BD客户经理", "department": "sales", "capabilities": ["web_browsing", "persistent_memory", "self_learning"], "mission": "负责客户开拓与续约，跟踪常年顾问到期与客户满意度回访。"},
+    {"name": "合伙人助理", "department": "company", "capabilities": ["web_browsing", "persistent_memory"], "mission": "汇总在办案件进展与风险，准备合伙人会议材料并跟踪决策落实。"}
+  ],
+  "kb_seed_topics": [
+    "利益冲突检索规则与回避制度",
+    "计费模式说明（计时/固定/计件/风险代理）与折扣权限",
+    "工时录入规范与计费描述写作要求",
+    "应收账龄分级催收政策与函件模板",
+    "常年顾问合同的摊销确认与续约流程",
+    "结案归档标准与档案保管期限",
+    "保密与客户信息隔离墙制度"
+  ]
+}
