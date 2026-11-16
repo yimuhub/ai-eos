@@ -20,7 +20,7 @@ bindings_router = APIRouter(prefix="/member-agents", tags=["security"])
 audit_router = APIRouter(prefix="/audit", tags=["security"])
 
 
-async def _guard(db: AsyncSession, user: User, company_id: str,
+async def _owned_guard(db: AsyncSession, user: User, company_id: str,
                  cap: Capability = Capability.VIEW) -> None:
     await assert_company_capability(db, user.id, company_id, cap)
 
@@ -31,7 +31,7 @@ async def list_bindings(company_id: str = Query(...),
                         db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
     """某人（或全员）名下的 Agent 绑定（「我的员工」页数据源）。"""
-    await _guard(db, user, company_id)
+    await _owned_guard(db, user, company_id)
     q = select(MemberAgentBinding, Agent).join(
         Agent, Agent.id == MemberAgentBinding.agent_id).where(
         MemberAgentBinding.company_id == company_id)
@@ -55,7 +55,7 @@ async def set_bindings(body: BindingIn, company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
     """整表设置某自然人的绑定（[{agent_id, relation}]）。"""
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     for item in body.bindings:
         relation = str(item.get("relation") or "subordinate")
         if relation not in RELATIONS:
@@ -86,7 +86,7 @@ async def set_bindings(body: BindingIn, company_id: str = Query(...),
 async def delete_binding(binding_id: str, company_id: str = Query(...),
                          db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     row = await db.get(MemberAgentBinding, binding_id)
     if row is None or row.company_id != company_id:
         raise HTTPException(404, "绑定不存在")
@@ -104,7 +104,7 @@ async def export_audit(company_id: str = Query(...),
 
     留存策略与字段级导出归 M5 后续（当前提供全量窗口导出）。
     """
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     from app.models.event import EventLog
     rows = (await db.execute(
         select(EventLog).where(EventLog.company_id == company_id)

@@ -217,6 +217,41 @@ async def test_dimension_mismatch_falls_back_to_keyword(fake_embed, tenants,
     assert hits[0]["score"] == pytest.approx(round(kw, 4), abs=1e-9)
 
 
+async def test_corrupted_vector_falls_back_to_keyword(tenants, fake_embed):
+    """长度对但元素是脏数据的手改向量：退回关键词分，绝不 500。"""
+    from app import kb_embedding
+    from app.knowledge_engine import _tokens, retrieve
+    from app.models.knowledge import KBChunk, KBDocument, KBDocumentStatus
+
+    co = tenants.alice_co["id"]
+    content = "退货政策：七日无理由退货。"
+    async with AsyncSessionLocal() as s:
+        doc = KBDocument(id=str(uuid.uuid4()), company_id=co, title="脏",
+                         content=content, source_type="text",
+                         status=KBDocumentStatus.READY)
+        s.add(doc)
+        await s.flush()
+        s.add(KBChunk(id=str(uuid.uuid4()), document_id=doc.id,
+                      company_id=co, seq=0, content=content,
+                      keywords=["退货"],
+                      embedding=["脏"] * FAKE_DIM))  # 8 个字符串：长度对、类型错
+        await s.commit()
+
+    async with AsyncSessionLocal() as s:
+        # 有关键词重合：脏向量按「无向量」处理，分数是纯关键词分
+        # （检索打分用的分词集合是存储的 keywords 列，不是现场重切 content）
+        chunk = (await s.execute(
+            select(KBChunk).where(KBChunk.company_id == co))).scalars().one()
+        hits = await retrieve(s, co, "退货流程", top_k=3)
+        r_tokens = set(chunk.keywords or [])
+        kw = len(_tokens("退货流程") & r_tokens) / (
+            len(_tokens("退货流程")) ** 0.5 * len(r_tokens) ** 0.5)
+        assert hits and hits[0]["score"] == pytest.approx(round(kw, 4), abs=1e-9)
+        # 零关键词重合 + 脏向量：既进不了语义通道也不崩，返回空
+        assert await retrieve(s, co, "返款流程怎么走", top_k=3) == []
+    assert kb_embedding.usable_vector(["脏"] * FAKE_DIM, _fake_vec("x")) is None
+
+
 async def test_ingest_survives_embed_exception(tenants, monkeypatch):
     """embed 抛异常绝不阻塞入库：文档照常 READY，块无向量。"""
     from app import kb_embedding

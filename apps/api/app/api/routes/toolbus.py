@@ -33,7 +33,7 @@ _NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{2,119}$")
 _MAX_IMPORT_TOOLS = 50
 
 
-async def _guard(db: AsyncSession, user: User, company_id: str,
+async def _owned_guard(db: AsyncSession, user: User, company_id: str,
                  cap: Capability = Capability.VIEW) -> None:
     await assert_company_capability(db, user.id, company_id, cap)
 
@@ -78,7 +78,7 @@ async def inventory(company_id: str = Query(...),
                     db: AsyncSession = Depends(get_db),
                     user: User = Depends(get_current_user)):
     """工具总目录：in-code（web/电脑/服务端）+ 本公司动态登记。"""
-    await _guard(db, user, company_id)
+    await _owned_guard(db, user, company_id)
     rows = (await db.execute(
         select(ToolRegistry).where(ToolRegistry.company_id == company_id)
         .order_by(ToolRegistry.created_at))).scalars().all()
@@ -110,7 +110,7 @@ async def register_tool(body: ToolRegisterIn,
                         company_id: str = Query(...),
                         db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     import uuid
 
     if not _NAME_RE.match(body.name or ""):
@@ -176,7 +176,7 @@ async def toggle_tool(tool_id: str, enabled: bool = Query(...),
                       company_id: str = Query(...),
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     row = await _load_row(db, company_id, tool_id)
     row.enabled = enabled
     await db.commit()
@@ -187,7 +187,7 @@ async def toggle_tool(tool_id: str, enabled: bool = Query(...),
 async def unregister_tool(tool_id: str, company_id: str = Query(...),
                           db: AsyncSession = Depends(get_db),
                           user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     row = await _load_row(db, company_id, tool_id)
     # 授权行按名字挂的：撤销登记时一并清掉，避免残留死授权
     await db.execute(delete(AgentToolGrant).where(
@@ -203,7 +203,7 @@ async def check_health(tool_id: str, company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
     """健康检查：mcp_http 工具真实探测端点 tools/list；其它来源标 unknown。"""
-    await _guard(db, user, company_id, Capability.OPERATE)
+    await _owned_guard(db, user, company_id, Capability.OPERATE)
     row = await _load_row(db, company_id, tool_id)
     if row.source != "mcp_http" or not row.endpoint:
         row.health_status = "unknown"
@@ -242,7 +242,7 @@ async def import_remote_tools(tool_id: str, company_id: str = Query(...),
     每个远端工具登记一行：name = 前缀_远端名（避免撞名），source_ref =
     远端真实工具名（执行时按它 tools/call）。重复跳过，上限 50 个。
     """
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     import uuid
     row = await _load_row(db, company_id, tool_id)
     if row.source != "mcp_http" or not row.endpoint:
@@ -296,7 +296,7 @@ async def test_execute(tool_id: str, company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
     """试执行（真执行，记审计）：给人用的"装好后点一下试试"。"""
-    await _guard(db, user, company_id, Capability.OPERATE)
+    await _owned_guard(db, user, company_id, Capability.OPERATE)
     row = await _load_row(db, company_id, tool_id)
     if not row.enabled:
         raise HTTPException(400, "工具已停用，先启用再试")
@@ -312,7 +312,7 @@ async def test_execute(tool_id: str, company_id: str = Query(...),
 async def list_agent_tools(agent_id: str, company_id: str = Query(...),
                            db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id)
+    await _owned_guard(db, user, company_id)
     agent = await db.get(Agent, agent_id)
     if agent is None or agent.company_id != company_id:
         raise HTTPException(404, "员工不存在")
@@ -338,7 +338,7 @@ async def set_agent_tools(agent_id: str, body: GrantIn,
                           db: AsyncSession = Depends(get_db),
                           user: User = Depends(get_current_user)):
     """整表设置某员工授权（前端一次提交全量名单；内置工具无需授权）。"""
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     agent = await db.get(Agent, agent_id)
     if agent is None or agent.company_id != company_id:
         raise HTTPException(404, "员工不存在")

@@ -80,8 +80,8 @@ def test_incode_registry_and_compat():
     assert len(computer) == 15
     assert get_tool("computer_click").executor is not None
     assert get_tool("computer_apply_patch").risk == "high"
-    # aieos.* 服务端工具只对外
-    assert len([s for s in SERVER_TOOL_SPECS if s.expose_mcp]) == 7
+    # aieos.* 服务端工具只对外（V6 M3 起含 aieos.query_metric，共 8 个）
+    assert len([s for s in SERVER_TOOL_SPECS if s.expose_mcp]) == 8
     assert get_tool("aieos.create_task") is None  # 服务端工具不占员工命名空间
 
 

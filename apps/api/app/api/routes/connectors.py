@@ -31,7 +31,7 @@ router = APIRouter(prefix="/connectors", tags=["connectors"])
 _KINDS = ("rest", "webhook", "mcp_bridge")
 
 
-async def _guard(db: AsyncSession, user: User, company_id: str,
+async def _owned_guard(db: AsyncSession, user: User, company_id: str,
                  cap: Capability = Capability.VIEW) -> None:
     await assert_company_capability(db, user.id, company_id, cap)
 
@@ -70,7 +70,7 @@ async def create_connector(body: ConnectorIn,
                            company_id: str = Query(...),
                            db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     import re as _re
 
     if body.kind not in _KINDS:
@@ -114,7 +114,7 @@ async def create_connector(body: ConnectorIn,
 async def list_connectors(company_id: str = Query(...),
                           db: AsyncSession = Depends(get_db),
                           user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id)
+    await _owned_guard(db, user, company_id)
     rows = (await db.execute(
         select(ToolRegistry).where(
             ToolRegistry.company_id == company_id,
@@ -131,7 +131,7 @@ async def sync_now(tool_id: str, company_id: str = Query(...),
                    db: AsyncSession = Depends(get_db),
                    user: User = Depends(get_current_user)):
     """立即执行一次增量同步（同步账落 connector_sync_runs）。"""
-    await _guard(db, user, company_id, Capability.OPERATE)
+    await _owned_guard(db, user, company_id, Capability.OPERATE)
     row = await _load_connector(db, company_id, tool_id)
     if not row.enabled:
         raise HTTPException(400, "连接器已停用")
@@ -144,7 +144,7 @@ async def list_runs(tool_id: str, company_id: str = Query(...),
                     limit: int = Query(20, le=100),
                     db: AsyncSession = Depends(get_db),
                     user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id)
+    await _owned_guard(db, user, company_id)
     await _load_connector(db, company_id, tool_id)
     rows = (await db.execute(
         select(ConnectorSyncRun).where(
@@ -161,7 +161,7 @@ async def ingest_records(records: list[dict], tool_id: str,
                          db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
     """Webhook 收数：外部推送/手工投喂统一入口，幂等 upsert。"""
-    await _guard(db, user, company_id, Capability.OPERATE)
+    await _owned_guard(db, user, company_id, Capability.OPERATE)
     row = await _load_connector(db, company_id, tool_id)
     if (row.config or {}).get("kind") != "webhook":
         raise HTTPException(400, "只有 webhook 连接器支持 ingest")
@@ -189,7 +189,7 @@ async def browse_records(tool_id: str, company_id: str = Query(...),
                          limit: int = Query(50, le=200),
                          db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id)
+    await _owned_guard(db, user, company_id)
     row = await _load_connector(db, company_id, tool_id)
     rows = (await db.execute(
         select(CanonicalRecord).where(
@@ -223,7 +223,7 @@ class MetricIn(BaseModel):
 async def create_metric(body: MetricIn, company_id: str = Query(...),
                         db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     import re as _re
 
     if not _re.match(r"^[a-z][a-z0-9_]{1,79}$", body.key or ""):
@@ -253,7 +253,7 @@ async def create_metric(body: MetricIn, company_id: str = Query(...),
 async def list_metrics(company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id)
+    await _owned_guard(db, user, company_id)
     rows = (await db.execute(
         select(MetricDef).where(MetricDef.company_id == company_id)
         .order_by(MetricDef.key))).scalars().all()
@@ -264,7 +264,7 @@ async def list_metrics(company_id: str = Query(...),
 async def evaluate(key: str, company_id: str = Query(...),
                    db: AsyncSession = Depends(get_db),
                    user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id)
+    await _owned_guard(db, user, company_id)
     try:
         return await evaluate_metric(db, company_id, key)
     except LookupError as exc:
@@ -277,7 +277,7 @@ async def evaluate(key: str, company_id: str = Query(...),
 async def delete_metric(key: str, company_id: str = Query(...),
                         db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     res = await db.execute(delete(MetricDef).where(
         MetricDef.company_id == company_id, MetricDef.key == key))
     await db.commit()
@@ -307,7 +307,7 @@ async def create_custom_field(body: CustomFieldIn,
                               company_id: str = Query(...),
                               db: AsyncSession = Depends(get_db),
                               user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     import re as _re
 
     if body.entity_type not in ENTITY_TYPES:
@@ -343,7 +343,7 @@ async def list_custom_fields(company_id: str = Query(...),
                              entity_type: str | None = Query(None),
                              db: AsyncSession = Depends(get_db),
                              user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id)
+    await _owned_guard(db, user, company_id)
     q = select(CustomFieldDef).where(
         CustomFieldDef.company_id == company_id)
     if entity_type:
@@ -359,7 +359,7 @@ async def list_custom_fields(company_id: str = Query(...),
 async def delete_custom_field(field_id: str, company_id: str = Query(...),
                               db: AsyncSession = Depends(get_db),
                               user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     row = await db.get(CustomFieldDef, field_id)
     if row is None or row.company_id != company_id:
         raise HTTPException(404, "字段不存在")

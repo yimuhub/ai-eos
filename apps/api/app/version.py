@@ -6,4 +6,4 @@
 tests/test_code_quality.py::test_version_strings_are_consistent 守住。
 """
 
-__version__ = "5.16.1"
+__version__ = "6.0.0"

@@ -170,16 +170,31 @@ async def test_install_workflow_template_and_rollback(client, tenants):
         assert inst.rolled_back_at is not None
 
 
-async def test_install_rejects_industry_pack_until_m4(client, tenants):
+async def test_install_industry_pack_plants_via_market(client, tenants):
+    """M4 后行业包走市场路径真实种植（详细断言见 test_industry_packs.py）。"""
     alice, co = tenants.alice, tenants.alice_co
     manifest = {"id": "pack-manufacturing", "name": "制造业包",
                 "version": "0.1.0", "category": "industry_pack",
-                "runtime": "declarative", "description": "x"}
+                "runtime": "declarative", "description": "x",
+                "custom_fields": [{"entity": "order", "key": "test_cf",
+                                   "label": "测试字段", "type": "text"}],
+                "workflow_templates": [{"id": "t1", "name": "模板流",
+                                        "steps": [{"name": "s1",
+                                                   "type": "agent_task",
+                                                   "detail": "做一件事"}]}],
+                "metric_defs": [{"key": "test_m", "name": "测试指标",
+                                 "unit": "个"}],
+                "agent_roster": [{"name": "测试员工", "department": "company",
+                                  "capabilities": ["persistent_memory"],
+                                  "mission": "测试"}]}
     r = await _publish(client, alice["headers"], "industry_pack",
                        "pack-manufacturing", "制造业包", manifest=manifest)
     assert r.status_code == 201
     r = await _install(client, alice["headers"], r.json()["id"], co["id"])
-    assert r.status_code == 400 and "M4" in r.text
+    assert r.status_code == 201, r.text
+    kinds = {a["kind"] for a in r.json()["artifacts"]}
+    assert {"agent", "custom_field", "workflow", "metric",
+            "feature_flag"} <= kinds
 
 
 async def test_legacy_package_stays_record_only(client, tenants):

@@ -61,13 +61,15 @@ async def _resolve_config(db: AsyncSession,
     为空串：本地 OpenAI 兼容网关（Ollama / llama.cpp）常不需要鉴权，与
     OpenAICompatProvider「无 Key 就不带 Authorization 头」的行为一致。
     """
+    # 公司自有优先于平台共享；NULL 公司 = 平台级共享模型
+    company_scope = (or_(Model.company_id == company_id,
+                         Model.company_id.is_(None))
+                     if company_id else Model.company_id.is_(None))
     rows = (await db.execute(
         select(Model).where(
             Model.model_type == "embedding",
             Model.provider_type == ModelProviderType.OPENAI_COMPAT,
-            # 公司自有优先于平台共享；NULL 公司 = 平台级共享模型
-            or_(Model.company_id == company_id, Model.company_id.is_(None))
-            if company_id else Model.company_id.is_(None),
+            company_scope,
             # enabled 可空，NULL 等价 True（与 models 表历史口径一致）
             or_(Model.enabled.is_(None), Model.enabled == True),  # noqa: E712
         ))).scalars().all()
@@ -169,14 +171,20 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 
 def usable_vector(embedding: object,
                   query_vec: list[float] | None) -> list[float] | None:
-    """chunk 的向量与查询向量维度一致时返回它，否则 None。
+    """chunk 的向量「可用于与本次查询算余弦」时返回它，否则 None。
 
-    只查维度不逐元素验型：向量只由本模块写入（list[float]），JSON 反序列化
-    不会变型；逐元素 isinstance 在 500 候选 × 1536 维下是纯浪费。手工改库
-    造出的脏数据最坏触发 TypeError → 调用方的兜底 except 降级，可接受。
+    维度必须与查询向量一致（模型被换过 → 旧向量整体判死），且元素必须是
+    数值——向量虽只由本模块写入，但手工改库/外部导入可能塞进脏 JSON；
+    检索打分循环没有兜底 except，脏元素会让 cosine 抛 TypeError 直接 500。
+    逐元素检查用 type() 判断（比 isinstance 便宜），最坏 500 候选 × 1536 维
+    约几十毫秒，远低于一次上游 RPC，换来「脏数据退回关键词分」的确定性。
     """
     if query_vec is None or not isinstance(embedding, list):
         return None
     if len(embedding) != len(query_vec) or not embedding:
         return None
+    for x in embedding:
+        t = type(x)
+        if t is not float and t is not int:
+            return None
     return embedding
