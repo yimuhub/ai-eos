@@ -62,6 +62,16 @@ SERVER_TOOL_SPECS: list[ToolSpec] = [
         source="mcp_server", risk="low", required_capability="view",
         expose_mcp=True),
     ToolSpec(
+        name="aieos.query_metric",
+        description="查询公司指标（销售额/应收账龄/良品率等已定义指标）。"
+                    "问业务数字时用这个，不要估算。",
+        parameters={"type": "object",
+                    "properties": {"key": {"type": "string",
+                                           "description": "指标 key"}},
+                    "required": ["key"]},
+        source="mcp_server", risk="low", required_capability="view",
+        expose_mcp=True),
+    ToolSpec(
         name="aieos.get_briefing",
         description="拉取 CEO 晨间简报（昨日完成/今日计划/需要你决策/今日成本）。",
         parameters={"type": "object", "properties": {}},

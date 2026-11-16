@@ -6,11 +6,28 @@ web 工具的 description/parameters 与 app/tools.py 历史版本逐字一致�
 from __future__ import annotations
 
 from . import computer_tools
-from .executors import web_fetch_executor, web_search_executor
+from .executors import (metrics_query_executor, web_fetch_executor,
+                        web_search_executor)
 from .registry import ToolSpec, register_tool
 
 
 def _register_builtin() -> None:
+    register_tool(ToolSpec(
+        name="metrics_query",
+        description="查询公司指标看板的数字（销售额/应收/良品率等已定义指标）。"
+                    "需要业务数字时先查这里，禁止凭记忆编造或估算。",
+        parameters={"type": "object",
+                    "properties": {
+                        "key": {"type": "string",
+                                "description": "指标 key，如 monthly_sales"},
+                    },
+                    "required": ["key"]},
+        source="builtin", risk="low", required_capability="view",
+        category="metrics", display_name="指标查询",
+        prompt_hint="业务数字一律经本工具取数（口径在指标注册表里），"
+                    "不要自己估算；grouped 返回分组值。",
+        executor=metrics_query_executor))
+
     register_tool(ToolSpec(
         name="web_search",
         description="联网搜索实时信息，返回标题、链接、摘要。"

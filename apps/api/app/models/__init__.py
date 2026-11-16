@@ -84,3 +84,6 @@ from .computer_device import (ComputerDevice, ComputerDispatch,  # noqa: F401
 from .media import MediaGeneration  # noqa: F401
 
 from .toolbus import AgentToolGrant, ToolRegistry  # noqa: F401
+
+from .canonical import (CanonicalRecord, ConnectorSyncRun,  # noqa: F401
+                        CustomFieldDef, MetricDef)

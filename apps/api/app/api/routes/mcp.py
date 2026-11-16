@@ -151,6 +151,17 @@ async def _execute_tool(db: AsyncSession, user: User, company_id: str,
             txt = rag.get("context_text") or "（知识库没有相关内容）"
             return txt[:4000], None
 
+        if name == "aieos.query_metric":
+            from app.services.metrics_service import evaluate_metric
+            try:
+                res = await evaluate_metric(db, company_id,
+                                            str(args.get("key") or ""))
+                return json.dumps(res, ensure_ascii=False, default=str), None
+            except LookupError as exc:
+                return "", f"{exc}（请先在指标中心定义）"
+            except ValueError as exc:
+                return "", f"指标口径非法：{exc}"
+
         if name == "aieos.get_briefing":
             from app.models.company import Company
             from app.api.routes.briefing import build_briefing

@@ -14,6 +14,23 @@ from .registry import ToolContext
 logger = get_logger(__name__)
 
 
+async def metrics_query_executor(args: dict, ctx: ToolContext) -> dict:
+    """指标查询：规整层 + 指标注册表，AI 取数的唯一正门。"""
+    key = str(args.get("key") or "").strip()
+    if not key:
+        return {"error": "缺少 key"}
+    if not ctx.company_id:
+        return {"error": "指标查询需要公司上下文"}
+    from app.db.session import AsyncSessionLocal
+    from app.services.metrics_service import evaluate_metric
+    async with AsyncSessionLocal() as mdb:
+        try:
+            return await evaluate_metric(mdb, ctx.company_id, key)
+        except LookupError as exc:
+            return {"error": str(exc),
+                    "hint": "请让老板先在指标中心定义该指标（/metrics）"}
+
+
 async def web_search_executor(args: dict, ctx: ToolContext) -> dict:
     """联网搜索：委托 skill_system 的 WebSearchSkill（多源降级）。"""
     query = str(args.get("query") or "").strip()
