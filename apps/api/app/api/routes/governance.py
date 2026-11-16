@@ -243,15 +243,37 @@ async def publish_package(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """发布/登记市场包。
+
+    V6 M2：manifest 走 plugin_manifest 校验（六类新分类）；旧四类
+    （AGENT/SKILL/WORKFLOW/DEPARTMENT_TEMPLATE）保留兼容、仅记账。
+    """
+    from app.services.plugin_manifest import ManifestError, validate_manifest
+
     if data.package_type not in ("AGENT", "SKILL", "WORKFLOW",
-                                  "DEPARTMENT_TEMPLATE"):
+                                 "DEPARTMENT_TEMPLATE") and \
+            data.package_type not in ("tool", "connector", "workflow_template",
+                                      "model_provider", "skill_pack",
+                                      "industry_pack"):
         raise HTTPException(400, "invalid package_type")
+    manifest = data.manifest
+    if data.package_type in ("tool", "connector", "workflow_template",
+                             "model_provider", "skill_pack", "industry_pack"):
+        try:
+            manifest = validate_manifest(manifest)
+        except ManifestError as exc:
+            raise HTTPException(400, f"manifest 校验失败：{exc}") from exc
+        # key/id 一致性：工具名前缀来自 key，错位会让产物找不回
+        if manifest.get("id") and manifest["id"] != data.key:
+            raise HTTPException(400,
+                                f"manifest.id ({manifest['id']}) 与包 key "
+                                f"({data.key}) 不一致")
     p = MarketplacePackage(
         id=_id(), package_type=data.package_type, key=data.key,
         name=data.name, description=data.description, author=data.author,
         latest_version=data.version,
         permissions_required=data.permissions_required or [],
-        dependencies=data.dependencies or [], manifest=data.manifest)
+        dependencies=data.dependencies or [], manifest=manifest)
     db.add(p)
     await db.commit()
     return {"id": p.id, "key": p.key, "version": p.latest_version}
@@ -277,9 +299,17 @@ async def install_package(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """安装包：必须显式确认权限清单。"""
+    """安装包：必须显式确认权限清单。
+
+    V6 M2：六类新分类走真实安装器（产物 = 工具/工作流/供应商行，
+    全部记入 install_log.artifacts 供回滚精确回收）；
+    安装是公司级配置变更，要求 MANAGE（与 /plugins 一致）。
+    """
+    from app.services.package_installer import install_package as _install
+    from app.services.plugin_manifest import ManifestError
+
     await assert_company_capability(db, user.id, company_id,
-                                    Capability.OPERATE)
+                                    Capability.MANAGE)
     p = await db.get(MarketplacePackage, pid)
     if not p:
         raise HTTPException(404, "not found")
@@ -289,16 +319,13 @@ async def install_package(
                     "permissions_required": p.permissions_required,
                     "dependencies": p.dependencies,
                     "potential_risk": "安装的包将以该公司身份运行"}}
-    inst = PackageInstallation(id=_id(), company_id=company_id,
-                               package_id=pid, version=p.latest_version,
-                               installed_by=user.id,
-                               install_log={"steps": ["download", "verify",
-                                                      "install"],
-                                            "all_ok": True})
-    db.add(inst)
-    await db.commit()
-    return {"installed": True, "installation_id": inst.id,
-            "package": p.name, "version": p.latest_version}
+    try:
+        result = await _install(db, p, company_id, user.id)
+    except ManifestError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"installed": True, "installation_id": result["installation_id"],
+            "package": p.name, "version": result["version"],
+            "artifacts": result["artifacts"], "notes": result["notes"]}
 
 
 @router.get("/installations", response_model=list[InstallationOut])
@@ -333,15 +360,23 @@ async def list_installations(company_id: str = Query(...),
 async def rollback_installation(inst_id: str,
                                 db: AsyncSession = Depends(get_db),
                                 user: User = Depends(get_current_user)):
+    """回滚安装：按 install_log.artifacts 精确回收产物（V6 M2 真回收）。
+
+    旧式 stub 安装（无 artifacts）只做记账回滚，如实返回 removed=0。
+    """
+    from app.services.package_installer import uninstall_package
+
     inst = await db.get(PackageInstallation, inst_id)
     if not inst:
         raise HTTPException(404, "not found")
     # 安装记录自带 company_id：回滚同样要确认调用者在该公司的能力
     await assert_company_capability(db, user.id, inst.company_id,
-                                    Capability.OPERATE)
-    inst.rolled_back_at = _now_utc()
-    await db.commit()
-    return {"id": inst_id, "rolled_back": True}
+                                    Capability.MANAGE)
+    removed = await uninstall_package(db, inst)
+    if not inst.rolled_back_at:
+        inst.rolled_back_at = _now_utc()
+        await db.commit()
+    return {"id": inst_id, "rolled_back": True, "removed_artifacts": removed}
 
 
 # ================= P3-15 Enterprise Templates =================

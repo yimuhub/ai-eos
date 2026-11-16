@@ -68,7 +68,10 @@ class KBChunk(Base):
     company_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    # embedding 向量以 JSON 存储（pgvector 可后续替换）
+    # 语义向量（V6 M1-f 混合检索）：JSON 浮点数组，写入方 app/kb_embedding.py。
+    # 刻意不引 sqlite-vec/pgvector——零新依赖、SQLite/PG 通吃，候选集已在
+    # SQL 层限流（≤500），Python 逐块余弦完全够 v1；单公司 chunk 超过
+    # 5 万、Python 打分延迟成为瓶颈时，再换原生向量索引（pgvector）。
     embedding: Mapped[list | None] = mapped_column(JSON, nullable=True)
     keywords: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=_now)

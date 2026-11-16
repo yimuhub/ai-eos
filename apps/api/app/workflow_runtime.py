@@ -255,7 +255,7 @@ class WorkflowRuntime:
         try:
             out["json"] = _json.loads(text)
         except (_json.JSONDecodeError, ValueError):
-            pass
+            pass  # noqa: silent-except — 非 JSON 响应体是常态（HTML/纯文本），如实留在 body 字段
         return out
 
     async def _exec_tool_node(self, node: WorkflowNode) -> dict:
