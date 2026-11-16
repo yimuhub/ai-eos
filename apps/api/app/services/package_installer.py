@@ -86,8 +86,16 @@ async def install_package(db: AsyncSession, pkg: MarketplacePackage,
         notes.append("技能包已登记引用；真身由磁盘插件加载器"
                      "（plugins/skills/）安装生效——市场无签名机制前不分发代码")
     elif category == "industry_pack":
-        raise ManifestError("行业包安装器随 M4 提供：先安装内容 JSON 所需的"
-                            "行业包运行时，再从市场安装行业包")
+        # M4：行业包安装 = 行业服务的一次事务种植（字段/员工/工作流/指标/
+        # 知识包/功能开关），产物全部记 artifacts 供回滚
+        from .industry_pack_service import install_pack_content
+        pack = {k: v for k, v in manifest.items()
+                if k in ("id", "name", "version", "description", "terms",
+                         "custom_fields", "workflow_templates", "metric_defs",
+                         "agent_roster", "kb_seed_topics")}
+        artifacts = await install_pack_content(db, pack, company_id, user_id)
+        notes.append(f"行业包「{manifest.get('name')}」已种植"
+                     f"（{len(artifacts)} 项产物，工作流为草稿待发布）")
 
     inst = PackageInstallation(
         id=_uuid(), company_id=company_id, package_id=pkg.id,
@@ -259,15 +267,23 @@ async def _install_model_provider(db: AsyncSession, manifest: dict,
 async def uninstall_package(db: AsyncSession, inst: PackageInstallation) -> int:
     """按 install_log 里的产物清单精确回收；返回回收的产物数。
 
-    节点/边对 workflow_definitions 有 ondelete=CASCADE，删定义即全清。
+    节点/边对 workflow_definitions 有 ondelete=CASCADE，删定义即全清；
+    行业包产物按 kind 分派给行业服务回收。
     """
     from app.models.workflow import WorkflowDefinition
 
     log = inst.install_log or {}
     artifacts = log.get("artifacts") or []
     removed = 0
+    if any(a.get("kind") in ("agent", "custom_field", "kb_document",
+                            "feature_flag") for a in artifacts):
+        from .industry_pack_service import uninstall_pack_artifacts
+        removed += await uninstall_pack_artifacts(db, artifacts,
+                                                  inst.company_id)
     for art in artifacts:
         kind, art_id = art.get("kind"), art.get("id")
+        if kind in ("agent", "custom_field", "kb_document", "feature_flag"):
+            continue  # 行业服务已按清单回收
         if kind == "tool_row":
             row = await db.get(ToolRegistry, art_id)
             if row is not None:

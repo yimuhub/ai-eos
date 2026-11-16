@@ -163,7 +163,12 @@ async def evaluate_metric(db: AsyncSession, company_id: str, key: str) -> dict:
                                 MetricDef.key == key))).scalars().first()
     if row is None:
         raise LookupError(f"指标 {key} 不存在")
-    spec = validate_spec(row.spec or {})
+    if not row.spec:
+        # 行业包预配的指标：口径已定义、数据源待接线（如实告知，不编数）
+        raise LookupError(
+            f"指标 {key}（{row.name}）还没有绑定数据源口径："
+            "请先安装对应连接器并在指标中心补全 spec（entity/op/field）")
+    spec = validate_spec(row.spec)
     spec["company_id"] = company_id
     conditions = _build_conditions(db, spec)
     op = spec["op"]
