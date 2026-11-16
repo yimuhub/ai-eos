@@ -59,3 +59,4 @@ packaging/mac-signing/*.key
 
 # 外部测评工具的截图产物（22 张 / 5.4MB，本地留证即可，不入 git 历史）
 .zcode-eval-screenshots/
+.v2c/
