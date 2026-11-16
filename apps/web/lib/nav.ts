@@ -77,6 +77,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { href: "/meetings", label: "会议中心", icon: "◍", desc: "多个员工开会讨论问题，产出结论", keywords: ["meeting", "huiyi", "会议", "讨论"], hidden: true },
       { href: "/plugins", label: "插件库", icon: "⊞", desc: "给数字员工安装本机操作能力，并设置三档电脑权限与审计", keywords: ["plugin", "chajian", "插件", "扩展", "本机操作", "computer", "三档审批", "完全控制", "硬拦截", "agent-desktop"], hidden: true },
+      { href: "/market", label: "基座市场", icon: "⌗", desc: "装积木：工具、连接器、工作流模板、行业包，安装即产生真实产物且可回滚", keywords: ["market", "shichang", "市场", "插件市场", "行业包", "连接器", "积木", "基座", "install"] },
       { href: "/workflow-builder", label: "工作流", icon: "⇄", desc: "把多步骤流程串起来，按顺序自动执行", keywords: ["workflow", "gongzuoliu", "工作流", "流程", "编排"] },
       { href: "/schedules", label: "日程安排", icon: "🗓", desc: "定时触发：每天/每周固定时间自动开工", keywords: ["schedule", "richeng", "日程", "定时", "cron", "排期"], hidden: true },
       { href: "/automation", label: "自动化规则", icon: "🤖", desc: "「发生 X 就做 Y」的事件触发规则", keywords: ["automation", "zidonghua", "自动化", "触发器", "规则"], hidden: true },
