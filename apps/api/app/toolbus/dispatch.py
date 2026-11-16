@@ -178,7 +178,8 @@ async def mcp_list_tools(endpoint: str, *, bearer: str | None = None,
 # ---------------------------------------------------------------------------
 
 async def _audit(name: str, ctx: ToolContext, *, ok: bool, source: str,
-                 risk: str, duration_ms: int, error: str | None) -> None:
+                 risk: str, duration_ms: int, error: str | None,
+                 dlp_findings: list[dict] | None = None) -> None:
     """tool.call 审计：独立短会话，失败只告警不拖垮工具调用本身。"""
     try:
         from app.db.session import AsyncSessionLocal
@@ -187,6 +188,8 @@ async def _audit(name: str, ctx: ToolContext, *, ok: bool, source: str,
                    "duration_ms": duration_ms, "task_id": ctx.task_id}
         if error:
             payload["error"] = error[:200]
+        if dlp_findings:
+            payload["dlp_findings"] = dlp_findings[:10]
         async with AsyncSessionLocal() as adb:
             await log_event(adb, "tool.call", "tool", name,
                             "agent" if ctx.agent_id else
@@ -230,7 +233,34 @@ async def execute_bus_tool(name: str, args, *, company_id: str | None = None,
         logger.warning("工具执行失败 name=%s: %s", name, exc, exc_info=True)
         result = {"error": f"{type(exc).__name__}: {exc}"[:300]}
     ok = isinstance(result, dict) and "error" not in result
+    # 出站 DLP（V6 M5）：结果进模型上下文前过脱敏闸门；公司可用功能开关
+    # dlp:outbound=disabled 关闭（明配置，不静默）。命中情况进审计。
+    dlp_findings: list[dict] = []
+    if ok:
+        result, dlp_findings = await _maybe_mask(result, ctx)
     await _audit(name, ctx, ok=ok, source=source, risk=risk,
                  duration_ms=int((time.monotonic() - started) * 1000),
-                 error=None if ok else str(result.get("error", ""))[:200])
+                 error=None if ok else str(result.get("error", ""))[:200],
+                 dlp_findings=dlp_findings)
     return _truncate(result)
+
+
+async def _maybe_mask(result, ctx: ToolContext):
+    """按公司开关执行出站脱敏；开关查询失败按开启处理（fail-safe）。"""
+    try:
+        from sqlalchemy import select as _select
+        from app.db.session import AsyncSessionLocal
+        from app.models.feature_flags import CompanyFeatureFlag
+        async with AsyncSessionLocal() as fdb:
+            if ctx.company_id:
+                row = (await fdb.execute(
+                    _select(CompanyFeatureFlag).where(
+                        CompanyFeatureFlag.company_id == ctx.company_id,
+                        CompanyFeatureFlag.key == "dlp:outbound"))).scalars().first()
+                if row is not None and not row.enabled:
+                    return result, []
+        from app.services.dlp import mask_result
+        return mask_result(result)
+    except Exception:  # noqa: BLE001 — 脱敏层故障不拖垮工具调用
+        logger.exception("DLP 脱敏检查失败 tool=%s", ctx.tool_name)
+        return result, []

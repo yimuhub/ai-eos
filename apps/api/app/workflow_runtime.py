@@ -256,6 +256,15 @@ class WorkflowRuntime:
             out["json"] = _json.loads(text)
         except (_json.JSONDecodeError, ValueError):
             pass  # noqa: silent-except — 非 JSON 响应体是常态（HTML/纯文本），如实留在 body 字段
+        # 出站 DLP（V6 M5）：HTTP 响应与工具结果同一道闸门
+        try:
+            from app.services.dlp import mask_result
+            out, findings = mask_result(out)
+            if findings:
+                out["dlp_findings"] = findings[:10]
+        except Exception:  # noqa: BLE001 — 脱敏层故障不阻塞流程
+            logger.warning("HTTP 节点 DLP 脱敏失败 node=%s", node.node_key,
+                           exc_info=True)
         return out
 
     async def _exec_tool_node(self, node: WorkflowNode) -> dict:

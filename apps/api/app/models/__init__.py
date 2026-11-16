@@ -89,3 +89,5 @@ from .canonical import (CanonicalRecord, ConnectorSyncRun,  # noqa: F401
                         CustomFieldDef, MetricDef)
 
 from .feature_flags import CompanyFeatureFlag  # noqa: F401
+
+from .bindings import MemberAgentBinding  # noqa: F401

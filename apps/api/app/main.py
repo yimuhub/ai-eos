@@ -31,7 +31,7 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             tokens, experts, command, org_presets, prometheus_metrics, setup,
                             org_synthesis, plugins, computer_policy, computer_devices,
                             members, licensing, subscription, byok, invites, media,
-                            toolbus, connectors, industry_packs)
+                            toolbus, connectors, industry_packs, security)
 from app.api.routes import notifications
 from app.api.routes import thread_reads
 # 收件箱挂在 /tasks 下，必须比 tasks 路由**先注册**——tasks 有 /{tid} 兜底，
@@ -500,3 +500,6 @@ app.include_router(connectors.metrics_router)
 app.include_router(connectors.custom_fields_router)
 # V6 M4：行业包模块附带公司功能开关子路由
 app.include_router(industry_packs.features_router)
+# V6 M5：安全面（成员绑定 + 审计导出）双路由
+app.include_router(security.bindings_router)
+app.include_router(security.audit_router)
