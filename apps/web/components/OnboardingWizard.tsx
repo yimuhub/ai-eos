@@ -21,6 +21,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, setActiveCompanyId } from "@/lib/api";
 import { notify } from "@/components/Toast";
 import DemoMode from "@/components/DemoMode";
+import { seedDemoCompany } from "@/lib/demo";
 import AttachmentPicker, { Attachment } from "@/components/AttachmentPicker";
 
 type Diagnostics = {
@@ -118,6 +119,21 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
 
   // ---- 演示模式（免 Key）----
   const [demoOpen, setDemoOpen] = useState(false);
+  // 一键预置演示公司：后端种子（幂等）→ 设为激活公司 → 回调刷新（商业交付：首屏主按钮）
+  const [seeding, setSeeding] = useState(false);
+  async function seedDemo() {
+    if (seeding) return;
+    setSeeding(true);
+    try {
+      const d = await seedDemoCompany();
+      setActiveCompanyId(d.company_id);
+      onDone();
+    } catch (e) {
+      notify("error", e instanceof Error ? e.message : "演示公司创建失败");
+    } finally {
+      setSeeding(false);
+    }
+  }
 
   // ---- 密钥就地保存（写本机 .env，立即生效）----
   const [keyInput, setKeyInput] = useState("");
@@ -300,9 +316,16 @@ export default function OnboardingWizard({ onDone }: { onDone: () => void }) {
         <p className="text-sm mt-2" style={{ color: "var(--muted)" }}>
           三步之后，你就拥有一支能替你干活的数字员工团队。全程约 1 分钟。
         </p>
-        <button onClick={() => setDemoOpen(true)} className="btn-ghost text-xs mt-3">
-          🎭 先体验演示（免密钥，约 30 秒）
-        </button>
+        <div className="mt-3 flex flex-col items-center gap-2">
+          <button onClick={seedDemo} disabled={seeding}
+            className="btn-primary inline-flex items-center gap-2 disabled:opacity-50"
+            style={{ background: "linear-gradient(135deg,#f59e0b,#ef4444)" }}>
+            {seeding ? "正在预置演示公司…" : "🎭 30 秒演示：预置一家能直接用的公司"}
+          </button>
+          <button onClick={() => setDemoOpen(true)} className="btn-ghost text-xs">
+            🎭 先看 30 秒对话演示（免密钥，模板回复）
+          </button>
+        </div>
       </div>
       {demoOpen && <DemoMode onClose={() => setDemoOpen(false)} />}
 

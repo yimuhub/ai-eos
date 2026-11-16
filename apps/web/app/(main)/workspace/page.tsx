@@ -1,7 +1,7 @@
 "use client";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, clearToken, describeError, getActiveCompanyId } from "@/lib/api";
+import { api, clearToken, describeError, getActiveCompanyId, setActiveCompanyId } from "@/lib/api";
 import { notify } from "@/components/Toast";
 import { confirmAction } from "@/components/ConfirmDialog";
 import { openCommandPalette, pushRecentPage } from "@/lib/palette";
@@ -108,6 +108,9 @@ export default function WorkspacePage() {
   const compactRef = useRef(false);
 
   const [boot, setBoot] = useState<"loading" | "ready" | "failed" | "empty">("loading");
+  // 公司列表为空：不再走全幅卡片（那会让面板容器消失、用户被困），
+  // 而是照常渲染外壳，由 NewChat 引导"去建公司"打开 /companies 面板。
+  const [noCompany, setNoCompany] = useState(false);
   const [err, setErr] = useState("");
   const [cid, setCid] = useState("");
   // 模型是否就绪：false 时显示顶部提示条。null = 还没查出来，不打扰。
@@ -165,7 +168,13 @@ export default function WorkspacePage() {
       setUserName(me.display_name || me.username || (me.email ? me.email.split("@")[0] : "") || "我");
 
       const companies = await api.get<{ id: string; name: string }[]>("/companies");
-      if (!companies.length) { setBoot("empty"); return; }
+      // 修复（新用户转化漏斗阻断）：空公司此前 setBoot("empty") 用全幅卡片
+      // 替换整个三栏外壳——面板容器不存在，"去建公司"按钮 openApp 打不开
+      // 公司页（geek 默认模式下其他页面还会被 (main)/layout 重定向回来，
+      // 死循环）。现在空公司照常渲染外壳：NewChat 引导"去建公司"打开
+      // /companies 面板，建司后 storage 事件驱动 cid 更新、工作台自动复活。
+      if (!companies.length) { setNoCompany(true); setBoot("ready"); return; }
+      setNoCompany(false);
       const active = getActiveCompanyId();
       const company = companies.find((c) => c.id === active) || companies[0];
       setCid(company.id);
@@ -468,6 +477,27 @@ export default function WorkspacePage() {
     setPicking(false);
   }, [agents, projects, meetings, sessions, chatGroups]);
 
+  // 演示公司种子：一键预置（幂等）→ 设为激活公司 → 工作台整体刷新。
+  // 新用户首屏的主按钮（商业交付：先看到活的公司，再决定要不要自己建）。
+  const [seedingDemo, setSeedingDemo] = useState(false);
+  const seedDemo = useCallback(async () => {
+    if (seedingDemo) return;
+    setSeedingDemo(true);
+    try {
+      const { seedDemoCompany } = await import("@/lib/demo");
+      const d = await seedDemoCompany();
+      setActiveCompanyId(d.company_id);
+      notify("success", d.already_seeded
+        ? "演示公司已就绪（此前预置过），已为你切换"
+        : "🎭 演示公司已就绪：4 名员工、待验收交付单和示例任务都已备好");
+      await load();
+    } catch (e) {
+      notify("error", describeError(e, "演示公司创建失败"));
+    } finally {
+      setSeedingDemo(false);
+    }
+  }, [seedingDemo, load]);
+
   const toggleLeft = useCallback(() => {
     // 经典模式的左栏由 ClassicLayout 负责，这里没有可开关的列
     if (classic) return;
@@ -717,6 +747,10 @@ export default function WorkspacePage() {
       picking={picking}
       onPick={pickAgent}
       onCancel={() => setPicking(false)}
+      noCompany={noCompany}
+      onGoToCompanies={() => openApp("/companies")}
+      onDemoSeed={seedDemo}
+      demoBusy={seedingDemo}
       leftHidden={classic ? false : layout.leftHidden}
       outHidden={layout.rightHidden}
       onExpandLeft={toggleLeft}
@@ -757,7 +791,7 @@ export default function WorkspacePage() {
         />
       )}
       {boot !== "ready" ? (
-        <BootState state={boot} err={err} onRetry={load} />
+        <BootState state={boot} err={err} onRetry={load} onGoToCompanies={() => router.push("/companies")} />
       ) : (
         <div ref={rowRef} className="flex flex-1 min-h-0">
           {compact ? (
@@ -907,10 +941,11 @@ function ModelBanner({ onOpen, onDismiss }: { onOpen: () => void; onDismiss: () 
   );
 }
 
-function BootState({ state, err, onRetry }: {
+function BootState({ state, err, onRetry, onGoToCompanies }: {
   state: "loading" | "failed" | "empty";
   err: string;
   onRetry: () => void;
+  onGoToCompanies: () => void;
 }) {
   if (state === "loading") {
     return (
@@ -932,7 +967,7 @@ function BootState({ state, err, onRetry }: {
           {state === "empty" ? "先建一家公司，员工和任务都会挂在它下面。" : (err || "请稍后重试")}
         </p>
         {state === "empty" ? (
-          <button type="button" onClick={() => openApp("/companies")} className="btn-primary inline-flex">去建公司</button>
+          <button type="button" onClick={onGoToCompanies} className="btn-primary inline-flex">去建公司</button>
         ) : (
           <button type="button" onClick={onRetry} className="btn-primary">重试</button>
         )}
@@ -944,11 +979,16 @@ function BootState({ state, err, onRetry }: {
 /* ---------------- 新对话：挑人 ---------------- */
 
 function NewChat({ agents, picking, onPick, onCancel,
+                    noCompany, onGoToCompanies, onDemoSeed, demoBusy,
                     leftHidden, outHidden, onExpandLeft, onToggleOut }: {
   agents: WsAgent[];
   picking: boolean;
   onPick: (a: WsAgent) => void;
   onCancel: () => void;
+  noCompany: boolean;
+  onGoToCompanies: () => void;
+  onDemoSeed: () => void;
+  demoBusy: boolean;
   leftHidden: boolean;
   outHidden: boolean;
   onExpandLeft: () => void;
@@ -993,12 +1033,34 @@ function NewChat({ agents, picking, onPick, onCancel,
       <div className="flex-1 min-h-0 overflow-y-auto ws-scroll p-6">
         {!agents.length ? (
           <div className="text-center py-10">
-            <p className="text-sm">还没有数字员工</p>
-            <p className="text-xs mt-1" style={{ color: "var(--muted)" }}>先招一个人，才有人接你的活。</p>
-            <div className="mt-3 flex items-center justify-center gap-2">
-              <button type="button" onClick={() => openApp("/agents")} className="btn-primary">去招人</button>
-              <button type="button" onClick={() => openApp("/factory")} className="btn-ghost">让工厂按目标生成团队</button>
-            </div>
+            {noCompany ? (
+              <>
+                <p className="text-sm">还没有公司</p>
+                <p className="text-xs mt-1" style={{ color: "var(--muted)" }}>
+                  点下面这个按钮，30 秒内预置一家带员工、待验收交付单和示例任务的演示公司，直接开逛。
+                </p>
+                <div className="mt-3 flex flex-col items-center justify-center gap-2">
+                  <button type="button" onClick={onDemoSeed} disabled={demoBusy}
+                    className="btn-primary inline-flex items-center gap-2 disabled:opacity-50"
+                    style={{ background: "linear-gradient(135deg,#f59e0b,#ef4444)" }}>
+                    {demoBusy ? "正在预置演示公司…" : "🎭 30 秒演示：预置一家能直接用的公司"}
+                  </button>
+                  <button type="button" onClick={onGoToCompanies}
+                    className="text-xs underline" style={{ color: "var(--muted)" }}>
+                    不用演示，我自己从头建一家
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-sm">还没有数字员工</p>
+                <p className="text-xs mt-1" style={{ color: "var(--muted)" }}>先招一个人，才有人接你的活。</p>
+                <div className="mt-3 flex items-center justify-center gap-2">
+                  <button type="button" onClick={() => openApp("/agents")} className="btn-primary">去招人</button>
+                  <button type="button" onClick={() => openApp("/factory")} className="btn-ghost">让工厂按目标生成团队</button>
+                </div>
+              </>
+            )}
           </div>
         ) : (
           <div className="grid grid-cols-2 md:grid-cols-3 gap-2 max-w-3xl">

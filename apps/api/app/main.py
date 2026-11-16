@@ -20,7 +20,7 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             mcp, mailboxes, worklogs,
                             companies, company_search, collaboration,
                             computer_agent, context,
-                            dashboard, events, health, intervention, knowledge,
+                            dashboard, demo, events, health, intervention, knowledge,
                             learning, meetings, memory, messages, metrics, models_api,
                             model_providers_api,
                             orchestrate, performance, projects, reflection,
@@ -480,7 +480,7 @@ async def api_v1_alias(request, call_next):
 
 
 for r in (health, auth, companies, company_search, agents, agent_chat, models_api, model_providers_api, skills, inbox_routes, tasks, messages, kb2, delivery, group_chat, chat_groups, doc_styles, growth_center,
-          assets, events, dashboard, metrics, orchestrate, projects, workflows, meetings,
+          assets, events, dashboard, demo, metrics, orchestrate, projects, workflows, meetings,
           collaboration, knowledge, memory, context, artifacts, intervention,
           performance, team_builder, browser_agent, computer_agent, app_alias,
           schedules, learning, training, reflection, skill_growth, career,
