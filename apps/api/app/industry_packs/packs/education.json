@@ -2,7 +2,7 @@
   "id": "education",
   "name": "教育培训",
   "version": "0.1.0",
-  "description": "面向教培机构的行业包，覆盖试听跟进、续费预警、排课优化与转介绍的增长运营闭环。",
+  "description": "面向教培机构的行业包，覆盖试听跟进、续费预警、排课优化与转介绍的增长运营闭环，并覆盖每周学情推送、退费流程、考勤课消补课、招生渠道执行与预收费监管对账。",
   "terms": {
     "续费": ["续报", "续班"],
     "满班率": ["班容利用率", "开班饱和度"],
@@ -61,7 +61,74 @@
         {"name": "排课审批", "type": "approval", "detail": "排课调整方案推送教学负责人审批，重点核对教师工时合规性、学员课表冲突与教室容量限制，通过后生成新版课表。"},
         {"name": "通知与确认", "type": "agent_task", "detail": "向受影响学员的监护人推送新课表与调整原因说明，收集确认与异议反馈，异议集中的班级自动回滚方案并重新生成调整。"}
       ]
+    },
+    {
+      "id": "weekly-learning-report",
+      "name": "每周学情推送",
+      "description": "学情数据归集、预警判定、图文周报到家长反馈跟进的留存服务流程。",
+      "steps": [
+        {"name": "学情数据归集", "type": "agent_task", "detail": "每周归集学员出勤、课堂表现、作业完成与阶段测成绩，按班型生成个体学情摘要，教师补充点评后形成推送初稿。"},
+        {"name": "推送名单判定", "type": "condition", "detail": "出勤骤降或连续作业未交的学员标记预警，优先安排班主任电话沟通，其余按家长触达偏好分批推送，避免群发打扰。"},
+        {"name": "学情报告推送", "type": "agent_task", "detail": "向监护人推送图文版周度学情报告，涵盖进步亮点、待改进项与家庭配合建议，推送后记录家长阅读与反馈情况。"},
+        {"name": "反馈跟进", "type": "approval", "detail": "家长异议或退课意向的反馈推送教学负责人复核处理方案，审定后由班主任执行沟通，处理结果记入学员档案供续费参考。"}
+      ]
+    },
+    {
+      "id": "refund-process",
+      "name": "退费申请与审批",
+      "description": "退费登记、按课时比例计算、审批到归档复盘的合规退费流程。",
+      "steps": [
+        {"name": "退费申请登记", "type": "agent_task", "detail": "登记退费申请原因、剩余课时与缴费记录，核对合同退费条款与优惠使用情况，按课时单价与已消课时计算应退金额初稿。"},
+        {"name": "退费金额判定", "type": "condition", "detail": "按已消课时比例与合同约定计算退费：赠课与已享优惠按规则扣减，金额或责任归属存在争议的升级协商，计算口径全程留痕。"},
+        {"name": "退费审批", "type": "approval", "detail": "退费方案推送校长与财务审批，重点复核计算准确性与合同条款一致性，审批通过后财务执行退款并向监护人确认到账。"},
+        {"name": "退费归档复盘", "type": "agent_task", "detail": "退费完成后将原因归类（搬迁、效果、服务）归档，月度统计退费率与集中原因，输出教学与服务改进清单跟踪落实。"}
+      ]
+    },
+    {
+      "id": "attendance-makeup",
+      "name": "考勤课消与补课管理",
+      "description": "课后考勤核销、缺勤预警、补课排期审批到月度对账的课消管理。",
+      "steps": [
+        {"name": "考勤核销", "type": "agent_task", "detail": "每节课后核对签到与课消记录，漏签当日补录，课消数据同步学员账户与收入确认口径，赠课与正课分开累计防止口径错漏。"},
+        {"name": "缺勤判定", "type": "condition", "detail": "无故连续缺课两次触发预警，班主任当日联系了解原因；请假缺课的按规则登记补课资格，缺课不补的按合同口径处理课消。"},
+        {"name": "补课排期", "type": "approval", "detail": "补课排期推送教务审批，核对教师工时与教室容量，审批通过后通知家长确认，补课完成后回写课消与考勤记录。"},
+        {"name": "月度对账", "type": "agent_task", "detail": "月末汇总各班课消率、补课完成率与课时余额，与财务收入确认口径勾兑，差异项查明修正，输出课消健康度报告。"}
+      ]
+    },
+    {
+      "id": "enrollment-channel-ops",
+      "name": "招生活动与渠道投放",
+      "description": "渠道计划编制、线索归集跟进、预算调整判定到投放复盘审批。",
+      "steps": [
+        {"name": "渠道计划编制", "type": "agent_task", "detail": "按招生目标编制月度渠道计划，覆盖地推、异业合作、线上投放与老带新活动，分配预算与线索指标，明确执行责任人与排期。"},
+        {"name": "线索归集跟进", "type": "agent_task", "detail": "各渠道线索统一登记并按意向分级，H与A级当日邀约试听，C级进入社群培育，跟进动作与话术按规范执行并记录。"},
+        {"name": "预算调整判定", "type": "condition", "detail": "单渠道线索成本连续两周超标或转化率垫底的暂停投放并复盘，达标渠道申请追加预算，调整方案进入审批流审定执行。"},
+        {"name": "投放复盘审批", "type": "approval", "detail": "月度渠道ROI复盘报告推送校长审批，审定下月预算与渠道结构，投放素材与话术经合规预审通过后方可上线。"}
+      ]
+    },
+    {
+      "id": "prepaid-supervision-recon",
+      "name": "预收费监管对账",
+      "description": "收费台账归集、限额校验、监管平台对账到报告审批的资金合规流程。",
+      "steps": [
+        {"name": "收费台账归集", "type": "agent_task", "detail": "每周归集新增收费订单、退款与课时消账记录，核对每笔收费进入监管存管账户的凭证，标记现金或个人账户收款的违规风险项。"},
+        {"name": "限额校验判定", "type": "condition", "detail": "逐单校验预收费限额：一次性收费跨度不得超过3个月或60课时，折扣赠课变相超限的同样拦截，违规订单退回重新拆分收费方案。"},
+        {"name": "监管平台对账", "type": "agent_task", "detail": "每月与全国校外教育培训监管与服务综合平台及存管银行流水对账，差异项编制说明并跟踪处理，确保平台数据与账务一致。"},
+        {"name": "对账报告审批", "type": "approval", "detail": "月度预收费对账与合规报告推送校长与财务审批，问题项限期整改并复查，报告归档作为年检与监管检查的自证材料。"}
+      ]
     }
+  ],
+  "compliance_items": [
+    {"key": "prepaid-fee-limit", "name": "预收费限额红线", "authority": "教育主管部门", "renewal_rule": "每笔收费订单开单时校验，一次性收费跨度不得超过3个月或60课时，折扣赠课变相超限同样拦截", "renewal_days_before": 1, "penalty": "超限额收费或变相超限，依教育部等六部门预收费监管要求责令整改、通报并纳入全国监管平台预警", "evidence_note": "收费合同、课时拆分记录与存管账户流水的对应关系"},
+    {"key": "supervision-platform-reporting", "name": "全国监管平台上报", "authority": "全国校外教育培训监管与服务综合平台/教育主管部门", "renewal_rule": "预收费、课程与从业人员信息按监管要求接入上报并保持数据一致，2023年7月平台上线后机构须接入", "renewal_days_before": 30, "penalty": "未接入全国监管平台或数据不实被责令整改、暂停招生直至吊销许可", "evidence_note": "平台账号、上报数据截图与核对记录"},
+    {"key": "teacher-certification", "name": "教师资格持证", "authority": "教育主管部门", "renewal_rule": "学科类培训教师必须持教师资格证上岗，入职前核验证件真伪，每年复核在册教师资证与专职教学人员占比", "renewal_days_before": 90, "penalty": "无证开展学科类培训责令整改并处罚，机构纳入年检问题名单", "evidence_note": "教师资格证编号、核验记录与专职教学人员占比台账"},
+    {"key": "training-material-review", "name": "培训材料审核", "authority": "教育主管部门", "renewal_rule": "新增培训材料上线前完成内部审核与备案，存量材料每年复查一次", "renewal_days_before": 365, "penalty": "使用未经审核或违规材料，依《校外培训机构培训材料管理办法（试行）》责令整改、通报处理", "evidence_note": "材料审核表、备案回执与版本变更记录"},
+    {"key": "double-reduction-restriction", "name": "双减时段与内容限制", "authority": "教育主管部门", "renewal_rule": "排课系统校验：节假日、休息日与寒暑假不得开展学科类培训，非学科课程不得含学科内容", "renewal_days_before": 1, "penalty": "违规开展学科培训责令整改、警告直至吊销办学许可", "evidence_note": "课表记录、课程内容审核记录与时段校验日志"}
+  ],
+  "integration_targets": [
+    {"system": "全国校外教育培训监管与服务综合平台", "auth_type": "api_key", "priority": 1, "data_entries": ["order", "product", "employee"], "note": "预收费、课程与人员数据上报，接口开放程度需逐地核实，先以台账兜底。"},
+    {"system": "校宝/小麦助教教务SaaS", "auth_type": "api_key", "priority": 2, "data_entries": ["order", "workorder", "employee"], "note": "课消、排课与考勤数据迁移共存期对接，保证课消口径一致。"},
+    {"system": "微信生态（企微/小程序/视频号）", "auth_type": "oauth", "priority": 3, "data_entries": ["contact", "lead"], "note": "家长触达、学情推送与招生活动主阵地，企微会话存档需合规使用。"}
   ],
   "metric_defs": [
     {"key": "renewal_rate", "name": "续费率", "unit": "%", "direction": "higher_better", "description": "统计期续费人数÷到期应续人数×100%，按课程类型与校区分解，赠课学员单独口径。"},
@@ -78,7 +145,10 @@
     {"name": "课程顾问", "department": "sales", "capabilities": ["web_browsing", "persistent_memory", "self_learning"], "mission": "负责试听邀约与转化跟进，执行报名办理与优惠申请。"},
     {"name": "班主任", "department": "support", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责在读学员服务、续费预警沟通与家长关系维护。"},
     {"name": "教务专员", "department": "project-management", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责排课、调班与教师课时管理，保障满班率与课消节奏。"},
-    {"name": "校区运营", "department": "marketing", "capabilities": ["web_browsing", "self_learning"], "mission": "分析渠道投放ROI与转介绍裂变，策划招生活动与社群培育。"}
+    {"name": "校区运营", "department": "marketing", "capabilities": ["web_browsing", "self_learning"], "mission": "分析渠道投放ROI与转介绍裂变，策划招生活动与社群培育。"},
+    {"name": "学情服务专员", "department": "support", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责每周学情报告制作推送与家长反馈跟进，沉淀学情话术模板。", "workflows": ["weekly-learning-report"]},
+    {"name": "招生专员", "department": "sales", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "负责渠道线索归集跟进与招生活动执行，跟踪线索转化与投放成本。", "workflows": ["enrollment-channel-ops"]},
+    {"name": "财务专员", "department": "finance", "capabilities": ["persistent_memory", "computer_use", "scheduled_work"], "mission": "负责预收费监管对账、退费执行与课时收入勾兑，维护收费合规台账。", "workflows": ["prepaid-supervision-recon", "refund-process"]}
   ],
   "kb_seed_topics": [
     "试听转化标准流程与家长沟通话术",
@@ -87,6 +157,15 @@
     "学科类培训合规要求（持证、收费、广告）",
     "满班率提升与班级合并的运营标准",
     "转介绍权益设计与裂变活动规范",
-    "教师课时饱和度与课酬核算办法"
+    "教师课时饱和度与课酬核算办法",
+    "预收费限额红线（3个月/60课时）与存管账户对账规范",
+    "退费申请流程与按课时比例计算标准",
+    "每周学情报告模板与推送节奏",
+    "考勤课消与补课调课操作规范",
+    "全国校外教育培训监管与服务综合平台上报要求",
+    "培训材料审核与备案流程",
+    "双减时段与内容限制对照表",
+    "教师资格核验与专职教学人员比例要求",
+    "招生渠道线索分级与跟进话术"
   ]
 }

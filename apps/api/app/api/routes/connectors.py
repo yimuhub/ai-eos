@@ -24,6 +24,10 @@ from app.services.connector_sync import (get_last_sync, run_sync,
                                          sync_run_out)
 from app.services.metrics_service import (evaluate_metric, metric_out,
                                           validate_spec)
+from app.schemas.responses_v61 import (ConnectorCreateOut, ConnectorListOut,
+                                        IngestOut, OAuthCallbackOut,
+                                        OAuthStartOut, OkOut, RecordsOut,
+                                        RunsOut, SyncResultOut)
 from app.toolbus.dispatch import _assert_public_http_url
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
@@ -65,7 +69,7 @@ class ConnectorIn(BaseModel):
     auth_secret_ref: str | None = None
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, response_model=ConnectorCreateOut)
 async def create_connector(body: ConnectorIn,
                            company_id: str = Query(...),
                            db: AsyncSession = Depends(get_db),
@@ -110,7 +114,7 @@ async def create_connector(body: ConnectorIn,
     return {"ok": True, "connector": _connector_out(row, None)}
 
 
-@router.get("")
+@router.get("", response_model=ConnectorListOut)
 async def list_connectors(company_id: str = Query(...),
                           db: AsyncSession = Depends(get_db),
                           user: User = Depends(get_current_user)):
@@ -126,7 +130,7 @@ async def list_connectors(company_id: str = Query(...),
     return {"connectors": out}
 
 
-@router.post("/{tool_id}/sync")
+@router.post("/{tool_id}/sync", response_model=SyncResultOut)
 async def sync_now(tool_id: str, company_id: str = Query(...),
                    db: AsyncSession = Depends(get_db),
                    user: User = Depends(get_current_user)):
@@ -141,7 +145,7 @@ async def sync_now(tool_id: str, company_id: str = Query(...),
 
 # ---------------------------------------------------------------- OAuth 托管流
 
-@router.get("/{tool_id}/oauth/start")
+@router.get("/{tool_id}/oauth/start", response_model=OAuthStartOut)
 async def oauth_start(tool_id: str, company_id: str = Query(...),
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
@@ -161,7 +165,7 @@ async def oauth_start(tool_id: str, company_id: str = Query(...),
                     " 到 /connectors/oauth/callback"}
 
 
-@router.get("/oauth/callback")
+@router.get("/oauth/callback", response_model=OAuthCallbackOut)
 async def oauth_callback(code: str = Query(...), state: str = Query(...),
                          db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
@@ -188,7 +192,7 @@ async def oauth_callback(code: str = Query(...), state: str = Query(...),
     return {"ok": True, "tool_id": row.id, "tool_name": row.name, **result}
 
 
-@router.post("/{tool_id}/oauth/disconnect")
+@router.post("/{tool_id}/oauth/disconnect", response_model=OkOut)
 async def oauth_disconnect(tool_id: str, company_id: str = Query(...),
                            db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
@@ -199,7 +203,7 @@ async def oauth_disconnect(tool_id: str, company_id: str = Query(...),
     return {"ok": True, "message": f"已断开 {row.name} 的授权"}
 
 
-@router.get("/{tool_id}/runs")
+@router.get("/{tool_id}/runs", response_model=RunsOut)
 async def list_runs(tool_id: str, company_id: str = Query(...),
                     limit: int = Query(20, le=100),
                     db: AsyncSession = Depends(get_db),
@@ -214,7 +218,7 @@ async def list_runs(tool_id: str, company_id: str = Query(...),
     return {"runs": [sync_run_out(r) for r in rows]}
 
 
-@router.post("/{tool_id}/ingest")
+@router.post("/{tool_id}/ingest", response_model=IngestOut)
 async def ingest_records(records: list[dict], tool_id: str,
                          company_id: str = Query(...),
                          signature: str | None = Query(None),
@@ -244,7 +248,7 @@ async def ingest_records(records: list[dict], tool_id: str,
     return {"ok": True, "upserted": count}
 
 
-@router.get("/{tool_id}/records")
+@router.get("/{tool_id}/records", response_model=RecordsOut)
 async def browse_records(tool_id: str, company_id: str = Query(...),
                          limit: int = Query(50, le=200),
                          db: AsyncSession = Depends(get_db),

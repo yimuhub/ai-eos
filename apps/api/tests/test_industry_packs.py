@@ -97,23 +97,25 @@ async def test_install_plants_full_industry_stack(client, tenants, make_user):
     kinds = {}
     for art in body["artifacts"]:
         kinds[art["kind"]] = kinds.get(art["kind"], 0) + 1
-    assert kinds.get("agent") == 4
+    # V6.1：包升级到商业交付级后制造包为 7 员工 / 10 工作流 / 4 合规台账
+    assert kinds.get("agent") == 7
     assert kinds.get("custom_field") == 16
-    assert kinds.get("workflow") == 4
+    assert kinds.get("workflow") == 10
     assert kinds.get("metric") == 10
     assert kinds.get("kb_document") == 1
     assert kinds.get("feature_flag") == 1
+    assert kinds.get("compliance_ledger") == 1
 
     async with AsyncSessionLocal() as db:
         agents = (await db.execute(
             select(Agent).where(Agent.company_id == co))).scalars().all()
-        assert len(agents) == 4
+        assert len(agents) == 7
         assert all(not a.memory_config.get("_has_model") for a in agents)
         wfs = (await db.execute(
             select(WorkflowDefinition).where(
                 WorkflowDefinition.company_id == co,
                 WorkflowDefinition.source == "industry_pack"))).scalars().all()
-        assert len(wfs) == 4
+        assert len(wfs) == 10
         assert all(wf.status == WorkflowStatus.DRAFT for wf in wfs)
         # AGENT 节点轮指到了真实员工
         nodes = (await db.execute(
@@ -146,7 +148,7 @@ async def test_install_plants_full_industry_stack(client, tenants, make_user):
     async with AsyncSessionLocal() as db:
         agents = (await db.execute(
             select(Agent).where(Agent.company_id == co))).scalars().all()
-        assert len(agents) == 4
+        assert len(agents) == 7
 
     # 功能开关可查可关
     r = await client.get(f"/company-features?company_id={co}",

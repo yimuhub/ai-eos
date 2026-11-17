@@ -18,18 +18,21 @@ from app.core.permissions import Capability
 from app.models.feature_flags import CompanyFeatureFlag
 from app.models.p3_governance import MarketplacePackage
 from app.models.user import User
+from app.schemas.responses_v61 import (FeatureListOut, FeatureSetOut,
+                                        IndustryPacksOut, IndustryPublishOut)
 from app.services.industry_pack_service import (get_builtin, list_builtins,
                                                 validate_content)
 
 router = APIRouter(prefix="/industry-packs", tags=["industry-packs"])
 
 # 行业包内容里允许进 manifest 的键（服务层种植时也按这份白名单取）
+# V6.1 新增 compliance_items（合规台账种子）与 integration_targets（连接器蓝图）
 _PACK_KEYS = ("id", "name", "version", "description", "terms", "custom_fields",
               "workflow_templates", "metric_defs", "agent_roster",
-              "kb_seed_topics")
+              "kb_seed_topics", "compliance_items", "integration_targets")
 
 
-@router.get("")
+@router.get("", response_model=IndustryPacksOut)
 async def list_packs(db: AsyncSession = Depends(get_db),
                      user: User = Depends(get_current_user)):
     """内置行业包目录 + 各包的市场发布状态。"""
@@ -49,7 +52,8 @@ async def list_packs(db: AsyncSession = Depends(get_db),
     } for p in packs]}
 
 
-@router.post("/publish", status_code=201)
+@router.post("/publish", status_code=201,
+             response_model=IndustryPublishOut)
 async def publish_pack(body: dict,
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
@@ -105,7 +109,7 @@ class FeatureIn(BaseModel):
     value: dict | None = None
 
 
-@features_router.get("")
+@features_router.get("", response_model=FeatureListOut)
 async def list_features(company_id: str = Query(...),
                         db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
@@ -120,7 +124,7 @@ async def list_features(company_id: str = Query(...),
     } for r in rows]}
 
 
-@features_router.put("")
+@features_router.put("", response_model=FeatureSetOut)
 async def set_feature(body: FeatureIn, company_id: str = Query(...),
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):

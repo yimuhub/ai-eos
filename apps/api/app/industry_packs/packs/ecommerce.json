@@ -2,7 +2,7 @@
   "id": "ecommerce",
   "name": "电商",
   "version": "0.1.0",
-  "description": "面向多平台店铺运营团队的行业包，覆盖评价监控、差评挽回、广告ROI复盘与售后风控的日常运营。",
+  "description": "面向多平台店铺运营团队的行业包，覆盖评价监控、广告ROI复盘、售后风控的日常运营，并覆盖库存警戒补货、竞品监控、大促备战、上架文案合规预审与平台费用对账。",
   "terms": {
     "ACOS": ["广告销售成本比", "Advertising Cost of Sale"],
     "ROI": ["投入产出比", "投产比"],
@@ -59,7 +59,73 @@
         {"name": "售后处理执行", "type": "agent_task", "detail": "按售后类型执行审核、退换货寄回跟进与补发，涉及仅退款的核对库存与损失，大额或高频客户的申请转人工复核后处理。"},
         {"name": "平台申诉与索赔台账", "type": "agent_task", "detail": "对判责有异议的售后整理聊天记录与凭证发起平台申诉，建立售后损失明细台账，并按月输出供应商与快递公司的索赔清单。"}
       ]
+    },
+    {
+      "id": "stock-alert-replenishment",
+      "name": "库存警戒与补货",
+      "description": "每日核算可售天数，双向预警断货与滞销，生成补货与清仓方案。",
+      "steps": [
+        {"name": "库存盘点汇总", "type": "agent_task", "detail": "每日汇总各仓与各渠道在售SKU的可售库存、在途补货与日均销量，剔除订单占用量后计算真实可售天数，形成库存健康看板。"},
+        {"name": "警戒判定", "type": "condition", "detail": "可售天数低于发货周期加安全垫的爆款触发断货预警，高于周转上限且动销下滑的标记滞销，双向清单分别进入补货与清仓处理。"},
+        {"name": "补货计划生成", "type": "agent_task", "detail": "按销售预测与到货周期生成补货计划，标明下单数量、预计到货与大促备货增量，同步供应商订单确认与到货跟踪，避免超卖断货。"},
+        {"name": "清仓与调拨执行", "type": "approval", "detail": "滞销清仓折扣、渠道间调拨与库存报废方案推送运营负责人审批，执行后跟踪动销恢复与资金占用释放，结果纳入选品复盘。"}
+      ]
+    },
+    {
+      "id": "competitor-monitor",
+      "name": "竞品监控与选品迭代",
+      "description": "每日采集竞品异动，威胁级异动当日应对，选品迭代持续滚动。",
+      "steps": [
+        {"name": "竞品清单采集", "type": "agent_task", "detail": "每日采集对标竞品的销量、价格、上新、评价与主推活动信息，更新竞品跟踪清单，标记异动项（降价、爆量、差评激增）。"},
+        {"name": "异动影响判定", "type": "condition", "detail": "竞品降价或爆量直接影响我方坑产时判定为威胁级异动，当日输出应对建议（价格跟进、卖点强化、投放加码），常规异动进入周度观察。"},
+        {"name": "选品迭代建议", "type": "agent_task", "detail": "结合竞品与自店数据输出选品迭代建议，包括跟款、差异化替代与淘汰清单，附市场规模与利润测算供运营决策参考。"},
+        {"name": "跟进效果复盘", "type": "agent_task", "detail": "对已执行的应对与选品动作跟踪两周销量毛利变化，沉淀有效打法进竞品应对手册，无效动作标记原因避免重复投入。"}
+      ]
+    },
+    {
+      "id": "promo-campaign-prep",
+      "name": "平台大促报名与备战",
+      "description": "大促日历汇总、备战就绪校验、报名审批到大促日作战跟踪。",
+      "steps": [
+        {"name": "活动情报汇总", "type": "agent_task", "detail": "跟踪各平台大促场次、报名节奏与玩法规则，按店铺评估可报名活动与坑位要求，形成大促日历与报名任务清单。"},
+        {"name": "备战就绪判定", "type": "condition", "detail": "报名前校验货盘库存、活动到手价毛利、发货时效承诺与客服排班四项就绪度，任一项不达标即补齐后再报，防止报而未备被平台处罚。"},
+        {"name": "报名与价格设置", "type": "approval", "detail": "活动报名与活动价、优惠券、赠品方案推送运营负责人审批，重点复核亏本链接与价格力要求，审批通过后按平台节点完成设置。"},
+        {"name": "大促日作战跟踪", "type": "agent_task", "detail": "大促期间每日跟踪成交、流量、转化与库存水位，异常（断货、差评激增、转化下滑）当日预警处置，促后输出复盘与返场建议。"}
+      ]
+    },
+    {
+      "id": "listing-compliance-review",
+      "name": "上架文案合规预审",
+      "description": "广告法禁用语扫描、风险分级、整改复检到违规复盘台账的合规前置流程。",
+      "steps": [
+        {"name": "文案合规扫描", "type": "agent_task", "detail": "对新上架与修改的商品标题、详情、主图与直播脚本扫描广告法禁用语、功效宣称与资质要求，输出违规点清单与修改建议。"},
+        {"name": "风险分级判定", "type": "condition", "detail": "命中绝对化用语、虚假功效或医疗暗示的判定为高风险，禁止发布并要求整改；一般性瑕疵给出替换话术后放行，全程留痕预审记录。"},
+        {"name": "整改复检", "type": "agent_task", "detail": "整改后的文案二次扫描确认合规，更新店铺禁用词库与话术模板，对历史在售链接按批次复查并输出下架整改清单。"},
+        {"name": "违规复盘台账", "type": "agent_task", "detail": "每月汇总预审拦截与平台处罚记录形成合规台账，分析高频违规点更新审查规则与培训案例，降低店铺被平台处罚风险。"}
+      ]
+    },
+    {
+      "id": "platform-fee-recon",
+      "name": "平台费用与货款对账",
+      "description": "月度归集平台账单、差异分流处理到结算确认的费用对账流程。",
+      "steps": [
+        {"name": "账单归集", "type": "agent_task", "detail": "每月归集各平台技术服务费、佣金、推广费、活动费与货款结算账单，与内部订单和广告消耗数据逐项对齐生成对账底表。"},
+        {"name": "差异判定", "type": "condition", "detail": "平台账单与内部数据差异超阈值分流入处理：佣金费率争议整理规则依据申诉，退款跨期差异调整归属期，无法解释差异挂账跟进。"},
+        {"name": "费用复盘", "type": "agent_task", "detail": "按店铺与品类复盘平台费用率与净毛利变化，识别费用异常增长项（推广超耗、违规扣罚），输出费用优化与申诉清单。"},
+        {"name": "结算确认", "type": "approval", "detail": "对账结果与申诉方案推送财务负责人审批，确认后登记应收货款与费用入账，申诉进展持续跟踪直至回款或结案。"}
+      ]
     }
+  ],
+  "compliance_items": [
+    {"key": "advertising-law-review", "name": "广告法极限词审查", "authority": "市场监督管理部门", "renewal_rule": "商品标题、详情与推广文案每次发布或修改前预审，大促前全店复查一轮", "renewal_days_before": 7, "penalty": "使用国家级、最高级、最佳等绝对化用语，依《广告法》第57条处20万至100万元罚款", "evidence_note": "上架文案预审记录、修改留痕与禁用词库版本"},
+    {"key": "live-commerce-compliance", "name": "直播带货合规", "authority": "市场监督管理部门", "renewal_rule": "每场直播脚本与商品资质预先报备审查，主播按禁限售目录与宣传红线培训", "renewal_days_before": 7, "penalty": "虚假宣传、价格欺诈依市场监管规定罚款，监管典型案例处罚3万至560万元，情节严重的下架封号", "evidence_note": "直播脚本审核记录、商品资质文件与回放存证"},
+    {"key": "e-commerce-tax-compliance", "name": "电商税务申报", "authority": "税务部门", "renewal_rule": "按期完成增值税与企业所得税申报，收入与平台流水口径一致，年度汇算清缴", "renewal_days_before": 15, "penalty": "隐匿收入偷逃税被税收大数据比对查实后追缴税款、加收滞纳金并处罚款，公开案例补罚合计百万级", "evidence_note": "平台结算流水、申报表与账务凭证的对应关系"},
+    {"key": "ip-infringement-review", "name": "知识产权侵权筛查", "authority": "平台与法院（《电子商务法》第45条）", "renewal_rule": "商品上架前对商标、外观与图片素材做侵权筛查，收到投诉24小时内响应处理", "renewal_days_before": 7, "penalty": "商标侵权成立平台可下架扣分封店，平台明知侵权的依《电子商务法》第45条承担连带责任", "evidence_note": "授权链路文件、素材来源记录与投诉申诉凭证"}
+  ],
+  "integration_targets": [
+    {"system": "淘宝TOP/拼多多开放平台/抖店", "auth_type": "oauth", "priority": 1, "data_entries": ["order", "product", "voucher"], "note": "ISV注册加商家OAuth授权托管，订单、库存、发货与退款全链路同步。"},
+    {"system": "聚水潭/旺店通电商ERP", "auth_type": "api_key", "priority": 2, "data_entries": ["order", "product"], "note": "多店铺订单与库存中枢单对接，库存警戒与发货时效指标取数源。"},
+    {"system": "平台广告后台（直通车/引力魔方/千川）", "auth_type": "api_key", "priority": 3, "data_entries": ["voucher", "product"], "note": "广告消耗与转化数据拉取，支撑ACOS与ROI复盘自动化。"}
   ],
   "metric_defs": [
     {"key": "acos", "name": "广告ACOS", "unit": "%", "direction": "lower_better", "description": "广告花费÷广告销售额×100%，与盈亏平衡ACOS（毛利率的倒数）对比评判投放盈亏。"},
@@ -76,7 +142,9 @@
     {"name": "电商运营专员", "department": "marketing", "capabilities": ["web_browsing", "persistent_memory", "self_learning"], "mission": "负责店铺日常运营与指标监控，产出销售复盘与选品优化建议。"},
     {"name": "广告投手", "department": "paid-media", "capabilities": ["web_browsing", "scheduled_work"], "mission": "每日监控广告计划ACOS与ROI，执行调价与预算调配并复盘投放效果。"},
     {"name": "电商客服", "department": "support", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "处理售前咨询与售后工单，执行差评挽回与平台申诉，维护客户体验。"},
-    {"name": "仓储发货专员", "department": "supply-chain", "capabilities": ["computer_use", "scheduled_work"], "mission": "跟踪48小时发货率与在途异常，处理缺货断货与补发协调。"}
+    {"name": "仓储发货专员", "department": "supply-chain", "capabilities": ["computer_use", "scheduled_work"], "mission": "跟踪48小时发货率与在途异常，处理缺货断货与补发协调。"},
+    {"name": "库存计划专员", "department": "supply-chain", "capabilities": ["persistent_memory", "computer_use", "scheduled_work"], "mission": "负责库存警戒监控、补货计划与大促备货，跟踪滞销清仓与资金占用。", "workflows": ["stock-alert-replenishment"]},
+    {"name": "合规文案专员", "department": "legal", "capabilities": ["persistent_memory", "self_learning"], "mission": "负责上架文案与直播脚本合规预审，维护禁用词库并跟踪平台处罚案例。", "workflows": ["listing-compliance-review"]}
   ],
   "kb_seed_topics": [
     "各平台规则差异（仅退款、考核指标与判责口径）",
@@ -85,6 +153,15 @@
     "RFM分层与复购召回策略",
     "爆款打造与坑产维护操作手册",
     "平台申诉判责的证据准备清单",
-    "多店铺矩阵的指标拆分与考核办法"
+    "多店铺矩阵的指标拆分与考核办法",
+    "《广告法》绝对化用语清单与《广告绝对化用语执法指南》要点",
+    "直播带货合规红线与禁限售目录",
+    "电商税务稽查案例警示与合规申报要点",
+    "上架文案合规预审清单与替换话术",
+    "库存警戒线与补货模型设置方法",
+    "竞品监控维度与选品迭代流程",
+    "大促备战清单（货盘/库存/客服排班/价格）",
+    "平台费用对账口径与申诉流程",
+    "知识产权侵权筛查与投诉应对"
   ]
 }

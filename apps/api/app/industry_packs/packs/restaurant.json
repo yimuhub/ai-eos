@@ -2,7 +2,7 @@
   "id": "restaurant",
   "name": "餐饮",
   "version": "0.1.0",
-  "description": "面向连锁餐饮门店的行业包，覆盖经营日报、食材损耗分析、每周排班建议与会员复购的门店运营闭环。",
+  "description": "面向连锁餐饮门店的行业包，覆盖经营日报、食材损耗分析、每周排班建议与会员复购的门店运营闭环，并覆盖外卖平台运营、食品安全日检、订货验收、菜单工程与储值营销执行。",
   "terms": {
     "翻台率": ["台周转率", "翻桌率"],
     "食材成本率": ["食材成本占比", "原料成本率"],
@@ -59,7 +59,73 @@
         {"name": "排班审批", "type": "approval", "detail": "排班草案推送店长审批，允许微调具体班次但人力成本率不得超过周预算线，审批通过后自动发布并逐人通知确认。"},
         {"name": "执行核对", "type": "agent_task", "detail": "每日核对实际出勤与排班的差异，登记加班、缺勤与临时调班记录，月末汇总人力成本率并反馈用于下期排班优化。"}
       ]
+    },
+    {
+      "id": "waimai-operations",
+      "name": "外卖平台运营",
+      "description": "外卖数据归集、差评分级处理、评分运营到活动推广决策的每日运营。",
+      "steps": [
+        {"name": "外卖数据归集", "type": "agent_task", "detail": "每日归集各外卖平台的评分、差评、曝光转化、佣金与活动费用数据，与堂食口径分开核算外卖毛利，形成外卖经营看板。"},
+        {"name": "差评分级判定", "type": "condition", "detail": "按差评内容分流：出品与配送问题转门店整改或平台申诉，恶意差评与职业差评师攻击收集证据向平台举报，24小时内完成首次回复。"},
+        {"name": "评分运营执行", "type": "agent_task", "detail": "执行差评回复、好评引导与满意度回访，跟踪店铺评分变化，同步优化菜单图片、满减设置与出餐时效等影响排名的运营动作。"},
+        {"name": "活动与推广决策", "type": "approval", "detail": "平台活动报名、满减力度调整与竞价推广出价方案推送店长审批，核算活动后到手毛利再执行，一周后复盘投入产出并调整策略。"}
+      ]
+    },
+    {
+      "id": "food-safety-daily-check",
+      "name": "食品安全日检",
+      "description": "晨检、留样、消毒与温控日检打卡，异常判定、整改复核到周检汇总。",
+      "steps": [
+        {"name": "日检任务推送", "type": "agent_task", "detail": "每日开店前推送日检清单，涵盖员工晨检记录、食材感官检查、冰箱温度、消毒记录与留样执行情况，责任人逐项打卡留痕。"},
+        {"name": "异常判定", "type": "condition", "detail": "晨检发现发热腹泻症状的员工当日调离直接入口岗位，食材感官异常立即停用封存，温控或消毒不达标的暂停相关档口营业并整改。"},
+        {"name": "整改复核", "type": "agent_task", "detail": "对日检异常项生成整改任务并跟踪复核，同步更新供货商排查与留样台账，重大食安隐患上报店长并评估是否需要向监管部门报告。"},
+        {"name": "周检汇总", "type": "approval", "detail": "每周汇总日检完成率、异常整改与留样合规情况形成食安周报，推送店长审阅后归档，作为许可审查与飞行检查的自查材料。"}
+      ]
+    },
+    {
+      "id": "procurement-order-acceptance",
+      "name": "订货下单与验收执行",
+      "description": "订货测算、下单审批、验收执行到订货复盘的采购执行闭环。",
+      "steps": [
+        {"name": "订货测算", "type": "agent_task", "detail": "结合近7天用量、下周客流预估与现有库存测算各门店订货量，生成订货单并按供应商起订量与到货窗口拆分下单，避免过量积压。"},
+        {"name": "下单审批", "type": "approval", "detail": "订货单超常用量波动或涉及新品与大宗采购时推送店长审批，通过后发送供应商并登记预计到货时间，供应商确认状态实时跟踪。"},
+        {"name": "验收执行", "type": "agent_task", "detail": "到货时按验收标准逐项核对数量、规格、生产日期与感官质量，登记验收结果与退回记录，票据与台账当日完成，供应商责任即时取证索赔。"},
+        {"name": "订货复盘", "type": "agent_task", "detail": "每周复盘订货准确率与损耗关联，调整订货模板系数，把验收退回与索赔落实情况记入供应商台账用于季度评审。"}
+      ]
+    },
+    {
+      "id": "menu-engineering",
+      "name": "菜单工程与调价",
+      "description": "按毛利与销量双维分析菜单，淘汰末位菜品、测算调价并跟踪效果。",
+      "steps": [
+        {"name": "菜品数据归集", "type": "agent_task", "detail": "每月归集菜品销量、毛利率、退菜率与食材价格波动数据，按毛利与销量双维分类（明星、金牛、问题、瘦狗）形成菜单工程矩阵。"},
+        {"name": "调优策略判定", "type": "condition", "detail": "末位毛利且低销量的菜品进入淘汰评估，高销量低毛利的菜品测算提价空间，明星菜品保障供给稳定，判定结果生成菜单调整草案。"},
+        {"name": "调价测算与审批", "type": "approval", "detail": "菜品调价与菜单结构调整方案推送店长审批，复核提价对客单价与复购的影响测算，审批通过后更新菜单与外卖平台价格同步生效。"},
+        {"name": "效果跟踪", "type": "agent_task", "detail": "调价上线后跟踪四周销量、毛利与客诉变化，未达预期的菜品回滚价格并记录原因，形成调价决策档案供后续菜单规划引用。"}
+      ]
+    },
+    {
+      "id": "member-marketing-execution",
+      "name": "会员储值与营销执行",
+      "description": "会员活动策划、合规校验、执行触达到效果复盘的营销闭环。",
+      "steps": [
+        {"name": "会员活动策划", "type": "agent_task", "detail": "按节日与淡旺季制定储值赠送、套餐券与会员日活动方案，测算让利成本与预期拉动，明确活动对象、权益与核销规则。"},
+        {"name": "合规判定", "type": "condition", "detail": "校验活动合规性：储值赠送比例不超限、券规则清晰无歧义、不设过期作废等霸王条款，触碰合规红线的方案退回修改后再执行。"},
+        {"name": "活动执行触达", "type": "agent_task", "detail": "分批次向目标会员推送活动信息，跟踪到店核销与储值到账数据，活动期间每日监控参与率与毛利表现，及时调整触达话术。"},
+        {"name": "效果复盘", "type": "approval", "detail": "活动结束后输出复盘报告（参与率、储值额、复购与毛利影响），推送店长审阅后归档，沉淀可复用活动模板与权益成本基准。"}
+      ]
     }
+  ],
+  "compliance_items": [
+    {"key": "food-business-license", "name": "食品经营许可证", "authority": "属地市场监管部门", "renewal_rule": "一地一证，许可证有效期5年，届满前30个工作日申请延续；门店信息变更及时办理变更手续", "renewal_days_before": 30, "penalty": "无证经营依《食品安全法》第122条没收违法所得并处5万至10万元起罚款", "evidence_note": "许可证正本悬挂公示、副本存档，配备食品安全员并落实自查与追溯制度"},
+    {"key": "health-cert-management", "name": "从业人员健康证明", "authority": "属地卫生健康部门/市场监管部门", "renewal_rule": "健康证明有效期一年，到期前30天安排体检换证，新员工上岗前先取证", "renewal_days_before": 30, "penalty": "未取得健康证明从事接触直接入口食品工作，依《食品安全法》第126条责令改正并可处罚款", "evidence_note": "健康证明原件、每日晨检记录与员工健康档案"},
+    {"key": "fume-drainage-permit", "name": "油烟排放与排水许可", "authority": "生态环境部门/城镇排水主管部门", "renewal_rule": "油烟排放口设永久性测试孔并定期清洗净化设备；城镇排水覆盖区内须取得排水许可证后方可排放，届满前申请延续", "renewal_days_before": 30, "penalty": "未取得排水许可排放污水或油烟超标，被责令改正并处罚款，情节严重的停业整治", "evidence_note": "排水许可证、油烟净化设备清洗记录与检测报告"},
+    {"key": "online-catering-publicity", "name": "网络餐饮证照公示", "authority": "属地市场监管部门", "renewal_rule": "外卖平台页面公示食品经营许可证与量化分级信息，证照变更后同步更新", "renewal_days_before": 30, "penalty": "未按要求公示或公示信息不实，依网络餐饮监管规定责令改正、警告并可处罚款", "evidence_note": "平台店铺页面截图、证照公示记录与线上线下证照一致性核对"}
+  ],
+  "integration_targets": [
+    {"system": "美团外卖/饿了么开放平台", "auth_type": "oauth", "priority": 1, "data_entries": ["order", "contact"], "note": "订单自动进收银、菜单同步与营业状态管理，评分差评数据回流经营日报。"},
+    {"system": "收银POS（美团收银/客如云/二维火）", "auth_type": "api_key", "priority": 2, "data_entries": ["order", "voucher"], "note": "经营日报与收银流水逐项核对的数据源，支持多门店汇总。"},
+    {"system": "食材供应链平台（美菜/快驴类）", "auth_type": "api_key", "priority": 3, "data_entries": ["order", "product"], "note": "订货单与进货验收数据接入，支撑损耗分析与订货测算。"}
   ],
   "metric_defs": [
     {"key": "table_turnover", "name": "翻台率", "unit": "个", "direction": "higher_better", "description": "营业时段开台数÷可用台位数，宴会包间按最低消费时长折算，堂食口径不含外卖。"},
@@ -76,7 +142,9 @@
     {"name": "门店店长", "department": "company", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "负责门店经营目标达成，审阅经营日报与排班，处理异常与客诉升级。"},
     {"name": "采购与供应链专员", "department": "supply-chain", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "管理食材订货与供应商验收索赔，监控损耗率并优化订货模板。"},
     {"name": "排班助理", "department": "hr", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "每周生成排班建议与工时测算，跟踪人力成本率与出勤差异。"},
-    {"name": "会员运营", "department": "marketing", "capabilities": ["web_browsing", "self_learning"], "mission": "策划会员储值与复购活动，监控会员流失并输出召回方案。"}
+    {"name": "会员运营", "department": "marketing", "capabilities": ["web_browsing", "self_learning"], "mission": "策划会员储值与复购活动，监控会员流失并输出召回方案。"},
+    {"name": "外卖运营专员", "department": "marketing", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "负责外卖平台评分运营、差评回复与活动推广，监控外卖毛利与排名。", "workflows": ["waimai-operations"]},
+    {"name": "食品安全员", "department": "company", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责日检巡查、留样消毒记录与证照台账，跟踪食安整改与员工健康证。", "workflows": ["food-safety-daily-check"]}
   ],
   "kb_seed_topics": [
     "菜品配方卡与标准成本核算办法",
@@ -85,6 +153,15 @@
     "分餐段排班与人效标准（前厅/后厨）",
     "外卖平台佣金、活动费用与毛利核算口径",
     "会员储值、催耗与合规注意事项",
-    "食品安全与员工健康证管理要求"
+    "食品安全与员工健康证管理要求",
+    "食品经营许可审查要点与食品安全员职责",
+    "员工健康证办理与晨检记录规范",
+    "食品安全日检清单（晨检/留样/消毒/温控）",
+    "留样管理行业规范（每品种不少于125g、冷藏48小时以上）",
+    "油烟净化与排水许可证管理要求",
+    "网络餐饮证照公示与线上经营规范",
+    "外卖评分运营与差评回复话术",
+    "菜单工程四象限分析与调价流程",
+    "会员储值活动合规边界与催耗节奏"
   ]
 }

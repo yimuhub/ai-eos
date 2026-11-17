@@ -2,7 +2,7 @@
   "id": "real-estate",
   "name": "房地产中介",
   "version": "0.1.0",
-  "description": "面向房地产中介门店的行业包，覆盖房源录入、客源匹配、带看跟进与签约过户的成交闭环。",
+  "description": "面向房地产中介门店的行业包，覆盖房源录入、客源匹配、带看跟进与签约过户的成交闭环，并覆盖端口获客运营、业主调价跟进、ACN分佣核算、按揭进度跟踪、飞单风险监控与晨夕会复盘。",
   "terms": {
     "房源": ["委托房源", "盘源", "在售房源"],
     "客源": ["意向客户", "购房客户"],
@@ -61,7 +61,84 @@
         {"name": "过户办证", "type": "agent_task", "detail": "预约不动产登记与税务申报办理，按清单准备过户资料并组织双方到场确认，缴税与新产权证出证进度每日同步买卖双方。"},
         {"name": "交房与佣金结算", "type": "agent_task", "detail": "组织水电燃气物业费用的交割与家具家电清单核对，完成交房确认书签署，按合同约定节点申请佣金结算并跟踪到账情况。"}
       ]
+    },
+    {
+      "id": "port-lead-ops",
+      "name": "端口运营与客源获客",
+      "description": "端口数据归集、刷新策略判定、线索回访分派到投放复盘。",
+      "steps": [
+        {"name": "端口数据归集", "type": "agent_task", "detail": "每日归集各端口房源曝光、点击、来电与线索量，按端口成本核算单线索成本，识别曝光下滑或转化异常的端口。"},
+        {"name": "刷新策略判定", "type": "condition", "detail": "按端口规则与流量高峰制定刷新排序，优质房源优先抢占曝光位，端口预算接近上限时切换组合投放，避免端口闲置浪费。"},
+        {"name": "线索回访分派", "type": "agent_task", "detail": "端口线索15分钟内分派跟进，当日完成首访并登记意向等级，重复投放线索合并归属防止撞单，跟进记录实时回填。"},
+        {"name": "投放复盘", "type": "approval", "detail": "月度复盘各端口投入产出与成交归因，推送店长审批下月端口套餐与预算调整，低效端口降级或更换，数据归档对比。"}
+      ]
+    },
+    {
+      "id": "owner-revisit-pricing",
+      "name": "业主回访与调价跟进",
+      "description": "回访计划生成、调价信号判定、调价沟通到价格情报归档。",
+      "steps": [
+        {"name": "回访计划生成", "type": "agent_task", "detail": "按房源在售天数与带看热度生成业主回访计划，重点覆盖超30天未成交、带看多次未成交与独家委托房源，明确本周触达清单。"},
+        {"name": "调价信号判定", "type": "condition", "detail": "带看反馈集中指向价格因素且议价幅度持续高于区域基准时判定调价时机，结合近期成交价与挂牌去化数据输出调价建议区间。"},
+        {"name": "调价沟通执行", "type": "agent_task", "detail": "携市场数据与业主沟通调价，取得书面确认后更新挂牌价并同步全渠道，业主坚持不调价的调整推广策略并记录沟通留痕。"},
+        {"name": "价格情报归档", "type": "approval", "detail": "月度汇总片区成交行情与业主心理价位变化推送店长审阅，形成价格情报库供议价与收房定价参考，敏感报价信息权限管控。"}
+      ]
+    },
+    {
+      "id": "acn-commission-settle",
+      "name": "ACN分佣核算与业绩考核",
+      "description": "成交角色归集、分佣规则判定、佣金核算复核到分佣审批。",
+      "steps": [
+        {"name": "成交角色归集", "type": "agent_task", "detail": "按成交单归集房源方、客源方、成交方等协作角色与贡献记录，核对带看、维护与撮合过程的系统留痕，作为分佣依据。"},
+        {"name": "分佣规则判定", "type": "condition", "detail": "按公司分佣规则计算各方分成比例，撞单争议按撞单判定规则仲裁，跨门店合作单核对费率差异，判定结果生成核算底表。"},
+        {"name": "佣金核算复核", "type": "agent_task", "detail": "按核算底表计算各人佣金，与回款进度联动（未收满缓发部分），复核折扣单与特殊优惠对佣金基数的影响，输出佣金明细。"},
+        {"name": "分佣审批", "type": "approval", "detail": "佣金核算表与争议仲裁结果推送店长审批，通过后公示并发起发放登记，月度业绩与带看转化联动考核结果同步归档。"}
+      ]
+    },
+    {
+      "id": "mortgage-progress-tracking",
+      "name": "按揭贷款进度跟踪",
+      "description": "贷款节点登记、逾期判定、进度催办到放款确认的交易保障流程。",
+      "steps": [
+        {"name": "贷款节点登记", "type": "agent_task", "detail": "签约后登记买方贷款银行、面签与评估安排，逐节点（面签、评估、审批、过户抵押、放款）录入进度台账并设定应完成时限。"},
+        {"name": "逾期判定", "type": "condition", "detail": "节点超过预期时限未推进的判定风险等级，评估政策收紧、征信或材料问题等原因，影响交房周期的立即预警买卖双方协商。"},
+        {"name": "进度跟进催办", "type": "agent_task", "detail": "对滞后节点联系银行客户经理与买卖双方催办，补件与补充说明当日响应，进度变化实时同步交易相关方并更新台账。"},
+        {"name": "放款确认", "type": "approval", "detail": "放款到账核对监管账户划转与佣金结算条件，推送权证专员确认后登记回款，月度汇总各银行放款时效形成合作银行评估。"}
+      ]
+    },
+    {
+      "id": "anti-flight-monitoring",
+      "name": "飞单风险监控",
+      "description": "行为数据扫描、风险分级判定、专项核查到处置审批的防飞单闭环。",
+      "steps": [
+        {"name": "行为数据扫描", "type": "agent_task", "detail": "每周扫描带看后跳过系统直接联系、房源信息外发、客户跟进断档与跳单成交线索等异常行为，生成风险行为清单。"},
+        {"name": "风险分级判定", "type": "condition", "detail": "成交未走系统或绕开公司签约的判定为飞单高危，立即冻结相关佣金核算并转专项核查，一般异常行为提醒警示并跟踪观察。"},
+        {"name": "专项核查", "type": "agent_task", "detail": "核查带看记录、客户沟通留痕与房源归属链条，约谈当事人并留存书面说明，核实结果登记台账并评估追责或挽回方案。"},
+        {"name": "处置审批", "type": "approval", "detail": "飞单处置（追偿、处分、移交法务）推送店长与公司审批，审定后执行并全员通报警示，防飞单规则修订后宣贯留痕。"}
+      ]
+    },
+    {
+      "id": "morning-briefing",
+      "name": "晨夕会与业务复盘",
+      "description": "晨会看板准备、夕会复盘整理、周度复盘判定到会议纪要归档。",
+      "steps": [
+        {"name": "晨会数据准备", "type": "agent_task", "detail": "每日晨会前汇总昨日新增房源客源、带看安排、成交与回款进度，生成门店晨会看板，标注当日重点跟进事项与到期任务。"},
+        {"name": "夕会复盘整理", "type": "agent_task", "detail": "夕会归集当日带看反馈、议价进展与客户异议，输出次日跟进清单与疑难单求助安排，跟进事项落实到人并设定时限。"},
+        {"name": "周度复盘判定", "type": "condition", "detail": "周度对比带看转化与房源去化目标：连续两周未达标的经纪人员调整跟盘与分配策略，连续达标强化激励，判定结果供店长管理参考。"},
+        {"name": "会议纪要归档", "type": "approval", "detail": "周度经营复盘纪要推送店长审阅后归档，沉淀片区行情与议价案例进门店知识库，未闭环事项滚动到下周跟踪直至清零。"}
+      ]
     }
+  ],
+  "compliance_items": [
+    {"key": "listing-verification", "name": "房源核验与书面委托", "authority": "住房城乡建设部门", "renewal_rule": "房源发布前完成产权核验并编制房屋状况说明书取得产权人书面同意，委托状态变更即时更新", "renewal_days_before": 1, "penalty": "发布未经书面委托或虚假房源，依《房地产经纪管理办法》责令改正并处罚款，记入信用档案直至停业整顿", "evidence_note": "委托协议、房屋状况说明书签字件与核验记录"},
+    {"key": "client-info-protection", "name": "客户个人信息保护", "authority": "住房城乡建设部门/市场监督管理部门/网信部门", "renewal_rule": "落实2023年住建部与市监总局《关于规范房地产经纪服务的意见》，客户信息采集授权留痕，员工权限最小化并年度评审", "renewal_days_before": 365, "penalty": "泄露或违规买卖客户信息承担行政责任与民事赔偿，情节严重涉刑", "evidence_note": "授权记录、权限配置与信息外发审计日志"},
+    {"key": "fund-supervision-redline", "name": "交易资金监管红线", "authority": "地方住建部门/资金监管机构", "renewal_rule": "每单交易签约时书面告知资金监管要求，中介不得直接或间接代收代管交易资金及定金", "renewal_days_before": 1, "penalty": "违规代收代管交易资金被责令改正、罚款直至停业整顿，挪用资金涉刑", "evidence_note": "资金监管告知书、监管账户划转凭证与拒绝代收记录"},
+    {"key": "agency-filing-realname", "name": "机构备案与人员实名", "authority": "住房城乡建设部门", "renewal_rule": "经纪机构备案信息与从业人员实名登记动态维护，发房人员实名可追溯", "renewal_days_before": 30, "penalty": "未备案开展经纪业务或人员未实名发房，责令改正并处罚款，影响平台发房权限", "evidence_note": "备案证书、人员实名登记与变更记录"}
+  ],
+  "integration_targets": [
+    {"system": "58安居客端口/贝壳ACN", "auth_type": "api_key", "priority": 1, "data_entries": ["product", "lead"], "note": "房源分发与客源线索来源，平台接口可得性待核实，端口数据人工录入兜底。"},
+    {"system": "巧房/房在线类中介SaaS", "auth_type": "api_key", "priority": 2, "data_entries": ["product", "contact", "order"], "note": "房客源存量数据迁移或共存对接，防止历史房源与跟进记录丢失。"},
+    {"system": "政府房源核验/网签备案平台", "auth_type": "signing", "priority": 3, "data_entries": ["product", "order"], "note": "真房源核验与网签备案数据回流交易台账，接口开放程度逐地核实。"}
   ],
   "metric_defs": [
     {"key": "viewing_conversion_rate", "name": "带看转化率", "unit": "%", "direction": "higher_better", "description": "成交单数÷带看次数×100%，按经纪人、区域与价格段分解考核匹配质量。"},
@@ -78,7 +155,9 @@
     {"name": "经纪人助理", "department": "sales", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "负责客源维护、带看安排与反馈归档，跟进意向客户转化。"},
     {"name": "门店店长", "department": "company", "capabilities": ["web_browsing", "persistent_memory"], "mission": "审核房源上架与佣金方案，分析带看转化与房源去化并调配人力。"},
     {"name": "权证专员", "department": "legal", "capabilities": ["persistent_memory", "computer_use"], "mission": "负责合同复核、贷款过户跟进与资金监管节点控制。"},
-    {"name": "房源维护专员", "department": "support", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "执行房源实勘、业主回访与状态维护，保障房源信息真实有效。"}
+    {"name": "房源维护专员", "department": "support", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "执行房源实勘、业主回访与状态维护，保障房源信息真实有效。"},
+    {"name": "端口运营专员", "department": "marketing", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "负责端口发房刷新、线索分派与投放复盘，监控单线索成本。", "workflows": ["port-lead-ops"]},
+    {"name": "业绩核算专员", "department": "finance", "capabilities": ["persistent_memory", "computer_use", "scheduled_work"], "mission": "负责ACN分佣核算、撞单仲裁台账与佣金发放登记，联动回款进度。", "workflows": ["acn-commission-settle"]}
   ],
   "kb_seed_topics": [
     "房源实勘拍摄与信息录入规范",
@@ -87,6 +166,15 @@
     "交易税费测算（住宅/公寓/商铺差异）",
     "资金监管与贷款过户节点流程",
     "购房资格核验与限购政策要点",
-    "佣金收退规则与客诉处理口径"
+    "佣金收退规则与客诉处理口径",
+    "房源核验与房屋状况说明书规范",
+    "客户个人信息保护制度与权限最小化",
+    "交易资金监管红线与告知话术",
+    "ACN分佣规则与撞单判定流程",
+    "飞单风险识别、核查与处置流程",
+    "业主回访节奏与调价谈判要点",
+    "按揭贷款节点跟踪与放款衔接",
+    "端口发房与刷新投放策略",
+    "晨夕会流程与周度复盘模板"
   ]
 }

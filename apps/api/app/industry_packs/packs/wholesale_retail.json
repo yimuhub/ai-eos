@@ -2,7 +2,7 @@
   "id": "wholesale-retail",
   "name": "批发零售",
   "version": "0.1.0",
-  "description": "面向批发与连锁零售企业的行业包，覆盖补货预警、门店调拨、促销复盘与月度盘点的运营闭环。",
+  "description": "面向批发与连锁零售企业的行业包，覆盖补货预警、门店调拨、促销复盘、月度盘点的运营闭环，并覆盖会员私域运营、对账催收、收银日结、临期处置与调价审批。",
   "terms": {
     "SKU": ["最小存货单位", "单品", "款号"],
     "动销率": ["动销比", "销售活跃度"],
@@ -61,7 +61,73 @@
         {"name": "差异处理审批", "type": "approval", "detail": "差异清单与初判原因推送店长与财务共同审批，明确报损、报溢或追责的处理口径，审批通过后调整库存并留存处理凭证。"},
         {"name": "盘损台账更新", "type": "agent_task", "detail": "将审批后的盘损结果计入门店盘损台账并更新月度盘损率，对连续两个月盘损率超标的门店自动生成专项整改建议并跟踪落实。"}
       ]
+    },
+    {
+      "id": "member-private-ops",
+      "name": "会员与私域社群运营",
+      "description": "会员分层盘点、企微社群内容执行、储值催耗到私域周报复盘的每日运营。",
+      "steps": [
+        {"name": "会员数据盘点", "type": "agent_task", "detail": "每周盘点会员分层、储值余额与最近消费数据，识别沉睡会员、储值临期未耗与高价值会员名单，形成本周触达任务清单。"},
+        {"name": "社群内容执行", "type": "agent_task", "detail": "按周排期执行企微社群运营，包括新品到货播报、会员日预告、社群专属券发放与导购加粉任务分派，记录各群活跃与转化数据。"},
+        {"name": "储值催耗判定", "type": "condition", "detail": "储值余额超出消费节奏可耗尽期限的会员触发催耗提醒，主动推送余额提示与适销商品组合，连续三月零消费的储值会员转入流失挽回。"},
+        {"name": "私域周报复盘", "type": "agent_task", "detail": "每周汇总加粉数、社群活跃、会员复购与储值催耗成果，对比目标输出下周活动建议，沉淀高转化话术与活动模板供复用。"}
+      ]
+    },
+    {
+      "id": "wholesale-recon-collections",
+      "name": "批发客户月度对账与催收",
+      "description": "对账单编制、差异分流、分级催收到停货处置审批的应收闭环。",
+      "steps": [
+        {"name": "对账单编制", "type": "agent_task", "detail": "每月按批发客户汇总订单、发货签收与回款记录生成对账单，核对账期与信用额度占用，差异项列明单据与责任后先内部核对再发送客户。"},
+        {"name": "差异确认判定", "type": "condition", "detail": "客户回签存在差异的按类型分流：单价折扣争议转价格政策复核，数量签收争议调出库与签收凭证，差异锁定前暂停该客户新增赊购。"},
+        {"name": "催收分级执行", "type": "agent_task", "detail": "按账期逾期天数分级催收：临期提醒、逾期30天电话催收、60天书面催款函并降信用额度，全程记录承诺与到账情况更新应收台账。"},
+        {"name": "停货处置审批", "type": "approval", "detail": "超期严重或反复失信的客户推送店长与财务审批停货或法务介入，审定结果记入客户信用档案，回款后按流程恢复供货并复盘原因。"}
+      ]
+    },
+    {
+      "id": "cash-daily-close",
+      "name": "收银日结对账",
+      "description": "POS流水与到账逐项核对、差异判定到月度勾兑的每日收银管理。",
+      "steps": [
+        {"name": "流水归集", "type": "agent_task", "detail": "每日打烊后归集POS交易流水、移动支付到账与现金缴款记录，按门店与支付方式汇总交易笔数与金额，缺漏小票当日补录。"},
+        {"name": "差异核对判定", "type": "condition", "detail": "系统流水与到账金额差异超过容忍阈值判定异常：移动支付到账延迟登记次日复核，长短款超限的当日锁定责任收银员并启动核查。"},
+        {"name": "日结报告推送", "type": "agent_task", "detail": "生成门店日结报告，含销售额、支付结构、退款与优惠核销明细，异常项附原因说明，晨会前推送店长并同步财务备查。"},
+        {"name": "月度勾兑", "type": "agent_task", "detail": "月末将每日日结与银行到账、第三方支付商户账单逐笔勾兑，未达账项登记跟进，输出月度收银差错率与改进措施纳入门店考核。"}
+      ]
+    },
+    {
+      "id": "near-expiry-handling",
+      "name": "临期商品处置",
+      "description": "效期扫描、临期分级、清仓处置到台账复盘的效期管理流程。",
+      "steps": [
+        {"name": "效期扫描", "type": "agent_task", "detail": "每日按保质期规则扫描在库商品效期，标记进入临期区间的商品清单，核对进货台账中生产日期与保质期信息的完整性。"},
+        {"name": "临期判定分级", "type": "condition", "detail": "按剩余效期占比分级：临界值内转入临期专区集中陈列并醒目标注，接近保质期三分之一的启动促销清仓，过期商品立即下架封存。"},
+        {"name": "处置方案执行", "type": "approval", "detail": "临期清仓折扣、捆绑搭赠与供应商退换方案推送店长审批，执行后跟踪消化率与毛利损失，过期商品报废处置留影像与台账凭证。"},
+        {"name": "台账更新复盘", "type": "agent_task", "detail": "处置完成后更新临期台账与损耗记录，按品类复盘临期成因（订货过量、动销缓慢），反哺补货模型的安全库存与订货量参数。"}
+      ]
+    },
+    {
+      "id": "price-policy-approval",
+      "name": "商品调价与价格政策审批",
+      "description": "调价申请评估、联动影响判定、审批到执行跟踪的价格管理流程。",
+      "steps": [
+        {"name": "调价申请评估", "type": "agent_task", "detail": "汇总供应商调价函、竞品价格与毛利数据，对拟调价商品测算新价格下的毛利与销量弹性影响，形成调价建议清单与执行时点。"},
+        {"name": "联动影响判定", "type": "condition", "detail": "判定调价是否触及价格政策联动：零售价变动同步促销价与会员价基准，批发价变动核对客户协议价范围，冲突项转价格政策调整。"},
+        {"name": "调价审批", "type": "approval", "detail": "调价清单与价格政策变更推送店长与采购负责人审批，重点复核毛利底线与客诉风险，审批通过后定时生效并同步收银与线上渠道。"},
+        {"name": "执行跟踪", "type": "agent_task", "detail": "调价生效后跟踪价格执行一致性与销量毛利变化，发现渠道价差或执行偏差即时纠正，月末输出调价商品复盘纳入价格档案。"}
+      ]
     }
+  ],
+  "compliance_items": [
+    {"key": "food-incoming-inspection", "name": "食品进货查验记录", "authority": "属地市场监管部门", "renewal_rule": "每批次进货时查验供货者许可证与合格证明并如实记录，按批次动态维护台账，记录保存不少于保质期满后6个月，无保质期的不少于2年", "renewal_days_before": 30, "penalty": "未建立进货查验记录制度依《食品安全法》第126条责令改正、警告，拒不改正处5千至5万元罚款；履行查验义务可依第136条尽职免责", "evidence_note": "供货者许可证复印件、合格证明与进货台账（名称、规格、批号、保质期、进货日期、供货者信息）"},
+    {"key": "food-business-license", "name": "食品经营许可与备案", "authority": "属地市场监管部门", "renewal_rule": "食品经营许可证有效期5年，届满前30个工作日申请延续；仅售预包装食品的办理备案并保持有效", "renewal_days_before": 30, "penalty": "无证经营依《食品安全法》第122条没收违法所得并处5万至10万元起罚款", "evidence_note": "许可证正本悬挂公示、副本与备案凭证存档，经营项目与实际经营一致"},
+    {"key": "near-expiry-food-ledger", "name": "临期食品台账管理", "authority": "属地市场监管部门", "renewal_rule": "每日扫描效期并在台账醒目标注临期商品，集中陈列并作消费提示，过期商品当日下架", "renewal_days_before": 30, "penalty": "经营超过保质期食品依《食品安全法》第124条没收违法所得，货值不足1万元的并处5万至10万元罚款", "evidence_note": "临期商品台账、下架报废记录与影像凭证"},
+    {"key": "bulk-food-record", "name": "散装食品专门台账", "authority": "属地市场监管部门", "renewal_rule": "散装食品按容器逐项记录生产日期、保质期与合格证明信息，随进货动态更新并在容器外醒目标注", "renewal_days_before": 30, "penalty": "散装食品未按要求标注或记录，依《食品安全法》第126条责令改正并可处罚款", "evidence_note": "散装食品台账、容器标签照片与供货者证明文件"}
+  ],
+  "integration_targets": [
+    {"system": "POS/收银系统（银豹/客如云/美团收银）", "auth_type": "api_key", "priority": 1, "data_entries": ["order", "voucher"], "note": "交易流水与退款数据实时同步，支撑收银日结与销售指标自动取数。"},
+    {"system": "有赞/微盟私域商城", "auth_type": "oauth", "priority": 2, "data_entries": ["order", "contact", "product"], "note": "线上订单、会员与优惠券数据打通，支撑私域运营与储值催耗触达。"},
+    {"system": "管家婆/秦丝进销存", "auth_type": "api_key", "priority": 3, "data_entries": ["product", "order", "voucher"], "note": "存量批发商户商品与往来数据在迁移双跑期对接，避免主数据重建。"}
   ],
   "metric_defs": [
     {"key": "inventory_turnover_days", "name": "库存周转天数", "unit": "天", "direction": "lower_better", "description": "平均库存成本÷日均销售成本；日均销售成本=期间销售出库成本÷期间自然日数，按品类与门店双维度统计。"},
@@ -78,7 +144,9 @@
     {"name": "采购专员", "department": "supply-chain", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责补货预警研判、采购申请与供应商到货跟踪，维护安全库存与主供商品清单。"},
     {"name": "店长", "department": "company", "capabilities": ["web_browsing", "persistent_memory"], "mission": "负责门店销售、盘点与人员管理，审核补货调拨单并跟进盘损整改。"},
     {"name": "库存专员", "department": "supply-chain", "capabilities": ["computer_use", "scheduled_work"], "mission": "每日核对库存与在途数据，执行调拨与盘点差异处理，维护商品主数据。"},
-    {"name": "促销运营", "department": "marketing", "capabilities": ["web_browsing", "self_learning"], "mission": "策划与复盘促销档期，输出选品定价建议并跟踪动销与毛利表现。"}
+    {"name": "促销运营", "department": "marketing", "capabilities": ["web_browsing", "self_learning"], "mission": "策划与复盘促销档期，输出选品定价建议并跟踪动销与毛利表现。"},
+    {"name": "私域运营专员", "department": "marketing", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "负责企微社群运营、会员分层触达与储值催耗活动，维护私域话术库。", "workflows": ["member-private-ops"]},
+    {"name": "对账催收专员", "department": "finance", "capabilities": ["persistent_memory", "computer_use", "scheduled_work"], "mission": "负责批发客户月度对账、差异处理与分级催收，维护应收账龄台账。", "workflows": ["wholesale-recon-collections"]}
   ],
   "kb_seed_topics": [
     "安全库存与补货点设置规则",
@@ -87,6 +155,15 @@
     "月度盘点流程与盘损追责口径",
     "商品主数据维护规范（条码、规格、进价）",
     "批发客户信用额度与账期管理政策",
-    "近效期与滞销商品的退换货处理流程"
+    "近效期与滞销商品的退换货处理流程",
+    "《食品安全法》第53条进货查验要求与第136条尽职免责适用",
+    "临期食品台账标注与集中陈列规范",
+    "散装食品经营台账与容器标注要求",
+    "食品经营许可证延续与预包装备案办理指引",
+    "企微社群运营排期与导购加粉考核办法",
+    "会员储值催耗节奏与触达话术模板",
+    "批发客户对账单编制与差异处理流程",
+    "应收催收分级与停货审批口径",
+    "收银日结差异类型与处理规范"
   ]
 }

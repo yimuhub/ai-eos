@@ -2,7 +2,7 @@
   "id": "construction",
   "name": "建筑装修",
   "version": "0.1.0",
-  "description": "面向建筑装修与工程企业的行业包，覆盖报价签约、进度款申请、变更签证与竣工结算的项目管理闭环。",
+  "description": "面向建筑装修与工程企业的行业包，覆盖报价签约、进度款申请、变更签证与竣工结算的项目管理闭环，并覆盖工地巡查影像汇报、劳务实名制工资专户、线索跟进、材料验收、质保报修与物业申报登记。",
   "terms": {
     "变更签证": ["工程签证", "设计变更", "现场签证"],
     "进度款": ["工程进度款", "中期款"],
@@ -72,7 +72,86 @@
         {"name": "结算书编制与审批", "type": "approval", "detail": "编制含合同价、签证增减、扣款事项的结算书，经预算员与项目经理复核后推送客户审定，审定结果作为尾款与质保金依据。"},
         {"name": "尾款与质保金跟踪", "type": "agent_task", "detail": "按结算审定金额跟踪尾款到账进度与质保金到期时间，质保期到期前发起客户质保回访，确认无质量问题的按期申请退还质保金。"}
       ]
+    },
+    {
+      "id": "site-daily-patrol",
+      "name": "工地巡查与影像汇报",
+      "description": "巡查计划、现场影像采集、风险分级到施工日记推送业主的现场流。",
+      "steps": [
+        {"name": "巡查计划生成", "type": "agent_task", "detail": "按在建项目生成每周巡查计划，明确各节点检查项（安全防护、工序质量、材料堆放、文明施工），责任巡查人与时间提前通知班组。"},
+        {"name": "巡查执行与影像采集", "type": "agent_task", "detail": "巡查现场逐项核对检查项并拍照留证，重点工序留存施工前后对比影像，发现隐患当场登记并明确整改责任与时限。"},
+        {"name": "风险判定", "type": "condition", "detail": "安全隐患（临边防护缺失、临时用电违规、消防隐患）立即停工整改并上报项目经理，一般质量偏差限期整改，重大风险同步公司安全负责人。"},
+        {"name": "施工日记推送", "type": "approval", "detail": "巡查结果整理成图文施工日记经项目经理审核后推送业主，业主异议与诉求回填工单跟进，巡查记录归档作为进度款与结算佐证。"}
+      ]
+    },
+    {
+      "id": "labor-realname-payroll",
+      "name": "劳务实名制与工资专户",
+      "description": "实名建档、考勤核对、专户拨付校验到工资台账审批的劳务合规闭环。",
+      "steps": [
+        {"name": "实名制建档", "type": "agent_task", "detail": "进场工人逐一登记身份信息、合同与持证情况，上传实名制监管平台并动态更新进出场记录，未完成实名的工人不得进场作业。"},
+        {"name": "考勤核对", "type": "agent_task", "detail": "每日归集实名考勤数据，核对班组出勤与工作量台账，缺卡漏卡限期补正，考勤异常（代打卡、长时间无考勤）标记核查。"},
+        {"name": "专户拨付判定", "type": "condition", "detail": "按月校验人工费用是否足额拨入工资专户并按考勤代发到人，专户未开立或拨付缺口的立即补办，确保合同签订后30日内完成开立。"},
+        {"name": "工资台账审批", "type": "approval", "detail": "月度工资发放表与专户流水对账后推送项目经理与财务审批，发放凭证与按月公示记录归档，工资投诉线索24小时响应并跟踪化解。"}
+      ]
+    },
+    {
+      "id": "lead-followup-surveying",
+      "name": "客户线索跟进与量房排期",
+      "description": "线索归集、意向分级、量房排期到转化复盘的获客流程。",
+      "steps": [
+        {"name": "线索归集登记", "type": "agent_task", "detail": "归集线上线下咨询线索并登记来源渠道与装修需求，30分钟内完成首次响应并登记接待人，按意向与预算初步分级建档。"},
+        {"name": "跟进分级判定", "type": "condition", "detail": "按意向强度分流：高意向当日邀约量房，中意向推送案例与优惠培育，低意向定期回访，超48小时未跟进的线索自动升级提醒。"},
+        {"name": "量房排期", "type": "agent_task", "detail": "协调设计师与客户时间安排量房，下发量房准备清单与注意事项，量房后48小时内完成图纸整理并转入报价流程。"},
+        {"name": "转化复盘", "type": "approval", "detail": "月度复盘线索量、量房转化率与渠道成本，推送经营负责人审批调整渠道预算与话术，无效渠道降权处理并记录依据。"}
+      ]
+    },
+    {
+      "id": "material-order-acceptance",
+      "name": "材料下单与进场验收",
+      "description": "需求汇总下单、封样比对验收、超量预警到月度对账的材料流。",
+      "steps": [
+        {"name": "需求汇总下单", "type": "agent_task", "detail": "按施工进度汇总各项目材料需求，核对封样品牌型号与库存余量后生成采购单，下单信息同步项目经理与供应商确认到货时间。"},
+        {"name": "进场验收", "type": "agent_task", "detail": "材料到场时按封样逐项核对品牌、型号、数量与合格证明，拍照留证并登记进场台账，不符材料的退换与索赔当日发起。"},
+        {"name": "超量预警判定", "type": "condition", "detail": "单项目累计进场量超过预算材料量设定比例时触发预警，核对是否存在变更增项依据，无依据的超量采购暂停并报项目经理处置。"},
+        {"name": "月度对账", "type": "approval", "detail": "供应商月度送货与结算对账推送预算员审批，核对价格与封样一致性，审定后登记应付账款，异常供应商纳入考核降分。"}
+      ]
+    },
+    {
+      "id": "warranty-repair-orders",
+      "name": "质保期报修工单",
+      "description": "报修登记、派单判定、维修执行到回访闭环的售后工单流程。",
+      "steps": [
+        {"name": "报修登记", "type": "agent_task", "detail": "登记业主报修问题、发生部位与紧急程度，核对是否处于保修范围与保修期内，保修书未覆盖的项目按增项流程报价处理。"},
+        {"name": "派单判定", "type": "condition", "detail": "渗漏、断电等影响居住安全的报修2小时内响应派单，普通报修24小时内约期上门，责任归属存疑的先取证再判定费用承担方。"},
+        {"name": "维修执行", "type": "agent_task", "detail": "派单维修并跟踪完工验收，留存维修前后影像与业主签字确认，费用按保修责任归集，供应商或班组责任的同步追偿。"},
+        {"name": "回访闭环", "type": "approval", "detail": "完工后72小时内回访满意度，不满意的重新派单处理直至闭环，月度汇总报修率与高频问题反哺施工工艺改进，台账归档。"}
+      ]
+    },
+    {
+      "id": "property-declaration",
+      "name": "物业申报与开工登记",
+      "description": "申报资料准备、协议签署校验、施工许可办理到退场核销的合规前置流程。",
+      "steps": [
+        {"name": "申报资料准备", "type": "agent_task", "detail": "开工前按小区物业要求准备申报资料（装修方案、施工人员名单、资质证明、业主委托书），逐项核对物业登记清单避免反复补件。"},
+        {"name": "协议签署判定", "type": "condition", "detail": "核对《住宅室内装饰装修管理服务协议》条款与费用：违规收费或加重业主责任的条款标记协商，协议签署与押金缴纳凭证留档。"},
+        {"name": "施工许可办理", "type": "agent_task", "detail": "办理装修许可与出入证，登记施工时间窗口与电梯使用规范，向班组交底物业约束条款，噪音时段与垃圾清运等违规风险提前告知业主。"},
+        {"name": "退场核销", "type": "approval", "detail": "竣工后办理物业退场手续，核对有无公共部位损坏与押金退还，结算凭证推送项目经理审批后归档，形成项目合规闭环。"}
+      ]
     }
+  ],
+  "compliance_items": [
+    {"key": "migrant-wage-account", "name": "农民工工资专用账户", "authority": "人力资源社会保障部门", "renewal_rule": "施工合同签订后30日内开立工资专户并与银行、人社部门签订三方协议，人工费用按月足额拨付专户并总包代发", "renewal_days_before": 30, "penalty": "未依《保障农民工工资支付条例》（国务院令第724号）开立专户或拨付人工费用，责令限期改正，逾期不改的责令项目停工并处5万至10万元罚款", "evidence_note": "三方协议、专户流水、代发工资凭证与按月公示记录"},
+    {"key": "realname-attendance-upload", "name": "建筑工人实名制考勤", "authority": "住房城乡建设部门", "renewal_rule": "工人实名登记并考勤数据上传实名制监管平台，进出场记录动态更新", "renewal_days_before": 30, "penalty": "未落实实名制管理责令改正并处罚款，工资发生争议时企业承担举证不利后果", "evidence_note": "实名平台登记记录、每日考勤数据与劳务合同台账"},
+    {"key": "safety-production-license", "name": "安全生产许可证", "authority": "住房城乡建设部门/应急管理部门", "renewal_rule": "安全生产许可证有效期3年，届满前3个月申请延期，期间接受资质动态核查", "renewal_days_before": 90, "penalty": "无安全生产许可证承揽施工责令停产停业并处罚款，发生安全事故从重追责", "evidence_note": "许可证正副本、延期申请回执与安全教育培训档案"},
+    {"key": "construction-qualification", "name": "装修专业承包资质", "authority": "住房城乡建设部门", "renewal_rule": "资质证书有效期5年，届满前3个月申请延续，人员与业绩条件持续达标", "renewal_days_before": 90, "penalty": "无资质或超资质承揽工程面临合同无效风险，依《建筑法》处罚款、没收违法所得", "evidence_note": "资质证书、延续材料与在建项目业绩台账"},
+    {"key": "property-decoration-filing", "name": "住宅装修申报登记", "authority": "房地产行政主管部门/物业", "renewal_rule": "开工前向物业申报登记并签署住宅室内装饰装修管理服务协议，涉及拆改结构的按规定审批", "renewal_days_before": 30, "penalty": "未经申报擅自开工或违规拆改，依《住宅室内装饰装修管理办法》（建设部令第110号）责令改正、恢复原状并处罚款", "evidence_note": "申报登记回执、管理服务协议与押金缴纳凭证"},
+    {"key": "warranty-book", "name": "质量保修书与法定保修期", "authority": "住房城乡建设部门", "renewal_rule": "竣工交付时出具住宅质量保修书，最低保修期限2年、防水工程5年，保修台账动态跟踪到期", "renewal_days_before": 60, "penalty": "不出具保修书或未履行保修义务，承担赔偿责任并受主管部门处理，影响资质与信用评价", "evidence_note": "保修书副本、保修台账与维修记录"}
+  ],
+  "integration_targets": [
+    {"system": "建筑工人实名制管理服务平台（全国/地方）", "auth_type": "api_key", "priority": 1, "data_entries": ["employee", "voucher"], "note": "考勤与工资专户数据上报，直连接口可得性逐地核实，先以台账兜底。"},
+    {"system": "酷家乐（设计/效果图）", "auth_type": "api_key", "priority": 2, "data_entries": ["lead", "product"], "note": "量房方案与效果图数据回流报价流程，主材清单对接选材库。"},
+    {"system": "材料供应商ERP/订货平台", "auth_type": "api_key", "priority": 3, "data_entries": ["order", "product"], "note": "主材下单与配送数据接入，支撑进场验收与月度对账。"}
   ],
   "metric_defs": [
     {"key": "project_gross_margin", "name": "项目毛利率", "unit": "%", "direction": "higher_better", "description": "（结算收入-直接成本）÷结算收入×100%；直接成本含材料、劳务、机械与分包，管理费另计。"},
@@ -89,7 +168,9 @@
     {"name": "项目经理", "department": "project-management", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "统筹项目进度、验收与劳务安排，跟踪进度偏差并发起赶工或签证。"},
     {"name": "预算造价员", "department": "finance", "capabilities": ["persistent_memory", "computer_use"], "mission": "负责报价编制、变更测算与结算书编制，监控项目毛利率与成本异常。"},
     {"name": "材料员", "department": "supply-chain", "capabilities": ["computer_use", "persistent_memory"], "mission": "管理材料进场验收与库存占用，跟踪供应商到货与封样比对。"},
-    {"name": "回款与合同专员", "department": "sales", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "跟进进度款请款与回款催收，维护合同台账与客户沟通记录。"}
+    {"name": "回款与合同专员", "department": "sales", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "跟进进度款请款与回款催收，维护合同台账与客户沟通记录。"},
+    {"name": "劳资专员", "department": "hr", "capabilities": ["persistent_memory", "computer_use", "scheduled_work"], "mission": "负责实名制考勤、工资专户拨付对账与工资台账公示，处理工资投诉。", "workflows": ["labor-realname-payroll"]},
+    {"name": "施工巡查员", "department": "project-management", "capabilities": ["computer_use", "persistent_memory", "scheduled_work"], "mission": "负责工地巡查影像采集、隐患登记与施工日记推送，跟踪整改闭环。", "workflows": ["site-daily-patrol"]}
   ],
   "kb_seed_topics": [
     "装修工程报价定额与工程量计算规则",
@@ -98,6 +179,15 @@
     "进度款申请的合同节点与请款比例约定",
     "劳务班组结算与工资支付合规要求（含实名制）",
     "常见增项争议与客户沟通话术规范",
-    "竣工结算资料清单与归档标准"
+    "竣工结算资料清单与归档标准",
+    "《保障农民工工资支付条例》要点：专户30日内开立、总包代发、实名考勤",
+    "工资保证金缴存与退还规则",
+    "住宅室内装饰装修申报登记与物业协议要点",
+    "工地巡查检查项清单与影像汇报规范",
+    "质量保修书与法定保修期限（2年/防水5年）",
+    "材料进场验收与封样比对操作规范",
+    "装修资质与安全生产许可证效期管理",
+    "质保期报修工单处理与费用归属规则",
+    "线索分级跟进与量房转化话术"
   ]
 }

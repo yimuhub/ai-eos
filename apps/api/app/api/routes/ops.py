@@ -14,11 +14,18 @@ from app.models.ops import ComplianceLedger, PayrollRule, ReconciliationRun
 from app.models.user import User
 from app.services import compliance_service, payroll_service, \
     reconciliation_service
+from app.schemas.responses_v61 import (ComplianceCreateOut, ComplianceListOut,
+                                        CompliancePatchOut,
+                                        ComplianceRefreshOut,
+                                        PayrollEvaluateOut, PayrollListOut,
+                                        PayrollRuleOut, ReconciliationListOut,
+                                        ReconciliationOut, TraceQueryOut,
+                                        UsageReportOut)
 
 router = APIRouter(prefix="/ops", tags=["ops"])
 
 
-async def _guard(db: AsyncSession, user: User, company_id: str,
+async def _owned_guard(db: AsyncSession, user: User, company_id: str,
                  cap: Capability = Capability.VIEW) -> None:
     await assert_company_capability(db, user.id, company_id, cap)
 
@@ -40,8 +47,9 @@ class ComplianceIn(BaseModel):
 async def list_compliance(company_id: str = Query(...),
                           status: str | None = Query(None),
                           db: AsyncSession = Depends(get_db),
-                          user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id)
+                          user: User = Depends(get_current_user)
+                          ) -> ComplianceListOut:
+    await _owned_guard(db, user, company_id)
     counts = await compliance_service.refresh_company_status(db, company_id)
     q = select(ComplianceLedger).where(
         ComplianceLedger.company_id == company_id)
@@ -53,12 +61,13 @@ async def list_compliance(company_id: str = Query(...),
             "counts": counts}
 
 
-@router.post("/compliance", status_code=201)
+@router.post("/compliance", status_code=201,
+             response_model=ComplianceCreateOut)
 async def create_compliance(body: ComplianceIn,
                             company_id: str = Query(...),
                             db: AsyncSession = Depends(get_db),
                             user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     from datetime import datetime
 
     expires = None
@@ -82,14 +91,14 @@ async def create_compliance(body: ComplianceIn,
     return {"ok": True, "item": compliance_service.ledger_out(row)}
 
 
-@router.patch("/compliance/{item_id}")
+@router.patch("/compliance/{item_id}", response_model=CompliancePatchOut)
 async def update_compliance(item_id: str, company_id: str = Query(...),
                             expires_at: str | None = Query(None),
                             owner_agent_id: str | None = Query(None),
                             db: AsyncSession = Depends(get_db),
                             user: User = Depends(get_current_user)):
     """更新有效期 / 责任人（续办后把新证照日期录进来）。"""
-    await _guard(db, user, company_id, Capability.OPERATE)
+    await _owned_guard(db, user, company_id, Capability.OPERATE)
     row = await db.get(ComplianceLedger, item_id)
     if row is None or row.company_id != company_id:
         raise HTTPException(404, "台账项不存在")
@@ -108,11 +117,11 @@ async def update_compliance(item_id: str, company_id: str = Query(...),
     return {"ok": True, "item": compliance_service.ledger_out(row)}
 
 
-@router.post("/compliance/refresh")
+@router.post("/compliance/refresh", response_model=ComplianceRefreshOut)
 async def refresh_compliance(company_id: str = Query(...),
                              db: AsyncSession = Depends(get_db),
                              user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id, Capability.OPERATE)
+    await _owned_guard(db, user, company_id, Capability.OPERATE)
     counts = await compliance_service.refresh_company_status(db, company_id)
     return {"ok": True, "counts": counts}
 
@@ -125,11 +134,11 @@ class PayrollIn(BaseModel):
     spec: dict
 
 
-@router.post("/payroll", status_code=201)
+@router.post("/payroll", status_code=201, response_model=PayrollRuleOut)
 async def create_payroll(body: PayrollIn, company_id: str = Query(...),
                          db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     try:
         spec = payroll_service.validate_spec(body.spec)
     except ValueError as exc:
@@ -149,22 +158,22 @@ async def create_payroll(body: PayrollIn, company_id: str = Query(...),
                                  "name": row.name, "spec": spec}}
 
 
-@router.get("/payroll")
+@router.get("/payroll", response_model=PayrollListOut)
 async def list_payroll(company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id)
+    await _owned_guard(db, user, company_id)
     rows = await payroll_service.list_rules(db, company_id)
     return {"rules": [{"id": r.id, "key": r.key, "name": r.name,
                        "mode": (r.spec or {}).get("mode"), "active": r.active,
                        "spec": r.spec} for r in rows]}
 
 
-@router.post("/payroll/{key}/evaluate")
+@router.post("/payroll/{key}/evaluate", response_model=PayrollEvaluateOut)
 async def evaluate_payroll(key: str, company_id: str = Query(...),
                            db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id, Capability.OPERATE)
+    await _owned_guard(db, user, company_id, Capability.OPERATE)
     try:
         return await payroll_service.evaluate_payroll(db, company_id, key)
     except LookupError as exc:
@@ -180,12 +189,13 @@ class ReconciliationIn(BaseModel):
     config: dict
 
 
-@router.post("/reconciliations", status_code=201)
+@router.post("/reconciliations", status_code=201,
+             response_model=ReconciliationOut)
 async def create_reconciliation(body: ReconciliationIn,
                                 company_id: str = Query(...),
                                 db: AsyncSession = Depends(get_db),
                                 user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id, Capability.MANAGE)
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
     row = ReconciliationRun(id=str(uuid.uuid4()), company_id=company_id,
                             name=body.name, config=body.config,
                             status="running", created_by=user.id)
@@ -195,11 +205,11 @@ async def create_reconciliation(body: ReconciliationIn,
     return {"ok": True, "run": _run_out(row)}
 
 
-@router.get("/reconciliations")
+@router.get("/reconciliations", response_model=ReconciliationListOut)
 async def list_reconciliations(company_id: str = Query(...),
                                db: AsyncSession = Depends(get_db),
                                user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id)
+    await _owned_guard(db, user, company_id)
     rows = (await db.execute(
         select(ReconciliationRun).where(
             ReconciliationRun.company_id == company_id)
@@ -207,12 +217,13 @@ async def list_reconciliations(company_id: str = Query(...),
     return {"runs": [_run_out(r) for r in rows]}
 
 
-@router.post("/reconciliations/{run_id}/run")
+@router.post("/reconciliations/{run_id}/run",
+             response_model=ReconciliationOut)
 async def run_reconciliation_endpoint(run_id: str,
                                       company_id: str = Query(...),
                                       db: AsyncSession = Depends(get_db),
                                       user: User = Depends(get_current_user)):
-    await _guard(db, user, company_id, Capability.OPERATE)
+    await _owned_guard(db, user, company_id, Capability.OPERATE)
     row = await db.get(ReconciliationRun, run_id)
     if row is None or row.company_id != company_id:
         raise HTTPException(404, "对账任务不存在")
@@ -235,12 +246,12 @@ def _run_out(r: ReconciliationRun) -> dict:
 
 # ---------------------------------------------------------------- trace 查询
 
-@router.get("/trace/{trace_id}")
+@router.get("/trace/{trace_id}", response_model=TraceQueryOut)
 async def trace_query(trace_id: str, company_id: str = Query(...),
                       db: AsyncSession = Depends(get_db),
                       user: User = Depends(get_current_user)):
     """按 trace_id 串起一次业务动作的全部事件（时间正序）。"""
-    await _guard(db, user, company_id)
+    await _owned_guard(db, user, company_id)
     from sqlalchemy import func as _func
     from app.models.event import EventLog
     q = (select(EventLog).where(
@@ -258,14 +269,14 @@ async def trace_query(trace_id: str, company_id: str = Query(...),
 
 # ---------------------------------------------------------------- 消耗报表
 
-@router.get("/usage-report")
+@router.get("/usage-report", response_model=UsageReportOut)
 async def usage_report(company_id: str = Query(...),
                        month: str | None = Query(None,
                                                  description="YYYY-MM，缺省当月"),
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
     """按 Agent/场景聚合的 token 消耗报表（计费底座）。"""
-    await _guard(db, user, company_id)
+    await _owned_guard(db, user, company_id)
     from datetime import datetime, timedelta, timezone
 
     from sqlalchemy import func as _func

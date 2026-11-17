@@ -2,7 +2,7 @@
   "id": "clinic",
   "name": "医疗诊所",
   "version": "0.1.0",
-  "description": "面向诊所与门诊部的合规敏感行业包，覆盖预约履约、随访召回、经营分析，全程执行患者信息脱敏。",
+  "description": "面向诊所与门诊部的合规敏感行业包，覆盖预约履约、随访召回、经营分析，全程执行患者信息脱敏，并覆盖药耗采购效期处置、医保结算对账、排班号源、不良事件上报与初诊获客。",
   "terms": {
     "复诊": ["再次就诊", "复诊预约"],
     "随访": ["回访", "诊后随访"],
@@ -61,7 +61,75 @@
         {"name": "整改工单", "type": "agent_task", "detail": "对确认的违规行为生成整改工单，明确责任人、整改措施与完成时限，同步评估影响范围并判断是否需要上报负责人处理。"},
         {"name": "合规复核", "type": "approval", "detail": "整改完成后由合规负责人复核确认关闭，每月输出合规巡检报告，将高频违规点固化为制度条款与系统自动校验规则。"}
       ]
+    },
+    {
+      "id": "drug-procurement-expiry",
+      "name": "药耗采购与效期处置",
+      "description": "订货测算、近效期判定、采购验收审批到过期处置登记的药耗闭环。",
+      "steps": [
+        {"name": "库存与用量盘点", "type": "agent_task", "detail": "每周汇总药品耗材库存、近效期批次与消耗速度，结合采购周期生成订货建议，控制近效期品种不再新增采购并标注缺货风险。"},
+        {"name": "近效期判定", "type": "condition", "detail": "效期6个月内药品触发预警并优先调拨使用，效期3个月内评估退换与停用，过期药品立即隔离下架登记，不得继续使用。"},
+        {"name": "采购下单与验收", "type": "approval", "detail": "订货计划推送药房负责人审批后下单，到货按批号、效期与合格证明逐批验收登记，票账货一致后入库并更新效期台账。"},
+        {"name": "过期处置登记", "type": "agent_task", "detail": "过期与破损药品按规程登记销毁或退换，留存处置记录与影像，季度复盘近效期占比与采购计划偏差，优化备货结构。"}
+      ]
+    },
+    {
+      "id": "insurance-settlement-recon",
+      "name": "医保结算与费用对账",
+      "description": "医保结算归集、拒付分流、月度对账到违规自查的费用管理流程。",
+      "steps": [
+        {"name": "医保结算归集", "type": "agent_task", "detail": "每日归集医保结算单据、自费收费与商保直付数据，核对结算金额与医保目录限频规则执行情况，标记拒付与扣款明细。"},
+        {"name": "拒付判定", "type": "condition", "detail": "医保拒付按原因分流：目录外项目误用转收费规范整改，限频超量转诊疗合规复核，资料不全的限期补正后重新申报。"},
+        {"name": "月度对账", "type": "agent_task", "detail": "每月与医保经办机构月结对账，逐笔核对拨付金额与拒付扣款，差异项编制说明与申诉材料，跟踪拨付到账并更新应收台账。"},
+        {"name": "违规自查", "type": "approval", "detail": "季度开展医保违规自查（分解收费、超量开药、电子凭证动态核验），自查报告推送负责人审批，问题项限期整改并纳入员工培训。"}
+      ]
+    },
+    {
+      "id": "doctor-scheduling",
+      "name": "医生排班与号源管理",
+      "description": "号源需求测算、排班编制、审批发布到执行调整的排班流程。",
+      "steps": [
+        {"name": "需求测算", "type": "agent_task", "detail": "结合各科室历史就诊量、预约转化与医生出诊意愿测算下周号源需求，识别高峰缺口与闲置时段，形成排班测算底表。"},
+        {"name": "排班方案编制", "type": "agent_task", "detail": "按执业范围与资质匹配生成医生排班草案，兼顾连续出诊体验与诊室资源占用，标注号源投放量与临时停诊替换预案。"},
+        {"name": "排班审批", "type": "approval", "detail": "排班草案推送医疗负责人审批，重点核对执业注册地点、工时负荷与处方权限，审批通过后发布并同步预约系统放号。"},
+        {"name": "执行与调整", "type": "agent_task", "detail": "每日核对出勤与停诊记录，临时停诊立即触发已约患者改期安抚，月末统计号源利用率与爽约率反哺下月放号策略优化。"}
+      ]
+    },
+    {
+      "id": "adverse-event-report",
+      "name": "医疗安全与不良事件上报",
+      "description": "不良事件登记、分级上报判定、根因整改到季度安全评审。",
+      "steps": [
+        {"name": "事件登记", "type": "agent_task", "detail": "登记不良事件（用药差错、跌倒坠床、器械故障、院感苗头）的时间经过与处置措施，按患者伤害程度初步分级并保全现场资料。"},
+        {"name": "分级上报判定", "type": "condition", "detail": "造成患者伤害或潜在高风险的事件按医疗质量安全核心制度立即上报负责人，一般隐患按周汇总，涉及传染病与药品不良反应的走法定渠道上报。"},
+        {"name": "根因分析整改", "type": "agent_task", "detail": "对伤害级事件组织根因分析，形成流程或培训层面的整改措施并跟踪落实，同类事件复发时升级为系统级整改专项。"},
+        {"name": "季度安全评审", "type": "approval", "detail": "季度汇总不良事件趋势与整改闭环率形成医疗安全报告，推送负责人评审，评审结论纳入人员考核与制度修订依据。"}
+      ]
+    },
+    {
+      "id": "patient-acquisition",
+      "name": "初诊获客与渠道运营",
+      "description": "渠道线索归集、意向分级、转化跟踪到渠道复盘的获客流程。",
+      "steps": [
+        {"name": "渠道线索归集", "type": "agent_task", "detail": "归集本地生活平台、线上投放、口碑转介绍与社区活动的咨询线索，登记来源渠道与意向科室，24小时内完成首次回访。"},
+        {"name": "线索分级判定", "type": "condition", "detail": "按意向强度分级：明确就诊意向的直接协助预约初诊，犹豫观望的推送科普内容培育，无效线索标记归因，避免过度营销扰民。"},
+        {"name": "转化跟踪", "type": "agent_task", "detail": "跟踪线索到初诊、初诊到复诊的转化数据，按渠道统计获客成本与投入产出，产出渠道投放优化建议供运营决策。"},
+        {"name": "渠道复盘", "type": "approval", "detail": "月度渠道复盘报告（线索量、转化率、获客成本）推送负责人审批，审定后调整下月投放预算与活动排期，广告内容同步合规审查。"}
+      ]
     }
+  ],
+  "compliance_items": [
+    {"key": "medical-record-retention", "name": "病历保存管理", "authority": "卫生健康行政部门", "renewal_rule": "门诊病历自末次就诊之日起保存不少于15年，住院病历不少于30年，电子病历同口径，销毁前逐档审批", "renewal_days_before": 365, "penalty": "未按规定保管或篡改病历，依《医疗机构病历管理规定（2013版）》与《医疗纠纷预防和处理条例》承担行政责任并在争议中承担举证不利后果", "evidence_note": "病历归档登记、保管台账与销毁审批记录"},
+    {"key": "prescription-retention", "name": "处方分类保存", "authority": "卫生健康行政部门", "renewal_rule": "普通、急诊、儿科处方保存1年，二类精神药品处方保存2年，麻醉与一类精神药品处方保存3年，销毁需登记批准", "renewal_days_before": 365, "penalty": "未按规定保存处方依《处方管理办法》第50条责令整改并处罚，麻醉药品处方违规涉药品管理追责", "evidence_note": "处方登记台账、销毁审批与清点记录"},
+    {"key": "practice-license-verification", "name": "医疗机构执业许可校验", "authority": "卫生健康行政部门", "renewal_rule": "执业许可证按周期接受校验（不满100张床位的机构每年校验一次），诊疗科目与人员执业注册持续合规", "renewal_days_before": 30, "penalty": "逾期校验或校验不合格可暂停执业直至吊销许可，超范围诊疗依《医疗机构管理条例》处罚", "evidence_note": "执业许可证正副本、校验合格记录与人员执业注册信息"},
+    {"key": "medical-ad-review", "name": "医疗广告审查", "authority": "卫生健康行政部门/市场监督管理部门", "renewal_rule": "对外发布医疗广告前取得医疗广告审查证明，发布内容与证明一致，变更重新报审", "renewal_days_before": 30, "penalty": "禁止保证治愈或宣传治愈率有效率，违规依《医疗广告管理办法》责令停止发布并处罚", "evidence_note": "审查证明、发布内容留档与渠道发布记录"},
+    {"key": "medical-insurance-agreement", "name": "医保定点协议管理", "authority": "医保经办机构", "renewal_rule": "定点协议按期续签，医保电子凭证动态核验，处方经电子处方中心流转上传", "renewal_days_before": 30, "penalty": "使用截图或静态二维码结算、分解收费等违规行为将被拒付、暂停拨付直至解除协议并处罚款", "evidence_note": "定点协议、结算对账单与电子凭证核验日志"},
+    {"key": "sensitive-info-consent", "name": "健康信息单独同意", "authority": "网信部门/卫生健康行政部门", "renewal_rule": "采集使用健康医疗等敏感个人信息时逐次取得单独同意并留痕，脱敏展示贯穿全流程", "renewal_days_before": 365, "penalty": "违规处理敏感个人信息依《个人信息保护法》最高可处5000万元或上年度营业额5%罚款", "evidence_note": "单独同意记录、脱敏规则配置与访问审计日志"}
+  ],
+  "integration_targets": [
+    {"system": "医保接口（电子凭证/结算/电子处方中心）", "auth_type": "signing", "priority": 1, "data_entries": ["order", "voucher"], "note": "定点机构接入医保电子处方中心与结算接口，处方优先上传流转，电子凭证动态核验。"},
+    {"system": "诊所HIS/EMR SaaS（牙医管家/e看牙/ABC）", "auth_type": "api_key", "priority": 2, "data_entries": ["contact", "workorder"], "note": "病历与收费数据迁移共存期对接，敏感字段按脱敏规则映射。"},
+    {"system": "药品耗材供应链（区域集采/SPD/医药B2B）", "auth_type": "api_key", "priority": 3, "data_entries": ["order", "product"], "note": "采购订单与批号效期数据接入，支撑近效期预警自动取数。"}
   ],
   "metric_defs": [
     {"key": "revisit_rate", "name": "复诊率", "unit": "%", "direction": "higher_better", "description": "统计期内复诊人次÷总诊疗人次×100%，按科室与病种分解，慢病随访口径单独统计。"},
@@ -78,7 +146,9 @@
     {"name": "前台助理", "department": "support", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责预约提醒、到诊接待与爽约改期，严格执行患者信息脱敏要求。"},
     {"name": "随访专员", "department": "support", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "按随访计划执行诊后随访与复诊召回，记录反馈并异常上报医生。"},
     {"name": "运营分析专员", "department": "marketing", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "分析复诊率、履约率与科室产值，输出运营优化建议且不接触患者明文信息。"},
-    {"name": "合规巡检员", "department": "legal", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "巡检档案访问与导出行为，处置违规并输出合规整改报告。"}
+    {"name": "合规巡检员", "department": "legal", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "巡检档案访问与导出行为，处置违规并输出合规整改报告。"},
+    {"name": "药房管理员", "department": "company", "capabilities": ["persistent_memory", "computer_use", "scheduled_work"], "mission": "负责药耗采购验收、效期台账与过期处置登记，控制近效期占比。", "workflows": ["drug-procurement-expiry"]},
+    {"name": "医保结算专员", "department": "finance", "capabilities": ["persistent_memory", "computer_use", "scheduled_work"], "mission": "负责医保结算对账、拒付申诉与违规自查，维护医保应收台账。", "workflows": ["insurance-settlement-recon"]}
   ],
   "kb_seed_topics": [
     "患者隐私保护与脱敏展示规范（编号制）",
@@ -87,6 +157,15 @@
     "处方点评与合理用药基本要求",
     "药品效期管理与近效期处置流程",
     "医疗广告与宣传的合规红线",
-    "病历与随访记录的保存期限要求"
+    "病历与随访记录的保存期限要求",
+    "病历保存年限与归档销毁流程（门诊15年/住院30年）",
+    "处方分类保存年限与销毁审批（普通1年/二类精神2年/麻醉一类精神3年）",
+    "医保电子凭证动态核验与电子处方流转要求",
+    "医疗广告审查证明与宣传红线清单",
+    "敏感个人信息单独同意与最小化采集规范",
+    "药品耗材采购计划与批号效期台账管理",
+    "医保拒付常见原因与申诉材料清单",
+    "医疗质量安全核心制度与不良事件上报路径",
+    "医生排班资质校验与号源投放策略"
   ]
 }

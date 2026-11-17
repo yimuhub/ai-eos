@@ -2,7 +2,7 @@
   "id": "manufacturing",
   "name": "制造业",
   "version": "0.1.0",
-  "description": "面向中小离散制造企业的行业包，打通订单评审、MRP运算、排产报工、质检入库到对账开票的全流程。",
+  "description": "面向中小离散制造企业的行业包，打通订单评审、MRP运算、排产报工、质检入库到对账开票的全流程，并覆盖采购催料、供应商考核、插单处置、计件工资与安全环保合规巡检。",
   "terms": {
     "工单": ["生产工单", "制令单", "加工单"],
     "MRP": ["物料需求计划", "Material Requirements Planning"],
@@ -79,7 +79,84 @@
         {"name": "异常处置判定", "type": "condition", "detail": "单位成本连续两月上升的物料转入专项分析；呆滞物料按可改制、退供应商、折价出售三类归类，形成处置建议清单。"},
         {"name": "处置审批与跟进", "type": "approval", "detail": "呆滞物料处置与成本改善方案推送财务与生产负责人审批，通过后限期执行并纳入下月复盘，跟踪验证改善效果。"}
       ]
+    },
+    {
+      "id": "procurement-order-chasing",
+      "name": "采购下单与到货催料",
+      "description": "把采购申请转成正式订单，跟踪到货进度、缺料风险与验收闭单，补齐采购执行闭环。",
+      "steps": [
+        {"name": "采购申请转单", "type": "agent_task", "detail": "将MRP生成的采购申请按供应商与到货时限合并成正式采购订单，核对单价、起订量与账期条款，订单生成后同步推送供应商并登记预计到货日期。"},
+        {"name": "到货进度跟催", "type": "agent_task", "detail": "每日按预计到货日跟踪在途订单，倒排距需求日期的缓冲天数，对关键物料提前两天催单，供应商未确认的升级电话跟催并记录承诺日期。"},
+        {"name": "缺料风险判定", "type": "condition", "detail": "预计到货晚于需求日期的物料判定缺料风险：影响在产工单的立即反馈计划员调整排产，影响新订单的联动销售与客户协商交期，风险清单同步采购负责人。"},
+        {"name": "到货验收与闭单", "type": "approval", "detail": "到货后核对实收数量、批次与质检结果，数量质量差异按索赔或退换处理，验收合格后闭单入库，供应商履约偏差记入考核台账。"}
+      ]
+    },
+    {
+      "id": "supplier-appraisal",
+      "name": "供应商月度对账与考核",
+      "description": "按月完成供应商对账、交期质量价格服务四维考核与等级调整。",
+      "steps": [
+        {"name": "对账单编制", "type": "agent_task", "detail": "每月按供应商汇总当月入库数量、金额、退换与索赔扣款，与报价单和入库记录逐单核对，生成对账单初稿并跟进差异确认。"},
+        {"name": "考核数据归集", "type": "agent_task", "detail": "按月归集各供应商的到货及时率、合格率、价格波动与服务响应记录，与采购订单和质检数据自动对齐，形成月度考核评分表。"},
+        {"name": "等级评定判定", "type": "condition", "detail": "按交期、质量、价格与服务四维评分评定供应商等级：连续两月不达标的降级并减少分单，核心物料供应商异常时同步启动备选供应商导入。"},
+        {"name": "考核结果审批", "type": "approval", "detail": "供应商等级调整与淘汰建议推送采购负责人和财务负责人审批，通过后更新供应商主数据与分单比例，考核结果反馈供应商并跟踪改进承诺。"}
+      ]
+    },
+    {
+      "id": "rush-order-handling",
+      "name": "插单急单处置",
+      "description": "急单登记评估、产能可行性判定、计划重排审批到执行跟踪的插单闭环。",
+      "steps": [
+        {"name": "急单登记评估", "type": "agent_task", "detail": "登记插单急单的产品、数量、期望交期与客户重要性，测算当前产能占用与物料齐套情况，输出可承诺交期与对在手工单的影响评估。"},
+        {"name": "重排可行性判定", "type": "condition", "detail": "插单导致延期工单累计超过产能红线或物料缺口无法补齐时判定不可行，返回销售与客户协商交期或拆单分批交付，可行的进入重排。"},
+        {"name": "计划重排与审批", "type": "approval", "detail": "生成插单后的新排产方案，列明被顺延工单与新交期，推送生产负责人审批，审批通过后冻结旧计划下发新计划并通知相关销售与班组。"},
+        {"name": "插单执行跟踪", "type": "agent_task", "detail": "插单工单投产后逐日跟踪进度与齐套情况，异常时二次预警，完工后复盘插单对原计划工单的实际影响并沉淀交期承诺参考数据。"}
+      ]
+    },
+    {
+      "id": "piece-rate-payroll",
+      "name": "计件工资核算",
+      "description": "按报工数据完成计件工资核算、异常复核与班组结算审批。",
+      "steps": [
+        {"name": "报工数据核对", "type": "agent_task", "detail": "月末按员工汇总当月各工序报工数量、工时与合格品数量，核对漏报重报与跨班次归属，异常数据反馈班组确认后修正核算底表。"},
+        {"name": "计件单价匹配", "type": "agent_task", "detail": "按工序计件单价表与工种班次规则计算每人计件工资，叠加加班、质量奖惩与不良扣款明细，生成个人与班组两级工资核算表。"},
+        {"name": "异常工资判定", "type": "condition", "detail": "单人工资金额环比波动超过设定比例或质量扣款集中的记录标记异常，转班组长与生产负责人复核确认，防止报工口径差异引发争议。"},
+        {"name": "工资表审批", "type": "approval", "detail": "计件工资表推送生产负责人与财务负责人审批，通过后导出发薪数据并按班组公示核算明细，异议限期反馈复核，审批记录与底表归档备查。"}
+      ]
+    },
+    {
+      "id": "safety-compliance-patrol",
+      "name": "特种设备与安全合规巡检",
+      "description": "每周扫描特种设备定检、特种作业证、职业健康与排污许可台账，法定级到期预警与隐患整改。",
+      "steps": [
+        {"name": "证照台账扫描", "type": "agent_task", "detail": "每周扫描特种设备检验、特种作业操作证、职业健康体检与排污许可台账，核对检验合格有效期与体检完成情况，形成证照到期与缺口清单。"},
+        {"name": "定检预警判定", "type": "condition", "detail": "特种设备检验合格有效期届满前一个月仍未申报定期检验的触发法定级预警，立即生成检验申报任务并限制相关设备排产使用。"},
+        {"name": "隐患整改派单", "type": "agent_task", "detail": "对巡检发现的证照缺口与现场隐患生成整改任务，明确责任人与完成时限，跟踪整改与复检结果，逾期未完成的升级至安环负责人处理。"},
+        {"name": "月度合规报告", "type": "approval", "detail": "每月汇总证照状态、隐患整改与培训演练情况形成安全环保合规月报，推送生产负责人审批后归档，作为年度安全投入与迎检的准备材料。"}
+      ]
+    },
+    {
+      "id": "ar-collections",
+      "name": "逾期应收分级催收",
+      "description": "账龄分析、分级判定、催收执行到处置升级的应收管理流程。",
+      "steps": [
+        {"name": "应收账龄分析", "type": "agent_task", "detail": "每周按客户汇总应收余额与逾期天数，生成账龄分析表并标注对账单确认与回款承诺状态，识别逾期集中的客户与合同。"},
+        {"name": "催收分级判定", "type": "condition", "detail": "按逾期天数与信用等级分级：逾期30天内业务跟催；60天内发正式催款函并暂停赊销放量；超90天或大额欠款提交管理层决策处置。"},
+        {"name": "催收动作执行", "type": "agent_task", "detail": "按分级方案执行催收，起草催款函与对账确认函并记录每次沟通承诺，客户承诺分期还款的登记还款计划并按期复核到账。"},
+        {"name": "处置升级审批", "type": "approval", "detail": "长期拖欠或拟停止供货、走法律程序的客户处置方案推送销售与财务负责人审批，决策结果记入客户信用档案并调整后续接单评审额度。"}
+      ]
     }
+  ],
+  "compliance_items": [
+    {"key": "special-equipment-inspection", "name": "特种设备定期检验", "authority": "属地市场监管部门", "renewal_rule": "检验合格有效期届满前1个月向检验机构申报定期检验，起重机械、压力容器、锅炉、电梯等按类别定检周期执行", "renewal_days_before": 30, "penalty": "使用未经定期检验或检验不合格的特种设备，依《特种设备安全法》责令停止使用并处3万至30万元罚款", "evidence_note": "检验报告、合格标志与设备台账（设备编号、类别、检验日期）"},
+    {"key": "special-operation-cert", "name": "特种作业人员操作证", "authority": "应急管理部门", "renewal_rule": "特种作业操作证有效期6年，每3年复审一次，期满前60日内申请复审", "renewal_days_before": 60, "penalty": "无证上岗或证件过期作业，依《安全生产法》责令限期改正并可处罚款，发生事故的从重追究企业责任", "evidence_note": "操作证复印件、复审记录与培训档案"},
+    {"key": "occupational-health-check", "name": "职业健康体检", "authority": "卫生健康委员会", "renewal_rule": "接触职业病危害岗位员工每年组织一次在岗期间职业健康体检，离岗时安排离岗体检", "renewal_days_before": 30, "penalty": "未按规定组织职业健康检查，依《职业病防治法》责令限期治理并可处罚款，发生职业病时承担赔偿责任", "evidence_note": "体检报告、接害岗位清单与劳动防护用品发放记录"},
+    {"key": "pollutant-discharge-permit", "name": "排污许可证", "authority": "生态环境部门", "renewal_rule": "排污许可证有效期5年，届满60日前申请延续，按证开展自行监测并按期提交执行报告", "renewal_days_before": 60, "penalty": "无证排污或未按规定提交执行报告，依《排污许可管理条例》（国务院令第736号）责令改正并处罚款，情节严重的责令停产整治", "evidence_note": "排污许可证正副本、自行监测数据与年度执行报告"}
+  ],
+  "integration_targets": [
+    {"system": "金蝶云星空/用友 ERP", "auth_type": "signing", "priority": 1, "data_entries": ["product", "order", "voucher"], "note": "物料与BOM主数据下发，采购销售生产单据与应收应付凭证回流，为MRP提供真数据。"},
+    {"system": "黑湖类MES/自建报工", "auth_type": "api_key", "priority": 2, "data_entries": ["workorder", "product"], "note": "报工、质检与停机数据双向同步，支撑OEE与良品率指标自动取数。"},
+    {"system": "设备层IoT网关（扫码枪/电子秤/PLC）", "auth_type": "api_key", "priority": 3, "data_entries": ["workorder", "employee"], "note": "扫码报工、称重数据与设备信号采集，接入后报工数据免人工录入。"}
   ],
   "metric_defs": [
     {"key": "oee", "name": "设备综合效率", "unit": "%", "direction": "higher_better", "description": "OEE=时间开动率×性能开动率×良品率；时间开动率=实际运行时间÷计划运行时间，性能开动率=（实际产量×理论节拍）÷运行时间，良品率=良品数÷实际产量，按机台日统计。"},
@@ -97,7 +174,10 @@
     {"name": "生产计划专员", "department": "supply-chain", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责订单评审、MRP运算与排产编制，每日跟踪工单进度偏差并预警交期风险。"},
     {"name": "质检专员", "department": "testing", "capabilities": ["computer_use", "self_learning"], "mission": "每日聚合质检单数据，监控良品率异常批次，起草整改建议与质量日报。"},
     {"name": "设备管理员", "department": "engineering", "capabilities": ["computer_use", "persistent_memory"], "mission": "监控各机台OEE与停机记录，发起维保申请并跟踪点检保养计划执行。"},
-    {"name": "销售跟单员", "department": "sales", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "跟进订单评审、发货签收与对账开票，维护客户交期沟通与应收提醒。"}
+    {"name": "销售跟单员", "department": "sales", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "跟进订单评审、发货签收与对账开票，维护客户交期沟通与应收提醒。"},
+    {"name": "采购专员", "department": "supply-chain", "capabilities": ["web_browsing", "persistent_memory", "scheduled_work"], "mission": "负责采购下单、到货跟催与供应商对账考核，维护供应商台账与备选货源。", "workflows": ["procurement-order-chasing", "supplier-appraisal"]},
+    {"name": "薪酬核算专员", "department": "hr", "capabilities": ["computer_use", "persistent_memory", "scheduled_work"], "mission": "负责计件工资与工时核算，处理工资异常复核与班组结算，对接财务发放。", "workflows": ["piece-rate-payroll"]},
+    {"name": "安环专员", "department": "engineering", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "管理特种设备定检、职业健康与排污合规台账，跟踪隐患整改与安全培训。", "workflows": ["safety-compliance-patrol"]}
   ],
   "kb_seed_topics": [
     "OEE计算口径与停机原因分类标准",
@@ -106,6 +186,15 @@
     "不合格品评审流程与让步接收管理制度",
     "排产优先级规则（交期优先、瓶颈工序优先、换模最小化）",
     "ISO9001质量管理体系要点与受控文件清单",
-    "应收账款对账开票流程与账期政策"
+    "应收账款对账开票流程与账期政策",
+    "《特种设备安全法》定期检验周期与届满前1个月申报要求",
+    "特种作业操作证复审规则与持证上岗管理",
+    "职业健康体检与劳动防护用品配备要求",
+    "排污许可自行监测与执行报告填报指引",
+    "采购下单与到货跟催操作规范",
+    "供应商月度考核评分表（交期/质量/价格/服务）",
+    "插单急单评估原则与排产重排规则",
+    "计件工资核算规则与班组结算流程",
+    "应收账龄分级催收政策与信用额度联动"
   ]
 }

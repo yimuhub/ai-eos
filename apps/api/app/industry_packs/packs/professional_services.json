@@ -2,7 +2,7 @@
   "id": "professional-services",
   "name": "专业服务（律所/财税/咨询）",
   "version": "0.1.0",
-  "description": "面向律所、财税与咨询公司的行业包，覆盖案件立项、工时归集、账单出具与应收催收的项目制经营闭环。",
+  "description": "面向律所、财税与咨询公司的行业包，覆盖案件立项、工时归集、账单出具与应收催收的项目制经营闭环，并覆盖关键期限提醒、线索转化、合同收费审批、结案归档与代账批量报税。",
   "terms": {
     "工时": ["计时工时", "Timesheet", "小时记录"],
     "案件": ["项目", "Matter", "委托事项"],
@@ -60,7 +60,85 @@
         {"name": "催收执行", "type": "agent_task", "detail": "执行分级催收动作，起草还款提醒函与正式催款函并记录每次沟通结果，对承诺分期付款的客户登记还款计划并按期复核落实。"},
         {"name": "升级处理", "type": "approval", "detail": "超期严重或拟采取法律途径的应收提交合伙人会议决策，明确停服、诉讼或核销方案，决策结果记入客户信用档案。"}
       ]
+    },
+    {
+      "id": "critical-deadline-reminder",
+      "name": "关键期限与时效提醒",
+      "description": "开庭日、上诉期、诉讼时效与申报期限的每日扫描、分级提醒与闭环。",
+      "steps": [
+        {"name": "期限台账扫描", "type": "agent_task", "detail": "每日扫描在办案件的开庭日、举证期限、上诉期、诉讼时效与申报期限，核对办案系统与人工登记双口径一致，输出当日与本周期限清单。"},
+        {"name": "风险分级判定", "type": "condition", "detail": "距期限不足3天且未确认完成准备的判定为红级，立即升级负责合伙人；不足7天的黄级每日提醒承办人，其余常规纳入周报跟踪。"},
+        {"name": "确认与准备跟踪", "type": "agent_task", "detail": "向承办人推送期限确认任务，跟踪文书准备、缴费与递交进度，完成情况回填台账，红级期限未确认的当面与电话双重提醒。"},
+        {"name": "期限复盘", "type": "approval", "detail": "每月汇总期限完成与误期情况形成报告推送合伙人会议审阅，误期事件做根因分析并修订期限管理制度，台账长期归档备查。"}
+      ]
+    },
+    {
+      "id": "lead-to-engagement",
+      "name": "线索跟进与委托转化",
+      "description": "线索归集、意向分级、委托方案跟进到转化复盘的获客流程。",
+      "steps": [
+        {"name": "线索归集登记", "type": "agent_task", "detail": "归集官网、转介绍、活动与平台咨询线索，登记需求领域与紧急程度，2小时内完成首响并做初步合规预检（冲突风险预筛）。"},
+        {"name": "意向分级判定", "type": "condition", "detail": "按需求匹配度与预算分级：明确委托意向的安排专业领域顾问面谈，需培育的推送领域内容，命中利益冲突预筛的转冲突检索流程。"},
+        {"name": "委托方案跟进", "type": "agent_task", "detail": "面谈后48小时内输出委托方案与报价，跟踪客户决策与异议处理，超两周未决的定期回访，转化结果与流失原因登记台账。"},
+        {"name": "转化复盘", "type": "approval", "detail": "月度复盘线索来源、转化率与客单价，推送合伙人审阅后调整市场投入与团队分工，优质渠道固化打法形成获客手册。"}
+      ]
+    },
+    {
+      "id": "engagement-contract-review",
+      "name": "合同评审与收费审批",
+      "description": "委托合同条款评审、风险代理预审、收费审批到开票登记。",
+      "steps": [
+        {"name": "合同条款评审", "type": "agent_task", "detail": "评审委托合同的服务范围、收费方式、期限与风险条款，核对与报价方案一致，识别越权承诺与免责缺失，输出修改意见清单。"},
+        {"name": "风险代理预审判定", "type": "condition", "detail": "风险代理案件校验回收条件与分成比例合规性，评估败诉风险与回款概率，超出权限或风险过高的方案调整计费结构后再审批。"},
+        {"name": "收费审批", "type": "approval", "detail": "合同与收费方案推送负责合伙人审批，折扣低于权限线的说明理由，审批通过后按统一收案收费原则签订归档，款项进律所对公账户。"},
+        {"name": "开票登记", "type": "agent_task", "detail": "按合同约定节点登记开票申请与预收款，核对收费到账与案件编号关联，票据信息同步财务台账供账单与税报引用。"}
+      ]
+    },
+    {
+      "id": "case-closure-archive",
+      "name": "结案与档案归档",
+      "description": "结案条件核对、费用清算判定、档案整理归档到结案复盘。",
+      "steps": [
+        {"name": "结案条件核对", "type": "agent_task", "detail": "结案申请触发后核对成果文件、费用清算与代垫费用回收情况，列明未完成事项与责任分工，缺项限期补齐后再进入结案。"},
+        {"name": "费用清算判定", "type": "condition", "detail": "存在未回款账单或客户欠费的暂缓结案并转入催收流程，争议费用提交合伙人裁定，清算完成确认后释放结案归档。"},
+        {"name": "档案整理归档", "type": "agent_task", "detail": "按归档标准整理纸质与电子档案，编目装订并核对完整性，录入档案台账标注保管期限与到期时间，移交档案管理员签收。"},
+        {"name": "结案复盘", "type": "approval", "detail": "结案报告（结果、工时、回款与经验教训）推送负责合伙人审阅，审定后归档并提取可复用知识进知识库，客户满意度回访同步发起。"}
+      ]
+    },
+    {
+      "id": "batch-tax-filing",
+      "name": "代账批量做账报税",
+      "description": "票据归集、记账校验、申报期限判定到申报确认归档的代账月度流程。",
+      "steps": [
+        {"name": "票据归集", "type": "agent_task", "detail": "每月初归集各委托客户的进销项发票、银行流水与工资社保资料，数电票自动取票与人工补录并行，缺票清单点对点催收。"},
+        {"name": "记账与校验", "type": "agent_task", "detail": "按客户套账完成凭证录入与结账，校验科目勾稽、税负率与进销项匹配异常，异常账套转资深会计复核后锁定再行申报。"},
+        {"name": "申报期限判定", "type": "condition", "detail": "按税种申报期排程批量申报，期限前3天未完成校验的账套升级提醒，逾期风险客户当日电话确认并留痕，防止逾期申报。"},
+        {"name": "申报确认归档", "type": "approval", "detail": "申报回执与税款缴纳凭证推送主管会计审批复核，完成客户确认通知，申报资料按客户归档，月度申报完成率纳入考核。"}
+      ]
+    },
+    {
+      "id": "expense-invoice-mgmt",
+      "name": "开票与代垫费用管理",
+      "description": "开票申请归集、数电票执行、代垫费用判定到月度三表核对。",
+      "steps": [
+        {"name": "开票申请归集", "type": "agent_task", "detail": "归集各案件与顾问项目的开票申请，核对合同约定与账单金额，代垫费用附凭证清单，生成开票清单供财务执行。"},
+        {"name": "开票执行", "type": "agent_task", "detail": "按数电票规范开具发票并交付客户，登记开票台账与案件关联，作废红冲按流程审批留痕，月末开票与账单勾兑。"},
+        {"name": "代垫费用判定", "type": "condition", "detail": "代垫费用单笔超限或凭证缺失的暂缓报销，退回补充依据后复核，可回收代垫款按案件跟踪回收进度并计入账单。"},
+        {"name": "月度核对", "type": "approval", "detail": "月度开票、代垫与回款三表核对推送项目会计主管审批，差异项查明调整，台账归档供账龄分析与税务申报引用。"}
+      ]
     }
+  ],
+  "compliance_items": [
+    {"key": "unified-intake-billing", "name": "统一收案统一收费", "authority": "司法行政部门", "renewal_rule": "每案立项时校验以律所名义签约、收费进律所对公账户，杜绝律师个人收案收费", "renewal_days_before": 1, "penalty": "违规私自收案收费，依《律师事务所管理办法》与《律师执业管理办法》第二十六条由司法行政机关处罚", "evidence_note": "委托合同、对公收款凭证与立项审批记录"},
+    {"key": "firm-annual-inspection", "name": "律所年度检查考核", "authority": "司法行政部门/律师协会", "renewal_rule": "律师事务所年度检查考核每年一次，律师执业年度考核同步完成", "renewal_days_before": 30, "penalty": "未参加年度检查考核的律所与律师将被公示、限制执业直至吊销执业证书", "evidence_note": "年度考核材料、执业证与考核结果公示记录"},
+    {"key": "e-invoice-tax-filing", "name": "数电票与纳税申报", "authority": "税务部门", "renewal_rule": "通过全国统一电子发票服务平台开具数电票，按月按季完成各税种申报，《增值税法》2026年1月1日施行后同步更新口径", "renewal_days_before": 5, "penalty": "逾期申报产生滞纳金并处罚款，虚开发票存在刑事责任风险", "evidence_note": "数电票开具记录、申报回执与完税凭证"},
+    {"key": "confidentiality-wall", "name": "保密义务与信息隔离墙", "authority": "司法行政部门/律师协会", "renewal_rule": "客户信息按隔离墙规则授权访问，利益冲突检索贯穿立项与在办全程，保密义务不以签署保密协议为前提", "renewal_days_before": 365, "penalty": "泄密或违规利益冲突执业由司法行政机关与律协处罚，并承担对客户的赔偿责任", "evidence_note": "权限配置记录、冲突检索报告与保密承诺书"}
+  ],
+  "integration_targets": [
+    {"system": "电子税务局/数电票平台", "auth_type": "oauth", "priority": 1, "data_entries": ["voucher", "account"], "note": "直连需税局乐企资质，第三方路径经百望等API归集发票与申报数据，代账场景刚需。"},
+    {"system": "金蝶账无忧/易代账类代账SaaS", "auth_type": "api_key", "priority": 2, "data_entries": ["voucher", "account", "order"], "note": "存量代账客户套账迁移共存，票据与申报状态双向同步。"},
+    {"system": "法院在线服务平台（立案/缴费/送达）", "auth_type": "api_key", "priority": 3, "data_entries": ["workorder", "voucher"], "note": "诉讼节点数据回流案件台账，接口可得性待逐地核实。"},
+    {"system": "既有律所SaaS（Alpha/法蝉）", "auth_type": "api_key", "priority": 4, "data_entries": ["workorder", "contact"], "note": "迁移共存期案件与客户数据同步，AI员工叠加在既有数据之上。"}
   ],
   "metric_defs": [
     {"key": "utilization_rate", "name": "工时利用率", "unit": "%", "direction": "higher_better", "description": "计费工时÷标准工时×100%；标准工时按每人每周40小时扣除行政与假期估算。"},
@@ -77,7 +155,9 @@
     {"name": "项目会计", "department": "finance", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责工时归集、账单编制与回款核销，维护应收账龄并执行催收提醒。"},
     {"name": "项目助理", "department": "support", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "协助案件资料整理、期限提醒与里程碑跟踪，保障项目按时交付。"},
     {"name": "BD客户经理", "department": "sales", "capabilities": ["web_browsing", "persistent_memory", "self_learning"], "mission": "负责客户开拓与续约，跟踪常年顾问到期与客户满意度回访。"},
-    {"name": "合伙人助理", "department": "company", "capabilities": ["web_browsing", "persistent_memory"], "mission": "汇总在办案件进展与风险，准备合伙人会议材料并跟踪决策落实。"}
+    {"name": "合伙人助理", "department": "company", "capabilities": ["web_browsing", "persistent_memory"], "mission": "汇总在办案件进展与风险，准备合伙人会议材料并跟踪决策落实。"},
+    {"name": "代账会计", "department": "finance", "capabilities": ["persistent_memory", "computer_use", "scheduled_work"], "mission": "负责委托客户批量做账报税与数电票管理，跟踪申报期限与税负异常。", "workflows": ["batch-tax-filing", "expense-invoice-mgmt"]},
+    {"name": "期限风控专员", "department": "legal", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责开庭日、上诉期与申报期限的台账扫描与分级提醒，跟踪期限闭环。", "workflows": ["critical-deadline-reminder"]}
   ],
   "kb_seed_topics": [
     "利益冲突检索规则与回避制度",
@@ -86,6 +166,15 @@
     "应收账龄分级催收政策与函件模板",
     "常年顾问合同的摊销确认与续约流程",
     "结案归档标准与档案保管期限",
-    "保密与客户信息隔离墙制度"
+    "保密与客户信息隔离墙制度",
+    "关键期限管理制度（开庭日/举证期限/上诉期/诉讼时效）",
+    "统一收案统一收费与利益冲突回避要求",
+    "代账服务月度做账报税标准流程",
+    "数电票开具与电子税务局操作要点（含《增值税法》2026年实施）",
+    "诉讼档案与会计档案保管期限规定",
+    "风险代理预审要点与分成比例合规",
+    "委托合同评审清单与收费折扣权限",
+    "结案清理与档案归档操作规范",
+    "线索分级跟进与委托转化话术"
   ]
 }

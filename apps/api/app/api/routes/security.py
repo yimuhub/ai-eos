@@ -15,6 +15,7 @@ from app.core.permissions import Capability
 from app.models.agent import Agent
 from app.models.bindings import RELATIONS, MemberAgentBinding
 from app.models.user import User
+from app.schemas.responses_v61 import BindingsListOut, OkOut
 
 bindings_router = APIRouter(prefix="/member-agents", tags=["security"])
 audit_router = APIRouter(prefix="/audit", tags=["security"])
@@ -25,7 +26,7 @@ async def _owned_guard(db: AsyncSession, user: User, company_id: str,
     await assert_company_capability(db, user.id, company_id, cap)
 
 
-@bindings_router.get("")
+@bindings_router.get("", response_model=BindingsListOut)
 async def list_bindings(company_id: str = Query(...),
                         user_id: str | None = Query(None),
                         db: AsyncSession = Depends(get_db),
@@ -50,7 +51,7 @@ class BindingIn(BaseModel):
     bindings: list[dict] = Field(default_factory=list, max_length=100)
 
 
-@bindings_router.put("")
+@bindings_router.put("", response_model=OkOut)
 async def set_bindings(body: BindingIn, company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
@@ -82,7 +83,7 @@ async def set_bindings(body: BindingIn, company_id: str = Query(...),
     return {"ok": True, "count": len(body.bindings)}
 
 
-@bindings_router.delete("/{binding_id}")
+@bindings_router.delete("/{binding_id}", response_model=OkOut)
 async def delete_binding(binding_id: str, company_id: str = Query(...),
                          db: AsyncSession = Depends(get_db),
                          user: User = Depends(get_current_user)):

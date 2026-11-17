@@ -25,6 +25,8 @@ from app.models.company_secret import CompanySecret
 from app.models.toolbus import AgentToolGrant, ToolRegistry
 from app.models.user import User
 from app.toolbus import all_incode_tools, execute_bus_tool, get_tool
+from app.schemas.responses_v61 import (GrantsOut, OkOut, ToolActionOut,
+                                        ToolInventoryOut, ToolTestOut)
 from app.toolbus.dispatch import mcp_list_tools
 
 router = APIRouter(prefix="/toolbus", tags=["toolbus"])
@@ -73,7 +75,7 @@ def _spec_out(spec) -> dict:
 # ----------------------------------------------------------------- 目录
 
 
-@router.get("/inventory")
+@router.get("/inventory", response_model=ToolInventoryOut)
 async def inventory(company_id: str = Query(...),
                     db: AsyncSession = Depends(get_db),
                     user: User = Depends(get_current_user)):
@@ -105,7 +107,7 @@ class ToolRegisterIn(BaseModel):
     auth_secret_ref: str | None = None
 
 
-@router.post("/tools", status_code=201)
+@router.post("/tools", status_code=201, response_model=ToolActionOut)
 async def register_tool(body: ToolRegisterIn,
                         company_id: str = Query(...),
                         db: AsyncSession = Depends(get_db),
@@ -171,7 +173,7 @@ async def register_tool(body: ToolRegisterIn,
     return {"ok": True, "tool": _row_out(row)}
 
 
-@router.patch("/tools/{tool_id}")
+@router.patch("/tools/{tool_id}", response_model=ToolActionOut)
 async def toggle_tool(tool_id: str, enabled: bool = Query(...),
                       company_id: str = Query(...),
                       db: AsyncSession = Depends(get_db),
@@ -183,7 +185,7 @@ async def toggle_tool(tool_id: str, enabled: bool = Query(...),
     return {"ok": True, "tool": _row_out(row)}
 
 
-@router.delete("/tools/{tool_id}")
+@router.delete("/tools/{tool_id}", response_model=ToolActionOut)
 async def unregister_tool(tool_id: str, company_id: str = Query(...),
                           db: AsyncSession = Depends(get_db),
                           user: User = Depends(get_current_user)):
@@ -198,7 +200,7 @@ async def unregister_tool(tool_id: str, company_id: str = Query(...),
     return {"ok": True, "message": f"已撤销登记 {row.name}（授权一并清除）"}
 
 
-@router.post("/tools/{tool_id}/health")
+@router.post("/tools/{tool_id}/health", response_model=OkOut)
 async def check_health(tool_id: str, company_id: str = Query(...),
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
@@ -233,7 +235,7 @@ async def check_health(tool_id: str, company_id: str = Query(...),
                 "message": row.last_health_error}
 
 
-@router.post("/tools/{tool_id}/import")
+@router.post("/tools/{tool_id}/import", response_model=OkOut)
 async def import_remote_tools(tool_id: str, company_id: str = Query(...),
                               db: AsyncSession = Depends(get_db),
                               user: User = Depends(get_current_user)):
@@ -290,7 +292,7 @@ async def import_remote_tools(tool_id: str, company_id: str = Query(...),
             "message": f"导入 {len(added)} 个工具，跳过 {len(skipped)} 个"}
 
 
-@router.post("/tools/{tool_id}/test")
+@router.post("/tools/{tool_id}/test", response_model=ToolTestOut)
 async def test_execute(tool_id: str, company_id: str = Query(...),
                        arguments: dict | None = None,
                        db: AsyncSession = Depends(get_db),
@@ -308,7 +310,7 @@ async def test_execute(tool_id: str, company_id: str = Query(...),
 # ----------------------------------------------------------------- 授权
 
 
-@router.get("/agents/{agent_id}/tools")
+@router.get("/agents/{agent_id}/tools", response_model=GrantsOut)
 async def list_agent_tools(agent_id: str, company_id: str = Query(...),
                            db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
@@ -332,7 +334,7 @@ class GrantIn(BaseModel):
     tool_names: list[str] = Field(default_factory=list, max_length=200)
 
 
-@router.put("/agents/{agent_id}/tools")
+@router.put("/agents/{agent_id}/tools", response_model=OkOut)
 async def set_agent_tools(agent_id: str, body: GrantIn,
                           company_id: str = Query(...),
                           db: AsyncSession = Depends(get_db),

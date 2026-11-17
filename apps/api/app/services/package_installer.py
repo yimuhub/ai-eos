@@ -100,8 +100,9 @@ async def install_package(db: AsyncSession, pkg: MarketplacePackage,
         items = manifest.get("compliance_items") or []
         if isinstance(items, list) and items:
             from .compliance_service import seed_from_pack
-            seeded = await seed_from_pack(db, manifest.get("id") or pkg.key,
-                                          company_id, items, user_id)
+            seeded = await seed_from_pack(db, company_id,
+                                          manifest.get("id") or pkg.key,
+                                          items, user_id)
             artifacts.append({"kind": "compliance_ledger",
                               "id": f"pack:{manifest.get('id')}",
                               "name": f"{seeded} 项合规台账"})

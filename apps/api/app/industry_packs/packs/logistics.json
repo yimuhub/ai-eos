@@ -2,7 +2,7 @@
   "id": "logistics",
   "name": "物流货运",
   "version": "0.1.0",
-  "description": "面向公路货运与物流公司的行业包，覆盖报价调度、在途跟踪、异常处理与月度对账的运输经营闭环。",
+  "description": "面向公路货运与物流公司的行业包，覆盖报价调度、在途跟踪、异常处理与月度对账的运输经营闭环，并覆盖油费ETC稽核、车辆证照年审、回程货匹配、司机承包结算、应收催收与维保台账。",
   "terms": {
     "运单": ["货单", "托运单", "提单"],
     "调度": ["派车", "车辆调度"],
@@ -61,7 +61,84 @@
         {"name": "差异审批", "type": "approval", "detail": "对账差异与理赔扣款方案推送结算主管审批，明确费用承担方与调整金额，审批后同步更新应收账款与承运商应付台账。"},
         {"name": "开票回款", "type": "agent_task", "detail": "按锁定金额提交开票申请并跟踪回款到账，逾期未回的转入催收流程，同时输出该客户的回款周期与信用评估供续约参考。"}
       ]
+    },
+    {
+      "id": "fuel-etc-audit",
+      "name": "油费ETC稽核",
+      "description": "油卡ETC台账归集、百公里油耗对标、偷油稽核到处置审批。",
+      "steps": [
+        {"name": "费用台账归集", "type": "agent_task", "detail": "每日归集油卡消费、加油小票、ETC通行与充电记录，按车辆与线路汇总费用，缺票补录，形成逐车费用台账。"},
+        {"name": "油耗对标判定", "type": "condition", "detail": "按线路里程与载重计算百公里油耗并与车型基准对标：偏离超过10%的标记异常，连续异常的车辆锁定为偷油或虚报嫌疑进入稽核。"},
+        {"name": "稽核取证", "type": "agent_task", "detail": "对嫌疑车辆调取GPS轨迹与加油站点位比对，核对加油时间与在途位置一致性，取证记录与司机面谈结论登记台账。"},
+        {"name": "稽核结果处置", "type": "approval", "detail": "确认虚报的按制度追责并推送车队长与财务审批处理方案，节油表现好的纳入奖励，月度输出油耗成本分析与节油措施清单。"}
+      ]
+    },
+    {
+      "id": "vehicle-license-renewal",
+      "name": "车辆证照与年审管理",
+      "description": "道路运输证、保险与从业资格台账扫描，到期预警与年审办理跟踪。",
+      "steps": [
+        {"name": "证照台账扫描", "type": "agent_task", "detail": "每周扫描企业道路运输经营许可、车辆道路运输证、行驶证保险与从业资格证台账，登记有效期与年审状态，输出到期清单。"},
+        {"name": "年审预警判定", "type": "condition", "detail": "道路运输证年审、保险续保或从业资格考核期届满前30天未启动办理的触发预警，相关车辆派单受限直至证照状态恢复合规。"},
+        {"name": "年审办理跟踪", "type": "agent_task", "detail": "跟踪年审检测、资料提交与证照换发进度，同步检查车载部标终端在线情况，离线终端限期修复以满足监管接入要求。"},
+        {"name": "月度合规报告", "type": "approval", "detail": "每月汇总证照合规率、年审完成率与终端在线率形成报告推送车队长审批，问题车辆停运整改，台账归档备查供年检引用。"}
+      ]
+    },
+    {
+      "id": "return-load-matching",
+      "name": "回程货匹配与空驶消化",
+      "description": "回程运力盘点、匹配可行性判定、回程单执行到空驶复盘。",
+      "steps": [
+        {"name": "回程运力盘点", "type": "agent_task", "detail": "每日盘点未来三日已派运单的回程空驶线路与可用载量，结合常跑线路与外部平台货源形成回程货机会清单与参考报价。"},
+        {"name": "匹配可行性判定", "type": "condition", "detail": "回程货价格低于线路保本价的判定不接单并记录空驶成本，价差可接受但时间冲突的评估延误风险，可行的生成配载方案。"},
+        {"name": "回程单执行跟踪", "type": "agent_task", "detail": "锁定回程单后跟踪装货与准时到达，回程运费计入线路毛利核算，执行偏差（甩货、延误）登记并影响下轮匹配权重。"},
+        {"name": "空驶复盘", "type": "approval", "detail": "月度分析空驶率与回程货消化率，推送调度主管审批调整固定货源开发与平台使用策略，高空驶线路评估开线或停线。"}
+      ]
+    },
+    {
+      "id": "driver-settlement",
+      "name": "司机结算与承包核算",
+      "description": "运单归集、费用分摊判定、结算单生成到审批发放的司机结算流程。",
+      "steps": [
+        {"name": "运单归集", "type": "agent_task", "detail": "按月归集每名司机完成运单的运费、趟次与附加费，核对签收回单齐备情况，异常运单（在途、争议）单列待结算池。"},
+        {"name": "费用分摊判定", "type": "condition", "detail": "按承包协议判定油费路桥费与维修费的承担方式，争议项（非约定维修、超速罚款）单独标记协商，分摊口径确认后锁定结算金额。"},
+        {"name": "结算单生成", "type": "agent_task", "detail": "生成司机月度结算明细（应发、扣款、押金与奖励），与考勤和安全分挂钩，推送司机确认，异议限期反馈复核修正。"},
+        {"name": "结算审批发放", "type": "approval", "detail": "司机结算表推送结算主管与财务审批，通过后安排发放并归档凭证，月度输出单车人力成本与承包模式毛利对比分析。"}
+      ]
+    },
+    {
+      "id": "ar-collections",
+      "name": "逾期应收分级催收",
+      "description": "账龄分析、分级判定、催收执行到信用调整审批的应收流程。",
+      "steps": [
+        {"name": "账龄分析", "type": "agent_task", "detail": "每周按客户汇总未回款运费与逾期天数，生成账龄清单并标注对账确认与回款承诺状态，识别逾期集中客户与风险合同。"},
+        {"name": "催收分级判定", "type": "condition", "detail": "按逾期天数分级：30天内业务跟催，60天内书面催款并暂停月结放量，90天以上或大额欠款提交管理层决定停运或法律途径。"},
+        {"name": "催收执行", "type": "agent_task", "detail": "按分级方案执行催收，记录沟通承诺与还款计划，承诺到账日次日复核，失约客户升级处置并同步暂停新单受理。"},
+        {"name": "信用调整审批", "type": "approval", "detail": "客户信用等级调整与诉讼决策推送结算主管与经营负责人审批，审定后更新接单规则与账期政策，回款后按流程恢复。"}
+      ]
+    },
+    {
+      "id": "vehicle-maintenance-audit",
+      "name": "维保台账与大额维修审批",
+      "description": "维保台账更新、大额维修判定、维修审批执行到成本复盘。",
+      "steps": [
+        {"name": "维保台账更新", "type": "agent_task", "detail": "登记每次保养、维修与轮胎更换的时间、里程与费用，按车辆归集维保台账，到期保养里程或时间临近的生成保养提醒。"},
+        {"name": "大额维修判定", "type": "condition", "detail": "单次维修费用超过设定额度的判定为大额维修，核对故障原因与责任归属（事故、自然损耗、驾驶不当），责任材料齐备后进入审批。"},
+        {"name": "维修审批执行", "type": "approval", "detail": "大额维修方案（报价、旧件回收、修复预期）推送车队长与财务审批，通过后送修并跟踪完工验收，维修记录写入台账。"},
+        {"name": "成本复盘", "type": "agent_task", "detail": "月度分析单车维修成本与故障频次，高维修成本车辆评估大修、调线或退役，维修供应商质量与价格纳入季度评审。"}
+      ]
     }
+  ],
+  "compliance_items": [
+    {"key": "road-transport-permit", "name": "道路运输经营许可证", "authority": "交通运输主管部门", "renewal_rule": "许可证有效期4年，届满前30日申请换证，经营范围与车辆规模动态保持一致", "renewal_days_before": 30, "penalty": "无证经营道路货运依《道路运输条例》责令停止经营并处罚款、没收违法所得", "evidence_note": "许可证正副本、换证回执与经营范围核对记录"},
+    {"key": "vehicle-transport-cert-annual", "name": "车辆道路运输证年审", "authority": "交通运输主管部门", "renewal_rule": "车辆道路运输证按期年审，车辆须安装符合JT/T 794—2019的部标卫星定位终端并接入全国道路货运车辆公共监管与服务平台", "renewal_days_before": 30, "penalty": "逾期未年审或终端不合规的车辆不得营运，依《道路运输条例》处罚款直至吊销车辆营运证", "evidence_note": "年审凭证、部标终端在线记录与车辆技术档案"},
+    {"key": "driver-qualification-cert", "name": "从业资格证诚信考核", "authority": "交通运输主管部门", "renewal_rule": "货运驾驶员从业资格证每年参加诚信考核并按规定周期换发，考核结果影响从业资格", "renewal_days_before": 30, "penalty": "未参加诚信考核或考核不合格仍从事经营性运输的，责令整改并处罚款，情节严重吊销从业资格", "evidence_note": "从业资格证、年度考核凭证与换发记录"},
+    {"key": "network-freight-compliance", "name": "网络货运平台合规", "authority": "交通运输主管部门/税务部门", "renewal_rule": "开展网络货运须完成信息系统等级保护三级备案，与省级网络货运信息监测系统对接并实时上传运单、车辆与驾驶员数据", "renewal_days_before": 60, "penalty": "未实时上传数据被通报整改直至取消网络货运资质，并影响代开增值税专用发票资格（税总函〔2019〕405号）", "evidence_note": "等保备案证明、监测系统上传日志与运单数据一致性核对"}
+  ],
+  "integration_targets": [
+    {"system": "G7/易流车载IoT平台", "auth_type": "api_key", "priority": 1, "data_entries": ["workorder", "voucher"], "note": "GPS轨迹、油耗与温度数据接入，JT/T808/1078部标协议，支撑在途跟踪与油耗稽核。"},
+    {"system": "满帮/运满满运力平台", "auth_type": "api_key", "priority": 2, "data_entries": ["order", "lead"], "note": "回程货与外协运力匹配来源，接口可得性待核实，人工录入兜底。"},
+    {"system": "ETC/油卡企业账户", "auth_type": "api_key", "priority": 3, "data_entries": ["voucher"], "note": "企业账户通行与加油流水逐车归集，支撑油耗对标与稽核取数。"}
   ],
   "metric_defs": [
     {"key": "on_time_rate", "name": "准时到达率", "unit": "%", "direction": "higher_better", "description": "约定时限内签收运单数÷应到达运单总数×100%，客户原因导致的等待经确认后剔除。"},
@@ -78,7 +155,10 @@
     {"name": "调度主管", "department": "project-management", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责派车调度与运力匹配，消化回程空驶并处理运力异常。"},
     {"name": "客服专员", "department": "support", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "跟踪在途运单与客户沟通，处理异常上报与回单归档。"},
     {"name": "结算专员", "department": "finance", "capabilities": ["persistent_memory", "computer_use", "scheduled_work"], "mission": "负责月度对账、开票与回款跟踪，维护理赔扣款与应收台账。"},
-    {"name": "安全与车管专员", "department": "engineering", "capabilities": ["computer_use", "persistent_memory"], "mission": "管理司机安全分与车辆维保计划，分析油耗与违章数据。"}
+    {"name": "安全与车管专员", "department": "engineering", "capabilities": ["computer_use", "persistent_memory"], "mission": "管理司机安全分与车辆维保计划，分析油耗与违章数据。"},
+    {"name": "油耗稽核专员", "department": "finance", "capabilities": ["persistent_memory", "computer_use", "scheduled_work"], "mission": "负责油卡ETC台账与百公里油耗对标，稽核异常油耗并跟踪处置。", "workflows": ["fuel-etc-audit"]},
+    {"name": "证照合规专员", "department": "legal", "capabilities": ["persistent_memory", "scheduled_work"], "mission": "负责车辆与司机证照台账、年审办理跟踪与终端在线合规检查。", "workflows": ["vehicle-license-renewal"]},
+    {"name": "车队结算专员", "department": "finance", "capabilities": ["persistent_memory", "computer_use", "scheduled_work"], "mission": "负责司机结算与承包核算、维保费用台账，输出单车成本分析。", "workflows": ["driver-settlement", "vehicle-maintenance-audit"]}
   ],
   "kb_seed_topics": [
     "线路成本测算模型（油耗、路桥、人工）",
@@ -87,6 +167,15 @@
     "货损货差取证与理赔流程",
     "月度对账差异类型与处理规范",
     "司机安全分考核与培训要求",
-    "危险品与大件运输资质合规要点"
+    "危险品与大件运输资质合规要点",
+    "道路运输证年审流程与部标终端接入要求",
+    "从业资格证年度诚信考核与换发规则",
+    "油卡与ETC台账管理及百公里油耗对标方法",
+    "偷油与虚报维修费的稽核取证要点",
+    "司机承包结算模式与费用承担约定",
+    "回程货平台使用与空驶消化策略",
+    "网络货运等保三级备案与省级监测上传要求",
+    "车辆保险与维保台账管理规范",
+    "应收账龄分级催收与信用停运规则"
   ]
 }
