@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -424,3 +424,259 @@ async def usage_report(company_id: str = Query(...),
         agg2["cost"] = round(agg2["cost"] + cost, 4)
     return {"month": month, "total": total,
             "by_agent": by_agent, "by_scenario": by_scenario}
+
+
+# ================================================================ 超级管理后台
+# 门禁 = is_superadmin + X-Super-Key 双因子；每一笔操作都落审计。
+
+
+async def _admin_guard(db: AsyncSession, user: User, request) -> None:
+    """超级后台门禁：身份（超管）+ 口令（超级密钥）缺一不可。"""
+    import hmac as _hmac
+
+    from app.core.config import settings
+
+    if not user.is_superadmin:
+        raise HTTPException(403, "需要平台超管身份")
+    provided = (request.headers.get("X-Super-Key") or "").strip()
+    if not provided or not _hmac.compare_digest(provided, settings.super_key):
+        raise HTTPException(403, "超级密钥不匹配")
+
+
+@router.post("/admin/unlock")
+async def admin_unlock(body: dict, request: Request,
+                       db: AsyncSession = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    """校验超级密钥（前端进门用）；通过后管理请求带 X-Super-Key 头即可。"""
+    await _admin_guard(db, user, request)
+    from app.services.event_system import log_event
+    await log_event(db, "admin.unlocked", "user", user.id, "user", user.id,
+                    {"via": "super_key"}, company_id=None)
+    await db.commit()
+    return {"ok": True, "message": "超级管理后台已解锁"}
+
+
+@router.get("/admin/overview")
+async def admin_overview(request: Request,
+                         db: AsyncSession = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    """运营总览：全部用户 + 名下公司 + 每家的行业授权与安装状态。"""
+    await _admin_guard(db, user, request)
+    from app.models.company import Company
+    from app.models.p3_governance import MarketplacePackage, PackageInstallation
+    from app.models.user import User as UserRow
+
+    users = (await db.execute(
+        select(UserRow).order_by(UserRow.created_at))).scalars().all()
+    companies = (await db.execute(
+        select(Company).order_by(Company.created_at))).scalars().all()
+    installs = (await db.execute(
+        select(PackageInstallation, MarketplacePackage)
+        .join(MarketplacePackage,
+              MarketplacePackage.id == PackageInstallation.package_id)
+        .where(MarketplacePackage.package_type == "industry_pack",
+               PackageInstallation.rolled_back_at.is_(None))
+        .order_by(PackageInstallation.created_at.desc()))).all()
+    by_company: dict[str, list[dict]] = {}
+    for inst, pkg in installs:
+        by_company.setdefault(inst.company_id, []).append({
+            "key": pkg.key, "name": pkg.name, "version": inst.version})
+    from app.models.feature_flags import CompanyFeatureFlag
+    flags = (await db.execute(
+        select(CompanyFeatureFlag).where(
+            CompanyFeatureFlag.enabled.is_(True)))).scalars().all()
+    flags_by_company: dict[str, list[str]] = {}
+    for f in flags:
+        flags_by_company.setdefault(f.company_id, []).append(f.key)
+
+    companies_out = []
+    for c in companies:
+        owner = next((u for u in users if u.id == c.owner_id), None)
+        companies_out.append({
+            "id": c.id, "name": c.name, "industry": c.industry,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "owner": {"id": owner.id, "email": owner.email,
+                      "username": owner.username} if owner else None,
+            "industry_packs": by_company.get(c.id, []),
+            "flags": flags_by_company.get(c.id, []),
+        })
+    return {"users": [{
+        "id": u.id, "email": u.email, "username": u.username,
+        "is_superadmin": bool(u.is_superadmin),
+        "created_at": u.created_at.isoformat() if u.created_at else None,
+    } for u in users], "companies": companies_out}
+
+
+class IndustrySetIn(BaseModel):
+    industry: str | None = None          # 行业类别（如 manufacturing）
+    packs_install: list[str] = Field(default_factory=list)   # 待解锁行业包 id（内置目录 id）
+    packs_remove: list[dict] = Field(default_factory=list)   # [{key, uninstall: bool}]
+
+
+@router.post("/admin/companies/{cid}/entitlements")
+async def set_entitlements(cid: str, body: IndustrySetIn,
+                           request: Request,
+                           db: AsyncSession = Depends(get_db),
+                           user: User = Depends(get_current_user)):
+    """给一家公司做内容配置：行业类别 + 行业解锁/收回（解锁=自动安装，收回=停用或卸载）。"""
+    await _admin_guard(db, user, request)
+    from datetime import datetime, timezone
+
+    from app.models.company import Company
+    from app.models.feature_flags import CompanyFeatureFlag
+    from app.services.event_system import log_event
+
+    from app.models.p3_governance import MarketplacePackage, PackageInstallation
+    from app.models.toolbus import ToolRegistry
+
+    company = await db.get(Company, cid)
+    if company is None:
+        raise HTTPException(404, "公司不存在")
+    actions: list[str] = []
+
+    # 1) 行业类别
+    if body.industry is not None:
+        company.industry = body.industry.strip()[:40] or None
+        actions.append(f"行业类别={company.industry or '(清空)'}")
+
+    # 2) 行业解锁：内置包 → 发布（若需要）→ 安装进公司 → 点亮 flag
+    for pack_id in body.packs_install:
+        from app.services.industry_pack_service import get_builtin
+        pack = get_builtin(pack_id)
+        if pack is None:
+            raise HTTPException(400, f"内置行业包 {pack_id!r} 不存在")
+        manifest = {k: pack.get(k) for k in
+                    ("id", "name", "version", "description", "terms",
+                     "custom_fields", "workflow_templates", "metric_defs",
+                     "agent_roster", "kb_seed_topics", "compliance_items",
+                     "integration_targets")}
+        manifest.update({"category": "industry_pack",
+                         "runtime": "declarative"})
+        pkg = (await db.execute(
+            select(MarketplacePackage).where(
+                MarketplacePackage.package_type == "industry_pack",
+                MarketplacePackage.key == pack_id))).scalars().first()
+        if pkg is None:
+            pkg = MarketplacePackage(
+                id=str(uuid.uuid4()), package_type="industry_pack",
+                key=pack["id"], name=str(pack.get("name")),
+                description=pack.get("description"), author="AI-EOS 内置",
+                latest_version=str(pack.get("version")),
+                permissions_required=["data:canonical:rw"], dependencies=[],
+                manifest=manifest, published=True)
+            db.add(pkg)
+            await db.flush()
+        else:
+            pkg.manifest = manifest
+            pkg.latest_version = str(pack.get("version"))
+            await db.flush()
+        from app.services.package_installer import install_package
+        dup_res = await db.execute(
+            select(PackageInstallation).where(
+                PackageInstallation.company_id == cid,
+                PackageInstallation.package_id == pkg.id,
+                PackageInstallation.rolled_back_at.is_(None)))
+        already = dup_res.scalars().first()
+        if already is None:
+            result = await install_package(db, pkg, cid, user.id)
+            actions.append(
+                f"解锁 {pack['name']}（{len(result['artifacts'])} 项产物）")
+        else:
+            actions.append(f"{pack['name']} 已在用（跳过重复安装）")
+        flag_res = await db.execute(
+            select(CompanyFeatureFlag).where(
+                CompanyFeatureFlag.company_id == cid,
+                CompanyFeatureFlag.key == f"industry:{pack_id}"))
+        flag = flag_res.scalars().first()
+        if flag is None:
+            db.add(CompanyFeatureFlag(
+                id=str(uuid.uuid4()), company_id=cid,
+                key=f"industry:{pack_id}", value={"version": pack.get("version")},
+                enabled=True, updated_by=user.id,
+                enabled_at=datetime.now(timezone.utc)))
+        else:
+            flag.enabled = True
+            flag.updated_by = user.id
+
+    # 3) 行业收回：flag 停用；uninstall=True 时连产物一起回收
+    from sqlalchemy import delete as _delete
+    for item in body.packs_remove:
+        key = str(item.get("key") or "")
+        uninstall = bool(item.get("uninstall"))
+        if not key:
+            continue
+        await db.execute(_delete(CompanyFeatureFlag).where(
+            CompanyFeatureFlag.company_id == cid,
+            CompanyFeatureFlag.key == f"industry:{key}"))
+        if uninstall:
+            pkg = (await db.execute(
+                select(MarketplacePackage).where(
+                    MarketplacePackage.package_type == "industry_pack",
+                    MarketplacePackage.key == key))).scalars().first()
+            if pkg is None:
+                continue
+            insts_res = await db.execute(
+                select(PackageInstallation).where(
+                    PackageInstallation.company_id == cid,
+                    PackageInstallation.package_id == pkg.id,
+                    PackageInstallation.rolled_back_at.is_(None)))
+            insts = insts_res.scalars().all()
+            from app.services.package_installer import uninstall_package
+            for inst in insts:
+                await uninstall_package(db, inst)
+            actions.append(f"收回 {key}（含卸载）")
+        else:
+            actions.append(f"停用 {key}（保留数据）")
+
+    await db.commit()
+    await log_event(db, "admin.entitlements_changed", "company", cid,
+                    "user", user.id, {"actions": actions}, company_id=cid)
+    await db.commit()
+    return {"ok": True, "actions": actions}
+
+
+@router.get("/admin/companies/{cid}")
+async def admin_company_detail(cid: str, request: Request,
+                               db: AsyncSession = Depends(get_db),
+                               user: User = Depends(get_current_user)):
+    """单公司授权明细：行业类别/已装包/插件工具状态/合规台账/指标。"""
+    await _admin_guard(db, user, request)
+    from app.models.company import Company
+    from app.models.canonical import MetricDef
+    from app.models.p3_governance import MarketplacePackage, PackageInstallation
+    from app.models.toolbus import ToolRegistry
+
+    company = await db.get(Company, cid)
+    if company is None:
+        raise HTTPException(404, "公司不存在")
+    packs = (await db.execute(
+        select(PackageInstallation, MarketplacePackage)
+        .join(MarketplacePackage,
+              MarketplacePackage.id == PackageInstallation.package_id)
+        .where(PackageInstallation.company_id == cid,
+               MarketplacePackage.package_type == "industry_pack",
+               PackageInstallation.rolled_back_at.is_(None)))).all()
+    tools = (await db.execute(
+        select(ToolRegistry).where(ToolRegistry.company_id == cid)
+        .order_by(ToolRegistry.name))).scalars().all()
+    ledgers = (await db.execute(
+        select(ComplianceLedger).where(
+            ComplianceLedger.company_id == cid)
+        .order_by(ComplianceLedger.key))).scalars().all()
+    metrics = (await db.execute(
+        select(MetricDef).where(MetricDef.company_id == cid)
+        .order_by(MetricDef.key))).scalars().all()
+    return {
+        "company": {"id": company.id, "name": company.name,
+                    "industry": company.industry},
+        "industry_packs": [{"key": p.key, "name": p.name,
+                            "version": i.version,
+                            "installed_at": (i.created_at.isoformat()
+                                             if i.created_at else None)}
+                           for i, p in packs],
+        "tools": [{"id": t.id, "name": t.name, "source": t.source,
+                   "enabled": t.enabled} for t in tools],
+        "compliance": [compliance_service.ledger_out(l) for l in ledgers],
+        "metrics": [{"key": m.key, "name": m.name, "wired": bool(m.spec)}
+                    for m in metrics],
+    }

@@ -207,6 +207,11 @@ class Settings(BaseSettings):
     # /metrics/prometheus 的访问令牌；留空时该端点只允许回环地址访问
     metrics_token: str = ""
 
+    # 超级管理后台门禁密钥（V6.1.1）：留空 = 启动时随机生成并落盘
+    # super_key.key（部署者从该文件/启动日志取值）。管理端点双重门禁 =
+    # users.is_superadmin + 本密钥（X-Super-Key 头），缺一不可。
+    super_key: str = ""
+
     # 密钥来源（configured / persisted:<path> / memory），仅用于启动日志
     _jwt_secret_source: str = PrivateAttr(default="configured")
 
@@ -291,6 +296,55 @@ class Settings(BaseSettings):
             )
         return self
 
+    def _ensure_super_key(self) -> "Settings":
+        """超级管理后台门禁密钥：未配置则随机生成并落盘 super_key.key。
+
+        与 jwt_secret 分文件存放（两者用途完全不同：一个签登录态，
+        一个是运营后台的进门口令）。生产环境若未显式配置，同样生成并
+        落盘 + WARNING——运营后台没有密钥等于不存在，有随机密钥至少
+        部署者能从文件里拿到。"""
+        if self.super_key.strip():
+            return self
+        token, source = _bootstrap_jwt_secret(self.database_url,
+                                              self.storage_dir)
+        # 复用同一生成器但换文件名：直接写独立的 super_key.key
+        candidates = _secret_file_candidates(self.database_url,
+                                             self.storage_dir)
+        for candidate in candidates:
+            sk = candidate.parent / "super_key.key"
+            try:
+                sk.parent.mkdir(parents=True, exist_ok=True)
+                reusable = _read_secret_file(sk)
+                if reusable:
+                    self.super_key = reusable
+                    _config_logger.warning(
+                        "[security] SUPER_KEY 未配置，已从 %s 读取超级管理后台密钥。",
+                        sk)
+                    return self
+                fd = os.open(str(sk), os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                             0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(token + "\n")
+                self.super_key = token
+                _config_logger.warning(
+                    "[security] SUPER_KEY 未配置，已生成随机密钥并保存到 %s。"
+                    "这是超级管理后台的唯一门禁，请妥善保管。",
+                    sk)
+                return self
+            except FileExistsError:
+                reusable = _read_secret_file(sk)
+                if reusable:
+                    self.super_key = reusable
+                    return self
+                continue
+            except OSError:
+                continue
+        # 全部落盘失败：降级为进程内随机（后台在本次进程内仍可用）
+        self.super_key = token
+        _config_logger.warning(
+            "[security] SUPER_KEY 未能落盘，已用进程内随机密钥（重启失效）。")
+        return self
+
     @model_validator(mode="after")
     def _enforce_security_posture(self) -> "Settings":
         """生产环境的安全底线检查。
@@ -300,6 +354,7 @@ class Settings(BaseSettings):
         - 生产环境 + debug 未显式关闭 → 拒绝启动（debug 会暴露堆栈与测试台）
         - 开发环境 → 只警告，保证"克隆下来就能跑"
         """
+        self._ensure_super_key()
         if not self.is_production:
             return self
 

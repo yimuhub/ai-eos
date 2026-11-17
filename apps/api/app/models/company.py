@@ -16,6 +16,8 @@ class Company(TimestampMixin, Base):
 
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(200))
+    # 行业类别（V6.1.1 超级管理后台解锁行业时写入；空 = 未定向）
+    industry: Mapped[str | None] = mapped_column(String(40), nullable=True)
     description: Mapped[str | None] = mapped_column(Text)
     logo: Mapped[str | None] = mapped_column(String(500))
     attachments: Mapped[list] = mapped_column(JSON, default=list)  # 📎 附件引用 [{id,name,size}]

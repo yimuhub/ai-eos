@@ -171,6 +171,11 @@ function applyCompanyScope(path: string): string {
 }
 
 export type RequestOptions = {
+  /**
+   * 本次请求的附加请求头（V6.1.1）：与鉴权/Content-Type 合并，
+   * 调用方传入的同名头覆盖默认值。典型用途：超级管理后台的 X-Super-Key。
+   */
+  headers?: Record<string, string>;
   /** 超时毫秒数，0 表示不限时（默认 180s） */
   timeoutMs?: number;
   /**
@@ -313,6 +318,7 @@ async function raw(
         ...(isForm ? {} : { "Content-Type": "application/json" }),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...options.headers,
+        ...(config.headers || {}),
       },
     });
   } catch (e: any) {
