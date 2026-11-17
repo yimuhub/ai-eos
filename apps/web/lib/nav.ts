@@ -63,6 +63,8 @@ export const NAV_GROUPS: NavGroup[] = [
     hint: "你的人力资源部：招人、排组织、配模型",
     items: [
       { href: "/agents", label: "Agent 团队", icon: "⬡", desc: "你的数字员工：新建、编辑、暂停、批量管理", keywords: ["agent", "employee", "员工", "yuangong", "智能体", "团队成员"] },
+      { href: "/my-agents", label: "我的员工", icon: "◎", desc: "绑定到你名下的数字员工：随身助理、下属、顾问", keywords: ["my-agents", "wode", "我的员工", "绑定", "助理", "人机配对"], hidden: true },
+      { href: "/approvals", label: "审批收件箱", icon: "✓", desc: "员工的高危动作与审批单在这里批准或拒绝", keywords: ["approval", "shenpi", "审批", "批准", "收件箱", "干预"], hidden: true },
       { href: "/organization", label: "组织架构", icon: "⌗", desc: "部门树与汇报关系，决定谁向谁汇报", keywords: ["organization", "org", "zuzhi", "部门", "架构", "汇报线"] },
       { href: "/members", label: "成员与邀请", icon: "👥", desc: "把同事加进公司：生成一次性邀请链接，对方自己注册后加入", keywords: ["member", "invite", "chengyuan", "yaoqing", "成员", "邀请", "同事", "团队", "加入"], hidden: true },
       { href: "/factory", label: "Agent 工厂", icon: "✦", desc: "按目标批量生成整套团队，而不是一个个招", keywords: ["factory", "gongchang", "工厂", "批量生成", "建团队"], hidden: true },
@@ -78,6 +80,8 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: "/meetings", label: "会议中心", icon: "◍", desc: "多个员工开会讨论问题，产出结论", keywords: ["meeting", "huiyi", "会议", "讨论"], hidden: true },
       { href: "/plugins", label: "插件库", icon: "⊞", desc: "给数字员工安装本机操作能力，并设置三档电脑权限与审计", keywords: ["plugin", "chajian", "插件", "扩展", "本机操作", "computer", "三档审批", "完全控制", "硬拦截", "agent-desktop"], hidden: true },
       { href: "/market", label: "基座市场", icon: "⌗", desc: "装积木：工具、连接器、工作流模板、行业包，安装即产生真实产物且可回滚", keywords: ["market", "shichang", "市场", "插件市场", "行业包", "连接器", "积木", "基座", "install"] },
+      { href: "/connectors", label: "连接器", icon: "⇆", desc: "外部系统数据入口：金蝶/用友/平台 API 的同步状态、水位与失败原因", keywords: ["connector", "lianjieqi", "连接器", "同步", "ERP", "数据接入"], hidden: true },
+      { href: "/metrics", label: "指标中心", icon: "∑", desc: "公司的经营数字口径：AI 取数永远走这里，不靠猜", keywords: ["metric", "zhibiao", "指标", "数字", "看板", "口径"], hidden: true },
       { href: "/workflow-builder", label: "工作流", icon: "⇄", desc: "把多步骤流程串起来，按顺序自动执行", keywords: ["workflow", "gongzuoliu", "工作流", "流程", "编排"] },
       { href: "/schedules", label: "日程安排", icon: "🗓", desc: "定时触发：每天/每周固定时间自动开工", keywords: ["schedule", "richeng", "日程", "定时", "cron", "排期"], hidden: true },
       { href: "/automation", label: "自动化规则", icon: "🤖", desc: "「发生 X 就做 Y」的事件触发规则", keywords: ["automation", "zidonghua", "自动化", "触发器", "规则"], hidden: true },
