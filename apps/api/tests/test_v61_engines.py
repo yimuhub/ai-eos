@@ -336,3 +336,67 @@ async def test_usage_report_aggregates(client, tenants):
     body = r.json()
     assert body["total"]["tokens"] >= 150 and body["total"]["calls"] >= 2
     assert body["by_agent"].get("ag-1", {}).get("tokens", 0) >= 150
+
+
+async def test_industry_hub_aggregates_and_publish(client, tenants):
+    """行业中心：聚合视图 + 草稿发布（V6.1.1 补测）。"""
+    import json as _json
+
+    from app.models.p3_governance import MarketplacePackage
+
+    alice, co = tenants.alice, tenants.alice_co["id"]
+    pack = {"id": "pack-hub-test", "name": "测试行业包", "version": "0.1.0",
+            "description": "d",
+            "custom_fields": [{"entity": "order", "key": "hub_cf",
+                               "label": "字段", "type": "text"}],
+            "workflow_templates": [{"id": "wf1", "name": "中枢流程一",
+                                    "steps": [{"name": "s", "type": "agent_task",
+                                               "detail": "做一件事"}]}],
+            "metric_defs": [{"key": "hub_m", "name": "中枢指标", "unit": "个"}],
+            "agent_roster": [{"name": "中枢员工", "department": "company",
+                              "capabilities": [], "mission": "m"}],
+            "compliance_items": [{"key": "hub_lic", "name": "测试许可",
+                                  "renewal_days_before": 30}]}
+    # 走完整市场路径：发布 → 安装（安装器负责建安装记录与 artifacts）
+    manifest = {**pack, "category": "industry_pack", "runtime": "declarative"}
+    r = await client.post("/governance/marketplace/packages",
+                          headers=alice["headers"],
+                          json={"package_type": "industry_pack",
+                                "key": "pack-hub-test", "name": "测试行业包",
+                                "description": "d", "version": "0.1.0",
+                                "permissions_required": [],
+                                "manifest": manifest})
+    assert r.status_code == 201, r.text
+    pid = r.json()["id"]
+    r = await client.post(
+        f"/governance/marketplace/packages/{pid}/install"
+        f"?company_id={co}&confirm_permissions=true", headers=alice["headers"])
+    assert r.status_code == 201, r.text
+    _ = _json, MarketplacePackage
+
+    r = await client.get(f"/ops/industry-hub?company_id={co}",
+                         headers=alice["headers"])
+    assert r.status_code == 200, r.text
+    body = r.json()
+    mine = [i for i in body["installed"] if i["key"] == "pack-hub-test"]
+    assert len(mine) == 1
+    inst = mine[0]
+    assert inst["agents_count"] == 1 and inst["draft_workflows"] == 1
+    assert inst["metrics"][0]["wired"] is False
+    assert len(inst["compliance"]) == 1
+
+    # 发布草稿工作流
+    wf_id = inst["workflows"][0]["id"]
+    r = await client.post(
+        f"/ops/industry-hub/workflows/{wf_id}/publish?company_id={co}",
+        headers=alice["headers"])
+    assert r.status_code == 200 and r.json()["status"] == "PUBLISHED"
+    # 再发布一次 → 幂等
+    r = await client.post(
+        f"/ops/industry-hub/workflows/{wf_id}/publish?company_id={co}",
+        headers=alice["headers"])
+    assert r.status_code == 200 and r.json()["message"] == "已是发布状态"
+    # bob 越界 404
+    r = await client.get(f"/ops/industry-hub?company_id={co}",
+                         headers=tenants.bob["headers"])
+    assert r.status_code == 404

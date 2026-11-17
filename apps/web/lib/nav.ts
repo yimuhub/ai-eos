@@ -80,6 +80,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: "/meetings", label: "会议中心", icon: "◍", desc: "多个员工开会讨论问题，产出结论", keywords: ["meeting", "huiyi", "会议", "讨论"], hidden: true },
       { href: "/plugins", label: "插件库", icon: "⊞", desc: "给数字员工安装本机操作能力，并设置三档电脑权限与审计", keywords: ["plugin", "chajian", "插件", "扩展", "本机操作", "computer", "三档审批", "完全控制", "硬拦截", "agent-desktop"], hidden: true },
       { href: "/market", label: "基座市场", icon: "⌗", desc: "装积木：工具、连接器、工作流模板、行业包，安装即产生真实产物且可回滚", keywords: ["market", "shichang", "市场", "插件市场", "行业包", "连接器", "积木", "基座", "install"], hidden: true },
+      { href: "/industry-hub", label: "行业中心", icon: "▦", desc: "装进来的行业包给了你什么：流程图纸、合规台账、指标接线、连接器蓝图，一屏看完", keywords: ["industry", "hangye", "行业中心", "行业包", "注入", "蓝图", "合规"], hidden: true },
       { href: "/connectors", label: "连接器", icon: "⇆", desc: "外部系统数据入口：金蝶/用友/平台 API 的同步状态、水位与失败原因", keywords: ["connector", "lianjieqi", "连接器", "同步", "ERP", "数据接入"], hidden: true },
       { href: "/metrics", label: "指标中心", icon: "∑", desc: "公司的经营数字口径：AI 取数永远走这里，不靠猜", keywords: ["metric", "zhibiao", "指标", "数字", "看板", "口径"], hidden: true },
       { href: "/workflow-builder", label: "工作流", icon: "⇄", desc: "把多步骤流程串起来，按顺序自动执行", keywords: ["workflow", "gongzuoliu", "工作流", "流程", "编排"] },

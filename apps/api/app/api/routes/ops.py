@@ -269,6 +269,104 @@ async def trace_query(trace_id: str, company_id: str = Query(...),
 
 # ---------------------------------------------------------------- 消耗报表
 
+# ---------------------------------------------------------------- 行业中心
+
+@router.get("/industry-hub")
+async def industry_hub(company_id: str = Query(...),
+                       db: AsyncSession = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    """行业中心聚合视图：以安装记录为单位，展示每个行业包注入的全部产物。
+
+    「装了什么、给了什么、哪些还没接线」在这一屏看完——散在六个页面里的
+    东西在这里收口（工作流/员工/合规/指标/知识/连接器蓝图）。
+    """
+    await _owned_guard(db, user, company_id)
+    from app.models.canonical import MetricDef
+    from app.models.p3_governance import MarketplacePackage, PackageInstallation
+    from app.models.workflow import WorkflowDefinition
+
+    rows = (await db.execute(
+        select(PackageInstallation, MarketplacePackage)
+        .join(MarketplacePackage,
+              MarketplacePackage.id == PackageInstallation.package_id)
+        .where(PackageInstallation.company_id == company_id,
+               MarketplacePackage.package_type == "industry_pack",
+               PackageInstallation.rolled_back_at.is_(None))
+        .order_by(PackageInstallation.created_at.desc()))).all()
+
+    installed = []
+    for inst, pkg in rows:
+        manifest = pkg.manifest or {}
+        artifacts = (inst.install_log or {}).get("artifacts") or []
+        agent_ids = [a["id"] for a in artifacts if a.get("kind") == "agent"]
+        wf_ids = [a["id"] for a in artifacts if a.get("kind") == "workflow"]
+        metric_ids = [a["id"] for a in artifacts if a.get("kind") == "metric"]
+        wf_rows = (await db.execute(
+            select(WorkflowDefinition).where(WorkflowDefinition.id.in_(wf_ids))
+            .order_by(WorkflowDefinition.created_at))).scalars().all()
+        workflows = [{"id": w.id, "name": w.name,
+                      "status": str(w.status.value)} for w in wf_rows]
+        m_rows = (await db.execute(
+            select(MetricDef).where(MetricDef.id.in_(metric_ids))
+            .order_by(MetricDef.key))).scalars().all()
+        metrics = [{"key": m.key, "name": m.name, "unit": m.unit,
+                    "wired": bool(m.spec)} for m in m_rows]
+        ledgers = (await db.execute(
+            select(ComplianceLedger).where(
+                ComplianceLedger.company_id == company_id,
+                ComplianceLedger.pack_id == str(pkg.key)))
+            ).scalars().all()
+        compliance = [compliance_service.ledger_out(l) for l in ledgers]
+        installed.append({
+            "installation_id": inst.id, "package_id": pkg.id, "key": pkg.key,
+            "name": pkg.name, "version": inst.version or pkg.latest_version,
+            "installed_at": (inst.created_at.isoformat()
+                             if inst.created_at else None),
+            "description": manifest.get("description") or pkg.description,
+            "agents_count": len(agent_ids),
+            "workflows": workflows,
+            "draft_workflows": sum(1 for w in workflows
+                                   if w["status"] == "DRAFT"),
+            "metrics": metrics,
+            "metrics_pending": sum(1 for m in metrics if not m["wired"]),
+            "compliance": compliance,
+            "integration_targets": manifest.get("integration_targets") or [],
+        })
+
+    from app.services.industry_pack_service import list_builtins
+    published_keys = set(r[1].key for r in rows)
+    available = [{"id": p["id"], "name": p["name"], "version": p["version"],
+                  "description": p["description"],
+                  "already_installed": p["id"] in published_keys}
+                 for p in list_builtins()]
+    return {"installed": installed, "available": available}
+
+
+@router.post("/industry-hub/workflows/{wid}/publish")
+async def publish_pack_workflow(wid: str, company_id: str = Query(...),
+                                db: AsyncSession = Depends(get_db),
+                                user: User = Depends(get_current_user)):
+    """发布一条行业包带来的草稿工作流（老板审完图纸，一键上岗）。"""
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
+    from app.models.workflow import WorkflowDefinition, WorkflowStatus
+    wf = await db.get(WorkflowDefinition, wid)
+    if wf is None or wf.company_id != company_id:
+        raise HTTPException(404, "工作流不存在")
+    if wf.source != "industry_pack":
+        raise HTTPException(400, "只支持发布行业包预置的工作流")
+    if wf.status != WorkflowStatus.DRAFT:
+        return {"ok": True, "workflow_id": wid, "status": str(wf.status.value),
+                "message": "已是发布状态"}
+    wf.status = WorkflowStatus.PUBLISHED
+    await db.commit()
+    from app.services.event_system import log_event
+    await log_event(db, "workflow.published", "workflow_definition", wid,
+                    "user", user.id, {"source": "industry_hub"},
+                    company_id=company_id)
+    await db.commit()
+    return {"ok": True, "workflow_id": wid, "status": "PUBLISHED"}
+
+
 @router.get("/usage-report", response_model=UsageReportOut)
 async def usage_report(company_id: str = Query(...),
                        month: str | None = Query(None,
