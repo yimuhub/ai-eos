@@ -430,17 +430,28 @@ async def usage_report(company_id: str = Query(...),
 # 门禁 = is_superadmin + X-Super-Key 双因子；每一笔操作都落审计。
 
 
-async def _admin_guard(db: AsyncSession, user: User, request) -> None:
-    """超级后台门禁：身份（超管）+ 口令（超级密钥）缺一不可。"""
+async def _admin_guard(db: AsyncSession, user: User, request,
+                       require_totp: bool = False) -> None:
+    """超级后台门禁：身份（超管）+ 超级密钥（知道）+ TOTP 动态码（持有）。
+
+    require_totp=False 用于绑定/解除绑定本身（鸡生蛋的引导动作，
+    由超级密钥作为根凭据把门）。"""
     import hmac as _hmac
 
     from app.core.config import settings
+    from app.services import totp_service
 
     if not user.is_superadmin:
         raise HTTPException(403, "需要平台超管身份")
     provided = (request.headers.get("X-Super-Key") or "").strip()
     if not provided or not _hmac.compare_digest(provided, settings.super_key):
         raise HTTPException(403, "超级密钥不匹配")
+    if require_totp and totp_service.status()["enrolled"]:
+        code = (request.headers.get("X-TOTP-Code") or "").strip()
+        try:
+            totp_service.verify_code(code)
+        except PermissionError as exc:
+            raise HTTPException(403, f"二次验证失败：{exc}") from exc
 
 
 @router.post("/admin/unlock")
@@ -448,12 +459,78 @@ async def admin_unlock(body: dict, request: Request,
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
     """校验超级密钥（前端进门用）；通过后管理请求带 X-Super-Key 头即可。"""
-    await _admin_guard(db, user, request)
+    await _admin_guard(db, user, request, require_totp=True)
     from app.services.event_system import log_event
     await log_event(db, "admin.unlocked", "user", user.id, "user", user.id,
-                    {"via": "super_key"}, company_id=None)
+                    {"via": "super_key+totp"}, company_id=None)
     await db.commit()
-    return {"ok": True, "message": "超级管理后台已解锁"}
+    return {"ok": True, "message": "超级管理后台已解锁",
+            "twofa": totp_status()["enrolled"]}
+
+
+@router.post("/admin/2fa/enroll")
+async def admin_2fa_enroll(body: dict, request: Request,
+                           db: AsyncSession = Depends(get_db),
+                           user: User = Depends(get_current_user)):
+    """生成 TOTP 绑定二维码（根凭据=超级密钥；旧绑定立即作废）。"""
+    await _admin_guard(db, user, request, require_totp=False)
+    from app.services import totp_service
+    uri = totp_service.enroll(str(body.get("account") or user.email))
+    import segno
+    qr_data_uri = segno.make(uri).svg_data_uri(scale=5, dark="#1a1d24")
+    return {"ok": True, "otpauth_uri": uri, "qr_svg": qr_data_uri,
+            "hint": "用 Authenticator 扫码 → 输入 30 秒动态码 confirm 绑定"}
+
+
+@router.get("/admin/2fa/status")
+async def admin_2fa_status(request: Request,
+                           db: AsyncSession = Depends(get_db),
+                           user: User = Depends(get_current_user)):
+    await _admin_guard(db, user, request, require_totp=False)
+    from app.services import totp_service
+    return {"ok": True, **totp_service.status()}
+
+
+@router.post("/admin/2fa/confirm")
+async def admin_2fa_confirm(body: dict, request: Request,
+                            db: AsyncSession = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    """首码确认绑定：生效 + 签发一次性恢复码（明文仅出现这一次）。"""
+    await _admin_guard(db, user, request, require_totp=False)
+    from app.services import totp_service
+    try:
+        result = totp_service.confirm_enrollment(str(body.get("code") or ""))
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    from app.services.event_system import log_event
+    await log_event(db, "admin.2fa_enrolled", "user", user.id, "user",
+                    user.id, {"via": "authenticator"}, company_id=None)
+    await db.commit()
+    return {"ok": True, **result}
+
+
+@router.post("/admin/2fa/disable")
+async def admin_2fa_disable(body: dict, request: Request,
+                            db: AsyncSession = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    """解除 TOTP 绑定（超级密钥根凭据把门；丢手机的部署者也可删文件重绑）。"""
+    await _admin_guard(db, user, request, require_totp=False)
+    if not body.get("confirm"):
+        raise HTTPException(400, "请显式 confirm=true")
+    from app.services import totp_service
+    totp_service.disable()
+    from app.services.event_system import log_event
+    await log_event(db, "admin.2fa_disabled", "user", user.id, "user",
+                    user.id, {}, company_id=None)
+    await db.commit()
+    return {"ok": True, "message": "TOTP 绑定已解除（建议立即重新绑定）"}
+
+
+def totp_status():
+    from app.services import totp_service
+    return totp_service.status()
 
 
 @router.get("/admin/overview")

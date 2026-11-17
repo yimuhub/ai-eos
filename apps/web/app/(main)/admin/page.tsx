@@ -26,12 +26,17 @@ type ExpertPackRow = { id: string; name: string; version: string;
 
 const KEY_STORE = "aieos_admin_key";
 
+type GateStage = "key" | "totp" | "enroll" | "recovery";
+
 export default function AdminPage() {
-  // 会话内恢复：sessionStorage 有密钥即直接进台——服务端对每个管理请求
-  // 仍真校验 X-Super-Key（错密钥会在第一个请求就被 403），前端只是少打一遍。
+  // 门禁三因子：超管身份 + 超级密钥（知道）+ TOTP 动态码（持有）。
+  // 会话内恢复：sessionStorage 有密钥则先验 2FA 状态——已绑定则要动态码。
   const [key, setKey] = useState("");
-  const [unlocked, setUnlocked] = useState(
-    typeof sessionStorage !== "undefined" && !!sessionStorage.getItem(KEY_STORE));
+  const [unlocked, setUnlocked] = useState(false);
+  const [stage, setStage] = useState<GateStage>("key");
+  const [qrSvg, setQrSvg] = useState("");
+  const [totpCode, setTotpCode] = useState("");
+  const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<CompanyDetail | null>(null);
@@ -57,20 +62,81 @@ export default function AdminPage() {
     if (error) notify("error", error);
   }, [error]);
 
-  const unlock = async () => {
+  const submitKey = async () => {
     setBusy(true);
     try {
-      await api.post("/ops/admin/unlock", {},
-        { headers: { "X-Super-Key": key } });
+      const st = await api.get<{ enrolled: boolean; pending: boolean }>(
+        "/ops/admin/2fa/status", { headers: { "X-Super-Key": key } });
       sessionStorage.setItem(KEY_STORE, key);
-      setUnlocked(true);
-      notify("success", "超级管理后台已解锁");
+      if (st.enrolled) setStage("totp");
+      else setStage("enroll");
     } catch (e) {
       notify("error", describeError(e, "密钥校验失败"));
     } finally {
       setBusy(false);
     }
   };
+
+  const unlockWithTotp = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post("/ops/admin/unlock", {},
+        { headers: { "X-Super-Key": key, "X-TOTP-Code": totpCode } });
+      sessionStorage.setItem(KEY_STORE, key);
+      setUnlocked(true);
+      notify("success", r.message || "超级管理后台已解锁");
+    } catch (e) {
+      notify("error", describeError(e, "动态码校验失败"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startEnroll = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post<{ otpauth_uri: string; qr_svg: string }>(
+        "/ops/admin/2fa/enroll", { account: "deployer" },
+        { headers: { "X-Super-Key": key } });
+      setQrSvg(r.qr_svg);
+      setStage("enroll");
+    } catch (e) {
+      notify("error", describeError(e, "生成绑定二维码失败"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmEnroll = async () => {
+    setBusy(true);
+    try {
+      const r = await api.post<{ recovery_codes: string[] }>(
+        "/ops/admin/2fa/confirm", { code: totpCode },
+        { headers: { "X-Super-Key": key } });
+      setRecoveryCodes(r.recovery_codes);
+      setStage("recovery");
+    } catch (e) {
+      notify("error", describeError(e, "绑定失败"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // 挂载时：sessionStorage 有密钥 → 先验 2FA 状态决定是否要动态码
+  useEffect(() => {
+    const saved = sessionStorage.getItem(KEY_STORE);
+    if (!saved) return;
+    setKey(saved);
+    setBusy(true);
+    api.get<{ enrolled: boolean }>("/ops/admin/2fa/status",
+      { headers: { "X-Super-Key": saved } })
+      .then((st) => {
+        if (st.enrolled) setStage("totp");
+        else setUnlocked(true);
+      })
+      .catch(() => { /* 静默：停留在密钥输入态 */ })
+      .finally(() => setBusy(false));
+  }, []);
 
   const openCompany = async (cid: string) => {
     setSelected(cid);
@@ -110,18 +176,95 @@ export default function AdminPage() {
     return (
       <div className="mx-auto max-w-md px-4 py-16 text-[13px]">
         <div className="rounded-xl border border-white/10 bg-white/5 p-6">
-          <div className="mb-1 text-[15px] font-semibold">🔒 超级管理后台</div>
+          <div className="mb-1 text-[15px] font-semibold">🔐 超级管理后台</div>
           <p className="mb-4 text-white/50">
-            仅限平台超管凭「超级密钥」进入。密钥由部署方持有（storage/super_key.key 或 AIEOS_SUPER_KEY）。
+            仅限平台超管进入。门禁三因子：超管身份 + 超级密钥（storage/super_key.key）
+            + Authenticator 动态码。
           </p>
-          <input type="password" value={key}
-                 onChange={(e) => setKey(e.target.value)}
-                 placeholder="输入超级密钥"
-                 className="mb-3 w-full rounded-md bg-black/30 px-3 py-2" />
-          <button onClick={unlock} disabled={busy || !key}
-                  className="w-full rounded-md bg-violet-600/80 px-3 py-2 hover:bg-violet-600 disabled:opacity-40">
-            {busy ? "校验中…" : "解锁"}
-          </button>
+
+          {stage === "key" && (
+            <>
+              <input type="password" value={key}
+                     onChange={(e) => setKey(e.target.value)}
+                     placeholder="输入超级密钥"
+                     className="mb-3 w-full rounded-md bg-black/30 px-3 py-2" />
+              <button onClick={submitKey} disabled={busy || !key}
+                      className="w-full rounded-md bg-violet-600/80 px-3 py-2 hover:bg-violet-600 disabled:opacity-40">
+                {busy ? "校验中…" : "下一步"}
+              </button>
+            </>
+          )}
+
+          {stage === "totp" && (
+            <>
+              <p className="mb-3 text-white/60">
+                请打开 Authenticator，输入当前 6 位动态码（30 秒刷新）。
+              </p>
+              <input inputMode="numeric" value={totpCode} maxLength={6}
+                     onChange={(e) => setTotpCode(e.target.value.replace(/[^0-9]/g, ""))}
+                     placeholder="000000"
+                     className="mb-3 w-full rounded-md bg-black/30 px-3 py-2 text-center text-[18px] tracking-[0.4em]" />
+              <button onClick={unlockWithTotp} disabled={busy || totpCode.length !== 6}
+                      className="w-full rounded-md bg-violet-600/80 px-3 py-2 hover:bg-violet-600 disabled:opacity-40">
+                {busy ? "校验中…" : "验证并进入"}
+              </button>
+            </>
+          )}
+
+          {stage === "enroll" && (
+            <>
+              <p className="mb-3 text-white/60">
+                未绑定验证器。用 Authenticator 扫描下方二维码，输入显示的 6 位动态码完成绑定。
+              </p>
+              {qrSvg ? (
+                <div className="mb-3 flex justify-center rounded-lg bg-white p-3"
+                     dangerouslySetInnerHTML={{ __html: qrSvg }} />
+              ) : (
+                <button onClick={startEnroll} disabled={busy}
+                        className="mb-3 w-full rounded-md bg-white/15 px-3 py-2 hover:bg-white/25">
+                  生成绑定二维码
+                </button>
+              )}
+              <input inputMode="numeric" value={totpCode} maxLength={6}
+                     onChange={(e) => setTotpCode(e.target.value.replace(/[^0-9]/g, ""))}
+                     placeholder="输入动态码确认绑定"
+                     className="mb-3 w-full rounded-md bg-black/30 px-3 py-2 text-center tracking-[0.4em]" />
+              <div className="mb-3 flex gap-2">
+                <button onClick={confirmEnroll} disabled={busy || totpCode.length !== 6}
+                        className="flex-1 rounded-md bg-emerald-600/80 px-3 py-2 hover:bg-emerald-600 disabled:opacity-40">
+                  确认绑定
+                </button>
+                <button onClick={() => {
+                  sessionStorage.setItem(KEY_STORE, key);
+                  setUnlocked(true);
+                  notify("success", "已进入（未绑定验证器——建议尽快绑定）");
+                }}
+                        className="rounded-md bg-white/10 px-3 py-2 hover:bg-white/20">
+                  跳过
+                </button>
+              </div>
+            </>
+          )}
+
+          {stage === "recovery" && (
+            <>
+              <p className="mb-2 font-medium text-emerald-300">绑定成功</p>
+              <p className="mb-2 text-white/60">
+                请把以下恢复码抄写保存——手机丢失时用它们进入（每个只能用一次）：
+              </p>
+              <div className="mb-3 grid grid-cols-2 gap-1.5 rounded-lg bg-black/30 p-3 font-mono text-white/80">
+                {recoveryCodes.map((c, i) => <div key={i}>{c}</div>)}
+              </div>
+              <button onClick={() => {
+                sessionStorage.setItem(KEY_STORE, key);
+                setUnlocked(true);
+                notify("success", "超级管理后台已解锁");
+              }}
+                      className="w-full rounded-md bg-violet-600/80 px-3 py-2 hover:bg-violet-600">
+                我已保存，进入后台
+              </button>
+            </>
+          )}
         </div>
       </div>
     );
