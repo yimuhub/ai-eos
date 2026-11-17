@@ -316,6 +316,14 @@ async def uninstall_pack_artifacts(db: AsyncSession, artifacts: list[dict],
             if row is not None and row.company_id == company_id:
                 await db.delete(row)
                 removed += 1
+        elif kind == "compliance_ledger":
+            # 产物 id 形如 "pack:<pack_id>"：按来源包回收
+            from app.models.ops import ComplianceLedger
+            pack_id = str(art_id).split(":", 1)[-1]
+            res = await db.execute(delete(ComplianceLedger).where(
+                ComplianceLedger.company_id == company_id,
+                ComplianceLedger.pack_id == pack_id))
+            removed += int(res.rowcount or 0)
         elif kind == "feature_flag":
             await db.execute(delete(CompanyFeatureFlag).where(
                 CompanyFeatureFlag.company_id == company_id,

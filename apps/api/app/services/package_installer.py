@@ -96,6 +96,22 @@ async def install_package(db: AsyncSession, pkg: MarketplacePackage,
         artifacts = await install_pack_content(db, pack, company_id, user_id)
         notes.append(f"行业包「{manifest.get('name')}」已种植"
                      f"（{len(artifacts)} 项产物，工作流为草稿待发布）")
+        # V6.1：compliance_items → 合规台账（罚则级证照/年审规则的种子）
+        items = manifest.get("compliance_items") or []
+        if isinstance(items, list) and items:
+            from .compliance_service import seed_from_pack
+            seeded = await seed_from_pack(db, manifest.get("id") or pkg.key,
+                                          company_id, items, user_id)
+            artifacts.append({"kind": "compliance_ledger",
+                              "id": f"pack:{manifest.get('id')}",
+                              "name": f"{seeded} 项合规台账"})
+            notes.append(f"已播种 {seeded} 项合规台账（在 /ops/compliance 查看，"
+                         "到期预警随状态刷新产生）")
+        targets = manifest.get("integration_targets") or []
+        if isinstance(targets, list) and targets:
+            notes.append("连接器蓝图：" + "、".join(
+                f"{t.get('system')}({t.get('auth_type')})"
+                for t in targets[:5]))
 
     inst = PackageInstallation(
         id=_uuid(), company_id=company_id, package_id=pkg.id,

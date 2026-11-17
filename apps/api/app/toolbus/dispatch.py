@@ -190,6 +190,8 @@ async def _audit(name: str, ctx: ToolContext, *, ok: bool, source: str,
             payload["error"] = error[:200]
         if dlp_findings:
             payload["dlp_findings"] = dlp_findings[:10]
+        from app.core.trace_context import traced_payload
+        payload = traced_payload(payload)
         async with AsyncSessionLocal() as adb:
             await log_event(adb, "tool.call", "tool", name,
                             "agent" if ctx.agent_id else

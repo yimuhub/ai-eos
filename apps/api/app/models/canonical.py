@@ -20,7 +20,8 @@ from app.db.base import Base
 from .base import TimestampMixin
 
 # 规范实体枚举（v1）：拓客/锁客/生产/财务/人力五域的最小覆盖
-ENTITY_TYPES = ("contact", "account", "order", "product", "voucher",
+# lead（V6.2 线索生命周期）= BD 角色的工作对象，转化后升级为 contact
+ENTITY_TYPES = ("lead", "contact", "account", "order", "product", "voucher",
                 "employee", "workorder")
 
 

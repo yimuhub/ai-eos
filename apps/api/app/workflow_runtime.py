@@ -351,9 +351,13 @@ async def advance_execution(db: AsyncSession, execution_id: str,
             raise ValueError("execution not found")
         logger.info("[workflow %s] 已有 worker 在推进，跳过重复调度", execution_id)
         return ex
+    # V6.1 可观测性：一次推进一条 trace（节点执行/失败事件都带 trace_id）
+    from app.core.trace_context import begin_trace, end_trace
+    trace_token = begin_trace()
     try:
         return await _advance_locked(db, execution_id, max_steps=max_steps)
     finally:
+        end_trace(trace_token)
         try:
             await release_lock(db, lock_key, holder)
         except Exception as lease_err:  # 释放失败最多等租约自然过期

@@ -213,6 +213,11 @@ async def run_agent_on_task(
     db.add(execution)
     await db.flush()
 
+    # V6.1 可观测性：一次任务一条 trace——期间所有 tool.call / 状态迁移
+    # 事件的 payload 都带 trace_id，绩效中心可串起完整链路
+    from app.core.trace_context import begin_trace, end_trace
+    _trace_token = begin_trace()
+
     agent.status = AgentStatus.RUNNING
     if task.status in (TaskStatus.TODO, TaskStatus.PLANNING):
         await transition(db, task, TaskStatus.RUNNING, actor_type=actor_type, commit=False)
@@ -539,6 +544,7 @@ async def run_agent_on_task(
         raise
     finally:
         await db.flush()
+        end_trace(_trace_token)
 
     return execution
 

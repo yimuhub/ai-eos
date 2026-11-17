@@ -139,6 +139,66 @@ async def sync_now(tool_id: str, company_id: str = Query(...),
     return {"ok": run.status == "success", "run": sync_run_out(run)}
 
 
+# ---------------------------------------------------------------- OAuth 托管流
+
+@router.get("/{tool_id}/oauth/start")
+async def oauth_start(tool_id: str, company_id: str = Query(...),
+                      db: AsyncSession = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    """构造第三方授权页跳转 URL（state 带 HMAC 签名 + 10 分钟时效）。"""
+    await _owned_guard(db, user, company_id, Capability.OPERATE)
+    row = await _load_connector(db, company_id, tool_id)
+    if not ((row.config or {}).get("oauth") or {}).get("authorize_url"):
+        raise HTTPException(400, "该连接器未配置 oauth 段")
+    from app.services.oauth_service import build_authorize_url
+    try:
+        # redirect_uri 固定指向本服务回调（单机/内网部署形态）
+        url, state = build_authorize_url(row, "http://localhost:8000")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "authorize_url": url, "state": state,
+            "hint": "浏览器打开 authorize_url 完成授权；第三方回 code+state"
+                    " 到 /connectors/oauth/callback"}
+
+
+@router.get("/oauth/callback")
+async def oauth_callback(code: str = Query(...), state: str = Query(...),
+                         db: AsyncSession = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    """第三方授权回调：code 换 token，密文入保险库。"""
+    from app.services.oauth_service import exchange_code, verify_state
+    try:
+        tool_id = verify_state(state)
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    row = await db.get(ToolRegistry, tool_id)
+    if row is None or row.source != "connector":
+        raise HTTPException(404, "连接器不存在")
+    await _owned_guard(db, user, row.company_id, Capability.OPERATE)
+    redirect_uri = "http://localhost:8000/connectors/oauth/callback"
+    try:
+        result = await exchange_code(db, row, code, redirect_uri)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    from app.services.event_system import log_event
+    await log_event(db, "connector.oauth_connected", "tool", row.name,
+                    "user", user.id, {"tool_id": row.id},
+                    company_id=row.company_id)
+    await db.commit()
+    return {"ok": True, "tool_id": row.id, "tool_name": row.name, **result}
+
+
+@router.post("/{tool_id}/oauth/disconnect")
+async def oauth_disconnect(tool_id: str, company_id: str = Query(...),
+                           db: AsyncSession = Depends(get_db),
+                           user: User = Depends(get_current_user)):
+    await _owned_guard(db, user, company_id, Capability.MANAGE)
+    row = await _load_connector(db, company_id, tool_id)
+    from app.services.oauth_service import disconnect
+    await disconnect(db, row)
+    return {"ok": True, "message": f"已断开 {row.name} 的授权"}
+
+
 @router.get("/{tool_id}/runs")
 async def list_runs(tool_id: str, company_id: str = Query(...),
                     limit: int = Query(20, le=100),

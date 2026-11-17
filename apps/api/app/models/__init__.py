@@ -91,3 +91,6 @@ from .canonical import (CanonicalRecord, ConnectorSyncRun,  # noqa: F401
 from .feature_flags import CompanyFeatureFlag  # noqa: F401
 
 from .bindings import MemberAgentBinding  # noqa: F401
+
+from .ops import (ComplianceLedger, PayrollRule,  # noqa: F401
+                  ReconciliationRun)
