@@ -1,4 +1,5 @@
 "use client";
+import { useRef } from "react";
 import type { AppTab } from "@/lib/apps";
 import { embedURL } from "@/lib/apps";
 import WorkspaceOutput, { type OutTab } from "./WorkspaceOutput";
@@ -13,6 +14,46 @@ import type { WsAgent } from "@/lib/workspace";
  */
 
 const OUT_ID = "out";
+
+/**
+ * 水合看门狗（V6.1 拟人化实测发现）：同一 tab 里第 2 个及以后挂载的 iframe，
+ * 偶发全部 JS chunk 加载为空（transferSize=decodedBodySize=0）→ 页面永远停在
+ * 服务端渲染的「正在校验登录状态…」壳上，用户只能重开标签。
+ * 看门狗：onLoad 后 4 秒仍能在 DOM 里找到 checking 文案（水合成功的页面会
+ * 把它替换掉），就带缓存击穿参数重载一次；retry 标记防循环。
+ */
+function PanelIframe({ t, onFrame }: {
+  t: AppTab;
+  onFrame: (id: string, el: HTMLIFrameElement | null) => void;
+}) {
+  const retried = useRef(false);
+  return (
+    <iframe
+      ref={(el) => onFrame(t.id, el)}
+      src={embedURL(t.src)}
+      title={t.label}
+      onLoad={(e) => {
+        const el = e.currentTarget;
+        window.setTimeout(() => {
+          try {
+            const doc = el.contentDocument;
+            if (!doc) return;
+            const ps = Array.from(doc.querySelectorAll("p"));
+            const stillChecking = ps.some(
+              (p) => (p.textContent || "").includes("正在校验登录状态"));
+            if (stillChecking && !retried.current) {
+              retried.current = true;
+              const sep = el.src.includes("?") ? "&" : "?";
+              el.src = `${el.src.split("&_r=")[0]}${sep}_r=${Date.now()}`;
+            }
+          } catch { /* 同源之外静默 */ }
+        }, 4000);
+      }}
+      className="w-full h-full border-0"
+      style={{ background: "var(--background)" }}
+    />
+  );
+}
 
 export default function WorkspacePanel({
   outTab,
@@ -102,13 +143,7 @@ export default function WorkspacePanel({
         </div>
         {apps.map((t) => (
           <div key={t.id} className={active === t.id ? "h-full" : "hidden"}>
-            <iframe
-              ref={(el) => onFrame(t.id, el)}
-              src={embedURL(t.src)}
-              title={t.label}
-              className="w-full h-full border-0"
-              style={{ background: "var(--background)" }}
-            />
+            <PanelIframe t={t} onFrame={onFrame} />
           </div>
         ))}
       </div>

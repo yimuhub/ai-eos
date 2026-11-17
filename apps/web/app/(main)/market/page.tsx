@@ -20,6 +20,8 @@ type InstallResp = {
   notes?: string[];
   requires_confirmation?: { permissions_required?: string[] };
 };
+type InstallRow = { package_id: string; package_key?: string;
+  version?: string; installed_at?: string };
 
 const CATEGORY_LABELS: Record<string, string> = {
   tool: "工具", connector: "连接器", workflow_template: "工作流模板",
@@ -42,14 +44,27 @@ export default function MarketPage() {
     async () => {
       const pkgs = await api.get<Package[]>("/governance/marketplace/packages");
       const packs = await api.get<{ packs: PackInfo[] }>("/industry-packs");
+      let installs: InstallRow[] = [];
+      try {
+        installs = await api.get<InstallRow[]>(
+          `/governance/installations?company_id=${cid}`);
+      } catch { /* 治理接口对非 MANAGE 角色可能 403——安装状态仅作展示 */ }
       return { pkgs: Array.isArray(pkgs) ? pkgs : [],
-               packs: packs?.packs ?? [] };
+               packs: packs?.packs ?? [],
+               installs: Array.isArray(installs) ? installs : [] };
     },
   );
   const pkgs = useMemo(
     () => (data && "pkgs" in data ? data.pkgs : []), [data]);
   const packs = useMemo(
     () => (data && "packs" in data ? data.packs : []), [data]);
+  const installCount = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const r of (data && "installs" in data ? data.installs : [])) {
+      m[r.package_id] = (m[r.package_id] || 0) + 1;
+    }
+    return m;
+  }, [data]);
 
   useEffect(() => {
     if (error) notify("error", error || "加载市场失败");
@@ -70,10 +85,10 @@ export default function MarketPage() {
         + `?company_id=${cid}&confirm_permissions=${confirmPerms}`, {});
       setResult(r);
       if (r.installed) {
+        setResult(r);  // 保留弹窗展示产物清单，用户自己关闭
+        setConfirmPerms(false);
         notify("success", `「${pkg.name}」已安装`
           + (r.artifacts?.length ? `（${r.artifacts.length} 项产物）` : ""));
-        setConfirming(null);
-        setConfirmPerms(false);
         await refresh();
       }
     } catch (e) {
@@ -137,6 +152,11 @@ export default function MarketPage() {
                     <div className="font-medium">
                       {p.name}
                       <span className="ml-2 text-white/40">v{p.version}</span>
+                      {(installCount[p.id] || 0) > 0 && (
+                        <span className="ml-2 rounded bg-emerald-500/20 px-1.5 py-0.5 text-[11px] text-emerald-300">
+                          已安装 ×{installCount[p.id]}
+                        </span>
+                      )}
                     </div>
                     <div className="mt-0.5 text-white/40">
                       {CATEGORY_LABELS[p.type] || p.type} · {p.key}
