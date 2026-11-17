@@ -1,0 +1,8 @@
+{
+  "id": "agriculture",
+  "industry": "agriculture",
+  "name": "农业专家包",
+  "version": "0.1.0",
+  "description": "面向种粮大户、家庭农场与农资服务组织的作物栽培与农技服务专家团队，覆盖小麦、玉米、马铃薯、大豆四大作物及植保防治、农资经营。",
+  "categories": ["种植业", "养殖业", "农资经营"]
+}

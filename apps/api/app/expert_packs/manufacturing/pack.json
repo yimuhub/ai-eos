@@ -1,0 +1,8 @@
+{
+  "id": "manufacturing",
+  "industry": "manufacturing",
+  "name": "制造专家包",
+  "version": "0.1.0",
+  "description": "面向中小离散制造企业的工艺与质量专家团队，覆盖冲压、焊接、装配三大工序及质量检验、设备维护两大职能。",
+  "categories": ["冲压工艺", "焊接工艺", "装配工艺", "质量检验", "设备维护"]
+}

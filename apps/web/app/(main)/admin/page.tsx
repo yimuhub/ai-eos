@@ -19,6 +19,10 @@ type CompanyDetail = { company: { id: string; name: string; industry?: string | 
   tools: { id: string; name: string; source: string; enabled: boolean }[];
   compliance: { key: string; name: string; status: string }[];
   metrics: { key: string; name: string; wired: boolean }[] };
+type ExpertPackRow = { id: string; name: string; version: string;
+  industry: string; description: string;
+  experts: { id: string; name: string; category?: string }[];
+  seeded_in_company?: number | null };
 
 const KEY_STORE = "aieos_admin_key";
 
@@ -32,6 +36,7 @@ export default function AdminPage() {
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<CompanyDetail | null>(null);
   const [newIndustry, setNewIndustry] = useState("");
+  const [expertPacks, setExpertPacks] = useState<ExpertPackRow[]>([]);
   const [installPacks, setInstallPacks] = useState<string[]>([]);
 
   const authHeaders = () => {
@@ -74,6 +79,11 @@ export default function AdminPage() {
         { headers: authHeaders() });
       setDetail(r);
       setNewIndustry(r.company.industry || "");
+      try {
+        const ep = await api.get<{ packs: ExpertPackRow[] }>(
+          `/expert-packs?company_id=${cid}`);
+        setExpertPacks(ep?.packs ?? []);
+      } catch { /* 目录读取失败不阻塞配置 */ }
     } catch (e) {
       notify("error", describeError(e));
     }
@@ -191,6 +201,31 @@ export default function AdminPage() {
                   </button>
                 );
               })}
+            </div>
+          </div>
+
+          <div className="mb-4">
+            <div className="mb-1.5 text-white/70">解锁行业专家包（写入该公司专家库，可编辑专属化）</div>
+            <div className="flex flex-wrap gap-2">
+              {expertPacks.map((p) => (
+                <button key={p.id} disabled={busy}
+                        onClick={async () => {
+                          try {
+                            const r = await api.post<{ created: number }>(
+                              "/expert-packs/admin/unlock",
+                              { pack_id: p.id, company_id: detail.company.id },
+                              { headers: authHeaders() });
+                            notify("success",
+                              `「${p.name}」已解锁（新增 ${r.created} 位专家）`);
+                          } catch (e) {
+                            notify("error", describeError(e, "解锁失败"));
+                          }
+                        }}
+                        className={`rounded-md px-2.5 py-1 text-[12px] ${(p.seeded_in_company || 0) > 0 ? "bg-emerald-500/20 text-emerald-300" : "bg-white/10 hover:bg-white/20"}`}>
+                      {p.name} · {p.experts.length} 专家{(p.seeded_in_company || 0) > 0 ? " ✓" : ""}
+                </button>
+              ))}
+              {!expertPacks.length && <div className="text-white/40">暂无内置专家包。</div>}
             </div>
           </div>
 

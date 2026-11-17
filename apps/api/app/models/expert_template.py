@@ -43,6 +43,13 @@ class ExpertTemplate(Base):
     deliverables: Mapped[list] = mapped_column(JSON, default=list)
     # V5.0.2 专家↔技能包：显式指定的推荐技能包（空则按部门映射 DEPT_CAPABILITY_PACKS 派生）
     capability_packs: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # V6.2 行业专家包：来源包 id / 细分领域（小麦、玉米、冲压…）/ 标准化技能清单
+    expert_pack_id: Mapped[str | None] = mapped_column(String(80), nullable=True,
+                                                       index=True)
+    category: Mapped[str | None] = mapped_column(String(60))
+    skills: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 访谈完善留痕：[{at, interview_id, source, additions, applied_by}]
+    interview_history: Mapped[list | None] = mapped_column(JSON, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     hired_count: Mapped[int] = mapped_column(Integer, default=0)   # 被雇佣次数
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

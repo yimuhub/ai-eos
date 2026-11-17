@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, describeError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { notify } from "@/components/Toast";
@@ -16,6 +16,10 @@ type InstalledPack = { installation_id: string; package_id: string; key: string;
   integration_targets: IntegrationTarget[] };
 type AvailablePack = { id: string; name: string; version: string;
   description: string; already_installed: boolean };
+type CompanyExpert = { id: string; name: string; category?: string;
+  pack_id: string; skills_count: number; interviews: number;
+  skills: { name: string; description?: string; category?: string;
+            level?: number }[] };
 
 const COMPLIANCE_STYLE: Record<string, string> = {
   valid: "bg-emerald-500/20 text-emerald-300",
@@ -45,6 +49,10 @@ export default function IndustryHubPage() {
   const installed = active?.installed ?? [];
   const available = (active?.available ?? [])
     .filter((a) => !installed.some((i) => i.key === a.id));
+  const [experts, setExperts] = useState<CompanyExpert[]>([]);
+  const [selExpert, setSelExpert] = useState<string>("");
+  const [transcript, setTranscript] = useState("");
+  const [digestResult, setDigestResult] = useState<string | null>(null);
 
   const publishWorkflow = async (packKey: string, wf: WorkflowRow) => {
     if (!cid) return;
@@ -56,6 +64,49 @@ export default function IndustryHubPage() {
       await refresh();
     } catch (e) {
       notify("error", describeError(e, "发布失败"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // 专家列表：进页面取一次；访谈提交后刷新
+  useEffect(() => {
+    if (!cid) return;
+    api.get<{ experts: CompanyExpert[] }>(
+      `/interviews/experts?company_id=${cid}`)
+      .then((r) => setExperts(r?.experts ?? []))
+      .catch(() => setExperts([]));
+  }, [cid]);
+
+  const runInterview = async () => {
+    if (!cid || !selExpert || transcript.trim().length < 20) {
+      notify("error", "先选专家并粘贴访谈全文（≥20 字）");
+      return;
+    }
+    setBusy("interview");
+    try {
+      const r = await api.post<{ interview_id: string }>(
+        `/interviews?company_id=${cid}`, {
+          transcript, expert_template_id: selExpert,
+          department: "访谈登记" });
+      const d = await api.post<{ ok: boolean; status: string;
+        digest?: { summary?: string; applied?: { skills_added: number;
+        prompt_rules: number } }; error?: string }>(
+        `/interviews/${r.interview_id}/digest?company_id=${cid}`, {});
+      if (d.ok) {
+        setDigestResult(
+          `✅ ${d.digest?.summary || "提炼完成"}（新增技能 ${d.digest?.applied?.skills_added ?? 0} 条 / 人设要点 ${d.digest?.applied?.prompt_rules ?? 0} 条）`);
+        notify("success", "总控已把访谈沉淀进专家");
+      } else {
+        setDigestResult(`⛔ 提炼失败：${d.error || "未知"}`);
+        notify("error", "提炼失败，访谈已留档");
+      }
+      setTranscript("");
+      const er = await api.get<{ experts: CompanyExpert[] }>(
+        `/interviews/experts?company_id=${cid}`);
+      setExperts(er?.experts ?? []);
+    } catch (e) {
+      notify("error", describeError(e, "访谈提交失败"));
     } finally {
       setBusy(null);
     }
@@ -213,6 +264,42 @@ export default function IndustryHubPage() {
       {cid && !installed.length && (
         <div className="mb-4 rounded-lg border border-white/10 bg-white/5 p-4 text-white/50">
           还没有安装行业包。下面是内置目录，安装后这里会展示它注入的一切。
+        </div>
+      )}
+
+      {cid && experts.length > 0 && (
+        <div className="mb-4 rounded-xl border border-white/10 bg-white/5 p-4">
+          <div className="mb-1 font-medium">专家与访谈</div>
+          <p className="mb-3 text-[12px] text-white/50">
+            把各部门的日常工作总结（文字或语音转写）交给总控，它会自动把做法沉淀进对应专家的技能与规则——专家越用越懂你的生意。
+          </p>
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {experts.map((e) => (
+              <button key={e.id}
+                      onClick={() => setSelExpert(e.id)}
+                      className={`rounded-md px-2.5 py-1 text-[12px] ${selExpert === e.id ? "bg-violet-500/30 text-violet-200" : "bg-white/8 text-white/60 hover:bg-white/15"}`}>
+                {e.name}（{e.category || "通用"}）· {e.skills_count} 技能
+                {e.interviews > 0 ? ` · 访谈×${e.interviews}` : ""}
+              </button>
+            ))}
+          </div>
+          {selExpert && (
+            <>
+              <textarea value={transcript}
+                        onChange={(e) => setTranscript(e.target.value)}
+                        placeholder="粘贴访谈全文：部门日常工作、流程、经验、常踩的坑……（语音请先转文字）"
+                        className="mb-2 h-28 w-full rounded-md bg-black/30 px-3 py-2" />
+              <button onClick={runInterview} disabled={busy === "interview"}
+                      className="rounded-md bg-violet-600/80 px-3 py-1.5 hover:bg-violet-600 disabled:opacity-40">
+                {busy === "interview" ? "总控提炼中…" : "提交给总控提炼"}
+              </button>
+              {digestResult && (
+                <div className="mt-2 rounded-md bg-emerald-500/10 px-3 py-2 text-emerald-200">
+                  {digestResult}
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
 

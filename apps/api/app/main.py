@@ -31,7 +31,8 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             tokens, experts, command, org_presets, prometheus_metrics, setup,
                             org_synthesis, plugins, computer_policy, computer_devices,
                             members, licensing, subscription, byok, invites, media,
-                            toolbus, connectors, industry_packs, security, ops)
+                            toolbus, connectors, industry_packs, security, ops,
+                            expert_packs)
 from app.api.routes import notifications
 from app.api.routes import thread_reads
 # 收件箱挂在 /tasks 下，必须比 tasks 路由**先注册**——tasks 有 /{tid} 兜底，
@@ -492,7 +493,8 @@ for r in (health, auth, companies, company_search, agents, agent_chat, models_ap
           budgets, mcp, mailboxes, worklogs, setup, members, notifications,
           thread_reads, licensing, queue_routes, subscription, byok,
           org_synthesis, plugins, computer_policy, computer_devices,
-          invites, media, toolbus, connectors, industry_packs):
+          invites, media, toolbus, connectors, industry_packs,
+          expert_packs):
     app.include_router(r.router)
 
 # V6 M3：connectors 模块带三个前缀不同的子路由（连接器/指标/自定义字段）
@@ -505,3 +507,5 @@ app.include_router(security.bindings_router)
 app.include_router(security.audit_router)
 # V6.1：运营引擎（合规台账/工资/对账/trace/消耗报表）
 app.include_router(ops.router)
+# V6.2：行业专家包目录 + 访谈完善（双路由）
+app.include_router(expert_packs.interviews_router)
