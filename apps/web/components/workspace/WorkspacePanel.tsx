@@ -120,7 +120,7 @@ export default function WorkspacePanel({
           {!compact && (
             <button type="button" onClick={onToggleFocus} title={focus ? "回到对话" : "展开工作区"}
               className="flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-[11px] hover:bg-white/[0.06]"
-              style={{ color: focus ? "#c7c8ff" : "var(--muted)", border: "1px solid transparent" }}>
+              style={{ color: focus ? "var(--ws-acc-text)" : "var(--muted)", border: "1px solid transparent" }}>
               <span aria-hidden>{focus ? "⇤" : "⤢"}</span>
               <span className="hidden sm:inline">{focus ? "回到对话" : "展开"}</span>
             </button>
@@ -163,7 +163,7 @@ function PaneTab({ active, onClick, onClose, closeLabel, children }: {
       onClose ? "" : ""
     }`}
       style={active
-        ? { background: "rgba(99,102,241,0.18)", border: "1px solid rgba(99,102,241,0.38)" }
+        ? { background: "rgba(var(--ws-acc),0.18)", border: "1px solid rgba(var(--ws-acc),0.38)" }
         : { border: "1px solid transparent" }}>
       <button type="button" onClick={onClick} aria-current={active ? "page" : undefined}
         className={`flex items-center gap-1.5 h-full text-[12px] rounded-lg ${

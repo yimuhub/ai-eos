@@ -8,6 +8,7 @@ import { openCommandPalette, pushRecentPage, openAllPages } from "@/lib/palette"
 import { openModeChooser } from "@/components/ModeChooser";
 import { navFor, registerAppOpener, stripEmbed, type AppTab } from "@/lib/apps";
 import { readUIMode } from "@/lib/ui-mode";
+import Splitter from "@/components/workspace/Splitter";
 import WorkspaceChat from "@/components/workspace/WorkspaceChat";
 import WorkspacePanel from "@/components/workspace/WorkspacePanel";
 import GroupEditor from "@/components/workspace/GroupEditor";
@@ -22,26 +23,40 @@ import type { WsAgent, WsChatGroup, WsMeeting, WsMode, WsProject, WsSession, WsV
  * 单聊/群聊/会议/作战、trace、iframe 标签与水合看门狗全部原样保留，
  * 再用一层作用域 CSS 变量把整个外壳换成石墨黑 + 暖橙的 Harness 审美。
  *
- * 与工作台一样：功能页面开在右栏标签里（iframe），对话不中断。
+ * 与工作台的差异（这里是 Harness 自己的约定）：
+ *   - 「展开」永远有反应：没有页面时展开 = 产出区吃满中间与右侧（对话挂起不卸载）；
+ *   - 展开/收起通过 hidden class 切换，对话与 iframe 标签保持挂载，不重载；
+ *   - 三栏宽度可拖拽（Splitter），独立存档，与工作台互不干扰。
  */
 
 const LAYOUT_KEY = "aieos_harness_layout";
 const AGENT_KEY = "aieos_workspace_agent"; // 与工作台共用"当前员工"，两个壳无缝衔接
 const APPS_KEY = "aieos_harness_apps";
 
+const LEFT_MIN = 208;
+const LEFT_MAX = 380;
+const RIGHT_MIN = 360;
+const RIGHT_MAX = 760;
+const CENTER_MIN = 420;
+const SPLITTER_W = 7;
+const PAGE_RIGHT_MIN = 360;
 const SIDEBAR_W = 248;
-const PANEL_W = 460;
-const PANEL_PAGE_RATIO = 0.55;
-const PANEL_PAGE_MIN = 420;
-const PANEL_PAGE_MAX = 980;
 
-const DEFAULT_LAYOUT = { leftHidden: false, rightHidden: false };
+const DEFAULT_LAYOUT = { left: 248, right: 460, pageRight: 0, leftHidden: false, rightHidden: false };
+type LayoutState = typeof DEFAULT_LAYOUT;
 
-function readLayout(): { leftHidden: boolean; rightHidden: boolean } {
+function readLayout(): LayoutState {
   try {
     const raw = localStorage.getItem(LAYOUT_KEY);
-    const d = raw ? JSON.parse(raw) : null;
-    return { leftHidden: !!d?.leftHidden, rightHidden: !!d?.rightHidden };
+    if (!raw) return DEFAULT_LAYOUT;
+    const d = JSON.parse(raw) || {};
+    return {
+      left: Number.isFinite(d.left) ? d.left : DEFAULT_LAYOUT.left,
+      right: Number.isFinite(d.right) ? d.right : DEFAULT_LAYOUT.right,
+      pageRight: Number.isFinite(d.pageRight) ? d.pageRight : 0,
+      leftHidden: !!d.leftHidden,
+      rightHidden: !!d.rightHidden,
+    };
   } catch {
     return DEFAULT_LAYOUT;
   }
@@ -144,7 +159,11 @@ const BASE_PAGES: { href: string; label: string }[] = [
   { href: "/knowledge", label: "知识库" },
 ];
 
-/** Harness 外壳的作用域主题：覆盖全局 CSS 变量，让复用的对话/右栏整体换肤。 */
+/**
+ * Harness 外壳的作用域主题：覆盖全局 CSS 变量，让复用的对话/右栏整体换肤。
+ * --ws-acc* 是工作台内脏的品牌色（头像/标签/高亮/主按钮），默认靛蓝，
+ * 这里统一换成暖橙——内脏组件一行不用改。
+ */
 const HARNESS_THEME = {
   "--background": "#17171c",
   "--surface": "#101014",
@@ -154,6 +173,14 @@ const HARNESS_THEME = {
   "--muted": "#9b9ba6",
   "--accent": "#f5862e",
   "--accent-2": "#ffb066",
+  "--ws-acc": "245, 134, 46",
+  "--ws-acc-solid": "#f5862e",
+  "--ws-acc-deep": "#d84a3a",
+  "--ws-acc-glow": "#ffb066",
+  "--ws-acc-tint-b": "216, 74, 58",
+  "--ws-acc-text": "#ffd2ad",
+  "--ws-acc-text-strong": "#ffe4c9",
+  "--ws-btn-grad-b": "#e05a2b",
 } as React.CSSProperties;
 
 export default function HarnessPage() {
@@ -180,8 +207,8 @@ export default function HarnessPage() {
   const [view, setView] = useState<WsView>({ mode: "single", id: "" });
   const [picking, setPicking] = useState(false);
   const [compact, setCompact] = useState(false);
-  const [leftHidden, setLeftHidden] = useState(DEFAULT_LAYOUT.leftHidden);
-  const [rightHidden, setRightHidden] = useState(DEFAULT_LAYOUT.rightHidden);
+  // 三栏宽度与收展：数值持久化，可拖拽（与工作台同一套 Splitter）
+  const [layout, setLayout] = useState<LayoutState>(DEFAULT_LAYOUT);
   const [outTab, setOutTab] = useState<OutTab>("trace");
   const [focus, setFocus] = useState(false);
   const booted = useRef<ReturnType<typeof bootApps> | null>(null);
@@ -195,6 +222,12 @@ export default function HarnessPage() {
   agentIdRef.current = agentId;
   const autoLeft = useRef(false);
   const [rowW, setRowW] = useState(0);
+
+  /* ---------- classic 模式误入守卫 ---------- */
+
+  useEffect(() => {
+    if (readUIMode() === "classic") router.replace("/dashboard");
+  }, [router]);
 
   /* ---------- 数据 ---------- */
 
@@ -305,23 +338,23 @@ export default function HarnessPage() {
 
   /* ---------- 布局 ---------- */
 
+  // 存档与量宽都只能在浏览器里做；首屏用默认值，挂载后再对齐
   useEffect(() => {
-    const l = readLayout();
-    setLeftHidden(l.leftHidden);
-    setRightHidden(l.rightHidden);
+    setLayout(readLayout());
     const mq = window.matchMedia("(max-width: 899px)");
     const apply = () => {
       const isCompact = mq.matches;
       setCompact(isCompact);
       compactRef.current = isCompact;
       if (isCompact) {
-        setLeftHidden(true);
-        setRightHidden(paneRef.current === "out");
+        // 窄屏两侧默认收起；但右栏里正开着一个页面时必须留着
+        setLayoutPersist((prev) => ({ ...prev, leftHidden: true, rightHidden: paneRef.current === "out" }), false);
       }
     };
     apply();
     mq.addEventListener("change", apply);
     return () => mq.removeEventListener("change", apply);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useLayoutEffect(() => {
@@ -336,47 +369,58 @@ export default function HarnessPage() {
     return () => ro.disconnect();
   }, [boot]);
 
-  const persistLayout = (leftHidden: boolean, rightHidden: boolean) => {
-    try { localStorage.setItem(LAYOUT_KEY, JSON.stringify({ leftHidden, rightHidden })); } catch { /* 隐私模式 */ }
-  };
-
-  const leftHiddenRef = useRef(leftHidden);
-  leftHiddenRef.current = leftHidden;
-  const rightHiddenRef = useRef(rightHidden);
-  rightHiddenRef.current = rightHidden;
+  const setLayoutPersist = useCallback((updater: LayoutState | ((prev: LayoutState) => LayoutState), persist = true) => {
+    setLayout((prev) => {
+      const next = typeof updater === "function" ? (updater as (p: LayoutState) => LayoutState)(prev) : updater;
+      if (persist && !compactRef.current) {
+        try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(next)); } catch { /* 隐私模式：仅本次生效 */ }
+      }
+      return next;
+    });
+  }, []);
 
   const toggleLeft = useCallback(() => {
-    setLeftHidden((prev) => {
-      const next = !prev;
-      persistLayout(next, rightHiddenRef.current);
-      return next;
-    });
     autoLeft.current = false;
-  }, []);
+    setLayoutPersist((prev) => ({ ...prev, leftHidden: !prev.leftHidden }));
+  }, [setLayoutPersist]);
 
   const toggleRight = useCallback(() => {
-    setRightHidden((prev) => {
-      const next = !prev;
-      persistLayout(leftHiddenRef.current, next);
-      return next;
-    });
+    // 收起右栏时顺带退出展开态，否则会留下「没有右栏却还在展开」的死状态
     setFocus(false);
-  }, []);
+    setLayoutPersist((prev) => ({ ...prev, rightHidden: !prev.rightHidden }));
+  }, [setLayoutPersist]);
 
   /* ---------- 右栏标签 ---------- */
 
   const activeApp = apps.find((t) => t.id === pane) || apps.find((t) => t.href === pane) || null;
   const activeId = activeApp ? activeApp.id : "out";
   const pageWide = !compact && !!activeApp;
-  const focusMode = focus && !!activeApp;
+  // 「展开」永远有反应：没有页面时展开 = 产出区吃满中间与右侧
+  const focusMode = focus;
+
+  // 页面一打开就把侧栏折起来，页面关掉再放回去；用户自己按过 ⌘B 就不再自动还原
+  const leftHiddenRef = useRef(layout.leftHidden);
+  leftHiddenRef.current = layout.leftHidden;
+  useEffect(() => {
+    if (pageWide) {
+      if (!layout.leftHidden) {
+        autoLeft.current = true;
+        setLayoutPersist((prev) => ({ ...prev, leftHidden: true }), false);
+      }
+    } else if (autoLeft.current) {
+      autoLeft.current = false;
+      setLayoutPersist((prev) => ({ ...prev, leftHidden: false }), false);
+    }
+    // 只在「是否有页面」变化时触发；用户手动收起/展开不该被这个 effect 覆盖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageWide]);
 
   const openAppTab = useCallback((raw: string) => {
     const href = stripEmbed(String(raw || "").trim());
     if (href === "/" || href === "/workspace" || href === "/harness") {
       setPane("out");
       setFocus(false);
-      setRightHidden(false);
-      persistLayout(leftHiddenRef.current, false);
+      setLayoutPersist((prev) => ({ ...prev, rightHidden: false }), false);
       return;
     }
     if (!href.startsWith("/") || href.startsWith("/workspace") || href.startsWith("/harness")) return;
@@ -390,10 +434,13 @@ export default function HarnessPage() {
     setPane(id);
     setFocus(false);
     pushRecentPage(href.split("?")[0]);
-    setRightHidden(false);
-    if (compactRef.current) setLeftHidden(true);
-    persistLayout(compactRef.current ? true : leftHiddenRef.current, false);
-  }, [apps]);
+    // 页面开在右栏：右栏必须可见；窄屏上顺手把侧栏让出来
+    setLayoutPersist((prev) => ({
+      ...prev,
+      rightHidden: false,
+      leftHidden: compactRef.current ? true : prev.leftHidden,
+    }), false);
+  }, [apps, setLayoutPersist]);
 
   const closeApp = useCallback((id: string) => {
     frames.current.delete(id);
@@ -492,6 +539,7 @@ export default function HarnessPage() {
     setView({ mode: "single", id: a.id });
     setPicking(false);
     setPane("out");
+    setFocus(false);
     try { localStorage.setItem(AGENT_KEY, a.id); } catch { /* 忽略 */ }
   }, []);
 
@@ -637,30 +685,53 @@ export default function HarnessPage() {
     }
   }, [seedingDemo, load]);
 
-  async function logout() {
+  const logout = useCallback(async () => {
+    const ok = await confirmAction({
+      title: "退出登录？",
+      description: "将清除本地凭据并返回登录页。",
+      confirmText: "退出",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await clearToken();
     } catch (e) {
       notify("warning", `退出时清理本地凭据失败：${describeError(e)}`);
     }
     router.push("/login");
-  }
+  }, [router]);
 
   const setFrame = useCallback((id: string, el: HTMLIFrameElement | null) => {
     if (el) frames.current.set(id, el);
     else frames.current.delete(id);
   }, []);
 
-  /* ---------- 派生 ---------- */
+  /* ---------- 宽度派生（与工作台同一套预算算法） ---------- */
+
+  const railHidden = layout.leftHidden;
+  const visibleSplitters = (railHidden ? 0 : 1) + (layout.rightHidden ? 0 : 1);
+  const sideBudget = rowW > 0
+    ? Math.max(0, rowW - CENTER_MIN - visibleSplitters * SPLITTER_W)
+    : Number.POSITIVE_INFINITY;
+  const maxRight = Number.isFinite(sideBudget)
+    ? Math.min(RIGHT_MAX, Math.max(RIGHT_MIN, sideBudget - (railHidden ? 0 : LEFT_MIN)))
+    : RIGHT_MAX;
+  const rightW = layout.rightHidden ? 0 : Math.min(maxRight, Math.max(RIGHT_MIN, layout.right));
+  // 页面模式上限不套 RIGHT_MAX——详情页/表格类内容更需要宽度，中栏可读宽度由 CENTER_MIN 兜底
+  const maxPageRight = Number.isFinite(sideBudget)
+    ? Math.max(RIGHT_MIN, sideBudget - (railHidden ? 0 : LEFT_MIN))
+    : RIGHT_MAX;
+  const pageRightW = layout.rightHidden ? 0 : Math.min(maxPageRight, Math.max(RIGHT_MIN,
+    layout.pageRight > 0 ? layout.pageRight : (rowW > 0 ? Math.round(rowW / 2) : Math.round(RIGHT_MAX / 2))));
+  const effectiveRightW = pageWide ? pageRightW : rightW;
+  const maxLeft = Number.isFinite(sideBudget)
+    ? Math.min(LEFT_MAX, Math.max(LEFT_MIN, sideBudget - rightW))
+    : LEFT_MAX;
+  const leftW = railHidden ? 0 : Math.min(LEFT_MAX, Math.max(LEFT_MIN, layout.left));
 
   const agent = agents.find((a) => a.id === agentId) || null;
   const railActiveChat = !activeApp;
   const railActiveHref = activeApp?.href || "";
-  // 页面打开时右栏让出一半宽度，中栏仍保住可读宽度
-  const panelW = rightHidden ? 0
-    : pageWide
-      ? (rowW > 0 ? Math.min(PANEL_PAGE_MAX, Math.max(PANEL_PAGE_MIN, Math.round(rowW * PANEL_PAGE_RATIO))) : 640)
-      : PANEL_W;
 
   /* ---------- 渲染 ---------- */
 
@@ -706,7 +777,7 @@ export default function HarnessPage() {
       </RailButton>
       <div
         className="w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold mt-1 shrink-0"
-        style={{ background: "linear-gradient(135deg,#f5862e,#d84a3a)", color: "#fff" }}
+        style={{ background: "linear-gradient(135deg,var(--ws-acc-solid),var(--ws-acc-deep))", color: "#fff" }}
         title={`${userName} · 退出登录`}
         role="button"
         tabIndex={0}
@@ -765,7 +836,7 @@ export default function HarnessPage() {
             >
               <span
                 className="w-7 h-7 rounded-lg flex items-center justify-center text-[11px] font-bold shrink-0"
-                style={{ background: "linear-gradient(135deg,#6366f1,#22d3ee)", color: "#fff" }}
+                style={{ background: "linear-gradient(135deg,var(--ws-acc-solid),var(--ws-acc-glow))", color: "#fff" }}
                 aria-hidden
               >
                 {a.name.slice(0, 1)}
@@ -853,8 +924,8 @@ export default function HarnessPage() {
       onDemoSeed={seedDemo}
       demoBusy={seedingDemo}
       onGoToCompanies={() => openAppTab("/companies")}
-      leftHidden={leftHidden}
-      outHidden={rightHidden}
+      leftHidden={railHidden}
+      outHidden={layout.rightHidden}
       onExpandLeft={toggleLeft}
       onToggleOut={toggleRight}
     />
@@ -873,21 +944,24 @@ export default function HarnessPage() {
       onMeetingCreated={addMeeting}
       onPickAgent={pickAgent}
       onOpenApp={openAppTab}
-      onOpenTrace={() => { setOutTab("trace"); setRightHidden(false); persistLayout(leftHiddenRef.current, false); }}
+      onOpenTrace={() => {
+        setOutTab("trace");
+        // 产出区若被页面标签盖住，切回「产出」——否则用户点了看不到任何反应
+        setPane("out");
+        setFocus(false);
+        setLayoutPersist((prev) => ({ ...prev, rightHidden: false }), false);
+      }}
       onEnsureGroup={ensurePresetGroup}
       onEditGroup={openGroupEditor}
       onCollapseOut={toggleRight}
       onExpandLeft={toggleLeft}
-      outHidden={rightHidden}
-      leftHidden={leftHidden}
+      outHidden={layout.rightHidden}
+      leftHidden={railHidden}
     />
   );
 
   return (
-    <div
-      className="flex flex-col h-full min-h-0 overflow-hidden"
-      style={HARNESS_THEME}
-    >
+    <div className="flex flex-col h-full min-h-0 overflow-hidden" style={HARNESS_THEME}>
       {boot === "ready" && modelReady === false && !bannerDismissed && (
         <ModelBanner onOpen={() => openAppTab("/models")} onDismiss={dismissModelBanner} />
       )}
@@ -900,7 +974,7 @@ export default function HarnessPage() {
         ) : compact ? (
           <>
             <div className="flex-1 min-w-0">{center}</div>
-            {!leftHidden && (
+            {!railHidden && (
               <>
                 <div className="fixed inset-0 z-20 bg-black/55" onClick={toggleLeft} aria-hidden />
                 <aside className="fixed inset-y-0 left-[46px] z-30 w-[260px] max-w-[80vw] shadow-2xl"
@@ -909,7 +983,7 @@ export default function HarnessPage() {
                 </aside>
               </>
             )}
-            {!rightHidden && (
+            {!layout.rightHidden && (
               <>
                 <div className="fixed inset-0 z-20 bg-black/55" onClick={toggleRight} aria-hidden />
                 <aside className={`fixed z-30 shadow-2xl ${activeApp
@@ -923,15 +997,56 @@ export default function HarnessPage() {
           </>
         ) : (
           <>
-            {!leftHidden && sidebar}
-            <div className="flex-1 min-w-0" style={{ background: "var(--background)" }}>{center}</div>
-            {!rightHidden && (
-              <aside
-                className="shrink-0 min-w-0 overflow-hidden transition-[width] duration-200"
-                style={{ width: panelW, background: "var(--surface)", borderLeft: "1px solid var(--border)" }}
-              >
-                {panel}
-              </aside>
+            {!railHidden && (
+              <>
+                {/* 分隔线自己画线，这一侧不再加边框 */}
+                <aside className="shrink-0 min-w-0 overflow-hidden" style={{ width: leftW }}>{sidebar}</aside>
+                <Splitter
+                  side="left"
+                  label="调整侧栏宽度"
+                  value={leftW}
+                  min={LEFT_MIN}
+                  max={maxLeft}
+                  onChange={(v) => setLayoutPersist((p) => ({ ...p, left: v }))}
+                  onReset={() => setLayoutPersist((p) => ({ ...p, left: DEFAULT_LAYOUT.left }))}
+                />
+              </>
+            )}
+
+            {/* 展开态对话挂起不卸载（hidden），iframe 标签与草稿都保得住 */}
+            <div className={`${focusMode ? "hidden" : "flex-1"} min-w-0`} style={{ background: "var(--background)" }}>
+              {center}
+            </div>
+
+            {!layout.rightHidden && (
+              <>
+                {!focusMode && (
+                  <Splitter
+                    side="right"
+                    label={pageWide ? "调整页面宽度" : "调整右栏宽度"}
+                    value={pageWide ? pageRightW : rightW}
+                    min={pageWide ? PAGE_RIGHT_MIN : RIGHT_MIN}
+                    max={pageWide ? maxPageRight : maxRight}
+                    onChange={(v) => setLayoutPersist((p) => (pageWide ? { ...p, pageRight: v } : { ...p, right: v }))}
+                    onReset={() => setLayoutPersist((p) => (pageWide ? { ...p, pageRight: 0 } : { ...p, right: DEFAULT_LAYOUT.right }))}
+                  />
+                )}
+                {/* 面板始终挂在同一个树位：展开/收起只改宽度，iframe 不重载 */}
+                <div
+                  className={`shrink-0 min-w-0 overflow-hidden ${focusMode ? "flex-1" : ""}`}
+                  style={{
+                    width: focusMode ? undefined : effectiveRightW,
+                    background: "var(--surface)",
+                    borderLeft: "1px solid var(--border)",
+                  }}
+                >
+                  {panel}
+                </div>
+              </>
+            )}
+            {layout.rightHidden && focusMode && (
+              /* 兜底：理论上 toggleRight 会先退展开态，这里防手速竞争 */
+              <div className="flex-1 min-w-0" style={{ background: "var(--surface)" }}>{panel}</div>
             )}
           </>
         )}
@@ -940,7 +1055,7 @@ export default function HarnessPage() {
         companyName={companyName || (noCompany ? "尚未创建公司" : "")}
         agents={agents.length}
         modelReady={modelReady}
-        activeLabel={activeApp ? activeApp.label : "对话"}
+        activeLabel={focusMode ? `${activeApp ? activeApp.label : "产出"} · 展开态` : (activeApp ? activeApp.label : "对话")}
         onOpenPalette={openCommandPalette}
       />
       <GroupEditor
@@ -1116,7 +1231,7 @@ function HarnessPicker({ agents, picking, onPick, onCancel, noCompany, onDemoSee
                 <p className="text-sm">还没有数字员工</p>
                 <p className="text-xs mt-1" style={{ color: "var(--muted)" }}>先招一个人，才有人接你的活。</p>
                 <div className="mt-3 flex items-center justify-center gap-2">
-                  <button type="button" onClick={() => openCommandPalette()} className="btn-primary">⌘K 打开「Agent 团队」去招人</button>
+                  <button type="button" onClick={onGoToCompanies} className="btn-primary">去招人</button>
                 </div>
               </>
             )}
@@ -1129,7 +1244,7 @@ function HarnessPicker({ agents, picking, onPick, onCancel, noCompany, onDemoSee
                 style={{ border: "1px solid var(--border)", background: "var(--surface-2)" }}>
                 <div className="flex items-center gap-2">
                   <span className="w-7 h-7 rounded-lg flex items-center justify-center text-[11px] font-semibold shrink-0"
-                    style={{ background: "linear-gradient(135deg,#6366f1,#22d3ee)", color: "#fff" }} aria-hidden>
+                    style={{ background: "linear-gradient(135deg,var(--ws-acc-solid),var(--ws-acc-glow))", color: "#fff" }} aria-hidden>
                     {a.name.slice(0, 1)}
                   </span>
                   <span className="text-xs font-medium truncate">{a.name}</span>

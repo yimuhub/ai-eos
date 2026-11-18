@@ -82,8 +82,8 @@ export function ChatProcessCard({
     <div
       className={`rounded-xl px-2.5 py-2 text-[11px] ${className}`}
       style={{
-        background: "rgba(99,102,241,0.07)",
-        border: "1px solid rgba(99,102,241,0.22)",
+        background: "rgba(var(--ws-acc),0.07)",
+        border: "1px solid rgba(var(--ws-acc),0.22)",
       }}
     >
       <button
@@ -260,8 +260,8 @@ export function ChatProcessBar({
     <div
       className="flex items-center gap-1.5 border-b px-3.5 py-1.5 text-[10px]"
       style={{
-        borderColor: "rgba(99,102,241,0.25)",
-        background: "rgba(99,102,241,0.08)",
+        borderColor: "rgba(var(--ws-acc),0.25)",
+        background: "rgba(var(--ws-acc),0.08)",
         color: "#c7d2fe",
       }}
       title={processActivity(process)}

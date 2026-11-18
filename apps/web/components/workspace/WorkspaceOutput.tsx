@@ -77,7 +77,7 @@ export default function WorkspaceOutput({
                 active ? "text-white" : "hover:bg-white/[0.05]"
               }`}
               style={active
-                ? { background: "rgba(99,102,241,0.16)", border: "1px solid rgba(99,102,241,0.32)" }
+                ? { background: "rgba(var(--ws-acc),0.16)", border: "1px solid rgba(var(--ws-acc),0.32)" }
                 : { color: "var(--muted)", border: "1px solid transparent" }}>
               <span aria-hidden>{t.icon}</span>
               {t.label}
@@ -140,7 +140,7 @@ function BrowsePane({ cid, agent }: { cid: string; agent: WsAgent | null }) {
         />
         <button type="submit" disabled={busy || !url.trim() || !cid}
           className="text-[11px] px-2.5 py-2 rounded-lg font-medium disabled:opacity-40 shrink-0"
-          style={{ background: "linear-gradient(135deg,#6366f1,#4f46e5)", color: "#fff" }}>
+          style={{ background: "linear-gradient(135deg,var(--ws-acc-solid),var(--ws-acc-deep))", color: "#fff" }}>
           {busy ? "读取中" : "读取"}
         </button>
       </form>
@@ -376,7 +376,7 @@ function TracePane({ cid, agent }: { cid: string; agent: WsAgent | null }) {
               <button key={t.id} type="button" onClick={() => setTaskId(t.id)}
                 className={`text-[10px] px-2 py-1 rounded-md border max-w-full truncate ${active ? "text-white" : ""}`}
                 style={active
-                  ? { borderColor: "rgba(99,102,241,0.5)", background: "rgba(99,102,241,0.16)" }
+                  ? { borderColor: "rgba(var(--ws-acc),0.5)", background: "rgba(var(--ws-acc),0.16)" }
                   : { borderColor: "var(--border)", background: "var(--surface-2)", color: "var(--muted)" }}
                 title={`${t.title} · ${m.label}`}>
                 {t.title}
@@ -452,8 +452,8 @@ function Node({ n }: { n: TraceNode }) {
   return (
     <li className="relative pb-3">
       <span className="absolute -left-4 top-1.5 w-2.5 h-2.5 rounded-full"
-        style={{ background: failed ? "var(--danger)" : "#6366f1",
-                 boxShadow: `0 0 0 3px ${failed ? "rgba(239,68,68,0.15)" : "rgba(99,102,241,0.15)"}` }} aria-hidden />
+        style={{ background: failed ? "var(--danger)" : "var(--ws-acc-solid)",
+                 boxShadow: `0 0 0 3px ${failed ? "rgba(239,68,68,0.15)" : "rgba(var(--ws-acc),0.15)"}` }} aria-hidden />
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-[11px] font-medium">{n.agent_name}</span>
         <span className="text-[9px] px-1.5 py-0.5 rounded-full border"

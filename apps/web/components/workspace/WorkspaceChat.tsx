@@ -874,7 +874,7 @@ export default function WorkspaceChat({
           </button>
         )}
         <div className="w-7 h-7 rounded-lg flex items-center justify-center text-[11px] font-semibold shrink-0"
-          style={{ background: "linear-gradient(135deg,#6366f1,#22d3ee)", color: "#fff" }}>
+          style={{ background: "linear-gradient(135deg,var(--ws-acc-solid),var(--ws-acc-glow))", color: "#fff" }}>
           {headline.av}
         </div>
         <div className="min-w-0 flex-1">
@@ -963,7 +963,7 @@ export default function WorkspaceChat({
               <button key={m.key} type="button" data-mode={m.key} onClick={() => onMode(m.key)}
                 className="h-6 px-2 rounded-md text-[10.5px] flex items-center gap-1 transition-colors"
                 style={on
-                  ? { background: "rgba(99,102,241,0.24)", color: "#e6e7ff" }
+                  ? { background: "rgba(var(--ws-acc),0.24)", color: "var(--ws-acc-text-strong)" }
                   : { color: "var(--muted)" }}>
                 <span aria-hidden>{m.icon}</span>{m.label}
               </button>
@@ -1016,7 +1016,7 @@ export default function WorkspaceChat({
                 ) : (
                   <div key={i} className="flex gap-2.5">
                     <div className="w-6 h-6 rounded-lg flex items-center justify-center text-[10px] font-semibold shrink-0 mt-0.5"
-                      style={{ background: "linear-gradient(135deg,#6366f1,#22d3ee)", color: "#fff" }}>
+                      style={{ background: "linear-gradient(135deg,var(--ws-acc-solid),var(--ws-acc-glow))", color: "#fff" }}>
                       {(agent?.name || "AI").slice(0, 1)}
                     </div>
                     <div className="min-w-0 flex-1">
@@ -1032,7 +1032,7 @@ export default function WorkspaceChat({
                       </div>
                       {m.file_name && (
                         <p className="mt-1.5 text-[11px] inline-flex items-center gap-1 px-2 py-1 rounded-md"
-                          style={{ background: "rgba(99,102,241,0.12)", color: "#c7c8ff" }}>
+                          style={{ background: "rgba(var(--ws-acc),0.12)", color: "var(--ws-acc-text)" }}>
                           📄 {m.file_name} · 已存入交付中心
                         </p>
                       )}
@@ -1121,7 +1121,7 @@ export default function WorkspaceChat({
                         {meet.status === "SCHEDULED" && (
                           <button type="button" onClick={() => meetingAction("start")} disabled={meetBusy}
                             className="text-[11px] px-2.5 py-1.5 rounded-lg disabled:opacity-40"
-                            style={{ background: "rgba(99,102,241,0.2)", color: "#dcddff", border: "1px solid rgba(99,102,241,0.4)" }}>
+                            style={{ background: "rgba(var(--ws-acc),0.2)", color: "var(--ws-acc-text-strong)", border: "1px solid rgba(var(--ws-acc),0.4)" }}>
                             开始会议
                           </button>
                         )}
@@ -1140,7 +1140,7 @@ export default function WorkspaceChat({
                         {meet.status === "PAUSED" && (
                           <button type="button" onClick={() => meetingAction("resume")} disabled={meetBusy}
                             className="text-[11px] px-2.5 py-1.5 rounded-lg disabled:opacity-40"
-                            style={{ background: "rgba(99,102,241,0.2)", color: "#dcddff", border: "1px solid rgba(99,102,241,0.4)" }}>
+                            style={{ background: "rgba(var(--ws-acc),0.2)", color: "var(--ws-acc-text-strong)", border: "1px solid rgba(var(--ws-acc),0.4)" }}>
                             继续
                           </button>
                         )}
@@ -1211,10 +1211,10 @@ export default function WorkspaceChat({
               {war && (
                 <>
                   <div className="rounded-xl px-4 py-3"
-                    style={{ border: "1px solid rgba(99,102,241,0.3)", background: "linear-gradient(135deg,rgba(99,102,241,0.12),rgba(168,85,247,0.04))" }}>
+                    style={{ border: "1px solid rgba(var(--ws-acc),0.3)", background: "linear-gradient(135deg,rgba(var(--ws-acc),0.12),rgba(var(--ws-acc-tint-b),0.04))" }}>
                     <div className="flex items-center gap-2.5">
                       <span className="w-8 h-8 rounded-full flex items-center justify-center shrink-0"
-                        style={{ background: "rgba(99,102,241,0.16)", border: "1px solid rgba(99,102,241,0.4)", color: "#c7c8ff" }}>
+                        style={{ background: "rgba(var(--ws-acc),0.16)", border: "1px solid rgba(var(--ws-acc),0.4)", color: "var(--ws-acc-text)" }}>
                         ◈
                       </span>
                       <div className="min-w-0 flex-1">
@@ -1225,7 +1225,7 @@ export default function WorkspaceChat({
                       </div>
                       <button type="button" onClick={() => onOpenApp(`/warroom/${war.id}`)}
                         className="text-[11px] px-2.5 py-1.5 rounded-lg shrink-0"
-                        style={{ background: "rgba(99,102,241,0.2)", color: "#dcddff", border: "1px solid rgba(99,102,241,0.4)" }}>
+                        style={{ background: "rgba(var(--ws-acc),0.2)", color: "var(--ws-acc-text-strong)", border: "1px solid rgba(var(--ws-acc),0.4)" }}>
                         作战室
                       </button>
                     </div>
@@ -1338,7 +1338,7 @@ export default function WorkspaceChat({
                 <div className="relative" ref={pickerRef}>
                   <button type="button" onClick={() => setPickerOpen((v) => !v)}
                     className="flex items-center gap-1 text-[11px] px-2 py-1.5 rounded-lg hover:bg-white/[0.06] max-w-[140px]"
-                    style={{ border: "1px solid rgba(99,102,241,0.35)", background: "rgba(99,102,241,0.1)", color: "#c7c8ff" }}>
+                    style={{ border: "1px solid rgba(var(--ws-acc),0.35)", background: "rgba(var(--ws-acc),0.1)", color: "var(--ws-acc-text)" }}>
                     <span className="truncate">{agent ? agent.name : "选员工"}</span>
                     <span aria-hidden className="opacity-60">▾</span>
                   </button>
@@ -1351,7 +1351,7 @@ export default function WorkspaceChat({
                           className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-[11px] text-left hover:bg-white/[0.06]"
                           style={{ color: a.id === agent?.id ? "#fff" : "var(--muted)" }}>
                           <span className="w-5 h-5 rounded-md flex items-center justify-center text-[9px] font-semibold"
-                            style={{ background: "linear-gradient(135deg,#6366f1,#22d3ee)", color: "#fff" }}>
+                            style={{ background: "linear-gradient(135deg,var(--ws-acc-solid),var(--ws-acc-glow))", color: "#fff" }}>
                             {a.name.slice(0, 1)}
                           </span>
                           <span className="flex-1 truncate">{a.name}</span>
@@ -1367,7 +1367,7 @@ export default function WorkspaceChat({
 
             {mode !== "single" && (
               <span className="text-[11px] px-2 py-1.5 rounded-lg flex items-center gap-1 max-w-[160px]"
-                style={{ border: "1px solid rgba(99,102,241,0.35)", background: "rgba(99,102,241,0.1)", color: "#c7c8ff" }}>
+                style={{ border: "1px solid rgba(var(--ws-acc),0.35)", background: "rgba(var(--ws-acc),0.1)", color: "var(--ws-acc-text)" }}>
                 <span className="truncate">
                   {mode === "group" ? (chatGroup?.name || project?.name || "群聊") : mode === "meeting" ? "会议" : "作战室"}
                 </span>
@@ -1389,7 +1389,7 @@ export default function WorkspaceChat({
             ) : (
               <button type="button" onClick={submit} disabled={!canSend}
                 className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg font-medium disabled:opacity-40"
-                style={{ background: "linear-gradient(135deg,#6366f1,#4f46e5)", color: "#fff" }}>
+                style={{ background: "linear-gradient(135deg,var(--ws-acc-solid),var(--ws-acc-deep))", color: "#fff" }}>
                 发送
               </button>
             )}
@@ -1434,7 +1434,7 @@ function ChatBubble({ role, name, text, time, process, live }: {
   return (
     <div className="flex gap-2.5">
       <div className="w-6 h-6 rounded-lg flex items-center justify-center text-[10px] font-semibold shrink-0 mt-0.5"
-        style={{ background: system ? "rgba(255,255,255,0.06)" : "linear-gradient(135deg,#6366f1,#22d3ee)", color: "#fff" }}>
+        style={{ background: system ? "rgba(255,255,255,0.06)" : "linear-gradient(135deg,var(--ws-acc-solid),var(--ws-acc-glow))", color: "#fff" }}>
         {system ? "·" : name.slice(0, 1)}
       </div>
       <div className="min-w-0 flex-1">
@@ -1462,7 +1462,7 @@ function EmptyIntro({ glyph, title, hint, suggestions, onPick }: {
   return (
     <div className="py-8">
       <div className="w-9 h-9 rounded-xl flex items-center justify-center text-sm font-semibold mb-3"
-        style={{ background: "linear-gradient(135deg,#6366f1,#22d3ee)", color: "#fff" }}>
+        style={{ background: "linear-gradient(135deg,var(--ws-acc-solid),var(--ws-acc-glow))", color: "#fff" }}>
         {glyph}
       </div>
       <p className="text-sm font-medium">{title}</p>
