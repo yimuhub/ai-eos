@@ -188,8 +188,8 @@ export default function AdminPage() {
         <div className="rounded-xl border border-white/10 bg-white/5 p-6">
           <div className="mb-1 text-[15px] font-semibold">🔐 超级管理后台</div>
           <p className="mb-4 text-white/50">
-            仅限平台超管进入。门禁三因子：超管身份 + 超级密钥（storage/super_key.key）
-            + Authenticator 动态码。
+            仅限平台超管进入。门禁三因子：超管身份 + 超级密钥（部署方持有：数据库目录下
+            super_key.key 文件，或环境变量 AIEOS_SUPER_KEY）+ Authenticator 动态码。
           </p>
 
           {stage === "key" && (
@@ -227,8 +227,11 @@ export default function AdminPage() {
                 未绑定验证器。用 Authenticator 扫描下方二维码，输入显示的 6 位动态码完成绑定。
               </p>
               {qrSvg ? (
-                <div className="mb-3 flex justify-center rounded-lg bg-white p-3"
-                     dangerouslySetInnerHTML={{ __html: qrSvg }} />
+                <div className="mb-3 flex justify-center rounded-lg bg-white p-3">
+                  {/* qr_svg 是 data:image/svg+xml 的 data URI——必须走 img src，
+                      不是 HTML 片段（用 innerHTML 会渲染成一坨编码文本） */}
+                  <img src={qrSvg} alt="TOTP 绑定二维码" width={200} height={200} />
+                </div>
               ) : (
                 <button onClick={startEnroll} disabled={busy}
                         className="mb-3 w-full rounded-md bg-white/15 px-3 py-2 hover:bg-white/25">
