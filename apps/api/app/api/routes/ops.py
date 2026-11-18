@@ -706,6 +706,13 @@ async def admin_2fa_enroll(body: dict, request: Request,
     """生成 TOTP 绑定二维码（根凭据=超级密钥；旧绑定立即作废）。"""
     await _admin_guard(db, user, request, require_totp=False)
     from app.services import totp_service
+    # 防覆盖守卫：已有生效绑定时拒绝静默重置——
+    # 否则一次误触 enroll 就会把用户 Authenticator 里的旧密钥作废
+    st = totp_service.status()
+    if st["enrolled"] and not body.get("force"):
+        raise HTTPException(409,
+            "已有生效的验证器绑定。如需更换请先在门禁页用超级密钥走"
+            "「重新绑定」通道，或传 force=true 显式覆盖。")
     uri = totp_service.enroll(str(body.get("account") or user.email))
     import segno
     qr_data_uri = segno.make(uri).svg_data_uri(scale=5, dark="#1a1d24")
