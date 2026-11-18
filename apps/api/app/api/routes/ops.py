@@ -1,6 +1,9 @@
 """商业交付运营引擎 API（V6.1）：合规台账 / 工资核算 / 对账 / trace 查询 / 消耗报表。"""
 from __future__ import annotations
 
+import hashlib
+import hmac
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -430,12 +433,48 @@ async def usage_report(company_id: str = Query(...),
 # 门禁 = is_superadmin + X-Super-Key 双因子；每一笔操作都落审计。
 
 
+def _mint_admin_session(user_id: str, ttl_s: int = 12 * 3600) -> tuple[str, int]:
+    """签发管理会话令牌：HMAC(jwt_secret, "admin-session:user:exp")。"""
+    import base64 as _b64
+
+    from app.core.config import settings
+
+    exp = int(time.time()) + ttl_s
+    payload = f"admin-session:{user_id}:{exp}"
+    sig = _b64.urlsafe_b64encode(hmac.new(
+        settings.jwt_secret.encode(), payload.encode(),
+        hashlib.sha256).digest()).decode().rstrip("=")
+    token = f"{exp}:{sig}"
+    return token, exp
+
+
+def _verify_admin_session(token: str) -> str | None:
+    """校验管理会话令牌，返回 user_id；非法/过期返回 None。"""
+    import base64 as _b64
+
+    from app.core.config import settings
+
+    try:
+        exp_s, sig = token.split(":", 1)
+        payload = f"admin-session:{exp_s}"
+        expect = _b64.urlsafe_b64encode(hmac.new(
+            settings.jwt_secret.encode(), payload.encode(),
+            hashlib.sha256).digest()).decode().rstrip("=")
+        if not hmac.compare_digest(expect, sig):
+            return None
+        if int(exp_s) < time.time():
+            return None
+        return exp_s.split(":")[1]
+    except Exception:  # noqa: silent-except, BLE001 — 畸形令牌一律拒绝（返回 None 由门禁转 403）
+        return None
+
+
 async def _admin_guard(db: AsyncSession, user: User, request,
                        require_totp: bool = False) -> None:
-    """超级后台门禁：身份（超管）+ 超级密钥（知道）+ TOTP 动态码（持有）。
-
-    require_totp=False 用于绑定/解除绑定本身（鸡生蛋的引导动作，
-    由超级密钥作为根凭据把门）。"""
+    """超级后台门禁：身份（超管）+ 凭据三选一——
+    * X-Super-Key（根凭据，知道）
+    * X-Admin-Token（unlock 验证后签发的管理会话令牌，12 小时）
+    require_totp=True 仅用于 unlock 本身（进台验 TOTP 持有）。"""
     import hmac as _hmac
 
     from app.core.config import settings
@@ -443,9 +482,21 @@ async def _admin_guard(db: AsyncSession, user: User, request,
 
     if not user.is_superadmin:
         raise HTTPException(403, "需要平台超管身份")
+    admin_token = (request.headers.get("X-Admin-Token") or "").strip()
+    if admin_token:
+        if _verify_admin_session(admin_token) != user.id:
+            raise HTTPException(403, "管理会话已失效，请重新进入")
+        if require_totp:
+            # 会话令牌不含 TOTP 证明：进台动作必须现验动态码或根凭据
+            code = (request.headers.get("X-TOTP-Code") or "").strip()
+            try:
+                totp_service.verify_code(code)
+            except PermissionError as exc:
+                raise HTTPException(403, f"二次验证失败：{exc}") from exc
+        return
     provided = (request.headers.get("X-Super-Key") or "").strip()
     if not provided or not _hmac.compare_digest(provided, settings.super_key):
-        raise HTTPException(403, "超级密钥不匹配")
+        raise HTTPException(403, "需要管理会话令牌或超级密钥")
     if require_totp and totp_service.status()["enrolled"]:
         code = (request.headers.get("X-TOTP-Code") or "").strip()
         try:
@@ -458,14 +509,40 @@ async def _admin_guard(db: AsyncSession, user: User, request,
 async def admin_unlock(body: dict, request: Request,
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
-    """校验超级密钥（前端进门用）；通过后管理请求带 X-Super-Key 头即可。"""
-    await _admin_guard(db, user, request, require_totp=True)
+    """进台门禁（用户口径「验证器优先」）：
+
+    * 已绑定验证器 → **只验动态码**（不用每次输超级密钥）；
+      恢复码同样可用（一次性）。
+    * 未绑定 → 验超级密钥（首次绑定/重新绑定的通道）。
+    失败均落审计；动态码有 5 次失败 60 秒冷却。"""
+    import hmac as _hmac
+
+    from app.core.config import settings
+    from app.services import totp_service
+
+    if not user.is_superadmin:
+        raise HTTPException(403, "需要平台超管身份")
+    enrolled = totp_service.status()["enrolled"]
+    if enrolled:
+        code = (request.headers.get("X-TOTP-Code") or "").strip()
+        try:
+            totp_service.verify_code(code)
+        except PermissionError as exc:
+            raise HTTPException(403, f"二次验证失败：{exc}") from exc
+        via = "totp"
+    else:
+        provided = (request.headers.get("X-Super-Key") or "").strip()
+        if not provided or not _hmac.compare_digest(provided,
+                                                    settings.super_key):
+            raise HTTPException(403, "超级密钥不匹配")
+        via = "super_key"
+    admin_token, exp = _mint_admin_session(user.id)
     from app.services.event_system import log_event
     await log_event(db, "admin.unlocked", "user", user.id, "user", user.id,
-                    {"via": "super_key+totp"}, company_id=None)
+                    {"via": via, "session_exp": exp}, company_id=None)
     await db.commit()
-    return {"ok": True, "message": "超级管理后台已解锁",
-            "twofa": totp_status()["enrolled"]}
+    return {"ok": True, "message": "超级管理后台已解锁", "via": via,
+            "admin_token": admin_token, "expires_at": exp}
 
 
 @router.post("/admin/2fa/enroll")
@@ -483,10 +560,13 @@ async def admin_2fa_enroll(body: dict, request: Request,
 
 
 @router.get("/admin/2fa/status")
-async def admin_2fa_status(request: Request,
-                           db: AsyncSession = Depends(get_db),
+async def admin_2fa_status(db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
-    await _admin_guard(db, user, request, require_totp=False)
+    """2FA 绑定状态：仅需超管登录态（不带超级密钥）——门禁路由据此选屏。
+
+    只暴露 enrolled 布尔值，不泄露任何密钥材料。"""
+    if not user.is_superadmin:
+        raise HTTPException(403, "需要平台超管身份")
     from app.services import totp_service
     return {"ok": True, **totp_service.status()}
 

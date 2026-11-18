@@ -24,16 +24,18 @@ type ExpertPackRow = { id: string; name: string; version: string;
   experts: { id: string; name: string; category?: string }[];
   seeded_in_company?: number | null };
 
-const KEY_STORE = "aieos_admin_key";
+const KEY_STORE = "aieos_admin_token";  // unlock 后签发的管理会话令牌（12h）
 
-type GateStage = "key" | "totp" | "enroll" | "recovery";
+type GateStage = "checking" | "totp" | "key" | "enroll" | "recovery";
 
 export default function AdminPage() {
-  // 门禁三因子：超管身份 + 超级密钥（知道）+ TOTP 动态码（持有）。
-  // 会话内恢复：sessionStorage 有密钥则先验 2FA 状态——已绑定则要动态码。
+  // 门禁三因子 + 「验证器优先」登录（用户口径）：
+  // * 已绑定 → 日常只输 6 位动态码进台（不用每次输超级密钥）；
+  // * 验证器不可用 → 点「用超级密钥重新绑定」走根凭据通道；
+  // * 首次 → 超级密钥 → 扫码绑定 → 恢复码。
   const [key, setKey] = useState("");
   const [unlocked, setUnlocked] = useState(false);
-  const [stage, setStage] = useState<GateStage>("key");
+  const [stage, setStage] = useState<GateStage>("checking");
   const [qrSvg, setQrSvg] = useState("");
   const [totpCode, setTotpCode] = useState("");
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
@@ -45,8 +47,8 @@ export default function AdminPage() {
   const [installPacks, setInstallPacks] = useState<string[]>([]);
 
   const authHeaders = () => {
-    const k = sessionStorage.getItem(KEY_STORE) || "";
-    return { "X-Super-Key": k };
+    const t = sessionStorage.getItem(KEY_STORE) || "";
+    return { "X-Admin-Token": t };
   };
 
   const { data, error, refresh } = useResource(
@@ -65,13 +67,16 @@ export default function AdminPage() {
   const submitKey = async () => {
     setBusy(true);
     try {
-      const st = await api.get<{ enrolled: boolean; pending: boolean }>(
-        "/ops/admin/2fa/status", { headers: { "X-Super-Key": key } });
-      sessionStorage.setItem(KEY_STORE, key);
-      if (st.enrolled) setStage("totp");
-      else setStage("enroll");
+      // 根凭据通道：解除旧绑定（若有）→ 直接进入新绑定
+      sessionStorage.setItem(KEY_STORE + "_root", key);
+      const r = await api.post<{ qr_svg: string }>(
+        "/ops/admin/2fa/enroll", { account: "deployer" },
+        { headers: { "X-Super-Key": key } });
+      setQrSvg(r.qr_svg);
+      setStage("enroll");
+      notify("success", "旧验证器已解除，请扫描新二维码绑定");
     } catch (e) {
-      notify("error", describeError(e, "密钥校验失败"));
+      notify("error", describeError(e, "超级密钥校验失败"));
     } finally {
       setBusy(false);
     }
@@ -81,8 +86,10 @@ export default function AdminPage() {
     setBusy(true);
     try {
       const r = await api.post("/ops/admin/unlock", {},
-        { headers: { "X-Super-Key": key, "X-TOTP-Code": totpCode } });
-      sessionStorage.setItem(KEY_STORE, key);
+        { headers: { "X-TOTP-Code": totpCode } });
+      // 验证器优先进台后，超级密钥仍需存 session 供管理请求头使用；
+      // 用户在 totp 屏点的「重新绑定」路径会在 submitKey 里覆盖它
+      sessionStorage.setItem(KEY_STORE, key || sessionStorage.getItem(KEY_STORE) || "");
       setUnlocked(true);
       notify("success", r.message || "超级管理后台已解锁");
     } catch (e) {
@@ -115,6 +122,13 @@ export default function AdminPage() {
         { headers: { "X-Super-Key": key } });
       setRecoveryCodes(r.recovery_codes);
       setStage("recovery");
+      // 顺手用同一动态码换管理会话令牌（进台免二次输入）
+      try {
+        const u = await api.post<{ admin_token: string }>(
+          "/ops/admin/unlock", {},
+          { headers: { "X-TOTP-Code": totpCode } });
+        sessionStorage.setItem(KEY_STORE, u.admin_token);
+      } catch { /* 用户点「进入后台」时若过期会重新提示 */ }
     } catch (e) {
       notify("error", describeError(e, "绑定失败"));
     } finally {
@@ -122,19 +136,15 @@ export default function AdminPage() {
     }
   };
 
-  // 挂载时：sessionStorage 有密钥 → 先验 2FA 状态决定是否要动态码
+  // 挂载分流：只需超管登录态（不带超级密钥/令牌）查绑定状态——
+  // 已绑定 → totp 优先屏；未绑定 → 超级密钥首绑屏。
+  // 若 sessionStorage 已有未过期会话令牌 → 直接进台（过期由首个请求 403 暴露）。
   useEffect(() => {
-    const saved = sessionStorage.getItem(KEY_STORE);
-    if (!saved) return;
-    setKey(saved);
+    if (sessionStorage.getItem(KEY_STORE)) { setUnlocked(true); return; }
     setBusy(true);
-    api.get<{ enrolled: boolean }>("/ops/admin/2fa/status",
-      { headers: { "X-Super-Key": saved } })
-      .then((st) => {
-        if (st.enrolled) setStage("totp");
-        else setUnlocked(true);
-      })
-      .catch(() => { /* 静默：停留在密钥输入态 */ })
+    api.get<{ enrolled: boolean }>("/ops/admin/2fa/status")
+      .then((st) => setStage(st.enrolled ? "totp" : "key"))
+      .catch(() => setStage("key"))
       .finally(() => setBusy(false));
   }, []);
 
@@ -235,12 +245,10 @@ export default function AdminPage() {
                   确认绑定
                 </button>
                 <button onClick={() => {
-                  sessionStorage.setItem(KEY_STORE, key);
-                  setUnlocked(true);
-                  notify("success", "已进入（未绑定验证器——建议尽快绑定）");
+                  notify("error", "未绑定验证器无法进入后台：请完成绑定，或用超级密钥重新绑定后再试");
                 }}
                         className="rounded-md bg-white/10 px-3 py-2 hover:bg-white/20">
-                  跳过
+                  稍后再绑
                 </button>
               </div>
             </>
@@ -256,7 +264,10 @@ export default function AdminPage() {
                 {recoveryCodes.map((c, i) => <div key={i}>{c}</div>)}
               </div>
               <button onClick={() => {
-                sessionStorage.setItem(KEY_STORE, key);
+                if (!sessionStorage.getItem(KEY_STORE)) {
+                  notify("error", "会话令牌缺失，请重新验证");
+                  return;
+                }
                 setUnlocked(true);
                 notify("success", "超级管理后台已解锁");
               }}

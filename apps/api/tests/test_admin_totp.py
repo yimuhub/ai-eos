@@ -79,27 +79,29 @@ async def test_enroll_and_confirm_flow(client, make_user):
     recovery = r.json()["recovery_codes"]
     assert len(recovery) == 8
 
-    # 绑定后语义：TOTP 只守「进台」（unlock）；overview 等管理请求
-    # 由已解锁 session（X-Super-Key）承载，不重复要动态码
+    # 绑定后语义（用户口径）：进台只用验证器动态码——不需要超级密钥。
+    # overview 等管理请求由已解锁 session（X-Super-Key）承载。
     r = await client.get("/ops/admin/overview", headers=h)
     assert r.status_code == 200
 
-    # unlock 端点：无动态码 → 403；对码 → 200；恢复码一次性可用
-    r = await client.post("/ops/admin/unlock", headers=h, json={})
+    # unlock：什么都不带 → 403；只带动态码（无超级密钥）→ 200
+    r = await client.post("/ops/admin/unlock",
+                          headers={**admin["headers"]}, json={})
     assert r.status_code == 403
     rec = recovery[0]
     r = await client.post("/ops/admin/unlock",
-                          headers={**admin["headers"],
-                                   "X-Super-Key": settings.super_key,
-                                   "X-TOTP-Code": rec}, json={})
+                          headers={**admin["headers"], "X-TOTP-Code": rec},
+                          json={})
     assert r.status_code == 200
+    # 同一恢复码第二次 → 403（一次性）
     r = await client.post("/ops/admin/unlock",
-                          headers={**admin["headers"],
-                                   "X-Super-Key": settings.super_key,
-                                   "X-TOTP-Code": rec}, json={})
-    assert r.status_code == 403  # 恢复码已用掉
+                          headers={**admin["headers"], "X-TOTP-Code": rec},
+                          json={})
+    assert r.status_code == 403
+    # 正常动态码 → 200
     r = await client.post("/ops/admin/unlock",
-                          headers=_totp_headers(admin, secret), json={})
+                          headers={**admin["headers"], "X-TOTP-Code": pyotp.TOTP(secret).now()},
+                          json={})
     assert r.status_code == 200
 
 
