@@ -23,6 +23,9 @@ type ExpertPackRow = { id: string; name: string; version: string;
   industry: string; description: string;
   experts: { id: string; name: string; category?: string }[];
   seeded_in_company?: number | null };
+type IndustryPackRow = { id: string; name: string; version: string;
+  description: string; published?: boolean };
+type ContentTab = "companies" | "content";
 
 const KEY_STORE = "aieos_admin_token";  // unlock 后签发的管理会话令牌（12h）
 
@@ -45,6 +48,9 @@ export default function AdminPage() {
   const [newIndustry, setNewIndustry] = useState("");
   const [expertPacks, setExpertPacks] = useState<ExpertPackRow[]>([]);
   const [installPacks, setInstallPacks] = useState<string[]>([]);
+  const [contentTab, setContentTab] = useState<ContentTab>("companies");
+  const [industryPackRows, setIndustryPackRows] = useState<IndustryPackRow[]>([]);
+  const [expertPackRows, setExpertPackRows] = useState<ExpertPackRow[]>([]);
 
   const authHeaders = () => {
     const t = sessionStorage.getItem(KEY_STORE) || "";
@@ -63,6 +69,16 @@ export default function AdminPage() {
   useEffect(() => {
     if (error) notify("error", error);
   }, [error]);
+
+  // 基座内容总览：内置行业包 + 专家包目录（登录态即可读）
+  useEffect(() => {
+    api.get<{ packs: IndustryPackRow[] }>("/industry-packs")
+      .then((r) => setIndustryPackRows(r?.packs ?? []))
+      .catch(() => setIndustryPackRows([]));
+    api.get<{ packs: ExpertPackRow[] }>("/expert-packs")
+      .then((r) => setExpertPackRows(r?.packs ?? []))
+      .catch(() => setExpertPackRows([]));
+  }, []);
 
   const submitKey = async () => {
     setBusy(true);
@@ -287,10 +303,72 @@ export default function AdminPage() {
   return (
     <div className="mx-auto max-w-5xl px-4 py-6 text-[13px] leading-relaxed">
       <div className="mb-1 text-[15px] font-semibold">超级管理后台</div>
-      <p className="mb-4 text-white/50">
-        给用户/公司解锁行业与配置内容。所有操作落审计（admin.* 事件）。
+      <p className="mb-3 text-white/50">
+        统一运营入口：给用户/公司解锁行业与配置内容。所有操作落审计（admin.* 事件）。
       </p>
 
+      <div className="mb-4 flex gap-2">
+        <button onClick={() => setContentTab("companies")}
+                className={`rounded-md px-3 py-1.5 ${contentTab === "companies" ? "bg-white/15" : "bg-white/5 hover:bg-white/10"}`}>
+          公司与授权
+        </button>
+        <button onClick={() => setContentTab("content")}
+                className={`rounded-md px-3 py-1.5 ${contentTab === "content" ? "bg-white/15" : "bg-white/5 hover:bg-white/10"}`}>
+          基座内容
+        </button>
+      </div>
+
+      {contentTab === "content" && (
+        <div className="mb-6 grid gap-4">
+          <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+            <div className="mb-2 font-medium">行业包（{industryPackRows.length}）</div>
+            <div className="grid gap-2 md:grid-cols-2">
+              {industryPackRows.map((p) => {
+                const unlocked = (data?.companies ?? [])
+                  .filter((c) => c.industry_packs.some((ip) => ip.key === p.id))
+                  .map((c) => c.name);
+                return (
+                  <div key={p.id} className="rounded-lg bg-black/25 p-3">
+                    <div className="font-medium">{p.name}
+                      <span className="ml-2 text-white/40">v{p.version}</span>
+                    </div>
+                    <div className="mt-0.5 text-[12px] text-white/50">{p.description}</div>
+                    <div className="mt-1.5 text-[12px]">
+                      {unlocked.length
+                        ? <span className="text-emerald-300">已解锁：{unlocked.join("、")}</span>
+                        : <span className="text-white/40">尚无公司解锁</span>}
+                    </div>
+                  </div>
+                );
+              })}
+              {!industryPackRows.length && <div className="text-white/40">加载中…</div>}
+            </div>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+            <div className="mb-2 font-medium">行业专家包（{expertPackRows.length}）</div>
+            <div className="grid gap-2 md:grid-cols-2">
+              {expertPackRows.map((p) => (
+                <div key={p.id} className="rounded-lg bg-black/25 p-3">
+                  <div className="font-medium">{p.name}
+                    <span className="ml-2 text-white/40">{p.industry} · v{p.version}</span>
+                  </div>
+                  <div className="mt-0.5 text-[12px] text-white/50">{p.description}</div>
+                  <div className="mt-1.5 text-[12px] text-white/40">
+                    {p.experts.map((e) => `${e.name}（${e.category}）`).join("、")}
+                  </div>
+                </div>
+              ))}
+              {!expertPackRows.length && <div className="text-white/40">加载中…</div>}
+            </div>
+          </div>
+          <div className="rounded-lg border border-white/10 bg-white/5 p-3 text-[12px] text-white/50">
+            插件与知识包：在「公司与授权」选择公司 → 配置，可逐公司启停；
+            插件目录见「基座市场」。
+          </div>
+        </div>
+      )}
+
+      {contentTab === "companies" && (
       <div className="mb-6 rounded-xl border border-white/10 bg-white/5">
         <div className="border-b border-white/10 px-4 py-2.5 font-medium">公司与授权</div>
         <div className="divide-y divide-white/5">
@@ -322,6 +400,7 @@ export default function AdminPage() {
           )}
         </div>
       </div>
+      )}
 
       {selected && detail && (
         <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-4">
