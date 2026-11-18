@@ -96,3 +96,5 @@ from .ops import (ComplianceLedger, PayrollRule,  # noqa: F401
                   ReconciliationRun)
 
 from .interview import ExpertInterview  # noqa: F401
+
+from .sensitive_access import SensitiveAccess  # noqa: F401

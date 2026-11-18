@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import time
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -427,6 +428,159 @@ async def usage_report(company_id: str = Query(...),
         agg2["cost"] = round(agg2["cost"] + cost, 4)
     return {"month": month, "total": total,
             "by_agent": by_agent, "by_scenario": by_scenario}
+
+
+# ---------------------------------------------------------------- 敏感访问
+
+async def _log_sensitive_access(db, user, category, target_id, reason,
+                                company_id=None, auth="totp",
+                                target_desc=None) -> None:
+    from app.models.sensitive_access import SensitiveAccess
+    db.add(SensitiveAccess(
+        id=str(uuid.uuid4()), company_id=company_id,
+        admin_user_id=user.id, category=category, target_id=target_id,
+        target_desc=(target_desc or "")[:300], reason=reason,
+        auth=auth, created_at=datetime.now(timezone.utc)))
+    await db.commit()
+
+
+def _verify_totp_or_fail(request) -> str:
+    """敏感内容查看的第二因子：校验 X-TOTP-Code（动态码或恢复码）。
+
+    返回验证方式（totp/recovery）；失败抛 403。冷却策略复用 TOTP 服务
+    （5 次失败 60 秒），防止对 6 位码的暴力枚举。"""
+    from app.services import totp_service
+
+    code = (request.headers.get("X-TOTP-Code") or "").strip()
+    auth = "recovery" if len(code.replace("-", "").replace(" ", "")) > 6         else "totp"
+    try:
+        totp_service.verify_code(code)
+    except PermissionError as exc:
+        raise HTTPException(403, f"二次验证失败：{exc}") from exc
+    return auth
+
+
+def _require_reason(reason: str | None) -> str:
+    text = (reason or "").strip()
+    if len(text) < 5:
+        raise HTTPException(400, "请填写查看原因（至少 5 个字），"
+                                 "该理由将随敏感访问台账留档")
+    return text[:2000]
+
+
+@router.get("/admin/logs/events")
+async def admin_log_events(request: Request,
+                           company_id: str | None = Query(None),
+                           event_type: str | None = Query(None),
+                           limit: int = Query(200, le=2000),
+                           db: AsyncSession = Depends(get_db),
+                           user: User = Depends(get_current_user)):
+    """系统事件日志：event_log 全量（支持按类型/公司过滤）。"""
+    await _admin_guard(db, user, request)
+    from app.models.event import EventLog
+    q = select(EventLog)
+    if company_id:
+        q = q.where(EventLog.company_id == company_id)
+    if event_type:
+        q = q.where(EventLog.event_type.contains(event_type))
+    rows = (await db.execute(
+        q.order_by(EventLog.created_at.desc()).limit(limit))).scalars().all()
+    return {"events": [{
+        "id": r.id,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "event_type": r.event_type, "entity_type": r.entity_type,
+        "entity_id": r.entity_id, "actor_type": r.actor_type,
+        "actor_id": r.actor_id, "company_id": r.company_id,
+        "payload": r.payload,
+    } for r in rows]}
+
+
+@router.get("/admin/logs/chats")
+async def admin_log_chats(request: Request,
+                          company_id: str = Query(...),
+                          limit: int = Query(50, le=200),
+                          db: AsyncSession = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    """聊天线程目录（元数据：线程/参与方/条数/时间）——不含内容，无需动态码。"""
+    await _admin_guard(db, user, request)
+    from sqlalchemy import func as _f
+
+    from app.models.agent_chat import AgentChatMessage
+    rows = (await db.execute(
+        select(
+            AgentChatMessage.agent_id,
+            AgentChatMessage.company_id,
+            AgentChatMessage.thread_id,
+            _f.count().label("msgs"),
+            _f.max(AgentChatMessage.created_at).label("last_at"),
+        ).where(AgentChatMessage.company_id == company_id)
+        .group_by(AgentChatMessage.agent_id, AgentChatMessage.thread_id)
+        .order_by(_f.max(AgentChatMessage.created_at).desc())
+        .limit(limit))).all()
+    return {"threads": [{
+        "agent_id": r.agent_id, "company_id": r.company_id,
+        "thread_id": r.thread_id, "messages": int(r.msgs),
+        "last_at": r.last_at.isoformat() if r.last_at else None,
+    } for r in rows]}
+
+
+@router.get("/admin/logs/chats/{agent_id}/messages")
+async def admin_log_chat_messages(request: Request, agent_id: str,
+                                  thread_id: str | None = Query(None),
+                                  reason: str = Query(...),
+                                  db: AsyncSession = Depends(get_db),
+                                  user: User = Depends(get_current_user)):
+    """查看聊天内容（敏感）：必须带查看原因 + 当前 TOTP 动态码。
+
+    每次调用在 sensitive_access 台账落一行——谁、何时、什么理由、
+    用动态码还是恢复码验证的，全部留痕。"""
+    from app.core.config import settings
+    import hmac as _hmac
+
+    if not user.is_superadmin:
+        raise HTTPException(403, "需要平台超管身份")
+    provided = (request.headers.get("X-Super-Key") or "").strip()
+    if not provided or not _hmac.compare_digest(provided, settings.super_key):
+        raise HTTPException(403, "超级密钥不匹配")
+    reason_text = _require_reason(reason)
+    auth = _verify_totp_or_fail(request)
+
+    from app.models.agent_chat import AgentChatMessage
+    q = select(AgentChatMessage).where(
+        AgentChatMessage.agent_id == agent_id)
+    if thread_id:
+        q = q.where(AgentChatMessage.thread_id == thread_id)
+    rows = (await db.execute(
+        q.order_by(AgentChatMessage.created_at).limit(500))).scalars().all()
+    await _log_sensitive_access(db, user, "chat_thread", agent_id,
+                                reason_text, auth=auth,
+                                target_desc=f"{len(rows)} 条消息")
+    await db.commit()
+    return {"messages": [{
+        "role": r.role, "content": r.content,
+        "thread_id": r.thread_id,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    } for r in rows], "audited": True}
+
+
+@router.get("/admin/logs/sensitive-access")
+async def admin_sensitive_access(request: Request,
+                                 limit: int = Query(100, le=1000),
+                                 db: AsyncSession = Depends(get_db),
+                                 user: User = Depends(get_current_user)):
+    """敏感访问台账：所有查看行为的留痕记录。"""
+    await _admin_guard(db, user, request)
+    from app.models.sensitive_access import SensitiveAccess
+    rows = (await db.execute(
+        select(SensitiveAccess)
+        .order_by(SensitiveAccess.created_at.desc()).limit(limit))).scalars().all()
+    return {"access": [{
+        "id": r.id, "admin_user_id": r.admin_user_id,
+        "company_id": r.company_id, "category": r.category,
+        "target_id": r.target_id, "target_desc": r.target_desc,
+        "reason": r.reason, "auth": r.auth,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    } for r in rows]}
 
 
 # ================================================================ 超级管理后台

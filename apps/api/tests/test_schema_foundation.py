@@ -218,7 +218,8 @@ def test_migration_revisions_extend_current_heads():
     active = _script_dir(ACTIVE_MIGRATIONS)
     # V6 基座新增 0019~0023（工具总线/kb 嵌入/规整层/功能开关/成员绑定），
     # 保持单链推进，head 随新迁移更新。
-    assert active.get_heads() == ["0026"]
+    assert active.get_heads() == ["0027"]
+    assert active.get_revision("0027").down_revision == "0026"
     assert active.get_revision("0026").down_revision == "0025"
     assert active.get_revision("0025").down_revision == "0024"
     assert active.get_revision("0024").down_revision == "0023"

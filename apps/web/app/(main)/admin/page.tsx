@@ -25,9 +25,24 @@ type ExpertPackRow = { id: string; name: string; version: string;
   seeded_in_company?: number | null };
 type IndustryPackRow = { id: string; name: string; version: string;
   description: string; published?: boolean };
-type ContentTab = "companies" | "content";
+type ContentTab = "companies" | "content" | "logs";
+type LogView = "events" | "chats" | "sensitive";
+type EventRow = { id: string; created_at?: string; event_type: string;
+  entity_type?: string; entity_id?: string; actor_type?: string;
+  actor_id?: string; company_id?: string; payload?: Record<string, unknown> };
+type ChatThread = { agent_id: string; thread_id?: string; messages: number;
+  last_at?: string };
+type ChatMsg = { role: string; content: string; created_at?: string };
+type SensitiveRow = { id: string; admin_user_id: string; category: string;
+  target_id: string; target_desc?: string; reason: string; auth: string;
+  created_at?: string };
 
 const KEY_STORE = "aieos_admin_token";  // unlock 后签发的管理会话令牌（12h）
+
+// 日志子页签（模块级常量：避免在 tsx 内联数组上写泛型断言与 JSX 解析打架）
+const LOG_TABS: Array<[LogView, string]> = [
+  ["events", "系统事件"], ["chats", "聊天记录"], ["sensitive", "敏感访问台账"],
+];
 
 type GateStage = "checking" | "totp" | "key" | "enroll" | "recovery";
 
@@ -51,6 +66,15 @@ export default function AdminPage() {
   const [contentTab, setContentTab] = useState<ContentTab>("companies");
   const [industryPackRows, setIndustryPackRows] = useState<IndustryPackRow[]>([]);
   const [expertPackRows, setExpertPackRows] = useState<ExpertPackRow[]>([]);
+  const cid = useActiveCompanyId();
+  const [events, setEvents] = useState<EventRow[]>([]);
+  const [chatThreads, setChatThreads] = useState<ChatThread[]>([]);
+  const [chatMsgs, setChatMsgs] = useState<ChatMsg[] | null>(null);
+  const [sensitive, setSensitive] = useState<SensitiveRow[]>([]);
+  const [logView, setLogView] = useState<LogView>("events");
+  const [gateFor, setGateFor] = useState<{ agentId: string } | null>(null);
+  const [gateReason, setGateReason] = useState("");
+  const [gateTotp, setGateTotp] = useState("");
 
   const authHeaders = () => {
     const t = sessionStorage.getItem(KEY_STORE) || "";
@@ -79,6 +103,31 @@ export default function AdminPage() {
       .then((r) => setExpertPackRows(r?.packs ?? []))
       .catch(() => setExpertPackRows([]));
   }, []);
+
+  const loadLogs = async () => {
+    setEvents([]); setChatThreads([]); setSensitive([]);
+    try {
+      const r = await api.get<{ events: EventRow[] }>(
+        `/ops/admin/logs/events?limit=300`, { headers: authHeaders() });
+      setEvents(r?.events ?? []);
+    } catch (e) { notify("error", describeError(e)); }
+    try {
+      const r = await api.get<{ threads: ChatThread[] }>(
+        `/ops/admin/logs/chats`
+        + (cid ? `?company_id=${cid}` : ""), { headers: authHeaders() });
+      setChatThreads(r?.threads ?? []);
+    } catch { /* 失败静默（tab 上会有全局错误提示） */ }
+    try {
+      const r = await api.get<{ access: SensitiveRow[] }>(
+        `/ops/admin/logs/sensitive-access?limit=200`,
+        { headers: authHeaders() });
+      setSensitive(r?.access ?? []);
+    } catch { /* 静默 */ }
+  };
+
+  useEffect(() => {
+    if (unlocked && contentTab === "logs") loadLogs();
+  }, [unlocked, contentTab]);
 
   const submitKey = async () => {
     setBusy(true);
@@ -178,6 +227,26 @@ export default function AdminPage() {
       } catch { /* 目录读取失败不阻塞配置 */ }
     } catch (e) {
       notify("error", describeError(e));
+    }
+  };
+
+  const openChatWithGate = async () => {
+    if (!gateFor) return;
+    setBusy(true);
+    try {
+      const r = await api.get<{ messages: ChatMsg[]; audited: boolean }>(
+        `/ops/admin/logs/chats/${gateFor.agentId}/messages`
+        + `?company_id=${cid}&reason=${encodeURIComponent(gateReason)}`,
+        { headers: { ...authHeaders(), "X-TOTP-Code": gateTotp } });
+      setChatMsgs(r?.messages ?? null);
+      setGateFor(null);
+      setGateReason(""); setGateTotp("");
+      notify("success", "已解锁查看（本次访问已留痕）");
+      loadLogs();
+    } catch (e) {
+      notify("error", describeError(e, "查看被拒绝"));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -316,6 +385,10 @@ export default function AdminPage() {
                 className={`rounded-md px-3 py-1.5 ${contentTab === "content" ? "bg-white/15" : "bg-white/5 hover:bg-white/10"}`}>
           基座内容
         </button>
+        <button onClick={() => setContentTab("logs")}
+                className={`rounded-md px-3 py-1.5 ${contentTab === "logs" ? "bg-white/15" : "bg-white/5 hover:bg-white/10"}`}>
+          系统日志
+        </button>
       </div>
 
       {contentTab === "content" && (
@@ -364,6 +437,122 @@ export default function AdminPage() {
           <div className="rounded-lg border border-white/10 bg-white/5 p-3 text-[12px] text-white/50">
             插件与知识包：在「公司与授权」选择公司 → 配置，可逐公司启停；
             插件目录见「基座市场」。
+          </div>
+        </div>
+      )}
+
+      {contentTab === "logs" && (
+        <div className="grid gap-4">
+          <div className="flex gap-2">
+            {LOG_TABS.map(([k, label]) => (
+              <button key={k} onClick={() => setLogView(k)}
+                      className={`rounded-md px-3 py-1.5 ${logView === k ? "bg-white/15" : "bg-white/5 hover:bg-white/10"}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {logView === "events" && (
+            <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+              <div className="mb-2 text-[12px] text-white/50">
+                event_log 全量系统事件（最近 300 条）：工具调用、工作流、解锁、授权变更……
+              </div>
+              <div className="max-h-[480px] overflow-y-auto font-mono text-[11px]">
+                {events.map((e, i) => (
+                  <div key={e.id || i} className="border-b border-white/5 py-1">
+                    <span className="text-white/40">{e.created_at?.slice(0, 19).replace("T", " ")}</span>
+                    <span className="ml-2 text-cyan-300">{e.event_type}</span>
+                    <span className="ml-2 text-white/40">{e.entity_type}:{e.entity_id}</span>
+                    <span className="ml-2 text-white/30">{e.actor_type}:{e.actor_id}</span>
+                  </div>
+                ))}
+                {!events.length && <div className="text-white/40">没有匹配的事件。</div>}
+              </div>
+            </div>
+          )}
+
+          {logView === "chats" && (
+            <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+              <div className="mb-2 text-[12px] text-amber-300/90">
+                聊天内容属敏感数据：查看需填写原因 + 输入 Authenticator 当前动态码，每次查看自动留痕。
+              </div>
+              <div className="grid gap-1.5">
+                {chatThreads.map((t, i) => (
+                  <div key={i} className="flex items-center justify-between rounded-md bg-black/25 px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="text-white/80">员工 {t.agent_id.slice(0, 8)}…{t.thread_id ? ` · 线程 ${t.thread_id.slice(0, 8)}…` : " · 单聊"}</div>
+                      <div className="text-[11px] text-white/40">{t.messages} 条 · 最近 {t.last_at?.slice(0, 19).replace("T", " ")}</div>
+                    </div>
+                    <button onClick={() => { setGateFor({ agentId: t.agent_id }); setChatMsgs(null); }}
+                            className="shrink-0 rounded-md bg-amber-500/25 px-2.5 py-1 text-[12px] text-amber-200 hover:bg-amber-500/35">
+                      查看内容
+                    </button>
+                  </div>
+                ))}
+                {!chatThreads.length && <div className="text-white/40">该公司还没有聊天记录。</div>}
+              </div>
+              {chatMsgs && (
+                <div className="mt-3 max-h-[360px] overflow-y-auto rounded-lg bg-black/30 p-3">
+                  {chatMsgs.map((m, i) => (
+                    <div key={i} className="border-b border-white/5 py-1.5">
+                      <span className={`mr-2 font-medium ${m.role === "boss" ? "text-sky-300" : "text-violet-300"}`}>
+                        {m.role === "boss" ? "老板" : "员工"}
+                      </span>
+                      <span className="text-white/70">{m.content}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {logView === "sensitive" && (
+            <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+              <div className="mb-2 text-[12px] text-white/50">
+                敏感访问台账：每一次查看敏感内容的留痕（谁/何时/理由/验证方式）。
+              </div>
+              <div className="max-h-[480px] overflow-y-auto">
+                {sensitive.map((a) => (
+                  <div key={a.id} className="border-b border-white/5 py-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-white/80">{a.category} · {a.target_id.slice(0, 12)}…</span>
+                      <span className="rounded bg-white/10 px-1.5 py-0.5 text-[11px] text-white/50">{a.auth}</span>
+                    </div>
+                    <div className="text-[11px] text-white/40">
+                      {a.created_at?.slice(0, 19).replace("T", " ")} · 理由：{a.reason.slice(0, 80)}
+                    </div>
+                  </div>
+                ))}
+                {!sensitive.length && <div className="text-white/40">还没有敏感访问记录。</div>}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {gateFor && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md rounded-xl border border-amber-500/30 bg-[#1a1d24] p-5">
+            <div className="mb-1 text-[14px] font-semibold text-amber-300">查看敏感内容</div>
+            <p className="mb-3 text-[12px] text-white/50">
+              Agent 聊天记录属敏感数据。请填写查看原因并输入 Authenticator 当前动态码——本次访问将自动留痕。
+            </p>
+            <textarea value={gateReason}
+                      onChange={(e) => setGateReason(e.target.value)}
+                      placeholder="查看原因（至少 5 个字，将永久留档）"
+                      className="mb-2 h-16 w-full rounded-md bg-black/30 px-3 py-2" />
+            <input inputMode="numeric" value={gateTotp} maxLength={6}
+                   onChange={(e) => setGateTotp(e.target.value.replace(/[^0-9]/g, ""))}
+                   placeholder="6 位动态码"
+                   className="mb-3 w-full rounded-md bg-black/30 px-3 py-2 text-center tracking-[0.4em]" />
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setGateFor(null)}
+                      className="rounded-md bg-white/10 px-3 py-1.5 hover:bg-white/20">取消</button>
+              <button onClick={openChatWithGate} disabled={busy || gateReason.trim().length < 5 || gateTotp.length !== 6}
+                      className="rounded-md bg-amber-600/80 px-3 py-1.5 hover:bg-amber-600 disabled:opacity-40">
+                验证并查看
+              </button>
+            </div>
           </div>
         </div>
       )}
