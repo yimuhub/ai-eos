@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>AI-EOS · Harness Agent</title>
+<style>
+:root{--bg:#0e0e10;--surface:#161619;--surface2:#1c1c20;--surface3:#242428;--border:#2a2a30;--border-l:#333338;--text:#e2e2e6;--text-hi:#fff;--muted:#78787f;--dim:#50505a;--accent:#7c6ef6;--accent-hi:#9589f8;--accent-dim:rgba(124,110,246,.08);--accent-border:rgba(124,110,246,.25);--green:#34d399;--green-dim:rgba(52,211,153,.1);--amber:#fbbf24;--amber-dim:rgba(251,191,36,.1);--red:#f87171;--font:"Inter",-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;--mono:"JetBrains Mono","SF Mono",Menlo,monospace;--r-sm:6px;--r:8px;--r-lg:12px;--dur:.18s;--ease:cubic-bezier(.4,0,.2,1);--abw:44px;--sbw:240px;--rpw:300px;--tbh:36px;--sbh:22px}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13px;min-height:100vh;display:flex;flex-direction:column;-webkit-font-smoothing:antialiased;overflow:hidden}
+button{font-family:var(--font);border:none;background:none;color:inherit;cursor:pointer;font-size:inherit}
+input,textarea{font-family:var(--font);font-size:inherit}
+::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:var(--border-l)}::-webkit-scrollbar-track{background:transparent}
+.ab{width:var(--abw);background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;padding:8px 0;flex-shrink:0;gap:2px;user-select:none}
+.ab .logo{width:36px;height:36px;border-radius:var(--r);display:flex;align-items:center;justify-content:center;font-size:18px;margin-bottom:8px;cursor:pointer}
+.ab .logo:hover{background:var(--surface2)}
+.ab .btn{width:36px;height:36px;border-radius:var(--r);display:flex;align-items:center;justify-content:center;font-size:17px;cursor:pointer;transition:all var(--dur) var(--ease);color:var(--dim);position:relative}
+.ab .btn:hover{color:var(--text);background:var(--surface2)}
+.ab .btn.active{color:var(--accent-hi);background:var(--accent-dim)}
+.ab .btn.active::before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:2px;border-radius:1px;background:var(--accent)}
+.ab .btn .badge{position:absolute;top:4px;right:4px;width:14px;height:14px;border-radius:7px;background:var(--red);font-size:8px;font-weight:700;color:white;display:flex;align-items:center;justify-content:center}
+.ab .spacer{flex:1}
+.ab .btm{width:36px;height:36px;border-radius:var(--r);display:flex;align-items:center;justify-content:center;font-size:16px;cursor:pointer;color:var(--dim)}
+.ab .btm:hover{color:var(--text);background:var(--surface2)}
+.topbar{height:var(--tbh);display:flex;align-items:center;padding:0 14px;border-bottom:1px solid var(--border);gap:8px;flex-shrink:0;background:var(--surface);user-select:none}
+.topbar .title{font-weight:600;font-size:12px;color:var(--text-hi)}
+.topbar .sep{width:1px;height:14px;background:var(--border)}
+.topbar .crumb{font-size:11px;color:var(--muted)}
+.topbar .crumb strong{color:var(--text);font-weight:500}
+.topbar .spacer{flex:1}
+.topbar .metric{display:flex;align-items:baseline;gap:4px;padding:2px 8px;border-radius:var(--r-sm);background:var(--surface2);font-size:11px;transition:all var(--dur-fast)}
+.topbar .metric:hover{background:var(--surface3)}
+.topbar .metric .k{color:var(--muted);font-size:10px}
+.topbar .metric .v{font-family:var(--mono);font-weight:600;font-size:12px}
+.topbar .metric .v.green{color:var(--green)}
+.topbar .metric .v.accent{color:var(--accent-hi)}
+.topbar .metric .v.red{color:var(--red)}
+.topbar .avatar{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,var(--accent),#4f46e5);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:white}
+.layout{display:flex;flex:1;min-height:0;position:relative}
+.sidebar{width:var(--sbw);min-width:var(--sbw);border-right:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;flex-shrink:0;transition:width var(--dur-slow) var(--ease),min-width var(--dur-slow) var(--ease),opacity var(--dur) var(--ease);overflow:hidden}
+.sidebar.collapsed{width:0;min-width:0;opacity:0;pointer-events:none;border-right:none}
+.sb-head{height:var(--tbh);display:flex;align-items:center;padding:0 12px;border-bottom:1px solid var(--border);gap:6px;flex-shrink:0;user-select:none}
+.sb-head .title{font-weight:600;font-size:12px;flex:1}
+.sb-head .btn{width:22px;height:22px;border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px}
+.sb-head .btn:hover{color:var(--text-hi);background:var(--surface2)}
+.sb-body{flex:1;overflow-y:auto}
+.sb-sec{padding:8px 0;border-bottom:1px solid var(--border)}
+.sb-sec:last-child{border-bottom:none}
+.sb-label{padding:4px 14px 6px;font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:1px;display:flex;align-items:center;justify-content:space-between;user-select:none}
+.sb-label .count{font-size:10px;background:var(--surface2);padding:1px 6px;border-radius:8px;color:var(--muted2)}
+.sb-agent{margin:0 6px;padding:6px 10px;border-radius:var(--r);display:flex;align-items:center;gap:10px;cursor:pointer;border:1px solid transparent;transition:all var(--dur-fast) var(--ease);user-select:none}
+.sb-agent:hover{background:var(--surface-hover,#1e1e24)}
+.sb-agent.active{background:var(--accent-dim);border-color:var(--accent-border)}
+.sb-agent .av{width:28px;height:28px;border-radius:7px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700}
+.sb-agent .info{flex:1;min-width:0}
+.sb-agent .info .name{font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sb-agent .info .role{font-size:10px;color:var(--muted)}
+.sb-agent .ind{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.sb-nav{display:flex;align-items:center;gap:10px;padding:6px 14px;font-size:12px;color:var(--muted);cursor:pointer;transition:all var(--dur-fast) var(--ease);user-select:none}
+.sb-nav:hover{color:var(--text);background:var(--surface-hover,#1e1e24)}
+.sb-nav .ic{width:18px;text-align:center;font-size:14px}
+.chat-col{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg)}
+.chat-head{height:var(--tbh);display:flex;align-items:center;padding:0 12px;border-bottom:1px solid var(--border);gap:4px;flex-shrink:0;background:var(--surface);user-select:none}
+.chat-head .toggle{width:24px;height:24px;border-radius:var(--r-sm);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--muted);font-size:13px;transition:all var(--dur-fast) var(--ease)}
+.chat-head .toggle:hover{color:var(--text-hi);background:var(--surface2)}
+.chat-head .name{font-weight:600;font-size:12px}
+.chat-head .sep-dot{color:var(--border-light)}
+.chat-head .role{font-size:11px;color:var(--muted)}
+.chat-head .spacer{flex:1}
+.chat-head .action{padding:3px 8px;border-radius:var(--r-sm);font-size:11px;color:var(--muted);transition:all var(--dur-fast) var(--ease);border:1px solid transparent}
+.chat-head .action:hover{color:var(--text-hi);background:var(--surface2);border-color:var(--border)}
+.chat-body{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:8px}
+.msg{max-width:70%}
+.msg.boss{align-self:flex-end}
+.msg .content{padding:8px 14px;border-radius:var(--r-lg);line-height:1.55;font-size:13px}
+.msg.agent .content{background:var(--surface2);border:1px solid var(--border);border-top-left-radius:4px}
+.msg.boss .content{background:var(--accent-dim);border:1px solid var(--accent-border);border-top-right-radius:4px}
+.msg .meta{font-size:10px;color:var(--muted);margin-top:3px;font-family:var(--mono)}
+.msg.agent .meta{text-align:left}
+.msg.boss .meta{text-align:right}
+.chat-input-zone{padding:8px 14px 12px;border-top:1px solid var(--border);background:var(--surface);flex-shrink:0}
+.chat-input-wrap{display:flex;gap:6px;align-items:flex-end}
+.chat-input-wrap textarea{flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:9px 14px;border-radius:var(--r);font-size:13px;resize:none;height:40px;transition:border-color var(--dur-fast) var(--ease),box-shadow var(--dur-fast) var(--ease)}
+.chat-input-wrap textarea:focus{outline:none;border-color:var(--accent-border);box-shadow:0 0 0 3px var(--accent-dim)}
+.chat-input-wrap textarea::placeholder{color:var(--dim)}
+.chat-input-wrap .send{background:var(--accent);color:white;padding:9px 16px;border-radius:var(--r);font-weight:600;font-size:12px;transition:all var(--dur-fast) var(--ease)}
+.chat-input-wrap .send:hover{background:var(--accent-hi)}
+.rp{width:var(--rpw);min-width:var(--rpw);border-left:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;flex-shrink:0;transition:width var(--dur-slow) var(--ease),min-width var(--dur-slow) var(--ease),opacity var(--dur) var(--ease);overflow:hidden}
+.rp.collapsed{width:0;min-width:0;opacity:0;pointer-events:none;border-left:none}
+.rp-head{height:var(--tbh);display:flex;align-items:center;padding:0 10px;border-bottom:1px solid var(--border);gap:3px;flex-shrink:0;background:var(--surface);user-select:none}
+.rp-head .tab{padding:3px 10px;border-radius:var(--r-sm);font-size:11px;color:var(--muted);cursor:pointer;transition:all var(--dur-fast) var(--ease);border:1px solid transparent}
+.rp-head .tab:hover{color:var(--text-hi);background:var(--surface2)}
+.rp-head .tab.active{background:var(--accent-dim);color:var(--accent-hi);border-color:var(--accent-border)}
+.rp-head .spacer{flex:1}
+.rp-head .close{padding:2px 6px;border-radius:var(--r-sm);color:var(--muted);cursor:pointer;font-size:12px;transition:all var(--dur-fast)}
+.rp-head .close:hover{color:var(--text-hi);background:var(--surface2)}
+.rp-body{flex:1;overflow-y:auto}
+.rp-sec{padding:10px 14px;border-bottom:1px solid var(--border)}
+.rp-sec:last-child{border-bottom:none}
+.rp-sec .sec-title{font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:1.2px;margin-bottom:8px;user-select:none}
+.rp-sec .kpi-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.rp-sec .kpi{background:var(--surface2);border-radius:var(--r);padding:10px 12px;border:1px solid var(--border);transition:border-color .12s}
+.rp-sec .kpi:hover{border-color:var(--border-l)}
+.rp-sec .kpi .k{font-size:10px;color:var(--muted)}
+.rp-sec .kpi .v{font-family:var(--mono);font-size:17px;font-weight:700;margin-top:2px}
+.rp-sec .kpi .v.green{color:var(--green)}
+.rp-sec .kpi .v.accent{color:var(--accent-hi)}
+.rp-sec .kpi .delta{font-size:10px;margin-top:1px}
+.rp-sec .kpi .delta.up{color:var(--green)}
+.rp-sec .row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:12px}
+.rp-sec .row .k{color:var(--muted)}
+.rp-sec .row .v{font-family:var(--mono);font-weight:500}
+.rp-sec .row .v.accent{color:var(--accent-hi)}
+.rp-sec .row .v.green{color:var(--green)}
+.rp-sec .pill{display:inline-flex;align-items:center;gap:3px;padding:1px 7px;border-radius:10px;font-size:10px;font-weight:500}
+.rp-sec .pill.run{color:var(--accent-hi);background:var(--accent-dim)}
+.rp-sec .pill.ok{color:var(--green);background:var(--green-dim)}
+.rp-sec .pill.warn{color:var(--amber);background:var(--amber-dim)}
+.gate-overlay{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);backdrop-filter:blur(4px)}
+.gate-box{width:380px;background:var(--surface);border:1px solid var(--amber);border-radius:var(--r-lg);padding:20px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.gate-box .gate-title{font-size:14px;font-weight:700;color:var(--amber);margin-bottom:4px}
+.gate-box .gate-sub{font-size:12px;color:var(--muted);margin-bottom:14px;line-height:1.5}
+.gate-box .gate-input{width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--r);font-size:12px;margin-bottom:8px;transition:border-color var(--dur-fast)}
+.gate-box .gate-input:focus{outline:none;border-color:var(--accent-border)}
+.gate-box textarea.gate-input{height:60px;resize:none;line-height:1.5}
+.gate-box .gate-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}
+.gate-box .gate-btn{padding:6px 14px;border-radius:var(--r);font-size:12px;font-weight:600;transition:all var(--dur-fast) var(--ease)}
+.gate-box .gate-btn.cancel{background:var(--surface2);color:var(--muted)}
+.gate-box .gate-btn.confirm{background:var(--amber);color:var(--bg)}
+.gate-box .gate-btn.confirm:disabled{opacity:.4;cursor:not-allowed}
+.restore{position:fixed;top:var(--tbh);width:22px;height:36px;display:flex;align-items:center;justify-content:center;background:var(--surface);border:1px solid var(--border);cursor:pointer;z-index:20;color:var(--muted);font-size:12px;transition:all var(--dur-fast) var(--ease);opacity:0;pointer-events:none}
+.restore.visible{opacity:1;pointer-events:auto}
+.restore:hover{color:var(--text-hi);background:var(--surface2)}
+#restoreL{left:var(--abw);border-left:none;border-radius:0 var(--r) var(--r) 0}
+#restoreR{right:0;border-right:none;border-radius:var(--r) 0 0 var(--r)}
+.statusbar{height:var(--sbh);display:flex;align-items:center;padding:0 10px;border-top:1px solid var(--border);font-size:10px;color:var(--muted);gap:10px;flex-shrink:0;background:var(--surface);font-family:var(--mono);user-select:none}
+.statusbar .dot{width:5px;height:5px;border-radius:50%;background:var(--green)}
+.statusbar .spacer{flex:1}
+.statusbar .key{padding:1px 5px;border-radius:3px;border:1px solid var(--border);font-size:9px;color:var(--muted2)}
+</style>
+</head>
+<body>
+<div class="ab">
+<div class="logo" title="AI-EOS">⚡</div>
+<div class="btn active" title="工作台">💬</div>
+<div class="btn" title="Agent 团队">⬡</div>
+<div class="btn" title="任务">📋</div>
+<div class="btn" title="交付中心">📦</div>
+<div class="btn" title="知识库">❑</div>
+<div class="btn" title="指标中心">📊</div>
+<div class="btn" title="行业中心">▦</div>
+<div class="btn" title="基座市场">⌗</div>
+<div class="btn" title="系统日志">📋<span class="badge">3</span></div>
+<div class="spacer"></div>
+<div class="btn" title="设置">⚙</div>
+<div class="btm" title="超级管理后台">🔐</div>
+</div>
+<div class="layout">
+<div class="sidebar" id="leftSidebar">
+<div class="sb-head"><span class="title">数字员工</span><div class="btn">🔍</div><div class="btn">＋</div></div>
+<div class="sb-body">
+<div class="sb-sec">
+<div class="sb-label">创意部 <span class="count">3</span></div>
+<div class="sb-agent active" onclick="selAgent(this,'创意总监·陈墨')"><div class="av" style="background:var(--accent-dim);color:var(--accent-hi)">陈</div><div class="info"><div class="name">创意总监·陈墨</div><div class="role">创意部</div></div><div class="ind" style="background:var(--amber)"></div></div>
+<div class="sb-agent" onclick="selAgent(this,'文案策划·林小满')"><div class="av" style="background:var(--green-dim);color:var(--green)">林</div><div class="info"><div class="name">文案策划·林小满</div><div class="role">创意部</div></div><div class="ind" style="background:var(--green)"></div></div>
+<div class="sb-agent" onclick="selAgent(this,'视觉设计师·顾小舟')"><div class="av" style="background:var(--green-dim);color:var(--green)">顾</div><div class="info"><div class="name">视觉设计师·顾小舟</div><div class="role">创意部</div></div><div class="ind" style="background:var(--green)"></div></div>
+</div>
+<div class="sb-sec">
+<div class="sb-label">运营部 <span class="count">1</span></div>
+<div class="sb-agent" onclick="selAgent(this,'运营专员·阿岚')"><div class="av" style="background:var(--amber-dim);color:var(--amber)">阿</div><div class="info"><div class="name">运营专员·阿岚</div><div class="role">运营部</div></div><div class="ind" style="background:var(--green)"></div></div>
+</div>
+<div class="sb-sec">
+<div class="sb-label">基座能力</div>
+<div class="sb-nav"><span class="ic">▦</span><span>行业中心</span></div>
+<div class="sb-nav"><span class="ic">⌗</span><span>基座市场</span></div>
+<div class="sb-nav"><span class="ic">🔐</span><span>超级管理后台</span></div>
+<div class="sb-nav"><span class="ic">📋</span><span>系统日志</span></div>
+<div class="sb-nav"><span class="ic">📊</span><span>指标中心</span></div>
+<div class="sb-nav"><span class="ic">⇆</span><span>连接器</span></div>
+</div>
+</div>
+</div>
+<div class="chat-col">
+<div class="chat-head">
+<button class="toggle" onclick="tglL()" title="⌘B">☰</button>
+<span class="name" id="agentName">创意总监·陈墨</span>
+<span class="sep-dot">·</span><span class="role">单聊</span>
+<div class="spacer"></div>
+<button class="action">会议</button><button class="action">拉群</button><button class="action">轨迹</button>
+<button class="action" onclick="tglR()" title="⌘J">◈</button>
+</div>
+<div class="chat-body" id="chatBody">
+<div class="msg boss"><div class="content">竞品A刚发布新产品，帮我把定价策略对比一下。</div><div class="meta">14:02</div></div>
+<div class="msg agent"><div class="content">已完成竞品定价对比分析。<br>结论：我方定价低于竞品A 12%，但增值服务缺失导致转化率低 8%。<br>报告已生成交付件。</div><div class="meta">14:06 · web_search ×3 · 交付件 ×1</div></div>
+<div class="msg boss"><div class="content">让运营部把会员储值活动也跟进一下。</div><div class="meta">14:08</div></div>
+<div class="msg agent"><div class="content">已派发给运营专员·阿岚执行，同时我在跟进竞品动态。预计 2 小时内出方案初稿。</div><div class="meta">14:09 · 派发 → 阿岚</div></div>
+</div>
+<div class="chat-input-zone">
+<div class="chat-input-wrap">
+<textarea placeholder="说一句话，让 创意总监·陈墨 去做…" id="chatInput" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg()}"></textarea>
+<button class="send" onclick="sendMsg()">发送</button>
+</div>
+</div>
+</div>
+<div class="rp" id="rightPanel">
+<div class="rp-head">
+<div class="tab active" onclick="rpTab(this)">看板</div>
+<div class="tab" onclick="rpTab(this)">产出</div>
+<div class="tab" onclick="rpTab(this)">合规</div>
+<div class="spacer"></div>
+<button class="close" onclick="tglR()">✕</button>
+</div>
+<div class="rp-body">
+<div class="rp-sec">
+<div class="sec-title">经营指标</div>
+<div class="kpi-grid">
+<div class="kpi"><div class="k">月收入</div><div class="v green">¥86.4万</div><div class="delta up">↑12.4%</div></div>
+<div class="kpi"><div class="k">应收账龄</div><div class="v accent">¥23.1万</div></div>
+<div class="kpi"><div class="k">OEE</div><div class="v">87.3%</div><div class="delta up">↑2.1%</div></div>
+<div class="kpi"><div class="k">周转</div><div class="v">45 天</div></div>
+</div>
+</div>
+<div class="rp-sec">
+<div class="sec-title">正在执行</div>
+<div class="row"><span>竞品定价策略分析</span><span class="pill run">● 执行</span></div>
+<div class="row"><span>会员储值活动方案</span><span class="pill run">● 执行</span></div>
+<div class="row"><span>Q3 交付物归档</span><span class="pill ok">✓ 完成</span></div>
+</div>
+<div class="rp-sec">
+<div class="sec-title">合规预警</div>
+<div class="row"><span>特种设备定检</span><span class="pill warn">⚠ 30 天</span></div>
+<div class="row"><span>排污许可证</span><span class="pill ok">有效</span></div>
+</div>
+<div class="rp-sec">
+<div class="sec-title">Token · 本月</div>
+<div class="row"><span>Input</span><span class="v">1.2M</span></div>
+<div class="row"><span>Output</span><span class="v">840K</span></div>
+<div class="row"><span>Cost</span><span class="v accent">¥347.20</span></div>
+</div>
+</div>
+</div>
+<div class="restore" id="restoreL" onclick="tglL()">☰</div>
+<div class="restore" id="restoreR" onclick="tglR()">◈</div>
+<div class="statusbar">
+<span class="dot"></span><span>4 agents</span><span>200 · 12ms</span><span>SQLite 3MB</span>
+<div class="spacer"></div>
+<span class="key">⌘K</span><span class="key">⌘B</span><span class="key">⌘J</span><span>v6.1.0 · Harness Agent</span>
+</div>
+// ═══ 面板收展 ═══
+function tglL(){var e=document.getElementById("leftSidebar");e.classList.toggle("collapsed");document.getElementById("restoreL").classList.toggle("visible",e.classList.contains("collapsed"))}
+function tglR(){var e=document.getElementById("rightPanel");e.classList.toggle("collapsed");document.getElementById("restoreR").classList.toggle("visible",e.classList.contains("collapsed"))}
+function selAgent(e,n){document.querySelectorAll(".sb-agent").forEach(a=>a.classList.remove("active"));e.classList.add("active");var t=document.getElementById("agentName");t.textContent=n}
+function rpTab(e,n){document.querySelectorAll(".rp-head .tab").forEach(t=>t.classList.remove("active"));e.classList.add("active")}
+function sendMsg(){var e=document.getElementById("chatInput"),t=e.value.trim();if(!t)return;var n=document.getElementById("chatBody"),a=document.createElement("div");a.className="msg boss",a.innerHTML='<div class="content">'+t+'</div><div class="meta">刚刚</div>',n.appendChild(a),e.value="",n.scrollTop=n.scrollHeight}
+
+// ═══ 键盘快捷键 ═══
+document.addEventListener("keydown",(e)=>{(e.metaKey||e.ctrlKey)&&"b"===e.key&&(e.preventDefault(),tglL());(e.metaKey||e.ctrlKey)&&"j"===e.key&&(e.preventDefault(),tglR())})
+
+// ═══ 敏感查看门禁 ═══
+var _gateOpen=false
+function openGate(){var e=document.getElementById("gateOverlay");e.classList.remove("hidden");document.getElementById("gateReason").focus();_gateOpen=true}
+function closeGate(){document.getElementById("gateOverlay").classList.add("hidden");_gateOpen=false}
+function confirmView(){var e=document.getElementById("gateReason").value;if(e.trim().length>=5){closeGate();notify("已解锁查看（本次访问已留痕）")}}
+document.addEventListener("input",e=>{if(e.target.closest(".gate-box")){var t=document.getElementById("gateReason"),n=document.getElementById("gateTotp");if(t&&n){document.getElementById("gateConfirmBtn").disabled=!(t.value.trim().length>=5&&n.value.length===6)}}})
+
+// ═══ 通知 ═══
+function notify(e){var t=document.createElement("div");t.style.cssText="position:fixed;top:40px;right:16px;z-index:200;padding:8px 14px;border-radius:8px;background:var(--surface3);border:1px solid var(--border-l);font-size:12px;color:var(--text);",t.textContent=e,document.body.appendChild(t),setTimeout(()=>t.remove(),3e3)}
+
+// ═══ HMR / 热加载：双击顶栏 logo 重新加载 iframe ═══
+document.querySelector(".ab .logo").addEventListener("dblclick",()=>location.reload())
+</script>
+</body>
+</html>
