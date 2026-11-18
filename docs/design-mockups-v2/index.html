@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<title>AI-EOS 商务 UI 方案对比 V2 — 可交互设计稿</title>
+<style>
+:root { --bg:#0f172a; --surface:#1e293b; --border:rgba(148,163,184,.15); --text:#e2e8f0; --muted:#94a3b8; --accent:#38bdf8; --font:"Inter","PingFang SC",sans-serif; }
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:var(--font); font-size:14px; padding:40px; min-height:100vh; }
+h1 { font-size:22px; font-weight:700; margin-bottom:4px; }
+h1 .num { color:var(--accent); }
+.sub { color:var(--muted); font-size:13px; margin-bottom:32px; }
+.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:20px; }
+.card { background:var(--surface); border:1px solid var(--border); border-radius:14px; overflow:hidden; text-decoration:none; color:var(--text); display:block; transition:transform .15s,box-shadow .15s; }
+.card:hover { transform:translateY(-3px); box-shadow:0 12px 40px rgba(56,189,248,.12); border-color:rgba(56,189,248,.3); }
+.card .preview { height:240px; overflow:hidden; position:relative; border-bottom:1px solid var(--border); }
+.card .preview iframe { width:1280px; height:480px; border:none; transform:scale(0.5); transform-origin:top left; pointer-events:none; }
+.card .info { padding:16px 18px; }
+.card .num { font-size:10px; font-weight:700; color:var(--accent); letter-spacing:2px; text-transform:uppercase; }
+.card .name { font-size:16px; font-weight:700; margin-top:4px; }
+.card .desc { font-size:12px; color:var(--muted); margin-top:6px; line-height:1.5; }
+.card .tags { display:flex; flex-wrap:wrap; gap:4px; margin-top:10px; }
+.card .tag { font-size:10px; padding:2px 8px; border-radius:4px; background:rgba(148,163,184,.1); color:var(--muted); }
+.card .open { display:inline-block; margin-top:12px; padding:6px 16px; border-radius:6px; background:var(--accent); color:var(--bg); font-size:12px; font-weight:600; text-decoration:none; }
+.note { margin-top:32px; padding:16px 20px; border-radius:10px; border:1px solid var(--border); background:var(--surface); font-size:12px; color:var(--muted); line-height:1.6; }
+.note strong { color:var(--text); }
+.card .interactions { display:flex; flex-wrap:wrap; gap:4px; margin-top:10px; }
+.card .interaction {
+  font-size:10px; padding:2px 8px; border-radius:4px;
+  background:rgba(56,189,248,.08); color:var(--accent);
+}
+</style>
+</head>
+<body>
+
+<h1>AI-EOS <span class="num">V2</span> 商务 UI 方案对比</h1>
+<p class="sub">
+  5 套可交互设计稿——每套都有真实交互：侧栏收展、员工切换、页签、hover 反馈。
+  点击卡片打开独立页面体验。
+</p>
+
+<div class="grid">
+  <a class="card" href="scheme-1-command-deck.html" target="_blank">
+    <div class="preview"><iframe src="scheme-1-command-deck.html" tabindex="-1"></iframe></div>
+    <div class="info">
+      <div class="num">SCHEME 01</div>
+      <div class="name">Command Deck — 暗色操作台</div>
+      <div class="desc">
+        Vercel/Linear 级别的暗色打磨，每个像素都有信息量。
+        极致克制，适合重度使用者与技术团队。
+      </div>
+      <div class="interactions">
+        <span class="interaction">☰ 侧栏收展</span>
+        <span class="interaction">「切换员工</span>
+        <span class="interaction">» 面板收展</span>
+        <span class="interaction">◈ 页签</span>
+      </div>
+      <div class="tags"><span class="tag">暗色</span><span class="tag">Indigo 强调</span><span class="tag">高密度</span><span class="tag">Vercel 风</span></div>
+      <div class="open">打开预览 →</div>
+    </div>
+  </a>
+
+  <a class="card" href="scheme-2-fluent-os.html" target="_blank">
+    <div class="preview"><iframe src="scheme-2-fluent-os.html" tabindex="-1"></iframe></div>
+    <div class="info">
+      <div class="num">SCHEME 02</div>
+      <div class="name">Fluent OS — 流体玻璃感</div>
+      <div class="desc">
+        Arc Browser meets ChatGPT。深蓝渐变底 + 玻璃拟态面板 + 紫罗兰强调，
+        面板像水一样流动。最有个性的选择。
+      </div>
+      <div class="interactions">
+        <span class="interaction">☰ 侧栏收展</span>
+        <span class="interaction">「切换员工</span>
+        <span class="interaction">» 面板收展</span>
+        <span class="interaction">◈ 页签</span>
+      </div>
+      <div class="tags"><span class="tag">深色渐变</span><span class="tag">玻璃拟态</span><span class="tag">紫罗兰</span><span class="tag">Arc 风</span></div>
+      <div class="open">打开预览 →</div>
+    </div>
+  </a>
+
+  <a class="card" href="scheme-3-studio-pro.html" target="_blank">
+    <div class="preview"><iframe src="scheme-3-studio-pro.html" tabindex="-1"></iframe></div>
+    <div class="info">
+      <div class="num">SCHEME 03</div>
+      <div class="name">Studio Pro — 极简白底专业工具</div>
+      <div class="desc">
+        Figma/Notion 级别的极简白底。红色唯一强调，让内容本身成为视觉主角。
+        最干净、最不抢注意力。
+      </div>
+      <div class="interactions">
+        <span class="interaction">☰ 侧栏收展</span>
+        <span class="interaction">「切换员工</span>
+        <span class="interaction">» 面板收展</span>
+        <span class="interaction">◈ 页签</span>
+      </div>
+      <div class="tags"><span class="tag">纯白</span><span class="tag">红色强调</span><span class="tag">极简</span><span class="tag">Figma 风</span></div>
+      <div class="open">打开预览 →</div>
+    </div>
+  </a>
+
+  <a class="card" href="scheme-4-mission-control.html" target="_blank">
+    <div class="preview"><iframe src="scheme-4-mission-control.html" tabindex="-1"></iframe></div>
+    <div class="info">
+      <div class="num">SCHEME 04</div>
+      <div class="name">Mission Control — 大屏指挥感</div>
+      <div class="desc">
+        SpaceX 任务控制台风格。极深蓝黑底 + 蓝色轨道环头像 + 发光状态灯，
+        适合需要"一屏掌控全局"的 CEO。
+      </div>
+      <div class="interactions">
+        <span class="interaction">☰ 侧栏收展</span>
+        <span class="interaction">「切换员工</span>
+        <span class="interaction">» 面板收展</span>
+        <span class="interaction">◈ 页签</span>
+      </div>
+      <div class="tags"><span class="tag">极深蓝</span><span class="tag">蓝色强调</span><span class="tag">指挥台</span><span class="tag">SpaceX 风</span></div>
+      <div class="open">打开预览 →</div>
+    </div>
+  </a>
+
+  <a class="card" href="scheme-5-atelier.html" target="_blank">
+    <div class="preview"><iframe src="scheme-5-atelier.html" tabindex="-1"></iframe></div>
+    <div class="info">
+      <div class="num">SCHEME 05</div>
+      <div class="name">Atelier — 暖色编辑感</div>
+      <div class="desc">
+        法国建筑事务所/高端品牌官网。暖白米色底、深橙强调、衬线标题，
+        像翻一本精装杂志。最不像"工具"，最像"作品"。
+      </div>
+      <div class="interactions">
+        <span class="interaction">☰ 侧栏收展</span>
+        <span class="interaction">「切换员工</span>
+        <span class="interaction">» 面板收展</span>
+        <span class="interaction">◈ 页签</span>
+      </div>
+      <div class="tags"><span class="tag">暖白</span><span class="tag">橙色强调</span><span class="tag">衬线</span><span class="tag">杂志感</span></div>
+      <div class="open">打开预览 →</div>
+    </div>
+  </a>
+</div>
+
+<div class="note">
+  <strong>每套的交互都一样：</strong>左栏收展 / Agent 切换 / 右栏面板页签 / hover 反馈 / 聊天输入。
+  区别只在视觉语言。<br><br>
+  <strong>如何选：</strong>打开每一套，实际点一下侧栏收展、切一下员工、切一下右栏页签——
+  感受哪种交互手感最舒服。选定后我把整套设计系统落到全部 47 个前端页面。<br><br>
+  <strong>我的推荐：</strong>如果你要「商务感最强」选 <strong>② Fluent OS</strong>（玻璃拟态最有品质感），
+  如果你要「信息密度最高」选 <strong>① Command Deck</strong>，
+  如果你要「最不像工具」选 <strong>⑤ Atelier</strong>。
+</div>
+
+</body>
+</html>

@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>① Command Deck — 暗色操作台</title>
+<style>
+/* ═══════════════════════════════════════════════════════════════
+   ① Command Deck — 暗色操作台
+   每个像素都有信息量 · 极致克制 · Vercel/Linear 级别的打磨
+   交互：左右侧栏收展 · Agent 切换 · 面板页签切换 · hover 反馈
+   ═══════════════════════════════════════════════════════════════ */
+:root {
+  --bg: #0a0a0c;
+  --surface: #111114;
+  --surface-2: #18181c;
+  --surface-3: #1e1e24;
+  --border: #232328;
+  --border-light: #2a2a30;
+  --text: #e8e8ea;
+  --text-hi: #ffffff;
+  --muted: #71717a;
+  --muted-2: #a1a1aa;
+  --accent: #6366f1;
+  --accent-hi: #818cf8;
+  --accent-dim: rgba(99,102,241,.1);
+  --accent-border: rgba(99,102,241,.25);
+  --green: #22c55e;
+  --green-dim: rgba(34,197,94,.1);
+  --amber: #f59e0b;
+  --amber-dim: rgba(245,158,11,.1);
+  --red: #ef4444;
+  --font: "Inter", -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --mono: "JetBrains Mono", "SF Mono", Menlo, monospace;
+  --radius: 8px;
+  --transition: .18s cubic-bezier(.4,0,.2,1);
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background: var(--bg); color: var(--text); font-family: var(--font);
+  font-size: 13px; min-height: 100vh; display: flex; flex-direction: column;
+  -webkit-font-smoothing: antialiased;
+}
+button { font-family: var(--font); border: none; background: none; color: inherit; cursor: pointer; }
+input, textarea { font-family: var(--font); }
+
+/* ═══ 顶栏 ═══ */
+.topbar {
+  height: 40px; display: flex; align-items: center; padding: 0 12px;
+  border-bottom: 1px solid var(--border); gap: 8px; flex-shrink: 0;
+  background: var(--surface);
+  user-select: none;
+}
+.topbar .logo { font-weight: 700; font-size: 13px; letter-spacing: -.3px; display: flex; align-items: center; gap: 6px; }
+.topbar .logo .mark { color: var(--accent-hi); font-size: 15px; }
+.topbar .logo .ver { font-size: 9px; color: var(--muted); font-family: var(--mono); }
+.topbar .sep { width: 1px; height: 16px; background: var(--border); }
+.topbar .crumb { font-size: 12px; color: var(--muted); }
+.topbar .crumb strong { color: var(--text-hi); font-weight: 500; }
+.topbar .spacer { flex: 1; }
+.topbar .stat { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.topbar .stat .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); }
+.topbar .avatar {
+  width: 22px; height: 22px; border-radius: 6px; background: var(--accent-dim);
+  border: 1px solid var(--accent-border);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; font-weight: 700; color: var(--accent-hi);
+}
+
+/* ═══ 布局 ═══ */
+.layout { display: flex; flex: 1; min-height: 0; transition: none; }
+
+/* ═══ 左栏 ═══ */
+.sidebar {
+  width: 220px; border-right: 1px solid var(--border); background: var(--surface);
+  display: flex; flex-direction: column; flex-shrink: 0;
+  transition: width var(--transition), opacity var(--transition);
+  overflow: hidden;
+}
+.sidebar.collapsed { width: 0; opacity: 0; pointer-events: none; }
+.sidebar .search {
+  margin: 10px 10px 6px; padding: 6px 10px; border-radius: var(--radius);
+  background: var(--surface-2); border: 1px solid var(--border);
+  font-size: 12px; color: var(--muted); width: calc(100% - 20px);
+}
+.sidebar .search:focus { outline: none; border-color: var(--accent-border); color: var(--text); }
+.sidebar .section { padding: 12px 10px 4px; font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+.sidebar .agent {
+  margin: 1px 8px; padding: 6px 8px; border-radius: var(--radius);
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  border: 1px solid transparent; transition: all var(--transition);
+}
+.sidebar .agent:hover { background: var(--surface-2); }
+.sidebar .agent.active { background: var(--accent-dim); border-color: var(--accent-border); }
+.sidebar .agent .av {
+  width: 28px; height: 28px; border-radius: 7px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700;
+}
+.sidebar .agent .info { flex: 1; min-width: 0; }
+.sidebar .agent .info .name { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sidebar .agent .info .role { font-size: 10px; color: var(--muted); }
+.sidebar .agent .ind { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.sidebar .capability {
+  margin: 1px 8px; padding: 5px 8px; border-radius: 6px; cursor: pointer;
+  font-size: 12px; color: var(--muted); transition: all var(--transition);
+  display: flex; align-items: center; gap: 6px;
+}
+.sidebar .capability:hover { background: var(--surface-2); color: var(--text); }
+.sidebar .capability .ic { width: 16px; text-align: center; font-size: 13px; }
+
+/* ═══ 中栏 ═══ */
+.chat-area {
+  flex: 1; display: flex; flex-direction: column; min-width: 0;
+  border-right: 1px solid var(--border); background: var(--bg);
+}
+.chat-head {
+  height: 40px; display: flex; align-items: center; padding: 0 14px;
+  border-bottom: 1px solid var(--border); gap: 6px; flex-shrink: 0;
+  background: var(--surface);
+}
+.chat-head .toggle {
+  width: 26px; height: 26px; border-radius: 6px; display: flex;
+  align-items: center; justify-content: center; cursor: pointer;
+  color: var(--muted); font-size: 14px; transition: all var(--transition);
+  border: 1px solid transparent;
+}
+.chat-head .toggle:hover { background: var(--surface-2); color: var(--text); border-color: var(--border); }
+.chat-head .name { font-weight: 600; font-size: 13px; }
+.chat-head .tag { font-size: 10px; color: var(--muted); }
+.chat-head .actions { margin-left: auto; display: flex; gap: 2px; }
+.chat-head .actions button {
+  padding: 4px 10px; border-radius: 5px; font-size: 11px; color: var(--muted);
+  transition: all var(--transition);
+}
+.chat-head .actions button:hover { color: var(--text); background: var(--surface-2); }
+
+.chat-body { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+.msg { max-width: 72%; display: flex; gap: 8px; }
+.msg.boss { align-self: flex-end; flex-direction: row-reverse; }
+.msg .content { padding: 8px 12px; border-radius: var(--radius); line-height: 1.55; font-size: 13px; }
+.msg.agent .content { background: var(--surface-2); border: 1px solid var(--border); }
+.msg.boss .content { background: var(--accent-dim); border: 1px solid var(--accent-border); }
+.msg .meta { font-size: 10px; color: var(--muted); margin-top: 3px; font-family: var(--mono); }
+
+.chat-input-zone { padding: 10px 14px; border-top: 1px solid var(--border); background: var(--surface); }
+.chat-input-wrap {
+  display: flex; gap: 6px; align-items: flex-end;
+}
+.chat-input-wrap textarea {
+  flex: 1; background: var(--surface-2); border: 1px solid var(--border);
+  color: var(--text); padding: 9px 12px; border-radius: var(--radius);
+  font-size: 13px; resize: none; height: 40px;
+  transition: border-color var(--transition);
+}
+.chat-input-wrap textarea:focus { outline: none; border-color: var(--accent-border); }
+.chat-input-wrap .send {
+  background: var(--accent); color: white; padding: 9px 14px; border-radius: var(--radius);
+  font-weight: 600; font-size: 12px; transition: all var(--transition);
+}
+.chat-input-wrap .send:hover { background: var(--accent-hi); }
+
+/* ═══ 右栏 ═══ */
+.right-panel {
+  width: 300px; border-left: 1px solid var(--border); background: var(--surface);
+  display: flex; flex-direction: column; flex-shrink: 0;
+  transition: width var(--transition), opacity var(--transition);
+  overflow: hidden;
+}
+.right-panel.collapsed { width: 0; opacity: 0; pointer-events: none; }
+.right-panel .rp-head {
+  height: 40px; display: flex; align-items: center; padding: 0 12px;
+  border-bottom: 1px solid var(--border); gap: 4px; flex-shrink: 0;
+}
+.right-panel .rp-head .rp-tab {
+  padding: 4px 10px; border-radius: 5px; font-size: 11px; color: var(--muted);
+  cursor: pointer; transition: all var(--transition);
+}
+.right-panel .rp-head .rp-tab:hover { color: var(--text); }
+.right-panel .rp-head .rp-tab.active { background: var(--accent-dim); color: var(--accent-hi); }
+.right-panel .rp-head .spacer { flex: 1; }
+.right-panel .rp-head .close { font-size: 13px; color: var(--muted); cursor: pointer; padding: 2px 6px; border-radius: 4px; }
+.right-panel .rp-head .close:hover { color: var(--text); background: var(--surface-2); }
+
+.rp-body { flex: 1; overflow-y: auto; }
+.rp-body .rp-section { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.rp-body .rp-section:last-child { border-bottom: none; }
+.rp-body .rp-title { font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+.rp-body .kpi-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.rp-body .kpi {
+  background: var(--surface-2); border-radius: var(--radius); padding: 10px 12px;
+  border: 1px solid var(--border);
+}
+.rp-body .kpi .k { font-size: 10px; color: var(--muted); }
+.rp-body .kpi .v { font-family: var(--mono); font-size: 17px; font-weight: 700; margin-top: 2px; }
+.rp-body .kpi .v.green { color: var(--green); }
+.rp-body .kpi .v.accent { color: var(--accent-hi); }
+.rp-body .kpi .delta { font-size: 10px; margin-top: 1px; }
+.rp-body .kpi .delta.up { color: var(--green); }
+.rp-body .list-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 5px 0; font-size: 12px; border-bottom: 1px solid var(--border-light);
+}
+.rp-body .list-item:last-child { border-bottom: none; }
+.rp-body .pill {
+  display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px;
+  border-radius: 10px; font-size: 10px; font-weight: 500;
+}
+.rp-body .pill.run { color: var(--accent-hi); background: var(--accent-dim); }
+.rp-body .pill.ok { color: var(--green); background: var(--green-dim); }
+.rp-body .pill.warn { color: var(--amber); background: var(--amber-dim); }
+
+/* 状态栏 */
+.statusbar {
+  height: 22px; display: flex; align-items: center; padding: 0 12px;
+  border-top: 1px solid var(--border); font-size: 10px; color: var(--muted);
+  gap: 12px; flex-shrink: 0; background: var(--surface); font-family: var(--mono);
+}
+.statusbar .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); }
+
+/* 恢复按钮 */
+.restore-btn {
+  position: fixed; top: 44px; width: 24px; height: 40px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface); border: 1px solid var(--border);
+  cursor: pointer; z-index: 10; color: var(--muted); font-size: 12px;
+  border-radius: 0 6px 6px 0; transition: all var(--transition);
+  opacity: 0; pointer-events: none;
+}
+.restore-btn.visible { opacity: 1; pointer-events: auto; }
+.restore-btn:hover { color: var(--text); background: var(--surface-2); }
+#restoreLeft { left: 0; border-left: none; }
+#restoreRight { right: 0; border-right: none; border-radius: 6px 0 0 6px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="logo"><span class="mark">⚡</span> AI-EOS <span class="ver">v6.1</span></div>
+  <div class="sep"></div>
+  <div class="crumb">工作台 / <strong>创意总监·陈墨</strong></div>
+  <div class="spacer"></div>
+  <div class="stat"><span class="dot"></span> 4 agents</div>
+  <div class="stat">200 · 12ms</div>
+  <div class="avatar">BO</div>
+</div>
+
+<div class="layout">
+  <!-- 左栏 -->
+  <div class="sidebar" id="leftSidebar">
+    <input class="search" placeholder="搜索员工、页面…" onfocus="this.placeholder=''" onblur="this.placeholder='搜索员工、页面…'"/>
+    <div class="section">数字员工 · 4</div>
+    <div class="agent active" onclick="selectAgent(this,'创意总监·陈墨')">
+      <div class="av" style="background:var(--accent-dim);color:var(--accent-hi);">陈</div>
+      <div class="info"><div class="name">创意总监·陈墨</div><div class="role">创意部</div></div>
+      <div class="ind" style="background:var(--amber);"></div>
+    </div>
+    <div class="agent" onclick="selectAgent(this,'文案策划·林小满')">
+      <div class="av" style="background:var(--green-dim);color:var(--green);">林</div>
+      <div class="info"><div class="name">文案策划·林小满</div><div class="role">创意部</div></div>
+      <div class="ind" style="background:var(--green);"></div>
+    </div>
+    <div class="agent" onclick="selectAgent(this,'视觉设计师·顾小舟')">
+      <div class="av" style="background:rgba(167,139,250,.1);color:#a78bfa;">顾</div>
+      <div class="info"><div class="name">视觉设计师·顾小舟</div><div class="role">创意部</div></div>
+      <div class="ind" style="background:var(--green);"></div>
+    </div>
+    <div class="agent" onclick="selectAgent(this,'运营专员·阿岚')">
+      <div class="av" style="background:var(--amber-dim);color:var(--amber);">阿</div>
+      <div class="info"><div class="name">运营专员·阿岚</div><div class="role">运营部</div></div>
+      <div class="ind" style="background:var(--green);"></div>
+    </div>
+    <div class="section">基座能力</div>
+    <div class="capability"><span class="ic">▦</span> 行业中心</div>
+    <div class="capability"><span class="ic">⌗</span> 基座市场</div>
+    <div class="capability"><span class="ic">🔐</span> 超级管理后台</div>
+    <div class="capability"><span class="ic">📋</span> 系统日志</div>
+  </div>
+
+  <!-- 中栏 -->
+  <div class="chat-area">
+    <div class="chat-head">
+      <button class="toggle" onclick="toggleLeft()" title="展开/收起左栏">☰</button>
+      <span class="name" id="chatName">创意总监·陈墨</span>
+      <span class="tag" style="font-size:10px;color:var(--muted);">单聊</span>
+      <div class="actions">
+        <button>会议</button><button>拉群</button><button>轨迹</button><button>审批</button>
+      </div>
+      <button class="toggle" style="margin-left:auto" onclick="toggleRight()" title="收起右栏">»
+
+      </button>
+    </div>
+    <div class="chat-body" id="chatBody">
+      <div class="msg boss"><div class="content">竞品A刚发布新产品，帮我把定价策略对比一下。</div><div class="meta">14:02</div></div>
+      <div class="msg agent"><div class="content">已完成竞品定价对比分析。<br/>结论：我方定价低于竞品A 12%，但增值服务缺失导致转化率低 8%。<br/>报告已生成交付件，可在右侧「产出」查看。</div><div class="meta">14:06 · web_search ×3 · 交付件 ×1</div></div>
+      <div class="msg boss"><div class="content">让运营部把会员储值活动也跟进一下。</div><div class="meta">14:08</div></div>
+      <div class="msg agent"><div class="content">已派发给运营专员·阿岚执行，同时我在跟进竞品动态。<br/>预计 2 小时内出方案初稿。</div><div class="meta">14:09 · 派发 → 阿岚</div></div>
+    </div>
+    <div class="chat-input-zone">
+      <div class="chat-input-wrap">
+        <textarea placeholder="说一句话，让 创意总监·陈墨 去做…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();addMsg();}"></textarea>
+        <button class="send" onclick="addMsg()">发送</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右栏 -->
+  <div class="right-panel" id="rightPanel">
+    <div class="rp-head">
+      <div class="rp-tab active" onclick="switchPanel(this,'board')">看板</div>
+      <div class="rp-tab" onclick="switchPanel(this,'output')">产出</div>
+      <div class="rp-tab" onclick="switchPanel(this,'compliance')">合规</div>
+      <div class="spacer"></div>
+      <span class="close" onclick="toggleRight()">✕</span>
+    </div>
+    <div class="rp-body">
+      <div class="rp-section">
+        <div class="rp-title">经营指标</div>
+        <div class="kpi-row">
+          <div class="kpi"><div class="k">月收入</div><div class="v green">¥86.4万</div><div class="delta up">↑12.4%</div></div>
+          <div class="kpi"><div class="k">应收账龄</div><div class="v accent">¥23.1万</div></div>
+          <div class="kpi"><div class="k">OEE</div><div class="v">87.3%</div><div class="delta up">↑2.1%</div></div>
+          <div class="kpi"><div class="k">周转</div><div class="v">45 天</div></div>
+        </div>
+      </div>
+      <div class="rp-section">
+        <div class="rp-title">正在执行</div>
+        <div class="list-item"><span>竞品定价策略分析</span><span class="pill run">● 执行</span></div>
+        <div class="list-item"><span>会员储值活动方案</span><span class="pill run">● 执行</span></div>
+        <div class="list-item"><span>Q3 交付物归档</span><span class="pill ok">✓ 完成</span></div>
+      </div>
+      <div class="rp-section">
+        <div class="rp-title">合规预警</div>
+        <div class="list-item"><span>特种设备定检</span><span class="pill warn">⚠ 30 天</span></div>
+        <div class="list-item"><span>排污许可证</span><span class="pill ok">有效</span></div>
+      </div>
+      <div class="rp-section">
+        <div class="rp-title">Token · 本月</div>
+        <div class="list-item"><span>Input</span><span class="pill">1.2M</span></div>
+        <div class="list-item"><span>Cost</span><span class="pill" style="color:var(--accent-hi)">¥347.20</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="statusbar">
+  <span class="dot"></span>
+  <span>4 agents</span>
+  <span>200 · 12ms</span>
+  <span>SQLite 3MB</span>
+  <span style="margin-left:auto">v6.1.0 · Command Deck</span>
+</div>
+
+<!-- 恢复按钮 -->
+<div class="restore-btn" id="restoreLeft" onclick="restoreLeft()">☰</div>
+<div class="restore-btn" id="restoreRight" onclick="restoreRight()">◀</div>
+
+<script>
+function toggleLeft() {
+  document.getElementById('leftSidebar').classList.toggle('collapsed');
+  document.getElementById('restoreLeft').classList.toggle('visible',
+    document.getElementById('leftSidebar').classList.contains('collapsed'));
+}
+function toggleRight() {
+  document.getElementById('rightPanel').classList.toggle('collapsed');
+  document.getElementById('restoreRight').classList.toggle('visible',
+    document.getElementById('rightPanel').classList.contains('collapsed'));
+}
+function restoreLeft() { toggleLeft(); }
+function restoreRight() { toggleRight(); }
+function switchPanel(el, name) {
+  document.querySelectorAll('.rp-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+}
+function selectAgent(el, name) {
+  document.querySelectorAll('.sidebar .agent').forEach(a => a.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('chatName').textContent = name;
+}
+function addMsg() {
+  const ta = document.querySelector('.chat-input-wrap textarea');
+  const text = ta.value.trim();
+  if (!text) return;
+  const body = document.getElementById('chatBody');
+  const div = document.createElement('div');
+  div.className = 'msg boss';
+  div.innerHTML = '<div class="content">' + text + '</div><div class="meta">刚刚</div>';
+  body.appendChild(div);
+  ta.value = '';
+  body.scrollTop = body.scrollHeight;
+}
+</script>
+
+</body>
+</html>

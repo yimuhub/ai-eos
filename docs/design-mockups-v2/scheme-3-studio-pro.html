@@ -1,0 +1,110 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"/><title>③ Studio Pro</title>
+<style>
+:root { --bg:#fff; --surface:#fafafa; --border:#e5e5e5; --border-l:#f0f0f0; --text:#1a1a1a; --muted:#999; --accent:#e5484d; --accent-dim:rgba(229,72,77,.06); --green:#30a46c; --font:"Inter","PingFang SC",sans-serif; --mono:"SF Mono",Menlo,monospace; --r:8px; }
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:var(--font); font-size:13px; min-height:100vh; display:flex; flex-direction:column; letter-spacing:-.01em; }
+button { font-family:var(--font); border:none; background:none; color:inherit; cursor:pointer; }
+.topbar { height:40px; border-bottom:1px solid var(--border-l); display:flex; align-items:center; padding:0 14px; gap:10px; }
+.topbar .logo { font-weight:700; font-size:13px; letter-spacing:-.5px; }
+.topbar .logo .dot { color:var(--accent); }
+.topbar .sep { width:1px; height:14px; background:var(--border); }
+.topbar .item { font-size:12px; color:var(--muted); cursor:pointer; padding:2px 6px; border-radius:4px; transition:all .15s; }
+.topbar .item:hover { color:var(--text); background:var(--surface); }
+.topbar .spacer { flex:1; }
+.topbar .key { font-family:var(--mono); font-size:10px; color:var(--muted); background:var(--surface); padding:2px 6px; border-radius:3px; border:1px solid var(--border); }
+.layout { display:flex; flex:1; min-height:0; }
+.sidebar { width:200px; border-right:1px solid var(--border-l); display:flex; flex-direction:column; flex-shrink:0; padding:8px; transition:width .2s,opacity .2s; overflow:hidden; }
+.sidebar.collapsed { width:0; opacity:0; pointer-events:none; }
+.sidebar .section { padding:10px 8px 4px; font-size:10px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:1px; }
+.sidebar .agent { display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:6px; cursor:pointer; margin-bottom:1px; border:1px solid transparent; transition:all .15s; }
+.sidebar .agent:hover { background:var(--surface); }
+.sidebar .agent.active { background:var(--accent-dim); }
+.sidebar .agent .ind { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+.sidebar .agent .info .name { font-size:13px; font-weight:500; }
+.sidebar .agent .info .role { font-size:11px; color:var(--muted); }
+.sidebar .capability { display:flex; align-items:center; gap:8px; padding:6px 8px; border-radius:6px; font-size:12px; color:var(--muted); cursor:pointer; margin-bottom:1px; transition:all .15s; }
+.sidebar .capability:hover { background:var(--surface); color:var(--text); }
+.chat-area { flex:1; display:flex; flex-direction:column; min-width:0; }
+.chat-head { height:40px; display:flex; align-items:center; padding:0 14px; border-bottom:1px solid var(--border-l); gap:6px; }
+.chat-head .name { font-weight:600; font-size:14px; }
+.chat-head .sep { color:var(--border); }
+.chat-head .role { font-size:12px; color:var(--muted); }
+.chat-head .actions { margin-left:auto; display:flex; gap:4px; }
+.chat-head .actions button { border:none; background:transparent; color:var(--muted); padding:4px 8px; border-radius:4px; font-size:12px; cursor:pointer; transition:all .15s; }
+.chat-head .actions button:hover { color:var(--text); background:var(--surface); }
+.chat-body { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+.msg { max-width:75%; }
+.msg.boss { align-self:flex-end; }
+.msg .content { padding:8px 12px; border-radius:8px; line-height:1.5; font-size:13px; }
+.msg.agent .content { background:var(--surface); border:1px solid var(--border-l); }
+.msg.boss .content { background:var(--accent); color:white; }
+.msg .meta { font-size:10px; color:var(--muted); margin-top:3px; }
+.msg.agent .meta { text-align:left; }
+.msg.boss .meta { text-align:right; }
+.chat-input-zone { padding:10px 16px; border-top:1px solid var(--border-l); display:flex; gap:8px; }
+.chat-input-zone textarea { flex:1; border:1px solid var(--border); border-radius:6px; padding:9px 12px; font-family:var(--font); font-size:13px; resize:none; height:40px; color:var(--text); background:var(--bg); }
+.chat-input-zone textarea:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-dim); }
+.chat-input-zone .send { background:var(--text); color:white; border:none; padding:9px 16px; border-radius:6px; font-weight:500; font-size:13px; cursor:pointer; }
+.right-panel { width:320px; border-left:1px solid var(--border-l); display:flex; flex-direction:column; flex-shrink:0; transition:width .2s,opacity .2s; overflow:hidden; }
+.right-panel.collapsed { width:0; opacity:0; pointer-events:none; }
+.rp-head { height:40px; display:flex; align-items:center; padding:0 14px; border-bottom:1px solid var(--border-l); gap:4px; }
+.rp-head .tab { padding:4px 10px; border-radius:5px; font-size:11px; color:var(--muted); cursor:pointer; transition:all .15s; }
+.rp-head .tab:hover { color:var(--text); }
+.rp-head .tab.active { background:var(--accent-dim); color:var(--accent); }
+.rp-head .spacer { flex:1; }
+.rp-head .close { color:var(--muted); cursor:pointer; font-size:13px; padding:2px 6px; border-radius:4px; }
+.rp-head .close:hover { color:var(--text); background:var(--surface); }
+.rp-body { flex:1; overflow-y:auto; }
+.rp-section { padding:12px 14px; border-bottom:1px solid var(--border-l); }
+.rp-section .title { font-size:10px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; }
+.rp-section .row { display:flex; justify-content:space-between; align-items:center; padding:5px 0; font-size:13px; }
+.rp-section .row .v { font-family:var(--mono); font-weight:500; }
+.rp-section .row .v.green { color:var(--green); }
+.rp-section .row .v.red { color:var(--accent); }
+.rp-section .divider { height:1px; background:var(--border-l); margin:6px 0; }
+.statusbar { height:22px; display:flex; align-items:center; padding:0 12px; border-top:1px solid var(--border-l); font-size:10px; color:var(--muted); gap:12px; font-family:var(--mono); }
+.restore-btn { position:fixed; top:40px; width:24px; height:40px; display:flex; align-items:center; justify-content:center; background:var(--bg); border:1px solid var(--border-l); cursor:pointer; z-index:10; color:var(--muted); opacity:0; pointer-events:none; transition:all .15s; }
+.restore-btn.visible { opacity:1; pointer-events:auto; }
+.restore-btn:hover { color:var(--text); background:var(--surface); }
+#rl { left:0; border-left:none; }
+#rr { right:0; border-right:none; }
+</style>
+</head><body>
+<div class="topbar"><div class="logo">AI-EOS<span class="dot">.</span></div><div class="sep"></div><span class="item">工作台</span><span class="item">团队</span><span class="item">日志</span><div class="spacer"></div><span class="key">⌘K</span></div>
+<div class="layout">
+<div class="sidebar" id="leftSidebar">
+<div class="section">数字员工</div>
+<div class="agent active"><div class="ind" style="background:var(--accent);"></div><div class="info"><div class="name">创意总监·陈墨</div><div class="role">创意部</div></div></div>
+<div class="agent"><div class="ind" style="background:var(--green);"></div><div class="info"><div class="name">文案策划·林小满</div><div class="role">创意部</div></div></div>
+<div class="agent"><div class="ind" style="background:var(--green);"></div><div class="info"><div class="name">视觉设计师·顾小舟</div><div class="role">创意部</div></div></div>
+<div class="section">基座</div>
+<div class="capability"><span>▦</span> 行业中心</div>
+<div class="capability"><span>⌗</span> 基座市场</div>
+<div class="capability"><span>📋</span> 系统日志</div>
+</div>
+<div class="chat-area">
+<div class="chat-head"><span class="name">创意总监·陈墨</span><span class="sep">·</span><span class="role">单聊</span><div class="actions"><button>会议</button><button>轨迹</button><button>审批</button></div><button class="toggle" style="margin-left:auto" onclick="tglR()">»</button></div>
+<div class="chat-body">
+<div class="msg boss"><div class="content">竞品A刚发布新产品，帮我把定价策略对比一下。</div><div class="meta">14:02</div></div>
+<div class="msg agent"><div class="content">已完成竞品定价对比，我方定价低于竞品A 12%，但增值服务缺失导致转化率低 8%。报告已生成交付件。</div><div class="meta">14:06 · web_search ×3</div></div>
+<div class="msg boss"><div class="content">让运营部把会员储值活动也跟进一下。</div><div class="meta">14:08</div></div>
+</div>
+<div class="chat-input-zone"><textarea placeholder="说一句话…"></textarea><button class="send">发送</button></div>
+</div>
+<div class="right-panel" id="rightPanel">
+<div class="rp-head"><div class="tab active">看板</div><div class="tab">产出</div><div class="tab">合规</div><div class="spacer"></div><span class="close" onclick="tglR()">✕</span></div>
+<div class="rp-body">
+<div class="rp-section"><div class="title">收入</div><div class="row"><span>月度收入</span><span class="v green">¥864K</span></div><div class="row"><span>应收账龄</span><span class="v">¥231K</span></div><div class="divider"></div><div class="title">效率</div><div class="row"><span>设备 OEE</span><span class="v">87.3%</span></div><div class="row"><span>库存周转</span><span class="v">45 天</span></div></div>
+<div class="rp-section"><div class="title">执行中</div><div class="row"><span>竞品定价分析</span><span class="v red">●</span></div><div class="row"><span>会员储值活动</span><span class="v red">●</span></div></div>
+<div class="rp-section"><div class="title">Token · 本月</div><div class="row"><span>Input</span><span class="v">1.2M</span></div><div class="row"><span>Cost</span><span class="v">¥347</span></div></div>
+</div>
+</div>
+</div>
+<div class="statusbar"><span>4 agents</span><span>200 · 12ms</span><span>SQLite 3MB</span><span style="margin-left:auto">v6.1.0 · Studio Pro</span></div>
+<script>
+function tglL(){d.getElementById('leftSidebar').classList.toggle('collapsed')}
+function tglR(){d.getElementById('rightPanel').classList.toggle('collapsed')}
+function d(i){return document.getElementById(i)}
+function sel(el,n){document.querySelectorAll('.sidebar .agent').forEach(a=>a.classList.remove('active'));el.classList.add('active')}
+</script>
+</body></html>
