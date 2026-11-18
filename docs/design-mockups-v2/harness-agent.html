@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>AI-EOS · Harness Agent</title>
+<style>
+:root{--bg:#0d0d0f;--surface:#131316;--surface2:#18181b;--surface3:#1e1e23;--border:#26262b;--border-l:#2e2e34;--text:#ececee;--text-hi:#ffffff;--muted:#6b6b74;--muted2:#9e9ea6;--accent:#7c6ef6;--accent-hi:#9589f8;--accent-dim:rgba(124,110,246,.08);--accent-border:rgba(124,110,246,.22);--green:#34d399;--green-dim:rgba(52,211,153,.08);--amber:#fbbf24;--amber-dim:rgba(251,191,36,.08);--red:#f87171;--cyan:#22d3ee;--font:"Inter",-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;--mono:"JetBrains Mono","SF Mono",Menlo,monospace;--r:8px;--r-lg:12px;--dur:.2s;--ease:cubic-bezier(.4,0,.2,1)}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13px;min-height:100vh;display:flex;flex-direction:column;-webkit-font-smoothing:antialiased;overflow:hidden}
+button{font-family:var(--font);border:none;background:none;color:inherit;cursor:pointer;font-size:inherit}
+input,textarea{font-family:var(--font)}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--border-light)}
+::-webkit-scrollbar-track{background:transparent}
+.topbar{height:36px;display:flex;align-items:center;padding:0 10px;border-bottom:1px solid var(--border);gap:6px;flex-shrink:0;background:var(--surface);user-select:none}
+.topbar .logo{display:flex;align-items:center;gap:5px;font-weight:700;font-size:12px}
+.topbar .logo .mark{color:var(--accent-hi);font-size:14px}
+.topbar .logo .ver{font-size:9px;color:var(--muted);font-family:var(--mono);font-weight:400}
+.topbar .sep{width:1px;height:14px;background:var(--border)}
+.topbar .nav-btn{padding:3px 8px;border-radius:5px;font-size:12px;color:var(--muted);transition:all .15s var(--ease)}
+.topbar .nav-btn:hover{color:var(--text-hi);background:var(--surface-2)}
+.topbar .nav-btn.active{color:var(--text-hi);background:var(--surface-3)}
+.topbar .spacer{flex:1}
+.topbar .search-box{display:flex;align-items:center;gap:4px;background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:11px;color:var(--muted);cursor:pointer;transition:all .15s;min-width:160px}
+.topbar .search-box:hover{border-color:var(--border-light)}
+.topbar .search-box .key{font-family:var(--mono);font-size:9px;margin-left:auto}
+.topbar .avatar{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,var(--accent),#4f46e5);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:white}
+.layout{display:flex;flex:1;min-height:0;position:relative}
+.left-sidebar{width:228px;min-width:228px;border-right:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;flex-shrink:0;transition:width .22s var(--ease),opacity .15s var(--ease),min-width .22s var(--ease);overflow:hidden}
+.left-sidebar.collapsed{width:0;min-width:0;opacity:0;pointer-events:none;border-right:none}
+.ls-search{margin:8px 10px 4px;padding:5px 10px;border-radius:var(--r);background:var(--surface-2);border:1px solid var(--border);font-size:12px;color:var(--muted);width:calc(100% - 20px);transition:border-color .15s}
+.ls-search:focus{outline:none;border-color:var(--accent-border);color:var(--text)}
+.ls-search::placeholder{color:var(--muted)}
+.ls-section{padding:10px 10px 4px;font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:1.2px;user-select:none}
+.ls-agent{margin:1px 8px;padding:5px 8px;border-radius:var(--r);display:flex;align-items:center;gap:8px;cursor:pointer;border:1px solid transparent;transition:all .12s var(--ease);user-select:none}
+.ls-agent:hover{background:var(--surface-2)}
+.ls-agent.active{background:var(--accent-dim);border-color:var(--accent-border)}
+.ls-agent .av{width:26px;height:26px;border-radius:7px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;transition:all .12s}
+.ls-agent .info{flex:1;min-width:0}
+.ls-agent .info .name{font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ls-agent .info .role{font-size:10px;color:var(--muted)}
+.ls-agent .ind{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+.ls-cap{margin:1px 8px;padding:5px 8px;border-radius:var(--r);display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--muted);transition:all .12s var(--ease);user-select:none}
+.ls-cap:hover{background:var(--surface-2);color:var(--text)}
+.ls-cap .ic{width:18px;text-align:center;font-size:13px}
+.chat-col{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg)}
+.chat-head{height:36px;display:flex;align-items:center;padding:0 12px;border-bottom:1px solid var(--border);gap:4px;flex-shrink:0;background:var(--surface);user-select:none}
+.chat-head .toggle{width:24px;height:24px;border-radius:5px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--muted);font-size:13px;transition:all .12s var(--ease)}
+.chat-head .toggle:hover{color:var(--text-hi);background:var(--surface-2)}
+.chat-head .name{font-weight:600;font-size:12px}
+.chat-head .sep-dot{color:var(--border-light)}
+.chat-head .role{font-size:11px;color:var(--muted)}
+.chat-head .spacer{flex:1}
+.chat-head .action{padding:3px 8px;border-radius:5px;font-size:11px;color:var(--muted);transition:all .12s var(--ease);border:1px solid transparent}
+.chat-head .action:hover{color:var(--text-hi);background:var(--surface-2);border-color:var(--border)}
+.chat-body{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:8px}
+.msg{max-width:68%}
+.msg.boss{align-self:flex-end}
+.msg .content{padding:7px 12px;border-radius:var(--r-lg);line-height:1.55;font-size:13px}
+.msg.agent .content{background:var(--surface-2);border:1px solid var(--border);border-top-left-radius:4px}
+.msg.boss .content{background:var(--accent-dim);border:1px solid var(--accent-border);border-top-right-radius:4px}
+.msg .meta{font-size:10px;color:var(--muted);margin-top:3px;font-family:var(--mono)}
+.msg.agent .meta{text-align:left}
+.msg.boss .meta{text-align:right}
+.chat-input-zone{padding:8px 12px 10px;border-top:1px solid var(--border);background:var(--surface);flex-shrink:0}
+.chat-input-wrap{display:flex;gap:6px;align-items:flex-end}
+.chat-input-wrap textarea{flex:1;background:var(--surface-2);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:var(--r);font-size:13px;resize:none;height:38px;transition:border-color .15s var(--ease),box-shadow .15s var(--ease)}
+.chat-input-wrap textarea:focus{outline:none;border-color:var(--accent-border);box-shadow:0 0 0 3px var(--accent-dim)}
+.chat-input-wrap .send{background:var(--accent);color:white;padding:8px 14px;border-radius:var(--r);font-weight:600;font-size:12px;transition:all .12s var(--ease)}
+.chat-input-wrap .send:hover{background:var(--accent-hi)}
+.chat-input-wrap .send:disabled{opacity:.4}
+.right-panel{width:296px;min-width:296px;border-left:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;flex-shrink:0;transition:width .22s var(--ease),opacity .15s var(--ease),min-width .22s var(--ease);overflow:hidden}
+.right-panel.collapsed{width:0;min-width:0;opacity:0;pointer-events:none;border-left:none}
+.rp-head{height:36px;display:flex;align-items:center;padding:0 10px;border-bottom:1px solid var(--border);gap:3px;flex-shrink:0;background:var(--surface);user-select:none}
+.rp-head .tab{padding:3px 10px;border-radius:5px;font-size:11px;color:var(--muted);cursor:pointer;transition:all .12s var(--ease);border:1px solid transparent}
+.rp-head .tab:hover{color:var(--text-hi);background:var(--surface-2)}
+.rp-head .tab.active{background:var(--accent-dim);color:var(--accent-hi);border-color:var(--accent-border)}
+.rp-head .spacer{flex:1}
+.rp-head .close{padding:2px 6px;border-radius:4px;color:var(--muted);cursor:pointer;font-size:12px;transition:all .12s}
+.rp-head .close:hover{color:var(--text-hi);background:var(--surface-2)}
+.rp-body{flex:1;overflow-y:auto}
+.rp-sec{padding:10px 14px;border-bottom:1px solid var(--border)}
+.rp-sec:last-child{border-bottom:none}
+.rp-sec .sec-title{font-size:10px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:1.2px;margin-bottom:8px;user-select:none}
+.rp-sec .kpi-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.rp-sec .kpi{background:var(--surface-2);border-radius:var(--r);padding:10px 12px;border:1px solid var(--border);transition:border-color .12s}
+.rp-sec .kpi:hover{border-color:var(--border-light)}
+.rp-sec .kpi .k{font-size:10px;color:var(--muted)}
+.rp-sec .kpi .v{font-family:var(--mono);font-size:17px;font-weight:700;margin-top:2px}
+.rp-sec .kpi .v.green{color:var(--green)}
+.rp-sec .kpi .v.accent{color:var(--accent-hi)}
+.rp-sec .kpi .delta{font-size:10px;margin-top:1px}
+.rp-sec .kpi .delta.up{color:var(--green)}
+.rp-sec .kpi .delta.down{color:var(--red)}
+.rp-sec .row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:12px}
+.rp-sec .row .k{color:var(--muted)}
+.rp-sec .row .v{font-family:var(--mono);font-weight:500}
+.rp-sec .row .v.accent{color:var(--accent-hi)}
+.rp-sec .row .v.green{color:var(--green)}
+.rp-sec .pill{display:inline-flex;align-items:center;gap:3px;padding:1px 7px;border-radius:10px;font-size:10px;font-weight:500}
+.rp-sec .pill.run{color:var(--accent-hi);background:var(--accent-dim)}
+.rp-sec .pill.ok{color:var(--green);background:var(--green-dim)}
+.rp-sec .pill.warn{color:var(--amber);background:var(--amber-dim)}
+.restore{position:fixed;top:36px;width:22px;height:36px;display:flex;align-items:center;justify-content:center;background:var(--surface);border:1px solid var(--border);cursor:pointer;z-index:20;color:var(--muted);font-size:12px;transition:all .12s var(--ease);opacity:0;pointer-events:none}
+.restore.visible{opacity:1;pointer-events:auto}
+.restore:hover{color:var(--text-hi);background:var(--surface-2)}
+#restoreL{left:0;border-left:none;border-radius:0 var(--r) var(--r) 0}
+#restoreR{right:0;border-right:none;border-radius:var(--r) 0 0 var(--r)}
+.statusbar{height:22px;display:flex;align-items:center;padding:0 10px;border-top:1px solid var(--border);font-size:10px;color:var(--muted);gap:10px;flex-shrink:0;background:var(--surface);font-family:var(--mono);user-select:none}
+.statusbar .dot{width:5px;height:5px;border-radius:50%;background:var(--green)}
+.statusbar .spacer{flex:1}
+</style>
+</head>
+<body>
+<div class="topbar">
+<div class="logo"><span class="mark">⚡</span> AI-EOS <span class="ver">v6.1</span></div>
+<div class="sep"></div>
+<button class="nav-btn active">工作台</button>
+<button class="nav-btn">团队</button>
+<button class="nav-btn">交付</button>
+<div class="spacer"></div>
+<div class="search-box"><span>🔍</span><span>搜索…</span><span class="key">⌘K</span></div>
+<div class="spacer"></div>
+<div class="avatar">BO</div>
+</div>
+<div class="layout">
+<div class="left-sidebar" id="leftSidebar">
+<input class="ls-search" placeholder="搜索员工、页面…" onfocus="this.placeholder=''" onblur="this.placeholder='搜索员工、页面…'"/>
+<div class="ls-section">数字员工 · 4</div>
+<div class="ls-agent active" onclick="selAgent(this,'创意总监·陈墨')">
+<div class="av" style="background:var(--accent-dim);color:var(--accent-hi)">陈</div>
+<div class="info"><div class="name">创意总监·陈墨</div><div class="role">创意部</div></div>
+<div class="ind" style="background:var(--amber)"></div>
+</div>
+<div class="ls-agent" onclick="selAgent(this,'文案策划·林小满')">
+<div class="av" style="background:var(--green-dim);color:var(--green)">林</div>
+<div class="info"><div class="name">文案策划·林小满</div><div class="role">创意部</div></div>
+<div class="ind" style="background:var(--green)"></div>
+</div>
+<div class="ls-agent" onclick="selAgent(this,'视觉设计师·顾小舟')">
+<div class="av" style="background:rgba(167,139,250,.1);color:#a78bfa">顾</div>
+<div class="info"><div class="name">视觉设计师·顾小舟</div><div class="role">创意部</div></div>
+<div class="ind" style="background:var(--green)"></div>
+</div>
+<div class="ls-agent" onclick="selAgent(this,'运营专员·阿岚')">
+<div class="av" style="background:var(--amber-dim);color:var(--amber)">阿</div>
+<div class="info"><div class="name">运营专员·阿岚</div><div class="role">运营部</div></div>
+<div class="ind" style="background:var(--green)"></div>
+</div>
+<div class="ls-section">基座能力</div>
+<div class="ls-cap"><span class="ic">▦</span> 行业中心</div>
+<div class="ls-cap"><span class="ic">⌗</span> 基座市场</div>
+<div class="ls-cap"><span class="ic">🔐</span> 超级管理后台</div>
+<div class="ls-cap"><span class="ic">📋</span> 系统日志</div>
+</div>
+<div class="chat-col">
+<div class="chat-head">
+<button class="toggle" onclick="tglL()" title="⌘B">☰</button>
+<span class="name" id="agentName">创意总监·陈墨</span>
+<span class="sep-dot">·</span><span class="role">单聊</span>
+<div class="spacer"></div>
+<button class="action">会议</button><button class="action">拉群</button><button class="action">轨迹</button>
+<button class="action" onclick="tglR()" title="⌘J">◈</button>
+</div>
+<div class="chat-body" id="chatBody">
+<div class="msg boss"><div class="content">竞品A刚发布新产品，帮我把定价策略对比一下。</div><div class="meta">14:02</div></div>
+<div class="msg agent"><div class="content">已完成竞品定价对比分析。<br>结论：我方定价低于竞品A 12%，但增值服务缺失导致转化率低 8%。<br>报告已生成交付件。</div><div class="meta">14:06 · web_search ×3 · 交付件 ×1</div></div>
+<div class="msg boss"><div class="content">让运营部把会员储值活动也跟进一下。</div><div class="meta">14:08</div></div>
+<div class="msg agent"><div class="content">已派发给运营专员·阿岚执行，同时我在跟进竞品动态。预计 2 小时内出方案初稿。</div><div class="meta">14:09 · 派发 → 阿岚</div></div>
+</div>
+<div class="chat-input-zone">
+<div class="chat-input-wrap">
+<textarea placeholder="说一句话，让 创意总监·陈墨 去做…" id="chatInput" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg()}"></textarea>
+<button class="send" onclick="sendMsg()">发送</button>
+</div>
+</div>
+</div>
+<div class="right-panel" id="rightPanel">
+<div class="rp-head">
+<div class="tab active" onclick="rpTab(this)">看板</div>
+<div class="tab" onclick="rpTab(this)">产出</div>
+<div class="tab" onclick="rpTab(this)">合规</div>
+<div class="spacer"></div>
+<button class="close" onclick="tglR()">✕</button>
+</div>
+<div class="rp-body">
+<div class="rp-sec">
+<div class="sec-title">经营指标</div>
+<div class="kpi-grid">
+<div class="kpi"><div class="k">月收入</div><div class="v green">¥86.4万</div><div class="delta up">↑12.4%</div></div>
+<div class="kpi"><div class="k">应收账龄</div><div class="v accent">¥23.1万</div></div>
+<div class="kpi"><div class="k">OEE</div><div class="v">87.3%</div><div class="delta up">↑2.1%</div></div>
+<div class="kpi"><div class="k">周转</div><div class="v">45 天</div></div>
+</div>
+</div>
+<div class="rp-sec">
+<div class="sec-title">正在执行</div>
+<div class="row"><span>竞品定价策略分析</span><span class="pill run">● 执行</span></div>
+<div class="row"><span>会员储值活动方案</span><span class="pill run">● 执行</span></div>
+<div class="row"><span>Q3 交付物归档</span><span class="pill ok">✓ 完成</span></div>
+</div>
+<div class="rp-sec">
+<div class="sec-title">合规预警</div>
+<div class="row"><span>特种设备定检</span><span class="pill warn">⚠ 30 天</span></div>
+<div class="row"><span>排污许可证</span><span class="pill ok">有效</span></div>
+</div>
+<div class="rp-sec">
+<div class="sec-title">Token · 本月</div>
+<div class="row"><span>Input</span><span class="v">1.2M</span></div>
+<div class="row"><span>Output</span><span class="v">840K</span></div>
+<div class="row"><span>Cost</span><span class="v accent">¥347.20</span></div>
+</div>
+</div>
+</div>
+</div>
+<div class="restore" id="restoreL" onclick="tglL()">☰</div>
+<div class="restore" id="restoreR" onclick="tglR()">◈</div>
+<div class="statusbar">
+<span class="dot"></span><span>4 agents</span><span>200 · 12ms</span><span>SQLite 3MB</span>
+<div class="spacer"></div>
+<span>⌘K 搜索</span><span>⌘B 左栏</span><span>⌘J 右栏</span><span>v6.1.0 · Harness Agent</span>
+</div>
+<script>
+function tglL(){var e=document.getElementById("leftSidebar");e.classList.toggle("collapsed");document.getElementById("restoreL").classList.toggle("visible",e.classList.contains("collapsed"))}
+function tglR(){var e=document.getElementById("rightPanel");e.classList.toggle("collapsed");document.getElementById("restoreR").classList.toggle("visible",e.classList.contains("collapsed"))}
+function selAgent(e,n){document.querySelectorAll(".ls-agent").forEach(a=>a.classList.remove("active"));e.classList.add("active");document.getElementById("agentName").textContent=n}
+function rpTab(e,n){document.querySelectorAll(".rp-head .tab").forEach(t=>t.classList.remove("active"));e.classList.add("active")}
+function sendMsg(){var e=document.getElementById("chatInput"),t=e.value.trim();if(!t)return;var n=document.getElementById("chatBody"),a=document.createElement("div");a.className="msg boss",a.innerHTML='<div class="content">'+t+'</div><div class="meta">刚刚</div>',n.appendChild(a),e.value="",n.scrollTop=n.scrollHeight}
+document.addEventListener("keydown",(e)=>{(e.metaKey||e.ctrlKey)&&"b"===e.key&&(e.preventDefault(),tglL());(e.metaKey||e.ctrlKey)&&"j"===e.key&&(e.preventDefault(),tglR())})
+document.addEventListener("keydown",(e)=>{(e.metaKey||e.ctrlKey)&&"b"===e.key&&(e.preventDefault(),tglL());(e.metaKey||e.ctrlKey)&&"j"===e.key&&(e.preventDefault(),tglR())})
+</script>
+</body>
+</html>
