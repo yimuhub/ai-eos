@@ -33,7 +33,20 @@ import { ALL_PAGES, type NavItem } from "@/lib/nav";
 import { api, clearToken, getActiveCompanyId } from "@/lib/api";
 import { notify } from "@/components/Toast";
 import { openApp } from "@/lib/apps";
-import { useSwitchMode, useUIMode } from "@/lib/ui-mode";
+import { useSwitchMode, useUIMode, type UIMode } from "@/lib/ui-mode";
+
+/** 界面模式三态循环（⌘K「切换模式」动作）：极客 → Harness → 经典 → 极客。 */
+const MODE_NEXT: Record<UIMode, UIMode> = { geek: "harness", harness: "classic", classic: "geek" };
+const MODE_NEXT_LABEL: Record<UIMode, string> = {
+  geek: "Harness 指挥台",
+  harness: "经典模式",
+  classic: "极客模式",
+};
+const MODE_NEXT_DESC: Record<UIMode, string> = {
+  geek: "Harness：ZCode 式指挥台，图标活动栏 + ⌘K + 状态栏，全部能力一个外壳",
+  harness: "经典：左侧固定菜单 + 整页导航，一页一件事",
+  classic: "极客：左中右三栏对话，功能页开在右栏标签，聊天不中断",
+};
 import { filterCommands, nextIndex } from "@/lib/commandSearch";
 import {
   MIN_COMPANY_QUERY_LENGTH,
@@ -373,16 +386,25 @@ export default function CommandPalette() {
       {
         kind: "action",
         id: "action:switch-mode",
-        label: mode === "classic" ? "切换到极客模式" : "切换到经典模式",
-        desc:
-          mode === "classic"
-            ? "极客：左中右三栏对话，功能页开在右栏标签，聊天不中断"
-            : "经典：左侧固定菜单 + 整页导航，一页一件事",
+        label: `切换到${MODE_NEXT_LABEL[mode]}`,
+        desc: MODE_NEXT_DESC[mode],
         icon: "⇄",
         group: "常用动作",
-        keywords: ["界面", "模式", "mode", "switch", "classic", "geek"],
-        run: () => switchMode(mode === "classic" ? "geek" : "classic"),
+        keywords: ["界面", "模式", "mode", "switch", "classic", "geek", "harness"],
+        run: () => switchMode(MODE_NEXT[mode]),
       },
+      ...(mode !== "harness"
+        ? [{
+            kind: "action" as const,
+            id: "action:goto-harness",
+            label: "打开 Harness 指挥台",
+            desc: "ZCode 式指挥台：图标活动栏 + ⌘K 命令面板 + 状态栏，全部能力装进一个行业级外壳",
+            icon: "⚡",
+            group: "常用动作",
+            keywords: ["harness", "指挥台", "外壳", "zcode"],
+            run: () => switchMode("harness"),
+          }]
+        : []),
       {
         kind: "action",
         id: "action:logout",

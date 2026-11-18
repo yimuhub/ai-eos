@@ -50,12 +50,15 @@ describe("界面模式", () => {
     expect(readUIMode()).toBe("geek");
   });
 
-  it("存储过 geek 时返回 geek；存储过 classic 时返回 classic", () => {
+  it("存储过 geek 时返回 geek；存储过 classic 时返回 classic；存储过 harness 时返回 harness", () => {
     stubBrowser({ aieos_ui_mode: "geek" });
     expect(readUIMode()).toBe("geek");
 
     stubBrowser({ aieos_ui_mode: "classic" });
     expect(readUIMode()).toBe("classic");
+
+    stubBrowser({ aieos_ui_mode: "harness" });
+    expect(readUIMode()).toBe("harness");
   });
 
   it("存储值损坏时回退到 geek", () => {

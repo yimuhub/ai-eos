@@ -89,16 +89,28 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
   }, [verify]);
 
   const isWorkspace = pathname === "/workspace";
+  const isHarness = pathname === "/harness";
   const isHome = pathname === "/";
 
-  // 极客模式的单界面约定：除工作台外的页面一律带回工作台，作为右栏标签打开。
-  // 经典模式不做任何改写；iframe 里必须放行，否则标签内会无限自我重定向。
+  // 单界面外壳（极客 / Harness）的约定：除各自外壳与首页外的页面一律带回外壳，
+  // 作为右栏标签打开。经典模式不做任何改写；iframe 里必须放行，否则标签内会无限自我重定向。
   useEffect(() => {
     if (state !== "ready" || !mounted || embed) return;
-    if (mode !== "geek" || isWorkspace || isHome) return;
+    if (mode === "classic" || isHome) return;
+    // Harness 模式下访问旧外壳地址：视为同一个壳的别名，连 ?app= 一起带过去
+    if (mode === "harness" && isWorkspace) {
+      router.replace(`/harness${window.location.search}`);
+      return;
+    }
+    if (mode === "geek" && isHarness) {
+      router.replace(`/workspace${window.location.search}`);
+      return;
+    }
+    if ((mode === "geek" && isWorkspace) || (mode === "harness" && isHarness)) return;
+    const shell = mode === "harness" ? "/harness" : "/workspace";
     const target = `${pathname}${window.location.search}${window.location.hash}`;
-    router.replace(`/workspace?app=${encodeURIComponent(target)}`);
-  }, [state, mounted, embed, mode, isWorkspace, isHome, pathname, router]);
+    router.replace(`${shell}?app=${encodeURIComponent(target)}`);
+  }, [state, mounted, embed, mode, isWorkspace, isHarness, isHome, pathname, router]);
 
   if (state === "checking") {
     return (
@@ -193,8 +205,8 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
     );
   }
 
-  // "/" 自己按模式分流（经典 → /dashboard，极客 → /workspace），必须放它渲染
-  if (!isWorkspace && !isHome) {
+  // "/" 自己按模式分流（经典在上面已返回；极客 → /workspace，Harness → /harness），必须放它渲染
+  if (!isWorkspace && !isHarness && !isHome) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-2">
         <span

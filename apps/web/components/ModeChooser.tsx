@@ -59,10 +59,10 @@ export default function ModeChooser() {
       >
         <h2 id="mode-title" className="text-base font-semibold">切换界面模式</h2>
         <p className="text-xs mt-1.5" style={{ color: "var(--muted)" }}>
-          默认使用经典模式；两种模式功能完全相同，只是使用方式不同。之后可以在 ⌘K 或侧边栏底部随时切换。
+          三种模式功能完全相同，只是使用方式不同。之后可以在 ⌘K 或侧边栏底部随时切换。
         </p>
 
-        <div className="grid gap-3 mt-5 sm:grid-cols-2">
+        <div className="grid gap-3 mt-5 sm:grid-cols-3">
           <button
             type="button"
             onClick={() => choose("classic")}
@@ -100,6 +100,26 @@ export default function ModeChooser() {
             </div>
             <p className="text-[11px] mt-1.5 leading-relaxed" style={{ color: "var(--muted)" }}>
               左中右三栏对话。功能页面开在右栏标签里，聊天不中断，开多少页都留在同一张屏上。
+            </p>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => choose("harness")}
+            aria-current={mode === "harness" ? "true" : undefined}
+            className="group text-left rounded-xl border p-4 transition-colors hover:border-orange-400/60"
+            style={{
+              borderColor: mode === "harness" ? "rgba(245,134,46,0.55)" : "var(--border)",
+              background: mode === "harness" ? "rgba(245,134,46,0.08)" : "rgba(255,255,255,0.02)",
+            }}
+          >
+            <HarnessPreview />
+            <div className="flex items-center gap-2 mt-3">
+              <span className="text-sm font-medium">Harness 指挥台</span>
+              {mode === "harness" && <Badge>当前</Badge>}
+            </div>
+            <p className="text-[11px] mt-1.5 leading-relaxed" style={{ color: "var(--muted)" }}>
+              ZCode 式指挥台：图标活动栏 + ⌘K 命令面板 + 状态栏。全部能力装进一个行业级外壳，对话与页面标签与极客模式同一套内核。
             </p>
           </button>
         </div>
@@ -168,6 +188,41 @@ function GeekPreview() {
           <div className="h-1.5 w-1/3 rounded-full" style={{ background: "rgba(255,255,255,0.18)" }} />
         </div>
         <div className="h-10 rounded" style={{ background: "rgba(255,255,255,0.06)", border: "1px solid var(--border)" }} />
+      </div>
+    </div>
+  );
+}
+
+/** Harness：图标活动栏 + 侧栏 + 对话 + 右栏 + 底部状态条。 */
+function HarnessPreview() {
+  return (
+    <div className="h-24 rounded-lg overflow-hidden flex flex-col" style={{ background: "#0b0b0e", border: "1px solid var(--border)" }}>
+      <div className="flex flex-1 min-h-0">
+        <div className="w-5 py-1 flex flex-col items-center gap-1" style={{ background: "#0b0b0e", borderRight: "1px solid #23232b" }}>
+          <div className="w-2 h-2 rounded-sm" style={{ background: "rgba(245,134,46,0.9)" }} />
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="w-2 h-2 rounded-sm" style={{ background: "rgba(255,255,255,0.12)" }} />
+          ))}
+        </div>
+        <div className="w-1/4 p-1.5 space-y-1" style={{ background: "#101014", borderRight: "1px solid #23232b" }}>
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="h-1.5 rounded-full" style={{ background: i === 0 ? "rgba(245,134,46,0.55)" : "rgba(255,255,255,0.12)" }} />
+          ))}
+        </div>
+        <div className="flex-1 p-2 space-y-1.5" style={{ background: "#17171c", borderRight: "1px solid #23232b" }}>
+          <div className="h-1.5 w-1/2 rounded-full ml-auto" style={{ background: "rgba(245,134,46,0.55)" }} />
+          <div className="h-1.5 w-2/3 rounded-full" style={{ background: "rgba(255,255,255,0.12)" }} />
+          <div className="h-1.5 w-3/5 rounded-full" style={{ background: "rgba(255,255,255,0.10)" }} />
+        </div>
+        <div className="w-1/4 p-1.5" style={{ background: "#101014" }}>
+          <div className="h-1.5 w-2/3 rounded-full mb-1" style={{ background: "rgba(245,134,46,0.45)" }} />
+          <div className="h-8 rounded" style={{ background: "rgba(255,255,255,0.06)" }} />
+        </div>
+      </div>
+      <div className="h-2.5 px-1.5 flex items-center gap-1" style={{ background: "#0b0b0e", borderTop: "1px solid #23232b" }}>
+        <div className="w-1 h-1 rounded-full" style={{ background: "rgba(52,211,153,0.8)" }} />
+        <div className="h-1 w-1/3 rounded-full" style={{ background: "rgba(255,255,255,0.14)" }} />
+        <div className="h-1 w-1/5 rounded-full ml-auto" style={{ background: "rgba(245,134,46,0.6)" }} />
       </div>
     </div>
   );

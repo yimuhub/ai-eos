@@ -1,17 +1,25 @@
 "use client";
 
-// 两种界面形态：
+// 三种界面形态：
 //   classic = v5.12 之前的「左侧固定菜单 + 整页导航」，一页一件事；
-//   geek    = v5.13 的「/workspace 单外壳 + 右栏标签」，对话不中断。
+//   geek    = v5.13 的「/workspace 单外壳 + 右栏标签」，对话不中断；
+//   harness = v6.2 的「/harness 指挥台」，ZCode 式活动栏 + 命令面板 + 状态栏，
+//             对话与右栏标签内核与 geek 相同，外壳换成行业级 Harness 审美。
 //
 // 默认是 geek：没有存储过选择（以及 SSR 首帧）一律按极客三栏模式处理，
-// 不再强制二选一；想用经典整页模式的人可以随时从侧边栏 / ⌘K 切过去。
+// 不再强制二选一；想用其他形态的人可以随时从侧边栏 / ⌘K 切过去。
 // 用 useSyncExternalStore 订阅，切换后所有挂着的组件（外壳、侧栏、⌘K）立即对齐。
 
 import { useCallback, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 
-export type UIMode = "classic" | "geek";
+export type UIMode = "classic" | "geek" | "harness";
+
+/** 每种单界面形态自己的外壳路由；classic 没有外壳（整页导航）。 */
+export const MODE_SHELL: Record<Exclude<UIMode, "classic">, string> = {
+  geek: "/workspace",
+  harness: "/harness",
+};
 
 /** 未选择时的默认形态。SSR 与首帧也用它，避免"先空一帧再选"的闪烁。 */
 export const DEFAULT_UI_MODE: UIMode = "geek";
@@ -24,7 +32,7 @@ export function readUIMode(): UIMode {
   if (typeof window === "undefined") return DEFAULT_UI_MODE;
   try {
     const v = localStorage.getItem(MODE_KEY);
-    return v === "classic" || v === "geek" ? v : DEFAULT_UI_MODE;
+    return v === "classic" || v === "geek" || v === "harness" ? v : DEFAULT_UI_MODE;
   } catch {
     return DEFAULT_UI_MODE;
   }
@@ -56,8 +64,9 @@ export function useUIMode(): UIMode {
 
 /**
  * 切换模式并做一次"落点修正"：
- *   经典 → 极客：普通页面带回 /workspace 当作标签打开；
- *   极客 → 经典：?app= 指向的页面直接整页打开，别停在空工作台上。
+ *   经典 → 极客/Harness：普通页面带回对应外壳当作标签打开；
+ *   极客/Harness → 经典：?app= 指向的页面直接整页打开，别停在空外壳上；
+ *   极客 ↔ Harness：同属单界面外壳，右栏标签（?app=）原样带过去。
  */
 export function useSwitchMode() {
   const router = useRouter();
@@ -67,15 +76,23 @@ export function useSwitchMode() {
     if (prev === next) return;
     if (next === "classic") {
       const app = new URLSearchParams(window.location.search).get("app");
-      if (app && app.startsWith("/") && !app.startsWith("/workspace")) {
+      if (app && app.startsWith("/") && !app.startsWith("/workspace") && !app.startsWith("/harness")) {
         router.replace(app);
       }
       return;
     }
+    const shell = MODE_SHELL[next];
+    const ownShell = MODE_SHELL[prev as Exclude<UIMode, "classic">];
+    // 从另一个单界面外壳切过来：把当前打开的标签一起带走
+    if (ownShell && window.location.pathname === ownShell) {
+      const app = new URLSearchParams(window.location.search).get("app");
+      router.replace(app ? `${shell}?app=${encodeURIComponent(app)}` : shell);
+      return;
+    }
     const path = window.location.pathname;
-    if (path !== "/workspace" && path !== "/") {
+    if (path !== "/workspace" && path !== "/harness" && path !== "/") {
       const target = `${path}${window.location.search}${window.location.hash}`;
-      router.replace(`/workspace?app=${encodeURIComponent(target)}`);
+      router.replace(`${shell}?app=${encodeURIComponent(target)}`);
     }
   }, [router]);
 }

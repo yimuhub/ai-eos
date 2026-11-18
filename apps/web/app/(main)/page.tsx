@@ -36,7 +36,8 @@ export default function Home() {
       return;
     }
     if (mode === "classic") router.replace("/dashboard");
-    else if (mode === "geek") router.replace("/workspace");
+    else if (mode === "harness") router.replace("/harness");
+    else router.replace("/workspace");
   }, [needsSetup, mode, router]);
 
   return (
