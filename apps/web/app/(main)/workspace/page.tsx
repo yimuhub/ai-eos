@@ -225,6 +225,19 @@ export default function WorkspacePage() {
   /* ---------- 模型就绪提示条 ---------- */
   // 刚装好的系统里一个模型都没有，员工接任务只会回「尚未绑定任何模型」。
   // 这里在进入工作台的第一屏就把缺口说出来，并直达「模型配置」。
+  // 窗口聚焦时静默刷新员工列表（绑定模型发生在右栏 iframe 里，父壳感知不到）
+  useEffect(() => {
+    if (boot !== "ready" || !cid) return;
+    const refresh = async () => {
+      try {
+        const rows = await api.get<WsAgent[]>(`/agents?company_id=${cid}`, { silent: true });
+        setAgents(Array.isArray(rows) ? rows : []);
+      } catch { /* 静默 */ }
+    };
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [boot, cid]);
+
   const checkModel = useCallback(async () => {
     if (!cid) return;
     try {

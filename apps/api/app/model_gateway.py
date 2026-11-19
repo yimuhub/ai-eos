@@ -319,7 +319,11 @@ def usage_context(**kw):
     try:
         yield kw
     finally:
-        usage_ctx.reset(token)
+        try:
+            usage_ctx.reset(token)
+        except ValueError:  # noqa: silent-except — Token 归属新 Context（中间件
+            # task group），上下文随任务销毁，跨 Context 无法也无须 reset。
+            pass
 
 
 def _get_ctx_value(ctx: dict, key: str):

@@ -309,6 +309,20 @@ export default function HarnessPage() {
     return () => clearInterval(t);
   }, [cid, sessions]);
 
+  // 窗口重新聚焦时静默刷新员工列表：员工绑定模型发生在右栏 iframe 里，
+  // 父壳感知不到——不刷新的话「未绑定模型」警示条会一直挂着误导人。
+  useEffect(() => {
+    if (boot !== "ready" || !cid) return;
+    const refresh = async () => {
+      try {
+        const rows = await api.get<WsAgent[]>(`/agents?company_id=${cid}`, { silent: true });
+        setAgents(Array.isArray(rows) ? rows : []);
+      } catch { /* 静默 */ }
+    };
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [boot, cid]);
+
   // 模型就绪探测：没接模型时在状态栏和提示条上说出来
   const checkModel = useCallback(async () => {
     if (!cid) return;

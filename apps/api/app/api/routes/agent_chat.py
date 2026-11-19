@@ -701,6 +701,20 @@ async def chat_history(aid: str, limit: int = Query(50, ge=1, le=200),
             "has_more": has_more}
 
 
+async def _ensure_model_bound(db: AsyncSession, agent: Agent) -> None:
+    """员工没有首选模型时，把「必然失败」拦在入口：422 + 去处引导。
+    （此前会一路跑到 ModelGateway 抛 RuntimeError → 500，报错来得太晚。）"""
+    from app.models.agent import AgentModelConfig
+    row = (await db.execute(select(AgentModelConfig).where(
+        AgentModelConfig.agent_id == str(agent.id),
+        AgentModelConfig.role == "primary"))).scalars().first()
+    if row is None:
+        raise HTTPException(
+            422,
+            f"「{agent.name}」还没有绑定首选模型，无法执行任务。"
+            "请到「模型配置」登记模型并配置密钥，再在员工详情页绑定为首选模型。")
+
+
 @router.post("/{aid}/chat")
 async def boss_chat(aid: str, data: ChatIn,
                     db: AsyncSession = Depends(get_db),
@@ -712,6 +726,7 @@ async def boss_chat(aid: str, data: ChatIn,
     a = await _visible_agent(db, user, aid)
     from app.core.ratelimit import CHAT_MSG_PER_MIN, enforce_rate_limit
     enforce_rate_limit(f"chat:{user.id}", CHAT_MSG_PER_MIN)
+    await _ensure_model_bound(db, a)
     text = data.message.strip()
     if not text:
         raise HTTPException(400, "empty message")

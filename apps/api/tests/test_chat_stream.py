@@ -197,6 +197,19 @@ async def test_non_stream_chat_returns_200_without_doc_marker(
     company = await make_company(user)
     agent = await _make_agent(client, user, company)
 
+    # /chat 入口现在有「未绑模型 → 422」预检：桩网关前先补一条绑定
+    from app.models.agent import AgentModelConfig, Model
+    from app.db.session import AsyncSessionLocal
+    async with AsyncSessionLocal() as s:
+        m = Model(company_id=company["id"], name="桩模型",
+                  provider_type="openai_compat", base_url="http://127.0.0.1:9/v1",
+                  model_id="stub", api_key_env="OPENAI_COMPAT_API_KEY", enabled=True)
+        s.add(m)
+        await s.flush()
+        s.add(AgentModelConfig(agent_id=agent["id"], role="primary",
+                               model_id=m.id))
+        await s.commit()
+
     async def fake_chat(self, model_ids, messages, tools=None, config=None):
         return {"content": "好的，我记下了。", "usage": {}, "tool_calls": None}
 

@@ -116,7 +116,9 @@ async def install_item(item_id: str, body: InstallIn,
         payload = row.payload or {}
         body_text = str(payload.get("body") or "")
         instruction = strip_injection(body_text)[:_MAX_INSTRUCTION]
-        slug = f"lib-{row.source_id[:80]}"
+        # skills.slug 是全表唯一：必须带公司前缀，否则第二个公司装同一条
+        # 平台技能就会撞 UNIQUE（冒烟实测抓出）。
+        slug = f"lib-{body.company_id[:8]}-{row.source_id[:60]}"
         existing = (await db.execute(select(Skill).where(
             Skill.slug == slug, Skill.company_id == body.company_id))).scalar_one_or_none()
         if existing is None:

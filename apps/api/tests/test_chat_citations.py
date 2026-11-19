@@ -127,6 +127,20 @@ async def test_non_stream_chat_returns_and_persists_citations(
     user = await make_user()
     company = await make_company(user)
     agent = await _make_agent(client, user, company)
+    # /chat 入口「未绑模型 → 422」预检：先补绑定
+    from app.models.agent import AgentModelConfig, Model
+    from app.db.session import AsyncSessionLocal
+    async with AsyncSessionLocal() as s:
+        mrow = Model(company_id=company["id"], name="引用测试模型",
+                     provider_type="openai_compat", base_url="http://127.0.0.1:9/v1",
+                     model_id="stub-cite", api_key_env="OPENAI_COMPAT_API_KEY",
+                     enabled=True)
+        s.add(mrow)
+        await s.flush()
+        s.add(AgentModelConfig(agent_id=agent["id"], role="primary",
+                               model_id=mrow.id))
+        await s.commit()
+
 
     calls = {"n": 0}
 
@@ -172,6 +186,20 @@ async def test_stream_chat_done_event_and_meta_carry_citations(
     user = await make_user()
     company = await make_company(user)
     agent = await _make_agent(client, user, company)
+    # /chat 入口「未绑模型 → 422」预检：先补绑定
+    from app.models.agent import AgentModelConfig, Model
+    from app.db.session import AsyncSessionLocal
+    async with AsyncSessionLocal() as s:
+        mrow = Model(company_id=company["id"], name="引用测试模型",
+                     provider_type="openai_compat", base_url="http://127.0.0.1:9/v1",
+                     model_id="stub-cite", api_key_env="OPENAI_COMPAT_API_KEY",
+                     enabled=True)
+        s.add(mrow)
+        await s.flush()
+        s.add(AgentModelConfig(agent_id=agent["id"], role="primary",
+                               model_id=mrow.id))
+        await s.commit()
+
 
     calls = {"n": 0}
 
