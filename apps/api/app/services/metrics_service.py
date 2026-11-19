@@ -51,9 +51,8 @@ def _json_path_expr(db: AsyncSession, column, field_path: str):
         raise ValueError(f"字段路径非法：{field_path}")
     if _dialect(db) == "sqlite":
         return func.json_extract(column, "$." + ".".join(keys))
-    if len(keys) == 1:
-        return column.op("->>")(keys[0])
-    return column.op("#>>")(f"{{{','.join(keys)}}}")
+    # PG：json_extract_path_text(json, VARIADIC text[]) 对单键/多键都成立
+    return func.json_extract_path_text(column, *keys)
 
 
 def validate_spec(spec: dict) -> dict:

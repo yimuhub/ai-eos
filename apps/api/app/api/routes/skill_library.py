@@ -191,6 +191,106 @@ async def install_item(item_id: str, body: InstallIn,
     return {"ok": True, "kind": row.kind, **detail}
 
 
+@router.get("/{item_id}/stats", response_model=dict)
+async def item_stats(item_id: str, company_id: str,
+                     db: AsyncSession = Depends(get_db),
+                     user: User = Depends(get_current_user)):
+    """技能使用统计（V6.2.2 度量闭环）：
+    安装企业数 / 本公司授权员工数 / 这些员工近 7 天任务量与完成量。"""
+    await _owned_guard(db, user, company_id)
+    row = await db.get(SkillLibraryItem, item_id)
+    if row is None:
+        raise HTTPException(404, "条目不存在")
+    from datetime import datetime, timedelta, timezone
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
+    agent_ids: list[str] = []
+    if row.kind == "skill":
+        skill = (await db.execute(select(Skill).where(
+            Skill.slug == f"lib-{row.source_id[:80]}",
+            Skill.company_id == company_id))).scalar_one_or_none()
+        if skill:
+            grants = (await db.execute(select(AgentSkill.agent_id).where(
+                AgentSkill.skill_id == skill.id))).scalars().all()
+            agent_ids = list(grants)
+    stats = {"install_count": row.install_count or 0,
+             "granted_agents": len(agent_ids)}
+    if agent_ids:
+        from app.models.task import Task
+        rows = (await db.execute(select(Task.status, Task.id).where(
+            Task.agent_id.in_(agent_ids),
+            Task.created_at >= since))).all()
+        stats["tasks_7d"] = len(rows)
+        stats["tasks_done_7d"] = sum(1 for st, _ in rows
+                                     if str(st).upper() in ("DONE", "COMPLETED", "DELIVERED"))
+    else:
+        stats["tasks_7d"] = 0
+        stats["tasks_done_7d"] = 0
+    return {"id": row.id, "name": row.name, "kind": row.kind, **stats}
+
+
+# ─────────────────────────── 开放投递（V6.2.3） ───────────────────────────
+class SubmitIn(BaseModel):
+    kind: str
+    source_id: str
+    name: str = ""
+    content: str = ""
+    files: dict[str, str] | None = None
+    license: str | None = None
+    contact: str = ""
+
+
+@router.post("/submit", response_model=dict)
+async def submit_item(body: SubmitIn,
+                      request: Request,
+                      db: AsyncSession = Depends(get_db)):
+    """开放投递（V6.2.3）：第三方按 SKILL.md 标准投递技能/连接器/专家包。
+    鉴权 = X-Submit-Token（env AIEOS_SKILL_SUBMIT_TOKEN，未配置则 503 关闭通道）。
+    一律进 review 队列，不做自动放行。"""
+    import hmac as _hmac
+    import os as _os
+    expected = (_os.environ.get("AIEOS_SKILL_SUBMIT_TOKEN") or "").strip()
+    if not expected:
+        raise HTTPException(503, "投递通道未开启（未配置 AIEOS_SKILL_SUBMIT_TOKEN）")
+    provided = (request.headers.get("X-Submit-Token") or "").strip()
+    if not provided or not _hmac.compare_digest(provided, expected):
+        raise HTTPException(403, "投递令牌无效")
+    if body.kind not in _KINDS:
+        raise HTTPException(400, f"kind 取值 {_KINDS}")
+    recs = bulk_import([{"kind": body.kind,
+                          "source_id": body.source_id,
+                          "content": body.content,
+                          "files": body.files or {}}],
+                       source="community")
+    if not recs:
+        raise HTTPException(400, "解析失败：内容为空")
+    rec = recs[0]
+    dup = (await db.execute(select(SkillLibraryItem).where(
+        SkillLibraryItem.source == rec["source"],
+        SkillLibraryItem.source_id == rec["source_id"]))).scalar_one_or_none()
+    if dup is not None:
+        raise HTTPException(409, f"source_id 已存在（{dup.review_status}）")
+    flags = rec.pop("flags", {})
+    # 投递通道一律人工审：即便无品牌词也不 auto_pass
+    row = SkillLibraryItem(
+        id=rec["id"], source=rec["source"], source_id=rec["source_id"],
+        kind=rec["kind"], name=(body.name or rec["name"])[:200],
+        version=rec.get("version"), description=rec.get("description"),
+        payload=rec.get("payload"),
+        trigger_keywords=rec.get("trigger_keywords") or [],
+        industry_tags=rec.get("industry_tags") or [],
+        license=(body.license or rec.get("license")),
+        brand_refs=rec.get("brand_refs") or [],
+        review_status="review",
+        reviewer=None, company_id=None)
+    db.add(row)
+    await log_event(db, "skill_library.submitted", "external",
+                    body.contact[:80] or "anonymous", "skill_library", row.id,
+                    {"kind": row.kind, "flags": flags}, company_id=None)
+    await db.commit()
+    return {"ok": True, "id": row.id, "review_status": row.review_status,
+            "message": "已进入审核队列"}
+
+
 # ─────────────────────────── 平台端（超管） ───────────────────────────
 @router.post("/admin/import", response_model=dict)
 async def admin_import(body: ImportIn, request: Request,

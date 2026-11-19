@@ -45,7 +45,7 @@ async def _seed_artifact(company_id: str, task_id: str, *,
                          status: ArtifactStatus, accepted: bool = False,
                          minutes: int = 1) -> str:
     async with AsyncSessionLocal() as s:
-        a = Artifact(id=f"art-{task_id}", company_id=company_id,
+        a = Artifact(id=f"art-{task_id[:30]}", company_id=company_id,
                      name=f"成果-{task_id[:6]}", artifact_type="document",
                      current_version=1, status=status, task_id=task_id,
                      accepted_at=_at(minutes) if accepted else None,

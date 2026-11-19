@@ -107,9 +107,26 @@ export function normalizeErrorDetail(detail: unknown): string {
  * 此前每个页面各自复制了一份同样的 `describe()`，改一处漏一处；
  * 统一到这里，页面只负责给出业务语境的兜底词（如"审批失败"）。
  */
+/** 常见状态码 → 人话（V6.2 错误文案工程化：用户不该看到裸状态码）。 */
+function friendlyStatus(status: number): string | null {
+  if (status === 429) return "操作太频繁了，稍等几秒再试一次";
+  if (status === 403) return "当前账号没有这个权限——需要更高角色或管理员授权";
+  if (status === 404) return "目标不存在或已被删除（可能刚被别人处理掉了）";
+  if (status === 401) return "登录已过期，请重新登录";
+  if (status >= 500) return "服务开小差了，稍后重试；若持续失败请联系管理员";
+  return null;
+}
+
 export function describeError(e: unknown, fallback = "操作失败"): string {
-  if (e instanceof ApiError) return e.message || fallback;
-  if (e instanceof Error) return e.message || fallback;
+  if (e instanceof ApiError) {
+    if (e.message) return e.message;
+    return (e.status && friendlyStatus(e.status)) || fallback;
+  }
+  if (e instanceof Error) {
+    const m = /\b(429|403|404|401|5\d\d)\b/.exec(e.message || "");
+    if (m && e.message.length <= 4) return friendlyStatus(Number(m[1])) || fallback;
+    return e.message || fallback;
+  }
   if (typeof e === "string" && e) return e;
   return fallback;
 }

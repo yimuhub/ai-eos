@@ -66,6 +66,16 @@ if _is_sqlite:
     _engine_kwargs["connect_args"] = {"timeout": SQLITE_CONNECT_TIMEOUT_S}
 else:
     _engine_kwargs["pool_pre_ping"] = True
+    # PG 真库回归专用（AIEOS_TEST_DB_NULLPOOL=1）：测试进程里 pytest-asyncio
+    # 每个用例换事件循环，全局池的连接跨循环复用会打爆 asyncpg 协议状态
+    # （"unknown protocol state"）并泄漏服务端连接槽。NullPool = 每次现开
+    # 现关，慢但正确；生产环境绝不设这个开关。
+    import os as _os
+
+    if _os.environ.get("AIEOS_TEST_DB_NULLPOOL") == "1":
+        from sqlalchemy.pool import NullPool
+
+        _engine_kwargs["poolclass"] = NullPool
 
 engine = create_async_engine(settings.database_url, **_engine_kwargs)
 register_sqlite_pragmas(engine)

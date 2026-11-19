@@ -13,6 +13,18 @@
 """
 from __future__ import annotations
 
+# 全进程时区钉 UTC（必须最早执行）：应用约定「naive datetime = UTC」，
+# 但 asyncpg 编码 naive 参数走 datetime.timestamp()——按本地时区折算。
+# 本机 +08 会把所有时间比较窗口整体偏移 8 小时（PG 真库回归抓出）。
+import os as _os
+import time as _time
+
+_os.environ.setdefault("TZ", "UTC")
+try:
+    _time.tzset()
+except AttributeError:  # noqa: silent-except — Windows 无 tzset，环境变量本身已生效
+    pass
+
 import logging
 import os
 import secrets

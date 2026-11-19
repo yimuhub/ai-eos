@@ -34,8 +34,9 @@ import {
 type Skill = { id: string; name: string; description?: string | null; source_label?: string };
 
 /** 单聊消息：历史 meta 与流式 done 都归一到 citations/process 上，渲染只用这一份。 */
-type ChatMsg = WsMsg & { citations?: Citation[]; process?: ChatProcess | null };
+type ChatMsg = WsMsg & { id?: string; citations?: Citation[]; process?: ChatProcess | null };
 type HistoryMsg = WsMsg & { meta?: unknown };
+type HistoryPage = { messages: HistoryMsg[]; has_more: boolean };
 
 function fromHistory(rows: HistoryMsg[]): ChatMsg[] {
   return rows.map((m) => ({
@@ -199,8 +200,12 @@ export default function WorkspaceChat({
     if (mode !== "single" || !agent) { setMsgs([]); return; }
     let alive = true;
     setLoading(true);
-    api.get<HistoryMsg[]>(`/agents/${agent.id}/chat/history?limit=50`)
-      .then((d) => { if (alive) setMsgs(Array.isArray(d) ? fromHistory(d) : []); })
+    api.get<HistoryPage>(`/agents/${agent.id}/chat/history?limit=50`)
+      .then((d) => {
+        if (!alive) return;
+        setMsgs(Array.isArray(d) ? fromHistory(d) : fromHistory(d?.messages ?? []));
+        setHasMoreBefore(!Array.isArray(d) && !!d?.has_more);
+      })
       .catch(() => { if (alive) setMsgs([]); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
@@ -267,12 +272,39 @@ export default function WorkspaceChat({
   /** 用服务端历史校正当前会话（后台流跑完后补回被跳过的增量）。 */
   const refreshHistory = useCallback(async (agentId: string) => {
     try {
-      const d = await api.get<HistoryMsg[]>(`/agents/${agentId}/chat/history?limit=50`);
-      if (currentKeyRef.current === `single:${agentId}`) setMsgs(Array.isArray(d) ? fromHistory(d) : []);
+      const d = await api.get<HistoryPage>(`/agents/${agentId}/chat/history?limit=50`);
+      if (currentKeyRef.current === `single:${agentId}`) {
+        setMsgs(Array.isArray(d) ? fromHistory(d) : fromHistory(d?.messages ?? []));
+        setHasMoreBefore(!Array.isArray(d) && !!d?.has_more);
+      }
     } catch {
       /* 拉不到就等下次切回时再取，不打扰当前界面 */
     }
   }, []);
+
+  /** 更早历史的分页游标：null=没有更早的了。 */
+  const [hasMoreBefore, setHasMoreBefore] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+
+  /** 加载更早的历史（「加载更多」按钮）：结果拼到最前面，滚动位置留在原地。 */
+  const loadOlder = useCallback(async () => {
+    if (mode !== "single" || !agent || loadingOlder) return;
+    const first = msgs.find((m) => m.id);
+    setLoadingOlder(true);
+    try {
+      const cursor = first?.id ? `&before_id=${first.id}` : "";
+      const d = await api.get<HistoryPage>(
+        `/agents/${agent.id}/chat/history?limit=50${cursor}`);
+      const older = Array.isArray(d?.messages) ? fromHistory(d.messages) : [];
+      if (older.length) {
+        setMsgs((prev) => [...older, ...prev]);
+        const el = scrollRef.current;
+        if (el) el.scrollTop = el.scrollTop + el.scrollHeight * 0.1;
+      }
+      setHasMoreBefore(!!d?.has_more);
+    } catch { /* 拉不到不打扰 */ }
+    finally { setLoadingOlder(false); }
+  }, [mode, agent, msgs, loadingOlder]);
 
   const send = useCallback(async () => {
     const text = input.trim();
@@ -1016,7 +1048,14 @@ export default function WorkspaceChat({
                 />
               )}
 
-              {msgs.map((m, i) => (
+              {hasMoreBefore && mode === "single" && (
+            <button type="button" onClick={loadOlder} disabled={loadingOlder}
+              className="mx-auto mb-2 block rounded-lg px-3 py-1.5 text-[11px] hover:bg-white/[0.06] disabled:opacity-50"
+              style={{ color: "var(--muted)", border: "1px solid var(--border)" }}>
+              {loadingOlder ? "加载中…" : "↑ 加载更早的消息"}
+            </button>
+          )}
+{msgs.map((m, i) => (
                 m.role === "boss" ? (
                   <div key={i} className="self-end max-w-[86%]">
                     <div className="rounded-2xl rounded-br-sm px-3.5 py-2.5 text-[13px] leading-relaxed whitespace-pre-wrap"

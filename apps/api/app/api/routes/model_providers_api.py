@@ -130,7 +130,10 @@ def _provider_out(provider: ModelProvider, *, model_count: int = 0,
 
 def _record_check(provider: ModelProvider, ok: bool, error: str | None) -> None:
     provider.last_check_ok = ok
-    provider.last_check_at = datetime.now(timezone.utc)
+    # last_check_at 列是 naive TIMESTAMP：必须存 naive UTC——
+    # aware 值在 SQLite 上被静默吞掉，在 PG 上 asyncpg 直接 DataError
+    # （"can't subtract offset-naive and offset-aware"）。PG 真库回归抓出。
+    provider.last_check_at = datetime.now(timezone.utc).replace(tzinfo=None)
     provider.last_check_error = (str(error)[:500] if error else None)
 
 

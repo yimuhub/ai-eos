@@ -276,7 +276,8 @@ async def test_chat_history_allowed_for_visible_agent(client, org):
     r = await client.get(f"/agents/{aid}/chat/history",
                          headers=org.member["headers"])
     assert r.status_code == 200
-    assert r.json() == []
+    d = r.json()
+    assert (d["messages"] if isinstance(d, dict) else d) == []
 
 
 async def test_chat_stream_returns_404_not_sse_for_hidden_agent(client, org):

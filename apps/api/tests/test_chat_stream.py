@@ -38,7 +38,8 @@ async def _history(client, user, aid) -> list[dict]:
     r = await client.get(f"/agents/{aid}/chat/history",
                          headers=user["headers"])
     assert r.status_code == 200, r.text
-    return r.json()
+    d = r.json()
+    return d["messages"] if isinstance(d, dict) else d
 
 
 # ---------------------------------------------------------------------------

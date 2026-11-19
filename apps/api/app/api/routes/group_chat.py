@@ -600,6 +600,8 @@ async def group_chat(scope: str, scope_id: str, data: GroupChatIn,
     if scope not in ("project", "task", "group"):
         raise HTTPException(400, "scope must be project, task or group")
     await _owned_company(db, user.id, company_id, Capability.OPERATE)
+    from app.core.ratelimit import GROUP_SEND_PER_MIN, enforce_rate_limit
+    enforce_rate_limit(f"group:{user.id}", GROUP_SEND_PER_MIN)
     from app.model_gateway import ModelGateway
     gw = ModelGateway(db)
 
@@ -681,6 +683,8 @@ async def group_chat_stream(
     if scope not in ("project", "task", "group"):
         raise HTTPException(400, "scope must be project, task or group")
     await _owned_company(db, user.id, company_id, Capability.OPERATE)
+    from app.core.ratelimit import GROUP_SEND_PER_MIN, enforce_rate_limit
+    enforce_rate_limit(f"group-stream:{user.id}", GROUP_SEND_PER_MIN)
 
     # 1. 存老板消息
     db.add(GroupChatMessage(

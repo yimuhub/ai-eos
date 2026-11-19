@@ -42,7 +42,7 @@ class AgentMemory(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     importance: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
     keywords: Mapped[list | None] = mapped_column(JSON, nullable=True)
-    context_ref: Mapped[str | None] = mapped_column(String(36), nullable=True,
+    context_ref: Mapped[str | None] = mapped_column(String(100), nullable=True,
                                                      index=True)
     access_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     expires_at: Mapped[datetime | None] = mapped_column(nullable=True, index=True)

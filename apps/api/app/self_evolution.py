@@ -707,6 +707,10 @@ async def run_evolution(db: AsyncSession, company_id: str, level: str,
         raise
 
     async def _skip(reason: str) -> dict:
+        from app.core.logging_config import get_logger
+        get_logger(__name__).warning(
+            "进化跳过 company=%s level=%s key=%s 原因=%s",
+            company_id, level, key, reason)
         rec.status = EvolutionStatus.SKIPPED.value
         rec.error = reason
         rec.diagnosis = reason

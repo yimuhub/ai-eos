@@ -317,7 +317,9 @@ async def test_trace_links_tool_calls(tenants):
             select(EventLog).where(
                 EventLog.company_id == co,
                 EventLog.event_type == "tool.call",
-                _f.json_extract(EventLog.payload, "$.trace_id") == tid))).scalars().all()
+                (_f.json_extract(EventLog.payload, "$.trace_id")
+             if db.bind.dialect.name == "sqlite"
+             else EventLog.payload.op("->>")("trace_id")) == tid))).scalars().all()
     assert rows, "trace_id 必须进工具审计 payload"
 
 

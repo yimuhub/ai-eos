@@ -72,6 +72,7 @@ def _json_expr(db: AsyncSession, column, path: str):
         raise ValueError(f"字段路径非法：{path}")
     if _dialect(db) == "sqlite":
         return func.json_extract(column, "$." + keys)
+    return func.json_extract_path_text(column, *keys.split("."))
     if "." not in keys:
         return column.op("->>")(keys)
     return column.op("#>>")(f"{{{keys.replace('.', ',')}}}")

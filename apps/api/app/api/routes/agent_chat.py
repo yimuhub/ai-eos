@@ -673,19 +673,32 @@ async def _maybe_summarize_thread(db: AsyncSession, a: Agent,
 @router.get("/{aid}/chat/history")
 async def chat_history(aid: str, limit: int = Query(50, ge=1, le=200),
                        thread_id: str | None = Query(None),
+                       before_id: str | None = Query(None, desc="翻页游标：返回比这条更早的消息"),
                        db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
+    """对话历史（分页）：默认最新 limit 条；带 before_id 时返回它之前更早的一页。
+
+    has_more=false 表示更早的没有了——前端用它决定「加载更多」按钮去留。
+    长会话不再全量拉取（V6.2 性能债）。"""
     a = await _visible_agent(db, user, aid)
     q = select(AgentChatMessage).where(AgentChatMessage.agent_id == str(a.id))
     if thread_id:
         thread = await _resolve_thread(db, a, thread_id)
         q = q.where(AgentChatMessage.thread_id == str(thread.id))
+    if before_id:
+        anchor = await db.get(AgentChatMessage, before_id)
+        if anchor is None or anchor.agent_id != str(a.id):
+            raise HTTPException(404, "分页游标不存在")
+        q = q.where(AgentChatMessage.created_at < anchor.created_at)
     rows = (await db.execute(q.order_by(
-        AgentChatMessage.created_at.desc()).limit(limit))).scalars().all()
-    return [{"id": r.id, "role": r.role, "content": r.content,
-             "meta": r.meta, "thread_id": r.thread_id,
-             "created_at": str(r.created_at)}
-            for r in reversed(rows)]
+        AgentChatMessage.created_at.desc()).limit(limit + 1))).scalars().all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    return {"messages": [{"id": r.id, "role": r.role, "content": r.content,
+                          "meta": r.meta, "thread_id": r.thread_id,
+                          "created_at": str(r.created_at)}
+                         for r in reversed(rows)],
+            "has_more": has_more}
 
 
 @router.post("/{aid}/chat")
@@ -697,6 +710,8 @@ async def boss_chat(aid: str, data: ChatIn,
     from app.memory_engine import MemoryType, remember
 
     a = await _visible_agent(db, user, aid)
+    from app.core.ratelimit import CHAT_MSG_PER_MIN, enforce_rate_limit
+    enforce_rate_limit(f"chat:{user.id}", CHAT_MSG_PER_MIN)
     text = data.message.strip()
     if not text:
         raise HTTPException(400, "empty message")
@@ -1343,6 +1358,8 @@ async def boss_chat_stream(aid: str, data: ChatStreamIn,
     # 响应码已经发出，越权只能被降级成 SSE 里的 error 文本——那等于把
     # 404 吞掉（前端会当成"模型报错"而不是"你没有这个员工"）。
     a = await _visible_agent(db, user, aid)
+    from app.core.ratelimit import CHAT_STREAM_PER_MIN, enforce_rate_limit
+    enforce_rate_limit(f"chat-stream:{user.id}", CHAT_STREAM_PER_MIN)
     text = data.message.strip()
     if not text:
         raise HTTPException(400, "empty message")

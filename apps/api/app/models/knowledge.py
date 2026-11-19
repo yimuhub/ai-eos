@@ -60,7 +60,7 @@ class KBDocument(Base):
 class KBChunk(Base):
     __tablename__ = "kb_chunks"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, index=True)
+    id: Mapped[str] = mapped_column(String(100), primary_key=True, index=True)
     document_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("kb_documents.id", ondelete="CASCADE"), nullable=False,
         index=True)

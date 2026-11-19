@@ -98,6 +98,9 @@ def _provision_postgres(url: str) -> str:
     name = f"aieos_test_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     try:
         _pg_admin_exec(_admin_dsn(url), f'CREATE DATABASE "{name}"')
+        # naive datetime 约定 = UTC：asyncpg 把 naive 参数按库时区解释，
+        # 不钉 UTC 的话窗口整体偏移本地时区（如 +08），进化/统计会静默丢数据。
+        _pg_admin_exec(_admin_dsn(url), f"ALTER DATABASE \"{name}\" SET timezone TO 'UTC'")
     except Exception as exc:  # noqa: BLE001 — 权限/并发等都可能，降级即可
         print(f"[conftest] 无法创建独立测试库（{type(exc).__name__}: {exc}），"
               f"改用给定库并先清空", file=sys.stderr)

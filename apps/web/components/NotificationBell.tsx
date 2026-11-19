@@ -107,7 +107,14 @@ export default function NotificationBell({
     if (!cid) return;
     try {
       const next = await fetchUnreadCount(cid);
-      setCount(next);
+      setCount((prev) => {
+        // 主动提示（V6.2 产品债）：页面可见时用户看不到系统通知——
+        // 未读增加就在页内弹一条 toast，别让审批/完成通知被刷掉。
+        if (next > prev && document.visibilityState === "visible") {
+          toast("info", `📩 ${next - prev} 条新通知（审批动态、任务完成都在这里）`);
+        }
+        return next;
+      });
       maybeDesktopNotify(next);
     } catch {
       /* 轮询失败保持旧值，不打扰用户 */

@@ -258,9 +258,12 @@ async def trace_query(trace_id: str, company_id: str = Query(...),
     await _owned_guard(db, user, company_id)
     from sqlalchemy import func as _func
     from app.models.event import EventLog
+    trace_expr = (_func.json_extract(EventLog.payload, "$.trace_id")
+                  if db.bind.dialect.name == "sqlite"
+                  else EventLog.payload.op("->>")("trace_id"))
     q = (select(EventLog).where(
         EventLog.company_id == company_id,
-        _func.json_extract(EventLog.payload, "$.trace_id") == trace_id)
+        trace_expr == trace_id)
         .order_by(EventLog.created_at))
     rows = (await db.execute(q.limit(500))).scalars().all()
     return {"trace_id": trace_id, "events": [{
@@ -514,7 +517,8 @@ async def admin_log_chats(request: Request,
             _f.count().label("msgs"),
             _f.max(AgentChatMessage.created_at).label("last_at"),
         ).where(AgentChatMessage.company_id == company_id)
-        .group_by(AgentChatMessage.agent_id, AgentChatMessage.thread_id)
+        .group_by(AgentChatMessage.agent_id, AgentChatMessage.company_id,
+                  AgentChatMessage.thread_id)
         .order_by(_f.max(AgentChatMessage.created_at).desc())
         .limit(limit))).all()
     return {"threads": [{

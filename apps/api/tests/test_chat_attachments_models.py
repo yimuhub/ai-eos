@@ -74,7 +74,9 @@ async def test_attachment_text_reaches_model_and_history(
     history = await client.get(f"/agents/{agent['id']}/chat/history",
                                headers=user["headers"])
     assert history.status_code == 200, history.text
-    boss = history.json()[0]
+    _hd = history.json()
+    _hmsgs = _hd["messages"] if isinstance(_hd, dict) else _hd
+    boss = _hmsgs[0]
     assert boss["role"] == "boss"
     assert boss["meta"]["attachments"][0]["id"] == asset["id"]
 
@@ -102,7 +104,9 @@ async def test_attachment_from_other_company_is_ignored(
     assert "TOP-SECRET-BOB" not in joined
     history = await client.get(f"/agents/{agent['id']}/chat/history",
                                headers=tenants.alice["headers"])
-    assert history.json()[0]["meta"] == {}
+    _hd2 = history.json()
+    _hm2 = _hd2["messages"] if isinstance(_hd2, dict) else _hd2
+    assert _hm2[0]["meta"] == {}
 
 
 async def _create_model(client, user, company, name: str) -> dict:

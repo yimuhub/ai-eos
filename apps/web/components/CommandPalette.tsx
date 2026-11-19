@@ -171,6 +171,9 @@ export default function CommandPalette() {
   const [cursor, setCursor] = useState(0);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [sessions, setSessions] = useState<WsSession[]>([]);
+  const [tasks, setTasks] = useState<{ id: string; title: string; status: string;
+    agent_name?: string }[]>([]);
+  const [metrics, setMetrics] = useState<{ key: string; name: string; unit?: string }[]>([]);
   // 公司资料（任务/记忆/知识/资产）异步检索：只影响独立分组，不阻断本地结果
   const [companyGroups, setCompanyGroups] = useState<CompanySearchGroup[]>([]);
   const [companyStatus, setCompanyStatus] = useState<
@@ -229,6 +232,8 @@ export default function CommandPalette() {
 
     setAgents([]);
     setSessions([]);
+    setTasks([]);
+    setMetrics([]);
 
     void Promise.allSettled([
       api.get<Agent[]>(`/agents${qs}`, { signal: controller.signal, silent: true }),
@@ -236,7 +241,16 @@ export default function CommandPalette() {
         signal: controller.signal,
         silent: true,
       }),
-    ]).then(([agentRes, sessionRes]) => {
+      // 数据搜索（V6.2 产品债）：⌘K 不只搜页面，还搜任务与指标
+      api.get<{ tasks?: { id: string; title: string; status: string;
+        agent_name?: string }[] }>(`/tasks${qs}`, {
+        signal: controller.signal, silent: true,
+      }).catch(() => api.get<{ id: string; title: string; status: string;
+        agent_name?: string }[]>(`/tasks${qs}`, {
+        signal: controller.signal, silent: true })),
+      api.get<{ metrics?: { key: string; name: string; unit?: string }[] }>(
+        `/metrics${qs}`, { signal: controller.signal, silent: true }),
+    ]).then(([agentRes, sessionRes, taskRes, metricRes]) => {
       if (controller.signal.aborted) return;
       if (agentRes.status === "fulfilled" && Array.isArray(agentRes.value)) {
         setAgents(agentRes.value);
@@ -246,6 +260,16 @@ export default function CommandPalette() {
         Array.isArray(sessionRes.value?.sessions)
       ) {
         setSessions(sessionRes.value.sessions);
+      }
+      if (taskRes.status === "fulfilled") {
+        const v = taskRes.value as { tasks?: unknown } | unknown[];
+        const rows = Array.isArray(v) ? v : (v?.tasks ?? []);
+        if (Array.isArray(rows)) setTasks(rows.slice(0, 200));
+      }
+      if (metricRes.status === "fulfilled") {
+        const v = metricRes.value as { metrics?: unknown } | unknown[];
+        const rows = Array.isArray(v) ? v : (v?.metrics ?? []);
+        if (Array.isArray(rows)) setMetrics(rows.slice(0, 100));
       }
     });
 
@@ -351,6 +375,35 @@ export default function CommandPalette() {
     [sessions],
   );
 
+  const taskResults = useMemo<PageResult[]>(
+    () => tasks.map((task) => ({
+      kind: "session",
+      id: `task:${task.id}`,
+      label: task.title || "未命名任务",
+      desc: `任务 · ${task.agent_name || "—"} · ${task.status}`,
+      icon: "◉",
+      group: "任务",
+      href: `/tasks/${task.id}`,
+      keywords: ["任务", "task", "renwu", task.title || "", task.status || "",
+                 task.agent_name || ""].filter(Boolean),
+    })),
+    [tasks],
+  );
+
+  const metricResults = useMemo<PageResult[]>(
+    () => metrics.map((m) => ({
+      kind: "session",
+      id: `metric:${m.key}`,
+      label: m.name,
+      desc: `指标 · ${m.key}${m.unit ? `（${m.unit}）` : ""} · 求值与趋势在指标中心`,
+      icon: "Σ",
+      group: "指标",
+      href: "/metrics",
+      keywords: ["指标", "metric", "zhibiao", m.name, m.key].filter(Boolean),
+    })),
+    [metrics],
+  );
+
   const actions = useMemo<ActionResult[]>(
     () => [
       {
@@ -451,8 +504,9 @@ export default function CommandPalette() {
   }, [open]);
 
   const allResults = useMemo<Result[]>(
-    () => [...PAGE_RESULTS, ...sessionResults, ...agentResults, ...actions],
-    [sessionResults, agentResults, actions],
+    () => [...PAGE_RESULTS, ...sessionResults, ...taskResults, ...metricResults,
+           ...agentResults, ...actions],
+    [sessionResults, taskResults, metricResults, agentResults, actions],
   );
 
   const query = q.trim();
