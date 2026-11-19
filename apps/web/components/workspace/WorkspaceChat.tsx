@@ -16,7 +16,9 @@ import {
   type ChatProcess,
   type ChatProcessEvent,
 } from "@/lib/chatProcess";
+import { markFirstMessageDone } from "@/components/FirstRunTour";
 import {
+  agentModelReady,
   clock, meetingMeta, sessionMeta, taskMeta,
   type GroupMsg, type MeetingDetail, type WsAgent, type WsChatGroup, type WsMeeting, type WsMode, type WsMsg,
   type WsProject, type WsSession, type WsView, type WarDetail,
@@ -345,6 +347,7 @@ export default function WorkspaceChat({
             setStatus(String(ev.text || ""));
           } else if (ev.type === "done") {
             acc = String(ev.reply ?? acc);
+            markFirstMessageDone();
             patchLast((m) => ({
               ...m,
               content: acc,
@@ -883,6 +886,14 @@ export default function WorkspaceChat({
             {headline.tag && (
               <span className="text-[9px] px-1.5 py-0.5 rounded shrink-0"
                 style={{ background: "rgba(255,255,255,0.06)", color: "var(--muted)" }}>{headline.tag}</span>
+            )}
+            {mode === "single" && agent && !agentModelReady(agent) && (
+              <button type="button" onClick={() => onOpenApp(`/agents/${agent.id}/profile`)}
+                title="该员工还没有首选模型，派活会失败——点这里去绑定"
+                className="text-[9px] px-1.5 py-0.5 rounded shrink-0 font-medium hover:brightness-110"
+                style={{ background: "rgba(251,191,36,0.14)", color: "#fcd34d", border: "1px solid rgba(251,191,36,0.4)" }}>
+                ⚠ 未绑定模型 · 去绑定
+              </button>
             )}
           </h1>
           <p className="text-[10px] mt-0.5 truncate" style={{ color: "var(--muted)" }}>{headline.sub}</p>

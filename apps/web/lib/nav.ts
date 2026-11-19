@@ -48,6 +48,7 @@ export const NAV_GROUPS: NavGroup[] = [
     hint: "每天先看这里：现在在打什么仗、仗打到哪了",
     items: [
       { href: "/workspace", label: "工作台", icon: "◧", desc: "左看人、中间下指令、右边看产出，一张屏干完活", keywords: ["workspace", "gongzuotai", "工作台", "对话", "聊天", "首页", "home"] },
+      { href: "/harness", label: "Harness 指挥台", icon: "⚡", desc: "ZCode 式指挥台：活动栏 + ⌘K + 状态栏，全部能力装进一个行业级外壳", keywords: ["harness", "指挥台", "zcode", "外壳", "模式"], hidden: true },
       { href: "/ceo", label: "CEO 指挥台", icon: "👑", desc: "一句话交给 CEO：拆准绳、分到人、按并发跑、盯偏离、收报告", keywords: ["ceo", "超级agent", "ceo zhihuitai", "统筹", "总指挥", "一句话"] },
       { href: "/dashboard", label: "指挥中心", icon: "◈", desc: "全局总览：公司、员工、任务与今日动向", keywords: ["dashboard", "zhihuizhongxin", "总览", "概览", "看板"], hidden: true },
       { href: "/command", label: "一句话指挥台", icon: "📣", desc: "说一句话，AI 判断派活/专家组队/作战室立项，每步都有你的确认点", keywords: ["command", "zhichutai", "指挥台", "一句话", "下达", "派活", "组队", "立项", "orchestrator"], hidden: true },

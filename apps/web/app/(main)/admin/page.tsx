@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, describeError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { notify } from "@/components/Toast";
@@ -79,6 +79,30 @@ export default function AdminPage() {
   const authHeaders = () => {
     const t = sessionStorage.getItem(KEY_STORE) || "";
     return { "X-Admin-Token": t };
+  };
+
+  // 技能库审核队列：auto_pass/review 待人工放行的条目
+  const [libQueue, setLibQueue] = useState<{ id: string; name: string; kind: string;
+    description: string; brand_refs: string[]; review_status: string }[]>([]);
+  const refreshLibQueue = useCallback(async () => {
+    if (!unlocked) return;
+    try {
+      const r = await api.get<typeof libQueue>(
+        "/skill-library/admin/queue?status=review", { headers: authHeaders() });
+      setLibQueue(Array.isArray(r) ? r : []);
+    } catch { setLibQueue([]); }
+  }, [unlocked]);
+  useEffect(() => { void refreshLibQueue(); }, [refreshLibQueue]);
+
+  const reviewLib = async (id: string, status: "published" | "rejected") => {
+    try {
+      await api.post(`/skill-library/admin/${id}/review`, { status },
+        { headers: authHeaders() });
+      notify("success", status === "published" ? "已发布，企业技能库可见" : "已拒绝");
+      void refreshLibQueue();
+    } catch (e) {
+      notify("error", describeError(e, "审核失败"));
+    }
   };
 
   const { data, error, refresh } = useResource(
@@ -432,6 +456,40 @@ export default function AdminPage() {
                 </div>
               ))}
               {!expertPackRows.length && <div className="text-white/40">加载中…</div>}
+            </div>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+            <div className="mb-2 font-medium">技能库审核队列（{libQueue.length}）</div>
+            <p className="mb-2 text-[12px] text-white/50">
+              外部技能生态导入的条目在这里放行；带品牌引用/疑似注入的不会自动过。
+            </p>
+            {!libQueue.length && <div className="text-white/40">队列已清空——没有待审条目。</div>}
+            <div className="grid gap-2">
+              {libQueue.map((x) => (
+                <div key={x.id} className="flex items-center justify-between gap-2 rounded-lg bg-black/25 p-3">
+                  <div className="min-w-0">
+                    <div className="truncate">
+                      {x.kind === "expert" ? "👥" : x.kind === "connector" ? "🔌" : "⚡"} {x.name}
+                      {x.brand_refs.length > 0 && (
+                        <span className="ml-2 rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] text-red-300">
+                          品牌引用：{x.brand_refs.slice(0, 3).join(",")}
+                        </span>
+                      )}
+                    </div>
+                    <div className="truncate text-[12px] text-white/50">{x.description}</div>
+                  </div>
+                  <div className="flex shrink-0 gap-1.5">
+                    <button onClick={() => reviewLib(x.id, "published")}
+                            className="rounded-md bg-emerald-600/80 px-2.5 py-1 text-[12px] hover:bg-emerald-600">
+                      放行
+                    </button>
+                    <button onClick={() => reviewLib(x.id, "rejected")}
+                            className="rounded-md bg-white/10 px-2.5 py-1 text-[12px] hover:bg-white/20">
+                      拒绝
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
           <div className="rounded-lg border border-white/10 bg-white/5 p-3 text-[12px] text-white/50">

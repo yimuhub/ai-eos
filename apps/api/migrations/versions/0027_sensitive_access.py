@@ -42,6 +42,8 @@ def upgrade() -> None:
                     ["admin_user_id"])
     op.create_index("ix_sensitive_access_category", "sensitive_access",
                     ["category"])
+    op.create_index("ix_sensitive_access_created_at", "sensitive_access",
+                    ["created_at"])
 
 
 def downgrade() -> None:

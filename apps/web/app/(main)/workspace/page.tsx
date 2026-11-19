@@ -12,6 +12,7 @@ import WorkspaceChat from "@/components/workspace/WorkspaceChat";
 import WorkspacePanel from "@/components/workspace/WorkspacePanel";
 import WorkspaceSidebar from "@/components/workspace/WorkspaceSidebar";
 import GroupEditor from "@/components/workspace/GroupEditor";
+import FirstRunTour from "@/components/FirstRunTour";
 import NotificationBell from "@/components/NotificationBell";
 import type { OutTab } from "@/components/workspace/WorkspaceOutput";
 import type { WsAgent, WsChatGroup, WsMeeting, WsMode, WsProject, WsSession, WsView } from "@/lib/workspace";
@@ -880,6 +881,7 @@ export default function WorkspacePage() {
           )}
         </div>
       )}
+      <FirstRunTour />
       <GroupEditor
         open={groupEditor.open}
         group={groupEditor.group}

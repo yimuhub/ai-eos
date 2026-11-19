@@ -32,7 +32,7 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             org_synthesis, plugins, computer_policy, computer_devices,
                             members, licensing, subscription, byok, invites, media,
                             toolbus, connectors, industry_packs, security, ops,
-                            expert_packs)
+                            expert_packs, skill_library)
 from app.api.routes import notifications
 from app.api.routes import thread_reads
 # 收件箱挂在 /tasks 下，必须比 tasks 路由**先注册**——tasks 有 /{tid} 兜底，
@@ -509,3 +509,4 @@ app.include_router(security.audit_router)
 app.include_router(ops.router)
 # V6.2：行业专家包目录 + 访谈完善（双路由）
 app.include_router(expert_packs.interviews_router)
+app.include_router(skill_library.router)

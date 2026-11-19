@@ -12,8 +12,10 @@ import Splitter from "@/components/workspace/Splitter";
 import WorkspaceChat from "@/components/workspace/WorkspaceChat";
 import WorkspacePanel from "@/components/workspace/WorkspacePanel";
 import GroupEditor from "@/components/workspace/GroupEditor";
+import FirstRunTour from "@/components/FirstRunTour";
 import type { OutTab } from "@/components/workspace/WorkspaceOutput";
-import type { WsAgent, WsChatGroup, WsMeeting, WsMode, WsProject, WsSession, WsView } from "@/lib/workspace";
+import { agentModelReady,
+  type WsAgent, type WsChatGroup, type WsMeeting, type WsMode, type WsProject, type WsSession, type WsView } from "@/lib/workspace";
 
 /**
  * Harness 指挥台（第三种界面形态）。
@@ -843,8 +845,15 @@ export default function HarnessPage() {
               </span>
               <span className="min-w-0 flex-1">
                 <span className="block text-[12px] font-medium truncate" style={{ color: "var(--foreground)" }}>{a.name}</span>
-                <span className="block text-[10px] truncate" style={{ color: "var(--muted)" }}>{a.role || "数字员工"}</span>
+                <span className="block text-[10px] truncate" style={{ color: agentModelReady(a) ? "var(--muted)" : "var(--warning)" }}>
+                  {agentModelReady(a) ? (a.role || "数字员工") : "⚠ 未绑定模型"}
+                </span>
               </span>
+              {!agentModelReady(a) && (
+                <span className="shrink-0 text-[9px] font-semibold"
+                  title="未绑定模型：派活会失败，点员工去绑定"
+                  style={{ color: "var(--warning)" }}>⚠</span>
+              )}
               <span
                 className="w-[7px] h-[7px] rounded-full shrink-0"
                 style={{
@@ -1058,6 +1067,7 @@ export default function HarnessPage() {
         activeLabel={focusMode ? `${activeApp ? activeApp.label : "产出"} · 展开态` : (activeApp ? activeApp.label : "对话")}
         onOpenPalette={openCommandPalette}
       />
+      <FirstRunTour />
       <GroupEditor
         open={groupEditor.open}
         group={groupEditor.group}

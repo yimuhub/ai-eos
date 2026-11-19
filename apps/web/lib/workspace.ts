@@ -8,7 +8,18 @@ export type WsAgent = {
   role?: string | null;
   /** 后端可能返回，用于判断员工是否在岗 */
   status?: string | null;
+  /** /agents 列表返回的模型绑定（role: primary|secondary|fallback）；
+   *  没有 primary 绑定 = 该员工接活会报「尚未绑定任何模型」，要提前亮出来。 */
+  model_configs?: { role?: string | null; model_id?: string }[] | null;
 };
+
+/** 员工是否绑定了首选模型——未绑定就发任务必然报错，UI 要提前拦。 */
+export function agentModelReady(a: WsAgent | null | undefined): boolean {
+  if (!a) return true;
+  const list = a.model_configs;
+  if (!Array.isArray(list)) return true; // 后端没给绑定信息时不误报
+  return list.some((m) => (m?.role || "primary") === "primary");
+}
 
 export type WsTask = {
   id: string;

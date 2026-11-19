@@ -98,3 +98,5 @@ from .ops import (ComplianceLedger, PayrollRule,  # noqa: F401
 from .interview import ExpertInterview  # noqa: F401
 
 from .sensitive_access import SensitiveAccess  # noqa: F401
+
+from .skill_library import SkillLibraryItem  # noqa: F401

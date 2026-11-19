@@ -40,6 +40,9 @@ async def catalog(company_id: str | None = Query(None),
                   db: AsyncSession = Depends(get_db),
                   user: User = Depends(get_current_user)):
     """内置专家包目录（按行业）；带 company_id 时附每包在本公司的解锁状态。"""
+    if company_id:
+        # company_id 是 Query 参数：必须校验调用者与该公司的归属，否则可枚举别家解锁数
+        await assert_company_capability(db, user.id, company_id, Capability.VIEW)
     packs = list_expert_packs()
     out = []
     for p in packs:
@@ -79,15 +82,8 @@ async def admin_unlock(body: UnlockIn, request: Request,
                        db: AsyncSession = Depends(get_db),
                        user: User = Depends(get_current_user)):
     """超管把内置专家包解锁到某公司（写入该公司 expert_templates）。"""
-    import hmac as _hmac
-
-    from app.core.config import settings
-
-    if not user.is_superadmin:
-        raise HTTPException(403, "需要平台超管身份")
-    provided = (request.headers.get("X-Super-Key") or "").strip()
-    if not provided or not _hmac.compare_digest(provided, settings.super_key):
-        raise HTTPException(403, "超级密钥不匹配")
+    from app.api.routes.ops import _admin_guard
+    await _admin_guard(db, user, request)
     try:
         created = await unlock_expert_pack(db, body.pack_id,
                                            body.company_id, user.id)

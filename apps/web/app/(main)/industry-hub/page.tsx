@@ -50,6 +50,10 @@ export default function IndustryHubPage() {
   const available = (active?.available ?? [])
     .filter((a) => !installed.some((i) => i.key === a.id));
   const [experts, setExperts] = useState<CompanyExpert[]>([]);
+  type LibItem = { id: string; kind: string; name: string; description: string;
+    industry_tags: string[]; trigger_keywords: string[]; install_count: number };
+  const [libSkills, setLibSkills] = useState<LibItem[]>([]);
+  const [libFilter, setLibFilter] = useState<string>("");
   const [selExpert, setSelExpert] = useState<string>("");
   const [transcript, setTranscript] = useState("");
   const [digestResult, setDigestResult] = useState<string | null>(null);
@@ -76,7 +80,34 @@ export default function IndustryHubPage() {
       `/interviews/experts?company_id=${cid}`)
       .then((r) => setExperts(r?.experts ?? []))
       .catch(() => setExperts([]));
+    // 技能库：已发布的平台条目（跨行业通用层 + 各行业层）
+    api.get<LibItem[]>("/skill-library")
+      .then((r) => setLibSkills(Array.isArray(r) ? r : []))
+      .catch(() => setLibSkills([]));
   }, [cid]);
+
+  const installLibSkill = async (item: LibItem) => {
+    if (!cid) return;
+    setBusy(`lib:${item.id}`);
+    try {
+      const r = await api.post<{ kind: string; granted_agents?: number;
+        expert_template_id?: string; hint?: string }>(
+        `/skill-library/${item.id}/install`, { company_id: cid });
+      if (item.kind === "skill") {
+        notify("success", `「${item.name}」已装给 ${r.granted_agents ?? 0} 名员工（方法论将进入其系统提示词）`);
+      } else if (item.kind === "expert") {
+        notify("success", "专家团队已进「专家库」，可在上面选人访谈");
+      } else {
+        notify("info", r.hint || "连接器蓝图已记录");
+      }
+      setLibSkills((prev) => prev.map((x) => x.id === item.id
+        ? { ...x, install_count: x.install_count + 1 } : x));
+    } catch (e) {
+      notify("error", describeError(e, "安装失败"));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const runInterview = async () => {
     if (!cid || !selExpert || transcript.trim().length < 20) {
@@ -300,6 +331,47 @@ export default function IndustryHubPage() {
               )}
             </>
           )}
+        </div>
+      )}
+
+      {cid && libSkills.length > 0 && (
+        <div className="mb-4 rounded-xl border border-white/10 bg-white/5 p-4">
+          <div className="mb-1 font-medium">技能库（平台精选 · 已审核发布）</div>
+          <p className="mb-2.5 text-[12px] text-white/50">
+            提示型技能装到员工身上后，其方法论会进入员工系统提示词，跟着行业包的岗位一起上岗。
+          </p>
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            <button onClick={() => setLibFilter("")}
+                    className={`rounded-md px-2.5 py-1 text-[12px] ${libFilter === "" ? "bg-white/25 text-white" : "bg-white/8 text-white/60 hover:bg-white/15"}`}>
+              全部（{libSkills.length}）
+            </button>
+            {Array.from(new Set(libSkills.flatMap((x) => x.industry_tags))).map((t) => (
+              <button key={t} onClick={() => setLibFilter(t)}
+                      className={`rounded-md px-2.5 py-1 text-[12px] ${libFilter === t ? "bg-sky-500/30 text-sky-200" : "bg-white/8 text-white/60 hover:bg-white/15"}`}>
+                {t}
+              </button>
+            ))}
+          </div>
+          <div className="grid gap-1.5 md:grid-cols-2">
+            {libSkills.filter((x) => !libFilter || x.industry_tags.includes(libFilter))
+              .map((x) => (
+              <div key={x.id} className="flex items-center justify-between gap-2 rounded-md bg-black/25 px-3 py-2">
+                <div className="min-w-0">
+                  <div className="truncate">
+                    {x.kind === "expert" ? "👥 " : x.kind === "connector" ? "🔌 " : "⚡ "}
+                    {x.name}
+                    {x.install_count > 0 && <span className="ml-1.5 text-[10px] text-white/40">已装 ×{x.install_count}</span>}
+                  </div>
+                  <div className="truncate text-[11px] text-white/40">{x.description}</div>
+                </div>
+                <button disabled={busy === `lib:${x.id}`}
+                        onClick={() => installLibSkill(x)}
+                        className="shrink-0 rounded-md bg-emerald-600/80 px-2.5 py-1 text-[12px] hover:bg-emerald-600 disabled:opacity-40">
+                  {busy === `lib:${x.id}` ? "…" : x.kind === "skill" ? "装给全员" : "安装"}
+                </button>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

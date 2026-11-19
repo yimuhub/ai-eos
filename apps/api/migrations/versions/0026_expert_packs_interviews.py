@@ -56,6 +56,10 @@ def upgrade() -> None:
     )
     op.create_index("ix_expert_interviews_company_id", "expert_interviews",
                     ["company_id"])
+    op.create_index("ix_expert_interviews_agent_id", "expert_interviews",
+                    ["agent_id"])
+    op.create_index("ix_expert_interviews_expert_template_id",
+                    "expert_interviews", ["expert_template_id"])
 
 
 def downgrade() -> None:

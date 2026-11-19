@@ -46,6 +46,7 @@ GUARD_MARKERS = (
     "_verify_",            # _verify_agent_access
     "owner_id",            # 就地比较归属（历史写法）
     "Capability",
+    "_admin_guard",        # 超管门禁（身份+根凭据/会话令牌）——强于公司归属
 )
 
 
@@ -180,6 +181,7 @@ READ_GUARD_MARKERS = (
     "_owned_",                # _owned_company / _owned_department ...
     "owner_id",               # 就地比较归属
     "resolve_role",           # 解析调用者在该公司的角色
+    "_admin_guard",           # 超管门禁：跨公司管理端点的合法守卫
 )
 # 认定"同文件某函数是校验辅助"时只认主动校验词；光出现 owner_id 不够
 # （序列化输出也可能带 owner_id），必须伴随 raise 才算真在校验。

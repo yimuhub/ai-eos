@@ -32,7 +32,8 @@ async def metrics_query_executor(args: dict, ctx: ToolContext) -> dict:
 
 
 async def web_search_executor(args: dict, ctx: ToolContext) -> dict:
-    """联网搜索：委托 skill_system 的 WebSearchSkill（多源降级）。"""
+    """联网搜索：委托 skill_system 的 WebSearchSkill（多源降级）。
+    结果是不可信外部内容：逐条过注入防护并附防御指令（V6.2 安全债）。"""
     query = str(args.get("query") or "").strip()
     if not query:
         return {"error": "缺少 query"}
@@ -41,9 +42,34 @@ async def web_search_executor(args: dict, ctx: ToolContext) -> dict:
     except (TypeError, ValueError):
         max_results = 5
     from app.skill_system import execute_skill
+    from app.toolbus.security import (sanitize_untrusted_text,
+                                      web_instruction, wrap_untrusted)
     res = await execute_skill("web_search", {
         "query": query, "max_results": max(1, min(max_results, 10))})
-    return res.get("result") or res
+    result = res.get("result") or res
+    # 结果形状兜底：list 或 {results: list} 都支持
+    items = result if isinstance(result, list) else (result or {}).get("results") or []
+    filtered = 0
+    cleaned_items: list = []
+    for it in items if isinstance(items, list) else []:
+        if isinstance(it, dict):
+            it = dict(it)
+            for field in ("content", "snippet", "title", "text", "summary"):
+                if isinstance(it.get(field), str):
+                    it[field], n = sanitize_untrusted_text(it[field], 3000)
+                    filtered += n
+        elif isinstance(it, str):
+            it, n = sanitize_untrusted_text(it, 3000)
+            filtered += n
+        cleaned_items.append(it)
+    if isinstance(result, list):
+        out: dict = {"results": cleaned_items}
+    else:
+        out = dict(result or {})
+        out["results"] = cleaned_items
+    out["external_content"] = wrap_untrusted(f"web_search:{query}", {
+        "instruction": web_instruction(), "filtered": filtered})
+    return out
 
 
 async def web_fetch_executor(args: dict, ctx: ToolContext) -> dict:
@@ -60,6 +86,8 @@ async def web_fetch_executor(args: dict, ctx: ToolContext) -> dict:
         max_chars = 6000
     from app.db.session import AsyncSessionLocal
     from app.browser_agent import fetch_page_text
+    from app.toolbus.security import (sanitize_untrusted_text, web_instruction,
+                                      wrap_untrusted)
     async with AsyncSessionLocal() as tdb:
         page = await fetch_page_text(
             tdb, ctx.company_id or "", ctx.agent_id, url,
@@ -68,9 +96,13 @@ async def web_fetch_executor(args: dict, ctx: ToolContext) -> dict:
         return {"error": page["error"], "url": url}
     if not page.get("allowed", True):
         return {"error": page.get("deny_reason") or "目标地址被拒绝", "url": url}
+    text, filtered = sanitize_untrusted_text(page.get("text") or "",
+                                             max(500, min(max_chars, 12000)))
     return {
         "url": url,
         "title": page.get("title_m") or "",
-        "text": page.get("text") or "",
+        "text": text,
         "rendered": bool(page.get("rendered")),
+        "external_content": wrap_untrusted(url, {
+            "instruction": web_instruction(), "filtered": filtered}),
     }

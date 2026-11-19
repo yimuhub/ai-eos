@@ -87,8 +87,17 @@ export default function ApprovalsPage() {
       )}
 
       {pending.length === 0 && cid && (
-        <div className="mb-5 rounded-lg border border-white/10 bg-white/5 p-4 text-white/50">
-          没有待审批事项。员工触发需要你批准的动作时会出现在这里。
+        <div className="mb-5 rounded-xl border border-sky-500/25 bg-sky-500/[0.06] p-4">
+          <div className="font-medium text-sky-200">审批收件箱还是空的——这是好事，也是提醒</div>
+          <div className="mt-1.5 space-y-1 text-[12px] text-white/60">
+            <div>· 员工执行高危动作（发外呼、动资金、删数据）时会先来这里等你点头；</div>
+            <div>· 想看到东西：给员工派一个真实任务，或在「自治运行」调高自治等级，让审批流真正跑起来；</div>
+            <div>· 每一笔批准/拒绝都会写进审计台账。</div>
+          </div>
+          <div className="mt-2 flex gap-2">
+            <a href="/" className="rounded-md bg-sky-500/20 px-2.5 py-1 text-[12px] text-sky-200 hover:bg-sky-500/30">去派个任务</a>
+            <a href="/autonomous" className="rounded-md bg-white/10 px-2.5 py-1 text-[12px] hover:bg-white/20">自治等级</a>
+          </div>
         </div>
       )}
 

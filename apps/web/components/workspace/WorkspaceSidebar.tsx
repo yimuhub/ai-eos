@@ -15,6 +15,7 @@ import {
 } from "@/lib/threadReads";
 import {
   groupThreadsByProject, meetingMeta, sessionMeta,
+  agentModelReady,
   type WsAgent, type WsChatGroup, type WsMeeting, type WsMode, type WsProject, type WsSession, type WsView,
 } from "@/lib/workspace";
 
@@ -218,9 +219,12 @@ export default function WorkspaceSidebar({
     for (const a of agents) {
       const st = String(a.status || "").toUpperCase();
       const paused = st === "PAUSED" || st === "DISABLED";
+      const noModel = !agentModelReady(a);
       out.push({
         key: `single:${a.id}`, mode: "single", id: a.id,
-        title: a.name, sub: a.role || (paused ? "暂停" : "在岗"), tone: st === "ERROR" ? "bad" : paused ? "idle" : "ok",
+        title: a.name,
+        sub: noModel ? "⚠ 未绑定模型" : (a.role || (paused ? "暂停" : "在岗")),
+        tone: st === "ERROR" ? "bad" : paused ? "idle" : noModel ? "warn" : "ok",
         glyph: a.name.slice(0, 1),
       });
     }

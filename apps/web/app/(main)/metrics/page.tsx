@@ -119,7 +119,20 @@ export default function MetricsPage() {
             </div>
           </div>
         ))}
-        {!rows.length && cid && <div className="text-white/40">还没有指标。装行业包会预配一组待接线指标，或在这里手工定义。</div>}
+        {!rows.length && cid && (
+          <div className="rounded-xl border border-sky-500/25 bg-sky-500/[0.06] p-4">
+            <div className="font-medium text-sky-200">三步点亮指标中心</div>
+            <div className="mt-1.5 space-y-1 text-[12px] text-white/60">
+              <div>① 去「行业中心」装一个行业包 → 会预配一组行业指标（如餐饮的门店客流）；</div>
+              <div>② 去「连接器」接数据源（或先用手工报数）；</div>
+              <div>③ 回这里给每个指标补 spec（实体/聚合/字段）→ 员工就能用 metrics_query 取数了。</div>
+            </div>
+            <div className="mt-2 flex gap-2">
+              <a href="/industry-hub" className="rounded-md bg-sky-500/20 px-2.5 py-1 text-[12px] text-sky-200 hover:bg-sky-500/30">去行业中心</a>
+              <a href="/connectors" className="rounded-md bg-white/10 px-2.5 py-1 text-[12px] hover:bg-white/20">去连接器</a>
+            </div>
+          </div>
+        )}
       </div>
 
       {evalResult && (
