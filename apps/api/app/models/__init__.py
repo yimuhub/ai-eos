@@ -19,6 +19,8 @@ from .project import (Milestone, Project, ProjectContextSnapshot,  # noqa: F401
 from .workflow import (WorkflowDefinition, WorkflowEdge, WorkflowExecution,  # noqa: F401
                        WorkflowNode, WorkflowStep)
 from .team import RoleProfile, TeamLoadout  # noqa: F401
+from .manual_log import WorkflowManualLog  # noqa: F401
+from .eval import EvalRun  # noqa: F401
 from .workflow_gate import WorkflowStepGate  # noqa: F401
 from .meeting import (Meeting, MeetingActionItem, MeetingDecision,  # noqa: F401
                       MeetingMessage, MeetingParticipant)

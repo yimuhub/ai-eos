@@ -1,4 +1,6 @@
 """Workflow CRUD + execution API (P2-02/P2-03 backend)."""
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import and_, select, update
@@ -12,11 +14,14 @@ from app.models.workflow import (NodeType, RunStatus, WorkflowDefinition,
                                  WorkflowEdge, WorkflowExecution,
                                  WorkflowFeedback, WorkflowNode,
                                  WorkflowStep, WorkflowStatus)
+from app.models.manual_log import MANUAL_REASONS, WorkflowManualLog
 from app.models.workflow_gate import WorkflowStepGate
 from app.schemas.responses import (WorkflowFeedbackItemOut,
                                    WorkflowFeedbackSubmitOut)
 from app.services.event_system import log_event
 from app.workflow_runtime import utcnow_iso
+from app.report.renderer import render_execution_report
+from app.services.autonomy import compute_autonomy, merge_autonomy
 from app.spec import (SpecParseError, build_context,
                       build_json_schema, compile_spec, dump_spec, errors,
                       parse_spec, serialize_workflow, summary, validate)
@@ -57,6 +62,13 @@ class SpecPayloadIn(BaseModel):
     project_id: str | None = None
     dry_run: bool = False
     loadout_id: str | None = None
+
+
+class ManualLogIn(BaseModel):
+    node_key: str | None = None
+    reason: str = "judgment"
+    minutes: float = 0
+    note: str | None = None
 
 
 class ReworkIn(BaseModel):
@@ -734,6 +746,127 @@ async def rework_execution(eid: str, data: ReworkIn, background: BackgroundTasks
     _run_in_background(eid)
     return {"detail": "rework started", "node_key": target,
             "mode": data.mode, "full_rerun": full_rerun}
+
+
+async def _execution_steps(db: AsyncSession, eid: str) -> tuple[list[dict], dict]:
+    q = await db.execute(select(WorkflowStep).where(
+        WorkflowStep.execution_id == eid).order_by(WorkflowStep.created_at))
+    steps = []
+    for s in q.scalars():
+        steps.append({
+            "node_key": s.node_key, "node_type": s.node_type.value,
+            "status": s.status.value, "attempt": s.attempt,
+            "input_data": s.input_data, "output_data": s.output_data,
+            "error": s.error, "started_at": s.started_at,
+            "completed_at": s.completed_at, "stale_at": s.stale_at,
+        })
+    return steps, {}
+
+
+async def _execution_gates(db: AsyncSession, eid: str,
+                           node_names: dict) -> list[dict]:
+    q = await db.execute(select(WorkflowStepGate).where(
+        WorkflowStepGate.execution_id == eid).order_by(
+        WorkflowStepGate.created_at, WorkflowStepGate.gate_round))
+    out = []
+    for g in q.scalars():
+        out.append({
+            "node_key": g.node_key,
+            "node_name": node_names.get(g.node_key, g.node_key),
+            "attempt": g.attempt, "gate_round": g.gate_round,
+            "stage": g.stage, "checks": g.checks or [],
+            "passed": g.passed, "degraded": g.degraded,
+            "score": g.score, "tokens": g.tokens, "latency_ms": g.latency_ms,
+            "detail": g.detail,
+        })
+    return out
+
+
+async def _manual_logs(db: AsyncSession, eids: list[str]) -> list[dict]:
+    if not eids:
+        return []
+    q = await db.execute(select(WorkflowManualLog).where(
+        WorkflowManualLog.execution_id.in_(eids)).order_by(
+        WorkflowManualLog.created_at))
+    return [{"node_key": r.node_key, "reason": r.reason,
+             "minutes": r.minutes, "note": r.note} for r in q.scalars()]
+
+
+@router.post("/executions/{eid}/manual-log", status_code=201)
+async def add_manual_log(eid: str, data: ManualLogIn,
+                         db: AsyncSession = Depends(get_db),
+                         user=Depends(get_current_user)):
+    """记一次人工介入（自主率的"人工侧"证据）。"""
+    await _owned_execution(db, user, eid)
+    if data.reason not in MANUAL_REASONS:
+        raise HTTPException(400, f"reason 只能是 {'/'.join(MANUAL_REASONS)}")
+    if data.minutes < 0 or data.minutes > 1440:
+        raise HTTPException(400, "minutes 必须在 0~1440 之间")
+    log = WorkflowManualLog(execution_id=eid, node_key=data.node_key,
+                            reason=data.reason, minutes=data.minutes,
+                            note=data.note, created_by=user.id)
+    db.add(log)
+    await db.commit()
+    return {"id": log.id, "execution_id": eid, "reason": log.reason,
+            "minutes": log.minutes, "note": log.note}
+
+
+@router.get("/executions/{eid}/autonomy")
+async def execution_autonomy(eid: str, db: AsyncSession = Depends(get_db),
+                             user=Depends(get_current_user)):
+    await _owned_execution(db, user, eid)
+    steps, _ = await _execution_steps(db, eid)
+    logs = await _manual_logs(db, [eid])
+    return {"execution_id": eid, **compute_autonomy(steps, logs)}
+
+
+@router.get("/executions/{eid}/report.html")
+async def execution_report(eid: str, db: AsyncSession = Depends(get_db),
+                           user=Depends(get_current_user)):
+    """单文件 HTML 报告：全内联样式、零外链，断网可开。"""
+    ex = await db.get(WorkflowExecution, eid)
+    if not ex:
+        raise HTTPException(404, "Execution not found")
+    wf = await _wf_owned(db, user, ex.workflow_id)
+    nodes_q = await db.execute(select(WorkflowNode).where(
+        WorkflowNode.workflow_id == ex.workflow_id))
+    node_names = {n.node_key: n.name for n in nodes_q.scalars()}
+    steps, _ = await _execution_steps(db, eid)
+    for s in steps:
+        s["node_name"] = node_names.get(s["node_key"], s["node_key"])
+    gates = await _execution_gates(db, eid, node_names)
+    logs = await _manual_logs(db, [eid])
+    html_doc = render_execution_report(
+        workflow_name=wf.name,
+        execution={"id": ex.id, "status": ex.status.value, "error": ex.error},
+        steps=steps, gates=gates,
+        autonomy=compute_autonomy(steps, logs))
+    return Response(content=html_doc, media_type="text/html; charset=utf-8",
+                    headers={"Content-Disposition":
+                             f'inline; filename="report-{eid[:8]}.html"'})
+
+
+@router.get("/metrics/autonomy")
+async def company_autonomy(company_id: str, days: int = 30,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(get_current_user)):
+    """公司口径自主率：分母相加，不对各执行的比率求平均。"""
+    await assert_company_capability(db, user.id, company_id, Capability.VIEW)
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, min(days, 365)))
+    q = await db.execute(
+        select(WorkflowExecution.id).join(
+            WorkflowDefinition,
+            WorkflowExecution.workflow_id == WorkflowDefinition.id)
+        .where(WorkflowDefinition.company_id == company_id,
+               WorkflowExecution.created_at >= since))
+    eids = [r[0] for r in q.all()]
+    parts = []
+    for eid in eids:
+        steps, _ = await _execution_steps(db, eid)
+        parts.append(compute_autonomy(steps, []))
+    logs = await _manual_logs(db, eids)
+    return {"company_id": company_id, "days": days,
+            **merge_autonomy(parts, logs)}
 
 
 async def _owned_execution(db: AsyncSession, user, eid: str) -> WorkflowExecution:

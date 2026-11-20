@@ -594,6 +594,21 @@ async def _cas_status(db: AsyncSession, execution_id: str,
     return res.rowcount == 1
 
 
+def _notify_finished(db: AsyncSession, ex: WorkflowExecution) -> None:
+    """跑完通知（默认关闭）：配了 IM webhook 且显式打开才发，失败不影响主流程。"""
+    import os
+    if os.getenv("AIEOS_WORKFLOW_NOTIFY", "").lower() not in ("1", "true", "yes"):
+        return
+    try:
+        from app.services.im_webhook import queue_notification
+        queue_notification(db, kind="workflow",
+                           title=f"工作流完成：{ex.workflow_id[:8]}",
+                           body=f"执行 {ex.id[:8]} 状态 {ex.status.value}",
+                           link=f"/executions/{ex.id}")
+    except Exception:  # noqa: BLE001 — 通知失败绝不影响执行结果
+        logger.warning("[workflow %s] 完成通知入队失败", ex.id, exc_info=True)
+
+
 async def _find_reusable_step(db: AsyncSession, execution_id: str,
                               node_key: str, sig: str) -> WorkflowStep | None:
     """找一条"输入指纹相同且未被作废"的历史完成步骤。"""
@@ -700,6 +715,7 @@ async def _advance_locked(db: AsyncSession, execution_id: str,
                     ex.output_data = {k: v for k, v in done_nodes.items()}
                     await log_event(db, "workflow.completed", "workflow_execution",
                                     ex.id, "system", None, {"reused": True})
+                    _notify_finished(db, ex)
                     await db.commit()
                     return ex
                 next_nodes.extend(_successors(node, reused_output,
@@ -767,6 +783,7 @@ async def _advance_locked(db: AsyncSession, execution_id: str,
                 ex.output_data = {k: v for k, v in done_nodes.items()}
                 await log_event(db, "workflow.completed", "workflow_execution",
                                 ex.id, "system", None, {})
+                _notify_finished(db, ex)
                 await db.commit()
                 return ex
 
