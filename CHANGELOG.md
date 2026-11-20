@@ -29,6 +29,31 @@ acceptance 评分；不通过则定向返工一轮（在原稿上改，不重写
 - **测试**：新增 22 项（断言的边界、三种文件块写法、注水拦截、返工两轮留证、
   阻断后 END 不执行、无 gate 零改动、observe 不阻断、生成侧清洗）。
 
+### 新功能：声明式工作流契约（M2，对标 agency-orchestrator 的单文件 YAML + 导入导出）
+
+工作流此前只存在于数据库三张表里，改流程只能在画布上点：diff 看不见、跨项目搬不动、
+脚本/模型生成的图要等跑起来才发现缺 END 或变量没来源。本次给出一份**可进 git 的
+单文件契约**，以及"校验 → 导入 → 回导"的闭环。
+
+- **新增 `app/spec/`**：`schema.py`（契约唯一真相源：14 种节点、字段白名单、上限与
+  JSON Schema 生成）、`validator.py`（结构/语义/策略三层，纯函数，一次报全）、
+  `compiler.py`（校验通过才落库，`source=import`，meta 记 spec_key/inputs/policy）、
+  `serializer.py`（导出稳定：排序、空值省略、坐标整数化）。
+- **四个接口**：`POST /workflows/validate`（只查不写）、`POST /workflows/import`
+  （有问题 422、`dry_run` 不落库）、`GET /workflows/{id}/export?format=yaml|json`、
+  `GET /schemas/workflow.schema.json`（免登录，给编辑器补全用）。
+- **运行时变量插值**（`workflow_runtime.py`）：`{{input.x}}` / `{{产出别名}}` /
+  `{{节点key}}`，支持 `a.b.c` 下钻；**只对 task 里真出现变量的节点开启**，
+  存量 instruction 逐字不变；取不到时原样保留，配置错误肉眼可见。
+- **显式 edges 而非 depends_on**：本引擎是边触发，依赖列表会在上游第一个完成时就
+  调度；要等齐必须插 `MERGE`，此偏差已写进文档。
+- **子流程 key**：`SUB_WORKFLOW` 支持 `workflow_key`，编译期解析成 id，导出回到
+  key（跨公司可复用）；key 不存在报 `subflow_not_found`。
+- **导出不输出内部 id**：AGENT 只导姓名，重名/查不到才补 `agent_id`。由此可测
+  "导出→导入→导出"字节幂等。
+- **测试**：新增 26 项（`tests/test_workflow_spec.py`），全量 1351 项 0 失败。
+  文档 `docs/工作流契约_使用说明.md`。
+
 ## [5.16.1] - 2026-11-11
 
 ### 修复：测评第二轮收口——越权口径、预览即生成与引擎健壮性

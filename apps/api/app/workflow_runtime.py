@@ -104,6 +104,11 @@ class WorkflowRuntime:
             raise RuntimeError("company_id unknown for agent task")
         title = (cfg.get("task_title_template") or node.name)
         instruction = cfg.get("instruction") or ""
+        if cfg.get("interpolate"):
+            # 只有 spec 导入、且真写了 {{变量}} 的节点才开插值：
+            # 存量工作流的 instruction 即使含花括号也保持逐字原样。
+            instruction = self._render_instruction(
+                instruction, cfg.get("var_aliases") or {}, ctx)
         if gate_feedback:
             # 返工任务单独标记，任务中心里能一眼分出"首跑"和"改稿"
             title = f"{title}（返工）"
@@ -139,6 +144,76 @@ class WorkflowRuntime:
 
     def exec_input_company(self) -> str:
         return (self.exec.input_data or {}).get("company_id", "")
+
+    # ---------------- 变量插值（spec 导入的 AGENT 节点专用） ----------------
+
+    @staticmethod
+    def _node_text(output) -> str:
+        """把一个节点的输出压成"能被下游引用的正文"。"""
+        if output is None:
+            return ""
+        if isinstance(output, str):
+            return output
+        if isinstance(output, dict):
+            for key in ("output", "content", "text", "data"):
+                v = output.get(key)
+                if isinstance(v, str) and v.strip():
+                    return v
+                if isinstance(v, dict):
+                    import json as _json
+                    return _json.dumps(v, ensure_ascii=False)
+            import json as _json
+            return _json.dumps(output, ensure_ascii=False)
+        return str(output)
+
+    @staticmethod
+    def _dig(value, path: list[str]):
+        cur = value
+        for seg in path:
+            if isinstance(cur, dict):
+                cur = cur.get(seg)
+            elif isinstance(cur, list) and seg.isdigit():
+                idx = int(seg)
+                cur = cur[idx] if 0 <= idx < len(cur) else None
+            else:
+                return None
+        return cur
+
+    def _render_instruction(self, text: str, aliases: dict[str, str],
+                            ctx: dict) -> str:
+        """替换 `{{变量}}`：输入名 → 节点 key → 产出别名，支持 `a.b.c` 取值。
+
+        取不到的引用**原样保留**（而不是空串），让"配错了"在产出里肉眼可见，
+        而不是悄悄少了一段上下文。
+        """
+        import json as _json
+        import re as _re
+
+        def repl(m):
+            ref = m.group(1)
+            parts = ref.split(".")
+            root, rest = parts[0], parts[1:]
+            if root == "input":
+                base = (self.exec.input_data or {})
+                value = self._dig(base, rest)
+            else:
+                target = None
+                if root in aliases:
+                    target = ctx.get(aliases[root])
+                elif root in ctx:
+                    target = ctx.get(root)
+                elif root in (self.exec.input_data or {}):
+                    target = (self.exec.input_data or {}).get(root)
+                value = self._node_text(target) if target is not None else None
+                if value is not None and rest:
+                    value = self._dig(target, rest)
+            if value is None:
+                return m.group(0)
+            if isinstance(value, (dict, list)):
+                return _json.dumps(value, ensure_ascii=False)
+            return str(value)
+
+        return _re.sub(r"\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}\}", repl, text or "")
 
     async def execute_step(self, node: WorkflowNode, ctx: dict,
                            step: WorkflowStep | None = None) -> dict | None:

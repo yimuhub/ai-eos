@@ -1,5 +1,5 @@
 """Workflow CRUD + execution API (P2-02/P2-03 backend)."""
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,9 @@ from app.models.workflow_gate import WorkflowStepGate
 from app.schemas.responses import (WorkflowFeedbackItemOut,
                                    WorkflowFeedbackSubmitOut)
 from app.services.event_system import log_event
+from app.spec import (SpecParseError, build_context,
+                      build_json_schema, compile_spec, dump_spec, errors,
+                      parse_spec, serialize_workflow, summary, validate)
 
 router = APIRouter(tags=["workflows"])
 
@@ -41,6 +44,14 @@ class WorkflowSaveIn(BaseModel):
     project_id: str | None = None
     nodes: list[NodeIn]
     edges: list[EdgeIn]
+
+
+class SpecPayloadIn(BaseModel):
+    """spec 接受 dict 或 YAML/JSON 文本（两种都允许，用户不必先猜格式）。"""
+
+    spec: dict | str
+    project_id: str | None = None
+    dry_run: bool = False
 
 
 class WorkflowFeedbackIn(BaseModel):
@@ -194,6 +205,91 @@ async def start_execution(db: AsyncSession, workflow_id: str,
     from app.workflow_runtime import advance_execution, start_workflow
     ex = await start_workflow(db, workflow_id, started_by, project_id, input_data)
     return ex
+
+
+@router.post("/workflows/validate")
+async def validate_workflow_spec(data: SpecPayloadIn, company_id: str,
+                                 db: AsyncSession = Depends(get_db),
+                                 user=Depends(get_current_user)):
+    """只校验、不写库。返回问题清单，前端可直接逐条高亮到 nodes[i]。"""
+    await assert_company_capability(db, user.id, company_id,
+                                    Capability.OPERATE)
+    try:
+        spec = parse_spec(data.spec)
+    except SpecParseError as e:
+        raise HTTPException(400, str(e))
+    ctx = await build_context(db, company_id)
+    issues = validate(spec, ctx)
+    return {"ok": not errors(issues),
+            "issues": [i.to_dict() for i in issues],
+            "summary": summary(issues)}
+
+
+@router.post("/workflows/import")
+async def import_workflow_spec(data: SpecPayloadIn, company_id: str,
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(get_current_user)):
+    """校验通过才落库；dry_run 时等价于 validate 但不写。
+
+    注意：导入是**显式动作**。导出的文件永远不会自动回写数据库——
+    否则"文件改了但库里没改"的分裂迟早发生。
+    """
+    await assert_company_capability(db, user.id, company_id,
+                                    Capability.OPERATE)
+    try:
+        spec = parse_spec(data.spec)
+    except SpecParseError as e:
+        raise HTTPException(400, str(e))
+
+    ctx = await build_context(db, company_id)
+    issues = validate(spec, ctx)
+    if data.dry_run or errors(issues):
+        body = {"ok": not errors(issues),
+                "issues": [i.to_dict() for i in issues],
+                "summary": summary(issues)}
+        if errors(issues):
+            raise HTTPException(422, detail=body)
+        return body
+
+    wf = await compile_spec(db, spec, company_id=company_id, user_id=user.id,
+                            project_id=data.project_id, ctx=ctx)
+    await log_event(db, "workflow.imported", "workflow_definition", wf.id,
+                    "user", user.id,
+                    {"key": (wf.meta or {}).get("spec_key"),
+                     "nodes": len(spec.get("nodes") or [])})
+    await db.commit()
+    return {"id": wf.id, "name": wf.name,
+            "key": (wf.meta or {}).get("spec_key"),
+            "nodes": len(spec.get("nodes") or []),
+            "edges": len(spec.get("edges") or [])}
+
+
+@router.get("/workflows/{wid}/export")
+async def export_workflow_spec(wid: str, format: str = "yaml",
+                               db: AsyncSession = Depends(get_db),
+                               user=Depends(get_current_user)):
+    """把库里的一张工作流还原成 spec。只读，不落文件、不回写。"""
+    if format not in ("yaml", "json"):
+        raise HTTPException(400, "format 只能是 yaml 或 json")
+    wf = await _wf_owned(db, user, wid, Capability.VIEW)
+    spec = await serialize_workflow(db, wf)
+    text = dump_spec(spec, format)
+    media = "application/json" if format == "json" else "application/yaml"
+    filename = f"{(wf.meta or {}).get('spec_key') or wid}.{format}"
+    return Response(content=text, media_type=media,
+                    headers={"Content-Disposition": f'inline; filename="{filename}"'})
+
+
+@router.get("/schemas/workflow.schema.json")
+async def workflow_spec_schema():
+    """给编辑器用的 JSON Schema（无需登录：静态内容，不含任何租户数据）。
+
+    文件首行写 `# yaml-language-server: $schema=<本服务>/schemas/workflow.schema.json`
+    即可在 VS Code / JetBrains 里获得字段补全与拼写标红。
+    """
+    from fastapi.responses import JSONResponse
+    return JSONResponse(build_json_schema(),
+                        headers={"Cache-Control": "public, max-age=3600"})
 
 
 @router.post("/workflows", status_code=201)
