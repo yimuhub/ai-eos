@@ -1,8 +1,13 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, describeError } from "@/lib/api";
 import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { notify } from "@/components/Toast";
+import {
+  autonomyBreakdown,
+  formatAutonomy,
+  type AutonomyLedger,
+} from "@/lib/evidence";
 
 type Metric = { id: string; key: string; name: string; unit: string;
   direction: string; description?: string; spec?: Record<string, unknown> | null };
@@ -13,6 +18,26 @@ export default function MetricsPage() {
     entity: "order", op: "count", field: "" });
   const [evalResult, setEvalResult] = useState<{ key: string; value?: number;
     grouped?: Record<string, number> | null } | null>(null);
+
+  /* 自主率账本：公司口径，分母相加（不对每个执行的比率求平均） */
+  const [days, setDays] = useState(30);
+  const [autonomy, setAutonomy] = useState<AutonomyLedger | null>(null);
+  const [autonomyError, setAutonomyError] = useState("");
+
+  useEffect(() => {
+    if (!cid) { setAutonomy(null); return; }
+    let alive = true;
+    (async () => {
+      try {
+        const r = await api.get<AutonomyLedger>(`/metrics/autonomy?company_id=${cid}&days=${days}`);
+        if (alive) { setAutonomy(r); setAutonomyError(""); }
+      } catch (e) {
+        // 没有工作流跑过时这里不该阻断指标页：就地降级为一句说明
+        if (alive) { setAutonomy(null); setAutonomyError(describeError(e, "自主率取数失败")); }
+      }
+    })();
+    return () => { alive = false; };
+  }, [cid, days]);
 
   const { data, error, refresh } = useResource(
     cid ? `metrics:${cid}` : null,
@@ -71,6 +96,33 @@ export default function MetricsPage() {
         指标 = 结构化口径（实体+聚合+过滤）。AI 经 metrics_query 工具取数永远走这里——数字对得上，不靠猜。
       </p>
       {!cid && <div className="text-white/40">先选择公司。</div>}
+
+      {cid && (
+        <div className="mb-5 rounded-lg border border-white/10 bg-white/5 p-4">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <span className="font-medium">AI 自主率</span>
+            <select value={days} onChange={(e) => setDays(Number(e.target.value))}
+                    className="rounded-md bg-black/30 px-2 py-1 text-[12px]">
+              {[7, 30, 90].map((d) => <option key={d} value={d}>近 {d} 天</option>)}
+            </select>
+            <span className="text-[12px] text-white/40">
+              口径：AI 完成步骤 ÷（AI 步骤 + 人工节点 + 手记介入）
+            </span>
+          </div>
+          {autonomyError ? (
+            <div className="text-[12px] text-white/40">{autonomyError}</div>
+          ) : (
+            <>
+              <div className="text-[20px] font-semibold tabular-nums">
+                {formatAutonomy(autonomy)}
+              </div>
+              <div className="text-[12px] text-white/50">
+                {autonomy ? `覆盖 ${autonomy.executions ?? 0} 次执行 · ${autonomyBreakdown(autonomy)}` : "—"}
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {cid && (
         <div className="mb-5 rounded-lg border border-white/10 bg-white/5 p-4">

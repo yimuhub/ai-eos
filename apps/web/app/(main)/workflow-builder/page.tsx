@@ -1,9 +1,24 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, describeError } from "@/lib/api";
+import { api, describeError, downloadURL, fetchBlobURL } from "@/lib/api";
 import { useResource } from "@/lib/useResource";
 import { formatLocalStamp } from "@/lib/remoteDevices";
 import { notify } from "@/components/Toast";
+import {
+  autonomyBreakdown,
+  executionStatusLabel,
+  executionStatusTone,
+  failedChecks,
+  formatAutonomy,
+  formatCheckValue,
+  isTerminalStatus,
+  MANUAL_REASONS,
+  MANUAL_REASON_LABELS,
+  summarizeGates,
+  type AutonomyLedger,
+  type GateRecord,
+  type ManualReason,
+} from "@/lib/evidence";
 import type { Company } from "@/lib/types";
 
 type Node = {
@@ -23,6 +38,14 @@ type WorkflowMeta = {
   score: number | null; run_count: number; success_count: number;
   failure_count: number; reuse_key: string; previous_workflow_id: string;
   feedback: FeedbackItem[];
+};
+
+/** GET /executions/{id} 的响应里与证据有关的部分（steps 只取需要的字段） */
+type ExecutionDetail = {
+  id: string; status: string; error: string | null;
+  steps: { node_key: string; node_name: string; node_type: string;
+           status: string; stale_at?: string | null }[];
+  gates: GateRecord[];
 };
 
 
@@ -65,6 +88,17 @@ export default function WorkflowBuilderPage() {
   const [fbBusy, setFbBusy] = useState(false);
   const [fbError, setFbError] = useState("");
   const [optimized, setOptimized] = useState<{ id: string; version: number } | null>(null);
+
+  /* 运行证据（M4 前端）：跑完后保留执行详情，而不是只留一行状态文字 */
+  const [execution, setExecution] = useState<ExecutionDetail | null>(null);
+  const [autonomy, setAutonomy] = useState<AutonomyLedger | null>(null);
+  const [reportBusy, setReportBusy] = useState(false);
+  const [manual, setManual] = useState<{ reason: ManualReason; minutes: number; note: string }>(
+    { reason: "judgment", minutes: 10, note: "" });
+  const [manualBusy, setManualBusy] = useState(false);
+  const [reworkNode, setReworkNode] = useState("");
+  const [reworkText, setReworkText] = useState("");
+  const [reworkBusy, setReworkBusy] = useState(false);
 
   const loadWorkflow = useCallback(async (id: string) => {
     try {
@@ -184,6 +218,9 @@ export default function WorkflowBuilderPage() {
   }
 
   const sel = nodes.find((n) => n.node_key === selected) || null;
+  const gateInfo = useMemo(() => summarizeGates(execution?.gates), [execution]);
+  const reworkable = (execution?.steps ?? []).filter(
+    (s) => !["START", "END"].includes(s.node_type));
 
   // selected 指向的节点已被删除时自动清除
   useEffect(() => {
@@ -214,19 +251,32 @@ export default function WorkflowBuilderPage() {
     void refreshMeta(res.id);
   }
 
-  async function run() {
-    if (!savedId) return;
-    const res = await api.post(`/workflows/${savedId}/run`);
-    setRunStatus("运行中…");
-    // 句柄存 ref：离开页面要清掉，连点「运行」要先清旧的，避免叠加轮询
+  /** 拉一次执行详情 + 自主率账本。轮询与返工后都走这里，避免两套解析。 */
+  const loadEvidence = useCallback(async (eid: string) => {
+    const ex = await api.get<ExecutionDetail>(`/executions/${eid}`);
+    setExecution(ex);
+    setRunStatus(`${executionStatusLabel(ex.status)}（${ex.steps.length} 步）`);
+    // 自主率只在跑完后取：跑一半的分母还在变，提前展示会误导
+    if (isTerminalStatus(ex.status)) {
+      try {
+        setAutonomy(await api.get<AutonomyLedger>(`/executions/${eid}/autonomy`));
+      } catch {
+        setAutonomy(null);   // 账本失败不影响主流程，页面显示"—"
+      }
+    }
+    return ex;
+  }, []);
+
+  /** 开始/重启轮询。抽出来是因为"整轮重跑""改稿"之后同样要接着盯。 */
+  const pollExecution = useCallback((eid: string) => {
     if (pollRef.current) clearInterval(pollRef.current);
     let fails = 0;
+    setRunStatus("运行中…");
     pollRef.current = setInterval(async () => {
       try {
-        const ex = await api.get(`/executions/${res.execution_id}`);
+        const ex = await loadEvidence(eid);
         fails = 0;
-        setRunStatus(`${ex.status}（${ex.steps.length} 步）`);
-        if (["COMPLETED", "FAILED", "CANCELLED"].includes(ex.status)) {
+        if (isTerminalStatus(ex.status)) {
           if (pollRef.current) clearInterval(pollRef.current);
           pollRef.current = null;
         }
@@ -239,6 +289,72 @@ export default function WorkflowBuilderPage() {
         }
       }
     }, 5000);
+  }, [loadEvidence]);
+
+  async function run() {
+    if (!savedId) return;
+    try {
+      const res = await api.post<{ execution_id: string }>(`/workflows/${savedId}/run`);
+      setAutonomy(null);
+      pollExecution(res.execution_id);
+    } catch (e) {
+      notify("error", describeError(e, "启动失败"));
+    }
+  }
+
+  /** 下载单文件报告：必须走 blob（window.open 带不上 Bearer token）。 */
+  async function downloadReport() {
+    if (!execution || reportBusy) return;
+    setReportBusy(true);
+    try {
+      const url = await fetchBlobURL(`/executions/${execution.id}/report.html`);
+      downloadURL(url, `report-${execution.id.slice(0, 8)}.html`);
+    } catch (e) {
+      notify("error", describeError(e, "下载报告失败"));
+    } finally {
+      setReportBusy(false);
+    }
+  }
+
+  async function addManualLog() {
+    if (!execution || manualBusy) return;
+    setManualBusy(true);
+    try {
+      await api.post(`/executions/${execution.id}/manual-log`, {
+        reason: manual.reason, minutes: manual.minutes, note: manual.note || null });
+      setManual((m) => ({ ...m, note: "" }));
+      setAutonomy(await api.get<AutonomyLedger>(`/executions/${execution.id}/autonomy`));
+      notify("success", "已记一条人工介入，自主率随之更新");
+    } catch (e) {
+      notify("error", describeError(e, "记录失败"));
+    } finally {
+      setManualBusy(false);
+    }
+  }
+
+  /** 返工：node_key 为空 = 整轮重跑；给了 feedback = 原稿改稿。 */
+  async function rework(feedback?: string) {
+    if (!execution || reworkBusy) return;
+    const nodeKey = reworkNode || undefined;
+    if (feedback !== undefined && !nodeKey) {
+      notify("error", "带意见改稿需要先选中一个节点");
+      return;
+    }
+    setReworkBusy(true);
+    try {
+      await api.post(`/executions/${execution.id}/rework`, {
+        node_key: nodeKey,
+        mode: feedback !== undefined ? "revise" : "rerun",
+        feedback: feedback ?? null,
+      });
+      setReworkText("");
+      notify("success", feedback !== undefined ? "已交回该员工改稿" : "已重新开跑");
+      pollExecution(execution.id);
+    } catch (e) {
+      notify("error", describeError(e, "返工失败"));
+    } finally {
+      setReworkBusy(false);
+    }
   }
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
@@ -329,6 +445,132 @@ export default function WorkflowBuilderPage() {
           );
         })}
       </div>
+
+      {/* 运行证据：闸门结果 + 自主率 + 报告下载 + 返工。
+          没有这层，前面三批机制只存在于数据库里，老板看不到。 */}
+      {execution && (
+        <div className="mt-3 card-lg p-3 space-y-2">
+          <div className="flex items-center gap-2 flex-wrap text-[11px]">
+            <span className="text-xs text-[var(--muted)]">本次运行</span>
+            <span className="px-1.5 py-0.5 rounded tabular-nums"
+              style={{
+                background: executionStatusTone(execution.status) === "ok" ? "rgba(52,211,153,0.14)"
+                  : executionStatusTone(execution.status) === "bad" ? "rgba(248,113,113,0.14)"
+                  : "rgba(255,255,255,0.06)",
+                color: executionStatusTone(execution.status) === "ok" ? "#6ee7b7"
+                  : executionStatusTone(execution.status) === "bad" ? "#fca5a5" : "var(--muted)",
+              }}>
+              {executionStatusLabel(execution.status)}
+            </span>
+            <span className="text-[var(--muted)]">#{execution.id.slice(0, 8)} · {execution.steps.length} 步</span>
+            <span className="text-[var(--muted)]">自主率 <b className="text-[var(--foreground)]">{formatAutonomy(autonomy)}</b></span>
+            <button type="button" onClick={() => void downloadReport()} disabled={reportBusy}
+              className="btn-primary !py-1 !px-3 text-xs disabled:opacity-40">
+              {reportBusy ? "生成中…" : "⬇ 下载报告"}
+            </button>
+            {isTerminalStatus(execution.status) && (
+              <button type="button" onClick={() => void rework()} disabled={reworkBusy}
+                className="px-2 py-1 rounded text-xs bg-white/[0.08] hover:bg-white/[0.14] disabled:opacity-40">
+                整轮重跑
+              </button>
+            )}
+          </div>
+
+          {execution.error && (
+            <div className="text-[11px]" style={{ color: "#fca5a5" }}>{execution.error}</div>
+          )}
+
+          <div className="text-[10px] text-[var(--muted)]">{autonomyBreakdown(autonomy)}</div>
+
+          {gateInfo.configured ? (
+            <div className="space-y-1">
+              <div className="text-[10px] text-[var(--muted)]">
+                闸门 {gateInfo.rounds} 轮 · 未通过节点 {gateInfo.failedNodes.length} · 返工 {gateInfo.reworked.length}
+                {gateInfo.degraded > 0 ? ` · 降级放行 ${gateInfo.degraded}` : ""}
+              </div>
+              {execution.gates.map((g, i) => {
+                const bad = failedChecks(g);
+                return (
+                  <div key={`${g.node_key}-${i}`} className="text-[10px] rounded-md px-2 py-1"
+                    style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--border)" }}>
+                    <span className="font-medium">{g.node_name || g.node_key}</span>
+                    <span className="text-[var(--muted)]"> · 第 {g.gate_round ?? 1} 轮 · {g.stage || "gate"}</span>
+                    <span style={{ color: g.passed ? "#6ee7b7" : "#fca5a5" }}>
+                      {" "}{g.passed ? "通过" : "未通过"}
+                    </span>
+                    {g.degraded && <span className="text-[var(--muted)]">（降级）</span>}
+                    {typeof g.score === "number" && (
+                      <span className="text-[var(--muted)]"> · 评审 {g.score.toFixed(2)}</span>
+                    )}
+                    {bad.length > 0 && (
+                      <div className="text-[var(--muted)]">
+                        {bad.map((c) => (
+                          <div key={c.rule}>
+                            × {c.rule}：实际 {formatCheckValue(c.actual)} / 要求 {formatCheckValue(c.expected)}
+                            {c.detail ? `（${c.detail}）` : ""}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-[10px] text-[var(--muted)]">该流程没有配置验收闸门（可在节点 config.gate 里声明）</div>
+          )}
+
+          {isTerminalStatus(execution.status) && (
+            <div className="flex items-center gap-2 flex-wrap pt-1"
+              style={{ borderTop: "1px dashed var(--border)" }}>
+              <span className="text-[10px] text-[var(--muted)]">记一条人工介入</span>
+              <select value={manual.reason}
+                onChange={(e) => setManual((m) => ({ ...m, reason: e.target.value as ManualReason }))}
+                className="bg-white/[0.04] border border-[var(--border)] rounded px-1.5 py-0.5 text-[10px]">
+                {MANUAL_REASONS.map((r) => (
+                  <option key={r} value={r}>{MANUAL_REASON_LABELS[r]}</option>
+                ))}
+              </select>
+              <input type="number" min={0} max={1440} value={manual.minutes}
+                onChange={(e) => setManual((m) => ({ ...m, minutes: Number(e.target.value) }))}
+                className="bg-white/[0.04] border border-[var(--border)] rounded px-1.5 py-0.5 text-[10px] w-16"
+                aria-label="人工介入分钟" />
+              <span className="text-[10px] text-[var(--muted)]">分钟</span>
+              <input value={manual.note}
+                onChange={(e) => setManual((m) => ({ ...m, note: e.target.value }))}
+                placeholder="做了什么（可空）"
+                className="bg-white/[0.04] border border-[var(--border)] rounded px-1.5 py-0.5 text-[10px] flex-1 min-w-[140px]" />
+              <button type="button" onClick={() => void addManualLog()} disabled={manualBusy}
+                className="px-2 py-1 rounded text-[10px] bg-white/[0.08] hover:bg-white/[0.14] disabled:opacity-40">
+                {manualBusy ? "记录中…" : "记录"}
+              </button>
+            </div>
+          )}
+
+          {isTerminalStatus(execution.status) && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[10px] text-[var(--muted)]">交回改稿</span>
+              <select value={reworkNode}
+                onChange={(e) => setReworkNode(e.target.value)}
+                className="bg-white/[0.04] border border-[var(--border)] rounded px-1.5 py-0.5 text-[10px] max-w-[180px]">
+                <option value="">选节点（留空=整轮重跑）</option>
+                {reworkable.map((s) => (
+                  <option key={s.node_key} value={s.node_key}>{s.node_name || s.node_key}</option>
+                ))}
+              </select>
+              <input value={reworkText}
+                onChange={(e) => setReworkText(e.target.value)}
+                placeholder="只说哪里不对、改成什么（必填才能改稿）"
+                className="bg-white/[0.04] border border-[var(--border)] rounded px-1.5 py-0.5 text-[10px] flex-1 min-w-[200px]" />
+              <button type="button" onClick={() => void rework(reworkText.trim())}
+                disabled={reworkBusy || !reworkText.trim() || !reworkNode}
+                className="px-2 py-1 rounded text-[10px] bg-amber-700 hover:bg-amber-600 disabled:opacity-40">
+                {reworkBusy ? "提交中…" : "交回该员工改"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 反馈：低于 80 分自动生成下一版，把经验注入执行指令 */}
       {savedId && (
