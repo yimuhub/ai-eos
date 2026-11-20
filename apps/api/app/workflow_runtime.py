@@ -14,6 +14,8 @@ execution survives server restarts and supports pause/resume/cancel/retry.
 - 长耗时节点（AGENT/WAIT）之前先 commit，不持写锁跨网络调用。
 """
 import asyncio
+import hashlib
+import json
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update
@@ -33,9 +35,66 @@ logger = get_logger(__name__)
 # 崩溃后的实例永久卡住。
 WORKFLOW_LEASE_S = 10 * 60
 
+# 这些节点的执行要么花钱（模型/外部 API）、要么有副作用，重跑前必须比对
+# 输入指纹；指纹没变就复用上一版产出。WAIT/APPROVAL 这类零成本节点不进此列。
+_SIGNED_TYPES = {NodeType.AGENT, NodeType.HTTP, NodeType.TOOL,
+                 NodeType.TRANSFORM, NodeType.SUB_WORKFLOW, NodeType.CONDITION}
+
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def node_input_signature(node: WorkflowNode, pred_keys, ctx: dict,
+                         revision: str = "") -> str:
+    """输入指纹 = 节点类型/配置 + 直接上游产出 + 返工指令。
+
+    只算**直接上游**而不是整张 ctx：否则改 A 会让所有下游全失效（菱形依赖
+    里的 D 就会被重复跑）。配置里以下划线开头的是运行期临时键（_approved /
+    _human_input），不参与指纹。
+    """
+    cfg = {k: v for k, v in (node.config or {}).items()
+           if not str(k).startswith("_")}
+    payload = {
+        "type": node.node_type.value,
+        "cfg": cfg,
+        "inputs": {str(k): ctx.get(k) for k in sorted(pred_keys or ())},
+        "rev": revision or "",
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _rework_of(execution) -> dict:
+    data = execution.input_data or {}
+    rw = data.get("_rework")
+    return rw if isinstance(rw, dict) else {}
+
+
+def build_revise_feedback(prev_text: str, feedback: str) -> str:
+    """"带意见返工"的提示词：原稿 + 意见 + 不许重写。
+
+    与"重跑"的区别全在措辞：重跑是"再做一遍"，改稿是"只改这些，其余保持原样"。
+    """
+    prev_text = (prev_text or "").strip()
+    feedback = (feedback or "").strip()
+    body = prev_text[:8000] if prev_text else "（上一版没有产出文本，请按原任务重做）"
+    return (
+        "【上一版产出】\n" + body + "\n\n"
+        "【需要修改的地方】\n" + feedback[:4000] + "\n\n"
+        "【要求】只针对上述问题在原稿上修改，其余内容、结构与措辞保持原样；"
+        "输出修改后的完整版本，不要解释你改了什么，也不要新增未被要求的内容。"
+    )
+
+
+def _successors(node: WorkflowNode, output: dict | None,
+                edges: list[WorkflowEdge]) -> list[str]:
+    """一个节点跑完后应该激活哪些后继（条件分支按 label 选边）。"""
+    if node.node_type == NodeType.CONDITION:
+        branch = (output or {}).get("branch", "yes")
+        chosen = [e.to_node for e in edges if (e.label or "").lower() == branch]
+        return chosen or [e.to_node for e in edges]
+    return [e.to_node for e in edges]
 
 
 class WorkflowRuntime:
@@ -109,6 +168,23 @@ class WorkflowRuntime:
             # 存量工作流的 instruction 即使含花括号也保持逐字原样。
             instruction = self._render_instruction(
                 instruction, cfg.get("var_aliases") or {}, ctx)
+        rework = _rework_of(self.exec)
+        if rework.get("node_key") == node.node_key and rework.get("mode") == "revise":
+            # 用户点名"在这一版上改"：把原稿与意见一起交回同一个员工
+            prev_q = await self.db.execute(
+                select(WorkflowStep).where(
+                    WorkflowStep.execution_id == self.exec.id,
+                    WorkflowStep.node_key == node.node_key,
+                    WorkflowStep.status == RunStatus.COMPLETED)
+                .order_by(WorkflowStep.attempt.desc()).limit(1))
+            prev_step = prev_q.scalars().first()
+            prev_text = ""
+            if prev_step and isinstance(prev_step.output_data, dict):
+                prev_text = str(prev_step.output_data.get("output") or "")
+            title = f"{title}（改稿）"
+            instruction = (instruction + "\n\n"
+                           + build_revise_feedback(prev_text, rework.get("feedback") or "")
+                           ).strip()
         if gate_feedback:
             # 返工任务单独标记，任务中心里能一眼分出"首跑"和"改稿"
             title = f"{title}（返工）"
@@ -518,6 +594,20 @@ async def _cas_status(db: AsyncSession, execution_id: str,
     return res.rowcount == 1
 
 
+async def _find_reusable_step(db: AsyncSession, execution_id: str,
+                              node_key: str, sig: str) -> WorkflowStep | None:
+    """找一条"输入指纹相同且未被作废"的历史完成步骤。"""
+    q = await db.execute(
+        select(WorkflowStep).where(
+            WorkflowStep.execution_id == execution_id,
+            WorkflowStep.node_key == node_key,
+            WorkflowStep.status == RunStatus.COMPLETED,
+            WorkflowStep.stale_at.is_(None),
+            WorkflowStep.input_signature == sig)
+        .order_by(WorkflowStep.attempt.desc()).limit(1))
+    return q.scalars().first()
+
+
 async def _advance_locked(db: AsyncSession, execution_id: str,
                           max_steps: int = 50) -> WorkflowExecution:
     ex = await db.get(WorkflowExecution, execution_id)
@@ -547,8 +637,15 @@ async def _advance_locked(db: AsyncSession, execution_id: str,
         WorkflowStep.execution_id == ex.id))
     done_nodes: dict[str, dict] = {}
     for s in steps_q.scalars():
-        if s.status == RunStatus.COMPLETED and s.output_data:
+        # 被返工点名作废的步骤（stale_at 非空）不算"已完成"，否则目标节点永远不会重跑
+        if s.status == RunStatus.COMPLETED and s.output_data and not s.stale_at:
             done_nodes[s.node_key] = s.output_data
+
+    # 反向前驱：输入指纹只认直接上游
+    preds: dict[str, list[str]] = {}
+    for f, es in out_edges.items():
+        for e in es:
+            preds.setdefault(e.to_node, []).append(f)
 
     current = list(ex.current_nodes or [])
     steps_taken = 0
@@ -562,23 +659,57 @@ async def _advance_locked(db: AsyncSession, execution_id: str,
             if not node:
                 continue
 
-            # 恢复推进防重放（修复前会把已完成节点再跑一遍：重复建任务/重复计费）：
-            # done_nodes 只含有 COMPLETED 输出的节点；等待人工的节点不会进入
-            # done_nodes（output=None 提前 return），所以"已完成即跳过"是精确的。
-            if key in done_nodes:
-                progressed = True
-                continue
-
             # 取消/暂停立即生效：每步前重读状态。读到就退出，不再开新节点。
             await db.refresh(ex)
             if ex.status in (RunStatus.CANCELLED, RunStatus.PAUSED,
                              RunStatus.FAILED):
                 return ex
 
+            # 返工点：mode=revise 时把意见写进指纹，保证这一步不会被"指纹复用"跳过
+            rework = _rework_of(ex)
+            revision = ""
+            if rework.get("node_key") == key:
+                revision = f"{rework.get('mode') or 'rerun'}:{rework.get('feedback') or ''}"
+            prev_step = None
+            sig = None
+            if node.node_type in _SIGNED_TYPES:
+                sig = node_input_signature(node, preds.get(key, ()), done_nodes, revision)
+                prev_step = await _find_reusable_step(db, ex.id, key, sig)
+
+            # 复用判定：
+            # - 花钱/有副作用的节点：旧步骤的输入指纹与本次一致才复用；
+            # - 零成本节点（START/MERGE/WAIT/PARALLEL/TASK/APPROVAL/HUMAN_INPUT/END）：
+            #   已完成即复用。
+            # 两者都要把后继排进来——返工后下游必须被"重新评估"一次，
+            # 由各自指纹决定是复用还是重跑（菱形依赖因此只会跑一次）。
+            reuse = key in done_nodes and node.node_type not in _SIGNED_TYPES
+            if prev_step is None and node.node_type in _SIGNED_TYPES:
+                reuse = False
+            elif node.node_type in _SIGNED_TYPES and key in done_nodes:
+                reuse = True   # 指纹一致，命中旧产出
+
+            if reuse:
+                reused_output = (prev_step.output_data if prev_step is not None
+                                 else done_nodes.get(key)) or {}
+                progressed = True
+                if node.node_type == NodeType.END:
+                    if await _cas_status(db, ex.id, RunStatus.RUNNING,
+                                         RunStatus.COMPLETED, current_nodes=[key]):
+                        set_committed_value(ex, "status", RunStatus.COMPLETED)
+                    ex.current_nodes = [key]
+                    ex.output_data = {k: v for k, v in done_nodes.items()}
+                    await log_event(db, "workflow.completed", "workflow_execution",
+                                    ex.id, "system", None, {"reused": True})
+                    await db.commit()
+                    return ex
+                next_nodes.extend(_successors(node, reused_output,
+                                              out_edges.get(key, [])))
+                continue
+
             # MERGE：汇聚语义按"先到先过"处理——并行分支在同一个 advance 里
             # 顺序执行完再调度 MERGE（next_nodes 去重后只进一次）；若分支跨轮
             # 完成，后到分支的出边会再次调度 MERGE，但此时 MERGE 已在
-            # done_nodes 里，上面的跳过逻辑保证下游子树不会执行两遍。
+            # done_nodes 里，上面的复用逻辑保证下游子树不会执行两遍。
             if node.node_type == NodeType.MERGE:
                 pass
 
@@ -616,6 +747,15 @@ async def _advance_locked(db: AsyncSession, execution_id: str,
                 return ex
 
             await rt._finish_step(step, output)
+            if sig:
+                # 留指纹：下次被调度时先比对，一致就复用这一版产出
+                step.input_signature = sig
+            if rework.get("node_key") == key:
+                # 返工指令只用一次，清掉免得被下游/后续推进再次读到
+                data = dict(ex.input_data or {})
+                data.pop("_rework", None)
+                ex.input_data = data
+            await db.flush()
 
             # END 节点：整个执行完成
             if node.node_type == NodeType.END:
@@ -633,17 +773,8 @@ async def _advance_locked(db: AsyncSession, execution_id: str,
             done_nodes[key] = output
             progressed = True
 
-            # 决定后继节点
-            edges = out_edges.get(key, [])
-            if node.node_type == NodeType.CONDITION:
-                branch = output.get("branch", "yes")
-                chosen = [e.to_node for e in edges
-                          if (e.label or "").lower() == branch]
-                next_nodes.extend(chosen or [e.to_node for e in edges])
-            elif node.node_type == NodeType.PARALLEL:
-                next_nodes.extend(e.to_node for e in edges)  # 全部分支同时激活
-            else:
-                next_nodes.extend(e.to_node for e in edges)
+            # 决定后继节点（条件分支按 label 选边；PARALLEL 全部激活）
+            next_nodes.extend(_successors(node, output, out_edges.get(key, [])))
 
         if not progressed:
             break

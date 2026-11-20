@@ -154,3 +154,8 @@ class WorkflowStep(TimestampMixin, Base):
     error: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[str | None] = mapped_column(String(50))
     completed_at: Mapped[str | None] = mapped_column(String(50))
+    # M3：输入指纹 + 失效戳。
+    # input_signature = sha256(节点配置 + 直接上游产出)。指纹没变就不重跑（省 token）；
+    # stale_at 非空表示这一步被用户返工点名作废，不得被"指纹复用"命中。
+    input_signature: Mapped[str | None] = mapped_column(String(64))
+    stale_at: Mapped[str | None] = mapped_column(String(50))

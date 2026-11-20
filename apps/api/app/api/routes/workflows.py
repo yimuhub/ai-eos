@@ -16,6 +16,7 @@ from app.models.workflow_gate import WorkflowStepGate
 from app.schemas.responses import (WorkflowFeedbackItemOut,
                                    WorkflowFeedbackSubmitOut)
 from app.services.event_system import log_event
+from app.workflow_runtime import utcnow_iso
 from app.spec import (SpecParseError, build_context,
                       build_json_schema, compile_spec, dump_spec, errors,
                       parse_spec, serialize_workflow, summary, validate)
@@ -47,11 +48,28 @@ class WorkflowSaveIn(BaseModel):
 
 
 class SpecPayloadIn(BaseModel):
-    """spec 接受 dict 或 YAML/JSON 文本（两种都允许，用户不必先猜格式）。"""
+    """spec 接受 dict 或 YAML/JSON 文本（两种都允许，用户不必先猜格式）。
+
+    `loadout_id` 非空时锁定阵容：AGENT 只能引用该阵容里的角色，防漏人/防幻觉。
+    """
 
     spec: dict | str
     project_id: str | None = None
     dry_run: bool = False
+    loadout_id: str | None = None
+
+
+class ReworkIn(BaseModel):
+    """步骤级返工请求。
+
+    - `node_key` 省略 = 整轮重跑（从 START 起，全部步骤作废）；
+    - `mode=rerun` = 让这个节点及其下游重做；
+    - `mode=revise` = 把意见和上一版产出一起交回同一个员工，在原稿上改。
+    """
+
+    node_key: str | None = None
+    mode: str = "rerun"
+    feedback: str | None = None
 
 
 class WorkflowFeedbackIn(BaseModel):
@@ -243,6 +261,9 @@ async def import_workflow_spec(data: SpecPayloadIn, company_id: str,
 
     ctx = await build_context(db, company_id)
     issues = validate(spec, ctx)
+    if data.loadout_id:
+        issues = issues + await _loadout_lock_issues(
+            db, company_id, data.loadout_id, spec)
     if data.dry_run or errors(issues):
         body = {"ok": not errors(issues),
                 "issues": [i.to_dict() for i in issues],
@@ -262,6 +283,25 @@ async def import_workflow_spec(data: SpecPayloadIn, company_id: str,
             "key": (wf.meta or {}).get("spec_key"),
             "nodes": len(spec.get("nodes") or []),
             "edges": len(spec.get("edges") or [])}
+
+
+async def _loadout_lock_issues(db: AsyncSession, company_id: str,
+                               loadout_id: str, spec: dict) -> list:
+    """阵容锁定：spec 里的 AGENT 必须是该 loadout 里的角色。"""
+    from app.api.routes.teams import locked_role_names
+    from app.spec.validator import Issue, _norm_name
+
+    allowed = await locked_role_names(db, company_id, loadout_id)
+    out = []
+    for i, n in enumerate(spec.get("nodes") or []):
+        if not isinstance(n, dict) or n.get("type") != "AGENT":
+            continue
+        name = n.get("agent")
+        if isinstance(name, str) and name and _norm_name(name) not in allowed:
+            out.append(Issue("agent_not_in_loadout",
+                             f"员工「{name}」不在该阵容（loadout）内",
+                             f"nodes[{i}].agent"))
+    return out
 
 
 @router.get("/workflows/{wid}/export")
@@ -614,6 +654,86 @@ async def approve_node(eid: str, node_key: str, approve: bool = True,
         return {"detail": "approved, continuing"}
     # 拒绝审批 → 取消执行（状态已在上面 CAS 里落成 CANCELLED）
     return {"detail": "rejected, execution cancelled"}
+
+
+@router.post("/executions/{eid}/rework", status_code=202)
+async def rework_execution(eid: str, data: ReworkIn, background: BackgroundTasks,
+                           db: AsyncSession = Depends(get_db),
+                           user=Depends(get_current_user)):
+    """步骤级返工：整轮 / 从某步重跑 / 带意见在原稿上改。
+
+    上游步骤一行不重跑（token 为 0）；下游是否重跑由各自的输入指纹决定，
+    所以菱形依赖里改 A，D 只会跑一次。
+    """
+    ex = await _owned_execution(db, user, eid)
+    if data.mode not in ("rerun", "revise"):
+        raise HTTPException(400, "mode 只能是 rerun 或 revise")
+
+    nodes_q = await db.execute(select(WorkflowNode).where(
+        WorkflowNode.workflow_id == ex.workflow_id))
+    nodes = {n.node_key: n for n in nodes_q.scalars()}
+    if not nodes:
+        raise HTTPException(400, "工作流没有节点")
+
+    if not data.node_key:
+        if data.mode == "revise":
+            raise HTTPException(400, "带意见返工必须指定 node_key")
+        start = next((n for n in nodes.values()
+                      if n.node_type == NodeType.START), None)
+        if not start:
+            raise HTTPException(400, "工作流没有 START 节点")
+        target = start.node_key
+        full_rerun = True
+    else:
+        node = nodes.get(data.node_key)
+        if not node:
+            raise HTTPException(404, f"节点 {data.node_key} 不存在")
+        if node.node_type in (NodeType.START, NodeType.END):
+            raise HTTPException(400, "START / END 不支持步骤级返工")
+        target = node.node_key
+        full_rerun = False
+    if data.mode == "revise" and not (data.feedback or "").strip():
+        raise HTTPException(400, "revise 模式必须给 feedback")
+
+    # 只有"停了"的实例才能返工：跑着的实例返工会让两拨 worker 抢同一批节点
+    allowed = [RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.PAUSED,
+               RunStatus.WAITING_INPUT, RunStatus.WAITING_APPROVAL]
+    if ex.status not in allowed:
+        raise HTTPException(409, f"cannot rework from {ex.status.value}")
+
+    res = await db.execute(
+        update(WorkflowExecution)
+        .where(WorkflowExecution.id == eid,
+               WorkflowExecution.status.in_(allowed))
+        .values(status=RunStatus.RUNNING, error=None,
+                current_nodes=[target])
+        .execution_options(synchronize_session=False))
+    if res.rowcount != 1:
+        raise HTTPException(409, "execution status changed, try again")
+    await db.refresh(ex)
+
+    # 作废范围：整轮 = 全部；单步 = 该节点所有历史完成记录（不止最新一条，
+    # 否则可能被"指纹复用"命中更早的版本）。
+    stale_q = update(WorkflowStep).where(
+        WorkflowStep.execution_id == eid,
+        WorkflowStep.status == RunStatus.COMPLETED,
+        WorkflowStep.stale_at.is_(None))
+    if not full_rerun:
+        stale_q = stale_q.where(WorkflowStep.node_key == target)
+    await db.execute(stale_q.values(stale_at=utcnow_iso())
+                     .execution_options(synchronize_session=False))
+
+    rework = {"node_key": target, "mode": data.mode,
+              "feedback": (data.feedback or "").strip() or None,
+              "at": utcnow_iso()}
+    ex.input_data = {**(ex.input_data or {}), "_rework": rework}
+    await log_event(db, "workflow.reworked", "workflow_execution", eid,
+                    "user", user.id, {"node": target, "mode": data.mode,
+                                      "full": full_rerun})
+    await db.commit()
+    _run_in_background(eid)
+    return {"detail": "rework started", "node_key": target,
+            "mode": data.mode, "full_rerun": full_rerun}
 
 
 async def _owned_execution(db: AsyncSession, user, eid: str) -> WorkflowExecution:

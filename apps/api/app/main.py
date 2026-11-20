@@ -32,7 +32,7 @@ from app.api.routes import (access, agents, artifacts, assets, auth, browser_age
                             org_synthesis, plugins, computer_policy, computer_devices,
                             members, licensing, subscription, byok, invites, media,
                             toolbus, connectors, industry_packs, security, ops,
-                            expert_packs, skill_library)
+                            expert_packs, skill_library, teams)
 from app.api.routes import notifications
 from app.api.routes import thread_reads
 # 收件箱挂在 /tasks 下，必须比 tasks 路由**先注册**——tasks 有 /{tid} 兜底，
@@ -494,7 +494,7 @@ for r in (health, auth, companies, company_search, agents, agent_chat, models_ap
           thread_reads, licensing, queue_routes, subscription, byok,
           org_synthesis, plugins, computer_policy, computer_devices,
           invites, media, toolbus, connectors, industry_packs,
-          expert_packs):
+          expert_packs, teams):
     app.include_router(r.router)
 
 # V6 M3：connectors 模块带三个前缀不同的子路由（连接器/指标/自定义字段）

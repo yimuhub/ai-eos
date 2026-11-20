@@ -105,6 +105,8 @@ class Agent(TimestampMixin, Base):
     doc_style_id: Mapped[str | None] = mapped_column(String(36), nullable=True)  # 绑定的文档风格
     # V5.0：绑定的专家库专家（expert_templates.id），激活时取其 system_prompt 作人设
     expert_template_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # M3-B：绑定的角色档案（能力条目）。可空：老员工不需要回填，行为不变
+    role_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 
     # --- P5 可见性 / 归属（全部可空：老库靠 ensure_columns 幂等补列） ---
     # company | department | private；NULL 等价 company（升级前的老 Agent 全员可见）

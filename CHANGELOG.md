@@ -54,6 +54,27 @@ acceptance 评分；不通过则定向返工一轮（在原稿上改，不重写
 - **测试**：新增 26 项（`tests/test_workflow_spec.py`），全量 1351 项 0 失败。
   文档 `docs/工作流契约_使用说明.md`。
 
+### 新功能：步骤级返工 + 阵容锁定（M3，对标 agency-orchestrator 的三粒度返工与 team loadout）
+
+此前只有执行级的暂停/继续/取消：某一步不满意只能整轮重跑，前序 token 全白烧，
+还会把跑得好的阵容丢掉。本次补齐两种能力。
+
+- **步骤级返工** `POST /executions/{id}/rework`：整轮 / 从某步（`node_key`）/
+  带意见在原稿上改（`mode=revise` + `feedback`）。改稿把"上一版产出 + 意见 + 只改这些"
+  交回同一员工；任务标题标「改稿」，历史 attempt 全保留。
+- **按输入指纹精确失效**：步骤完成时记 `input_signature`（节点配置 + 直接上游产出 +
+  返工指令）；返工只作废目标节点，下游由指纹决定复用还是重跑。菱形依赖改 A，D 只跑一次；
+  改一步且产出未变，下游 0 次调用。
+- **新增两列两表**（迁移 `0031`/`0032`，全部可空或新增，存量零影响）：
+  `workflow_steps.input_signature/stale_at`、`role_profiles`、`team_loadouts`、
+  `agents.role_profile_id`。
+- **阵容锁定**：`GET/POST /role-profiles`、`GET/POST /teams`、
+  `POST /teams/from-execution`（从一次执行抽阵容，未绑档案的员工就地补）。
+  阵容存**角色 key** 而非员工 id；`POST /workflows/import` 带 `loadout_id` 时，
+  阵容外的 AGENT 引用直接 422（`agent_not_in_loadout`）。
+- **测试**：新增 13 项（`test_step_rework.py` 9 + `test_team_loadout.py` 4）；
+  迁移实测推进到 0032。文档 `docs/返工与阵容_使用说明.md`。
+
 ## [5.16.1] - 2026-11-11
 
 ### 修复：测评第二轮收口——越权口径、预览即生成与引擎健壮性
