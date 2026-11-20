@@ -217,8 +217,9 @@ def test_thread_reads_scope_is_unique():
 def test_migration_revisions_extend_current_heads():
     active = _script_dir(ACTIVE_MIGRATIONS)
     # V6 基座新增 0019~0023（工具总线/kb 嵌入/规整层/功能开关/成员绑定），
-    # 保持单链推进，head 随新迁移更新。
-    assert active.get_heads() == ["0029"]
+    # 0030 为步骤级验收闸门证据表。保持单链推进，head 随新迁移更新。
+    assert active.get_heads() == ["0030"]
+    assert active.get_revision("0030").down_revision == "0029"
     assert active.get_revision("0029").down_revision == "0028"
     assert active.get_revision("0026").down_revision == "0025"
     assert active.get_revision("0025").down_revision == "0024"

@@ -80,8 +80,13 @@ class WorkflowRuntime:
 
     # ---------------- node executors ----------------
 
-    async def _exec_agent_node(self, node: WorkflowNode, ctx: dict) -> dict:
-        """AGENT 节点：创建任务并同步执行（后台线程由外层调度）。"""
+    async def _exec_agent_node(self, node: WorkflowNode, ctx: dict,
+                               gate_feedback: str | None = None) -> dict:
+        """AGENT 节点：创建任务并同步执行（后台线程由外层调度）。
+
+        gate_feedback：闸门返工时传入的修改指令，拼在原始指令之后，
+        原有调用方不传（None）时行为与本版之前完全一致。
+        """
         from app.agent_runtime import run_agent_on_task
         from app.background_jobs import _make_session_factory
         from app.models.agent import Agent
@@ -98,10 +103,15 @@ class WorkflowRuntime:
         if not company_id:
             raise RuntimeError("company_id unknown for agent task")
         title = (cfg.get("task_title_template") or node.name)
+        instruction = cfg.get("instruction") or ""
+        if gate_feedback:
+            # 返工任务单独标记，任务中心里能一眼分出"首跑"和"改稿"
+            title = f"{title}（返工）"
+            instruction = (instruction + "\n\n" + gate_feedback).strip()
         task = Task(company_id=company_id,
                     project_id=self.exec.project_id,
                     title=title[:500],
-                    description=cfg.get("instruction") or "",
+                    description=instruction,
                     status=TaskStatus.TODO, priority=TaskPriority.NORMAL,
                     assigned_agent_id=agent.id, created_by=self.exec.started_by)
         self.db.add(task)
@@ -130,8 +140,12 @@ class WorkflowRuntime:
     def exec_input_company(self) -> str:
         return (self.exec.input_data or {}).get("company_id", "")
 
-    async def execute_step(self, node: WorkflowNode, ctx: dict) -> dict | None:
-        """Execute one node. Returns output dict, or None if waiting/blocked."""
+    async def execute_step(self, node: WorkflowNode, ctx: dict,
+                           step: WorkflowStep | None = None) -> dict | None:
+        """Execute one node. Returns output dict, or None if waiting/blocked.
+
+        `step` 只用于闸门取证（attempt 号），不传时按第 1 次算。
+        """
         if node.node_type in (NodeType.START, NodeType.MERGE):
             return {"passed": True}
 
@@ -141,7 +155,8 @@ class WorkflowRuntime:
         if node.node_type == NodeType.AGENT:
             # _exec_agent_node 要么返回 output dict，要么上抛异常（标 FAILED），
             # 不会再返回 None —— None 只保留给真正的"等待人工"（审批/输入）语义。
-            return await self._exec_agent_node(node, ctx)
+            return await self._apply_gate(
+                node, await self._exec_agent_node(node, ctx), ctx, step)
 
         if node.node_type == NodeType.CONDITION:
             keyword = (node.config or {}).get("keyword", "")
@@ -186,15 +201,67 @@ class WorkflowRuntime:
             return {"fanned_out": True}
 
         if node.node_type == NodeType.HTTP:
-            return await self._exec_http_node(node)
+            return await self._apply_gate(
+                node, await self._exec_http_node(node), ctx, step)
 
         if node.node_type == NodeType.TOOL:
-            return await self._exec_tool_node(node)
+            return await self._apply_gate(
+                node, await self._exec_tool_node(node), ctx, step)
 
         if node.node_type == NodeType.TRANSFORM:
-            return self._exec_transform_node(node, ctx)
+            return await self._apply_gate(
+                node, self._exec_transform_node(node, ctx), ctx, step)
 
         raise RuntimeError(f"Unknown node type {node.node_type}")
+
+    # ---------------- 步骤级验收闸门（M1） ----------------
+
+    async def _apply_gate(self, node: WorkflowNode, output: dict | None,
+                          ctx: dict, step: WorkflowStep | None = None) -> dict:
+        """节点产出过闸门。
+
+        旁路设计：闸门不改变节点类型、不改变 DAG 推进；只在"拿到产出之后、
+        写回 step 之前"插一道检查。未配置 gate 的节点原样返回，零开销。
+
+        不通过时抛 GateBlocked —— 沿用 advance_execution 既有的失败路径
+        （step 标 FAILED、执行标 FAILED、事件留痕），缺件产物不放行。
+        """
+        if not (node.config or {}).get("gate"):
+            return output or {}
+
+        from app.gates.step_gate import enforce
+
+        agent = None
+        agent_id = (node.config or {}).get("agent_id")
+        if node.node_type == NodeType.AGENT and agent_id:
+            from app.models.agent import Agent
+            agent = await self.db.get(Agent, agent_id)
+
+        company_id = self.exec_input_company()
+        if not company_id:
+            wf = await self.db.get(WorkflowDefinition, self.exec.workflow_id)
+            company_id = wf.company_id if wf else None
+
+        async def _rework(prompt: str) -> dict:
+            # 同一个员工、同一节点，带着"上一版 + 未过项"在原稿上改
+            return await self._exec_agent_node(node, ctx, gate_feedback=prompt)
+
+        # 闸门里的模型评审是网络调用：先把当前事务收口，不持锁跨调用
+        # （与 P0-6 同一条纪律；节点产出与任务状态此前已落库）。
+        await self.db.commit()
+
+        await enforce(
+            self.db,
+            execution_id=self.exec.id,
+            node=node,
+            output=output or {},
+            agent=agent,
+            attempt=getattr(step, "attempt", 1) or 1,
+            task_id=(output or {}).get("task_id") if isinstance(output, dict) else None,
+            company_id=company_id,
+            rework=_rework if agent is not None else None,
+        )
+        return output or {}
 
     # ---------------- 基座三节点（V6 M1-e） ----------------
 
@@ -444,7 +511,7 @@ async def _advance_locked(db: AsyncSession, execution_id: str,
             # 先把 step 行（RUNNING）落库并释放写锁，再去调可能很慢的节点
             await db.commit()
             try:
-                output = await rt.execute_step(node, done_nodes)
+                output = await rt.execute_step(node, done_nodes, step=step)
             except Exception as e:
                 await rt._finish_step(step, {}, RunStatus.FAILED, str(e))
                 if await _cas_status(db, ex.id, RunStatus.RUNNING,

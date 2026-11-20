@@ -12,6 +12,7 @@ from app.models.workflow import (NodeType, RunStatus, WorkflowDefinition,
                                  WorkflowEdge, WorkflowExecution,
                                  WorkflowFeedback, WorkflowNode,
                                  WorkflowStep, WorkflowStatus)
+from app.models.workflow_gate import WorkflowStepGate
 from app.schemas.responses import (WorkflowFeedbackItemOut,
                                    WorkflowFeedbackSubmitOut)
 from app.services.event_system import log_event
@@ -380,10 +381,27 @@ async def get_execution(eid: str, db: AsyncSession = Depends(get_db),
         d["node_name"] = node_names.get(s.node_key, s.node_key)
         steps.append(d)
 
+    # 验收闸门证据：每个节点每轮一条，前端据此显示"哪条规则没过、实际值多少"。
+    # 只读附加字段，不影响既有响应结构。
+    gates_q = await db.execute(select(WorkflowStepGate).where(
+        WorkflowStepGate.execution_id == eid).order_by(
+        WorkflowStepGate.created_at, WorkflowStepGate.gate_round))
+    gates = []
+    for g in gates_q.scalars():
+        gates.append({
+            "id": g.id, "node_key": g.node_key, "node_name": node_names.get(g.node_key, g.node_key),
+            "attempt": g.attempt, "gate_round": g.gate_round, "stage": g.stage,
+            "checks": g.checks or [], "passed": g.passed, "blocking": g.blocking,
+            "degraded": g.degraded, "score": g.score,
+            "judge_model": g.judge_model, "tokens": g.tokens,
+            "latency_ms": g.latency_ms, "detail": g.detail,
+            "created_at": g.created_at.isoformat() if g.created_at else None,
+        })
+
     return {"id": ex.id, "workflow_id": ex.workflow_id, "workflow_name": wf.name,
             "project_id": ex.project_id, "status": ex.status.value,
             "current_nodes": ex.current_nodes, "error": ex.error,
-            "steps": steps}
+            "steps": steps, "gates": gates}
 
 
 @router.post("/executions/{eid}/pause")

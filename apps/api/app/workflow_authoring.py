@@ -207,6 +207,35 @@ def _anchor_summary(mission: CeoMission) -> str:
     return "\n".join(lines)
 
 
+def _sanitize_gate(raw) -> dict | None:
+    """把模型给的 gate 清洗成可执行配置。
+
+    原则：宁可少配，不可配错。
+    * 未知字段/未知断言一律丢掉（模型很爱自创 `min_words` 这类名字）；
+    * `on_fail` 强制为 observe：自动生成的工作流先只观察、不阻断，
+      误杀率经真实样本校准后才由人工改成 fail；
+    * 没有 acceptance 也没有任何合法断言时返回 None（等于关闸，零开销）。
+    """
+    from app.gates.rules import KNOWN_RULES
+
+    if not isinstance(raw, dict):
+        return None
+    out: dict = {}
+    acc = str(raw.get("acceptance") or "").strip()
+    if acc:
+        out["acceptance"] = acc[:1200]
+    asserts = raw.get("assert") if "assert" in raw else raw.get("asserts")
+    if isinstance(asserts, dict):
+        clean = {k: v for k, v in asserts.items() if k in KNOWN_RULES}
+        if clean:
+            out["assert"] = clean
+    if not out:
+        return None
+    out["on_fail"] = "observe"
+    out["max_rework"] = 0
+    return out
+
+
 def _node_instruction(mission: CeoMission, item: dict) -> str:
     parts = [str(item.get("description") or item.get("title") or "").strip()]
     skills = [str(s) for s in (item.get("required_skills") or []) if s]
@@ -323,6 +352,9 @@ def normalize_graph(raw: dict, mission: CeoMission,
                     item.get("task_title_template") or name)[:200],
                 "instruction": (instruction or name)[:2000],
             })
+            gate = _sanitize_gate(item.get("gate"))
+            if gate:
+                node["gate"] = gate
         elif node_type == "WAIT":
             try:
                 node["seconds"] = max(0, min(int(item.get("seconds") or 5), 60))
@@ -404,6 +436,9 @@ WORKFLOW_PROMPT = """你是这家公司的 CEO。请把下面这次任务沉淀�
 - 必须有 START 与 END，且从 START 能走到 END；
 - 最多 {max_nodes} 个节点；能顺序执行就不要硬加分支；
 - 每个 AGENT 节点必须写执行人姓名（与上面子任务里的执行人一致）和可照做的 instruction；
+- AGENT 节点可选写 gate（产出验收）：{{"acceptance":"这一节点产出必须满足什么（可核对的一句话）",
+  "assert":{{"min_chars":300}}}}。assert 只允许 min_chars/contains/emits_files/min_citations/
+  json_schema 等确定性规则，写不出可核对的规则就不要写 gate；
 - 不要在 instruction 里编造数据来源；缺数据要写"先核实"。
 """
 
@@ -446,7 +481,7 @@ async def _persist_graph(db: AsyncSession, wf: WorkflowDefinition,
         node_type = NodeType(node["type"])
         config: dict = {}
         for key in ("agent_id", "task_title_template", "instruction", "seconds",
-                    "approver_hint", "keyword"):
+                    "approver_hint", "keyword", "gate"):
             if key in node:
                 config[key] = node[key]
         db.add(WorkflowNode(
