@@ -37,6 +37,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging_config import get_logger
+from app.gates.inherit import inherit_gates_for_graph
 from app.models.agent import Agent
 from app.models.ceo import CeoMission
 from app.models.workflow import (NodeType, WorkflowDefinition, WorkflowEdge,
@@ -495,6 +496,49 @@ async def _persist_graph(db: AsyncSession, wf: WorkflowDefinition,
     await db.flush()
 
 
+async def _loadout_agent_ids(db: AsyncSession, company_id: str,
+                             loadout_id: str) -> set[str]:
+    """阵容允许上场的员工 id。
+
+    绑定规则：员工的 role_profile_id 落在阵容的角色里；角色档案被删时
+    用工号名兜底（与导入侧 `locked_role_names` 的口径一致）。
+    """
+    from sqlalchemy import select as _select
+
+    from app.models.agent import Agent as _Agent
+    from app.models.team import RoleProfile as _RoleProfile
+    from app.models.team import TeamLoadout as _TeamLoadout
+    from app.spec.validator import _norm_name
+
+    t = await db.get(_TeamLoadout, loadout_id)
+    if not t or t.company_id != company_id:
+        raise ValueError("loadout 不存在或不属于该公司")
+
+    keys = [str(r.get("key")) for r in (t.roles or []) if r.get("key")]
+    names = {_norm_name(str(r.get("name"))) for r in (t.roles or [])
+             if r.get("name")}
+    ids: set[str] = set()
+    if keys:
+        profs = (await db.execute(_select(_RoleProfile).where(
+            _RoleProfile.company_id == company_id,
+            _RoleProfile.key.in_(keys)))).scalars().all()
+        pids = [p.id for p in profs]
+        names |= {_norm_name(p.name) for p in profs}
+        if pids:
+            agents = (await db.execute(_select(_Agent).where(
+                _Agent.company_id == company_id,
+                _Agent.role_profile_id.in_(pids)))).scalars().all()
+            ids |= {str(a.id) for a in agents}
+    if names:
+        agents = (await db.execute(_select(_Agent).where(
+            _Agent.company_id == company_id))).scalars().all()
+        ids |= {str(a.id) for a in agents
+                if _norm_name(str(a.name or "")) in names}
+    if not ids:
+        raise ValueError("该阵容没有绑定任何员工（角色档案未落地到员工）")
+    return ids
+
+
 async def author_mission_workflow(db: AsyncSession, mission: CeoMission,
                                   coordinator: Agent | None) -> WorkflowDefinition | None:
     """为一场统筹生成工作流（同名任务复用高分公司已有版本）。
@@ -511,7 +555,8 @@ async def author_mission_workflow(db: AsyncSession, mission: CeoMission,
     prior = await latest_workflow(db, mission.company_id, reuse_key)
 
     # 同一套拆解且上版已经跑得不错：直接复用，不再造一个同义版本
-    if (prior is not None
+    # 带阵容的统筹不复用旧版：旧版可能是别人生成的、阵容外的员工
+    if (not mission.loadout_id and prior is not None
             and (prior.meta or {}).get("signature") == signature
             and (prior.score is None or prior.score >= 90)):
         mission.workflow_id = prior.id
@@ -531,6 +576,23 @@ async def author_mission_workflow(db: AsyncSession, mission: CeoMission,
     used_llm = graph is not None
     if graph is None:
         graph = deterministic_graph(mission, coordinator)
+
+    # 统筹带阵容：生成的 AGENT 节点只能引用阵容内员工。
+    # 不满足就不生成工作流（mission 照常跑任务），并把原因留痕——
+    # 静默把节点改派给别人，等于让"锁定"变成摆设。
+    allowed_ids: set[str] | None = None
+    if mission.loadout_id:
+        allowed_ids = await _loadout_agent_ids(db, mission.company_id,
+                                               mission.loadout_id)
+        outsiders = [n for n in (graph.get("nodes") or [])
+                     if n.get("type") == "AGENT"
+                     and str(n.get("agent_id") or "") not in allowed_ids]
+        if outsiders:
+            raise ValueError(
+                f"{len(outsiders)} 个节点引用了阵容外员工"
+                f"（如 {outsiders[0].get('name') or outsiders[0].get('key')}）")
+
+    inherited = await inherit_gates_for_graph(db, graph)
 
     version = (prior.version + 1) if prior is not None else 1
     if prior is not None:
@@ -555,6 +617,8 @@ async def author_mission_workflow(db: AsyncSession, mission: CeoMission,
             "errors": context.get("errors") or [],
             "generated_at": _iso(),
             "mission_id": mission.id,
+            "loadout_id": mission.loadout_id,
+            "gates_inherited": inherited,
         })
     db.add(wf)
     await db.flush()

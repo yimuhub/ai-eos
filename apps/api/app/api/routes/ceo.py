@@ -39,6 +39,8 @@ class CreateMissionIn(BaseModel):
     title: str | None = None
     coordinator_agent_id: str | None = None
     max_parallel: int | None = Field(default=None, ge=2, le=10)
+    # 可选：锁定阵容。生成工作流时只允许阵容内员工上场（M6）
+    loadout_id: str | None = None
 
 
 class LaunchIn(BaseModel):
@@ -172,7 +174,8 @@ async def create(data: CreateMissionIn,
             db, company_id=data.company_id, user_id=user.id,
             instruction=data.instruction, title=data.title,
             coordinator_agent_id=data.coordinator_agent_id,
-            max_parallel=data.max_parallel)
+            max_parallel=data.max_parallel,
+            loadout_id=data.loadout_id)
     except CeoError as exc:
         _raise(exc)
 

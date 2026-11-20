@@ -21,6 +21,7 @@ from app.schemas.responses import (WorkflowFeedbackItemOut,
 from app.services.event_system import log_event
 from app.workflow_runtime import utcnow_iso
 from app.report.renderer import render_execution_report
+from app.gates.inherit import inherit_gates_for_nodes
 from app.services.autonomy import compute_autonomy, merge_autonomy
 from app.spec import (SpecParseError, build_context,
                       build_json_schema, compile_spec, dump_spec, errors,
@@ -286,15 +287,21 @@ async def import_workflow_spec(data: SpecPayloadIn, company_id: str,
 
     wf = await compile_spec(db, spec, company_id=company_id, user_id=user.id,
                             project_id=data.project_id, ctx=ctx)
+    # 角色档案的出厂验收标准：只给没写 gate 的 AGENT 节点补，且强制观察态
+    nodes_q = await db.execute(select(WorkflowNode).where(
+        WorkflowNode.workflow_id == wf.id))
+    inherited = await inherit_gates_for_nodes(db, list(nodes_q.scalars()))
     await log_event(db, "workflow.imported", "workflow_definition", wf.id,
                     "user", user.id,
                     {"key": (wf.meta or {}).get("spec_key"),
-                     "nodes": len(spec.get("nodes") or [])})
+                     "nodes": len(spec.get("nodes") or []),
+                     "gates_inherited": inherited})
     await db.commit()
     return {"id": wf.id, "name": wf.name,
             "key": (wf.meta or {}).get("spec_key"),
             "nodes": len(spec.get("nodes") or []),
-            "edges": len(spec.get("edges") or [])}
+            "edges": len(spec.get("edges") or []),
+            "gates_inherited": inherited}
 
 
 async def _loadout_lock_issues(db: AsyncSession, company_id: str,

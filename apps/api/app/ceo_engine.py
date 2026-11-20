@@ -421,7 +421,8 @@ async def create_mission(db: AsyncSession, *, company_id: str, user_id: str,
                          instruction: str, title: str | None = None,
                          coordinator_agent_id: str | None = None,
                          max_parallel: int | None = None,
-                         parent_task_id: str | None = None) -> dict:
+                         parent_task_id: str | None = None,
+                         loadout_id: str | None = None) -> dict:
     """一句话 → 准绳 + 拆解预览（不建任务、不执行）。
 
     ``parent_task_id`` 供旧 /orchestrate 入口复用已经建好的父任务，
@@ -432,6 +433,13 @@ async def create_mission(db: AsyncSession, *, company_id: str, user_id: str,
         raise CeoError("请先说要办的事", 400)
     if len(instruction) > 4000:
         raise CeoError("指令太长了，请精简到 4000 字以内", 400)
+
+    if loadout_id:
+        # 先验阵容归属，再花模型调用去拆解：错误配置不该消耗 token
+        from app.models.team import TeamLoadout
+        loadout = await db.get(TeamLoadout, loadout_id)
+        if not loadout or loadout.company_id != company_id:
+            raise CeoError("阵容（loadout）不存在或不属于该公司", 404)
 
     coord = await pick_coordinator(db, company_id, coordinator_agent_id)
     capacity = await resolve_capacity(db, str(coord.id), max_parallel)
@@ -472,6 +480,7 @@ async def create_mission(db: AsyncSession, *, company_id: str, user_id: str,
         redlines=plan["redlines"], acceptance=plan["acceptance"],
         terminology=plan["terminology"], extra_instructions=[],
         anchor_version=1,
+        loadout_id=loadout_id,
         max_parallel=capacity["requested"],
         effective_parallel=capacity["effective"],
         provider_cap=capacity["provider_cap"],

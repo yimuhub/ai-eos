@@ -76,6 +76,8 @@ class CeoMission(TimestampMixin, Base):
     # 本次统筹生成/复用的工作流（开工时落库，收尾后可能升到新版本）
     workflow_id: Mapped[str | None] = mapped_column(
         String(36), nullable=True, index=True)
+    # 这场统筹锁定的阵容（M6）：NULL = 不锁，行为与历史一致
+    loadout_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     stats: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     started_at: Mapped[str | None] = mapped_column(String(50), nullable=True)
     finished_at: Mapped[str | None] = mapped_column(String(50), nullable=True)

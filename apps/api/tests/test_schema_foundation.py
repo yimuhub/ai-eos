@@ -217,13 +217,14 @@ def test_thread_reads_scope_is_unique():
 def test_migration_revisions_extend_current_heads():
     active = _script_dir(ACTIVE_MIGRATIONS)
     # V6 基座新增 0019~0023（工具总线/kb 嵌入/规整层/功能开关/成员绑定），
-    # 0030 闸门、0031 返工指纹、0032 阵容、0033 手记、0034 评测。单链推进。
-    assert active.get_heads() == ["0034"]
+    # 0030 闸门、0031 返工指纹、0032 阵容、0033 手记、0034 评测、0035 统筹接阵容。
+    assert active.get_heads() == ["0035"]
     assert active.get_revision("0030").down_revision == "0029"
     assert active.get_revision("0031").down_revision == "0030"
     assert active.get_revision("0032").down_revision == "0031"
     assert active.get_revision("0033").down_revision == "0032"
     assert active.get_revision("0034").down_revision == "0033"
+    assert active.get_revision("0035").down_revision == "0034"
     assert active.get_revision("0029").down_revision == "0028"
     assert active.get_revision("0026").down_revision == "0025"
     assert active.get_revision("0025").down_revision == "0024"
