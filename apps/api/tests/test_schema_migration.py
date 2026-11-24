@@ -118,6 +118,35 @@ async def test_tables_absent_from_database_are_left_alone():
         assert tables == {"agent_executions"}, f"凭空多出了表：{tables}"
 
 
+_WORKFLOW_EXECUTION_LEGACY_DDL = """
+CREATE TABLE workflow_executions (
+    id VARCHAR(36) PRIMARY KEY,
+    workflow_id VARCHAR(36),
+    status VARCHAR(30),
+    started_by VARCHAR(36)
+)
+"""
+
+
+async def test_workflow_execution_snapshot_column_is_added_without_data_loss():
+    async with legacy_engine(_WORKFLOW_EXECUTION_LEGACY_DDL) as engine:
+        async with engine.begin() as conn:
+            await conn.execute(text(
+                "INSERT INTO workflow_executions (id, workflow_id, status) "
+                "VALUES ('e1', 'w1', 'PENDING')"))
+
+        added = await ensure_columns(engine)
+
+        assert "workflow_executions.definition_snapshot" in added
+        assert await ensure_columns(engine) == []
+        async with engine.connect() as conn:
+            row = (await conn.execute(text(
+                "SELECT id, status, definition_snapshot FROM workflow_executions"
+            ))).one()
+        assert row.id == "e1" and row.status == "PENDING"
+        assert row.definition_snapshot is None
+
+
 _WORKFLOW_LEGACY_DDL = """
 CREATE TABLE workflow_definitions (
     id VARCHAR(36) PRIMARY KEY,

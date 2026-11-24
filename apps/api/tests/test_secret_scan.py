@@ -205,6 +205,99 @@ def _allowed(hit: Hit) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 签名材料门禁：二进制私钥不能靠文本扫描器兜底
+# ---------------------------------------------------------------------------
+
+_SIGNING_MATERIAL_PATHS = (
+    "packaging/keystore/ai-eos.p12",
+    "packaging/mac-signing/aieos-mac.key",
+    "packaging/mac-signing/aieos-mac.crt",
+    "packaging/mac-signing/aieos-mac.p12",
+    "packaging/mac-signing/aieos-mac.p12.b64",
+    "packaging/mac-signing/AI-EOS-Mac-trust-activate.command",
+)
+_FORBIDDEN_SIGNING_SUFFIXES = {".p12", ".pfx", ".jks", ".keystore", ".key", ".pem"}
+
+
+def test_signing_material_is_absent_from_worktree_and_index():
+    """当前树和 Git 索引都不得保留签名私钥、密钥库或内嵌私钥脚本。"""
+    tracked = set(_tracked_files())
+    tracked_material = sorted(
+        rel for rel in tracked
+        if pathlib.PurePosixPath(rel).suffix.lower() in _FORBIDDEN_SIGNING_SUFFIXES
+    )
+    assert not tracked_material, f"Git 索引仍含私钥或密钥库：{tracked_material}"
+    for rel in _SIGNING_MATERIAL_PATHS:
+        assert not (REPO_ROOT / rel).exists(), f"签名材料仍存在于当前树：{rel}"
+        assert rel not in tracked, f"签名材料仍被 Git 跟踪：{rel}"
+
+    packaging = REPO_ROOT / "packaging"
+    leftovers = sorted(
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in packaging.rglob("*")
+        if path.is_file() and path.suffix.lower() in _FORBIDDEN_SIGNING_SUFFIXES
+    )
+    assert not leftovers, f"packaging 下发现禁用签名材料：{leftovers}"
+
+
+def _clients_workflow() -> str:
+    return (REPO_ROOT / ".github/workflows/clients.yml").read_text(encoding="utf-8")
+
+
+def test_clients_workflow_has_no_repository_signing_material():
+    """流水线不得重新引用仓库密钥、固定口令或信任激活脚本。"""
+    workflow = _clients_workflow()
+    for forbidden in (
+        "packaging/keystore",
+        "packaging/mac-signing",
+        "aieos-mac.p12",
+        "aieos-mac.key",
+        "AI-EOS-Mac-trust-activate.command",
+        "security add-trusted-cert",
+        '"*.command"',
+    ):
+        assert forbidden not in workflow, f"clients workflow 仍含禁用签名引用：{forbidden}"
+
+    for line_no, line in enumerate(workflow.splitlines(), start=1):
+        if re.match(r"\s*[A-Z0-9_]*(?:PASSWORD|PASSWD):", line, re.IGNORECASE):
+            value = line.split(":", 1)[1].strip()
+            assert re.fullmatch(r"\$\{\{\s*secrets\.[A-Z0-9_]+\s*\}\}", value), (
+                f"clients.yml:{line_no} 的密码必须来自 GitHub Secrets"
+            )
+        if re.search(r"(?i)(?:password|passwd)\s*=\s*[\"'][^\"']+[\"']", line):
+            assignment = re.search(
+                r"(?i)(?:password|passwd)\s*=\s*[\"']([^\"']+)[\"']", line)
+            assert assignment and re.fullmatch(
+                r"\$\{?[A-Z][A-Z0-9_]*\}?", assignment.group(1)
+            ), f"clients.yml:{line_no} 含固定口令赋值"
+        assert not re.search(r"keyAlias\s+[\"'][^\"']+[\"']", line), (
+            f"clients.yml:{line_no} 含固定 keyAlias"
+        )
+
+
+def test_clients_workflow_mac_fallback_is_ad_hoc_only():
+    workflow = _clients_workflow()
+    assert "CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac" in workflow
+    assert "不安装信任根" in workflow
+    assert "add-trusted-cert" not in workflow
+
+
+def test_clients_workflow_android_requires_external_secrets():
+    workflow = _clients_workflow()
+    for name in (
+        "ANDROID_KEYSTORE_BASE64",
+        "ANDROID_KEYSTORE_PASSWORD",
+        "ANDROID_KEY_ALIAS",
+        "ANDROID_KEY_PASSWORD",
+    ):
+        assert f"${{{{ secrets.{name} }}}}" in workflow
+    assert "base64.b64decode" in workflow
+    assert "mktemp" in workflow and "trap 'rm -f" in workflow
+    assert "ORG_GRADLE_PROJECT_android.injected.signing.store.file" in workflow
+    assert "缺少 GitHub Secret" in workflow and "exit 1" in workflow
+
+
+# ---------------------------------------------------------------------------
 # 用例
 # ---------------------------------------------------------------------------
 

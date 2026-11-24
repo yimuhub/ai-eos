@@ -1,6 +1,6 @@
 """验收闸门端到端：断言 → 证据落库 → 阻断/放行 → 定向返工。
 
-不调真实模型：评审分支只验证"不可用时降级放行"，模型评审本身
+不调真实模型：评审分支只验证"不可用时按 on_fail 处理"，模型评审本身
 （返回 JSON 的解析与阈值判定）用假返回值单测覆盖。
 """
 from types import SimpleNamespace
@@ -285,3 +285,104 @@ def test_sanitize_gate_drops_invented_rules_and_forces_observe():
     assert set(cleaned["assert"]) == {"min_chars"}
     assert cleaned["on_fail"] == "observe"
     assert cleaned["max_rework"] == 0
+
+
+# ---------------------------------------------------------------------------
+# judge 不可用：按 on_fail 留证，绝不把"没评上"伪装成通过
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("on_fail", ["observe", "fail", "manual"])
+async def test_unavailable_judge_respects_on_fail_and_persists_degraded_failure(
+        client, make_user, make_company, monkeypatch, on_fail):
+    gate = {
+        "acceptance": "必须给出可验证的结论",
+        "assert": {"min_chars": 40, "emits_files": 2, "min_citations": 1},
+        "on_fail": on_fail,
+        "max_rework": 0,
+    }
+    ctx = await _build(client, make_user, make_company, gate)
+    calls: list[dict] = []
+
+    async def offline_review(db, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(available=False, error="offline", score=None,
+                               model_id=None, tokens=0)
+
+    monkeypatch.setattr("app.gates.step_gate.judge_mod.review", offline_review)
+    async with AsyncSessionLocal() as db:
+        node = await db.get(WorkflowNode, ctx.node.id)
+        if on_fail == "observe":
+            out = await enforce(db, execution_id=ctx.execution.id, node=node,
+                                output={"output": GOOD}, attempt=1)
+            assert out.enabled is True
+            assert out.passed is False
+            assert out.degraded is True
+        else:
+            with pytest.raises(GateBlocked) as ei:
+                await enforce(db, execution_id=ctx.execution.id, node=node,
+                              output={"output": GOOD}, attempt=1)
+            assert "acceptance" in str(ei.value)
+            assert "unavailable" in str(ei.value)
+        await db.commit()
+
+    assert len(calls) == 1
+    assert calls[0]["acceptance"] == "必须给出可验证的结论"
+    rows = await _gate_rows(ctx.execution.id)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.passed is False
+    assert row.degraded is True
+    assert row.score is None and row.judge_model is None and row.tokens == 0
+    acceptance = [c for c in row.checks if c["rule"] == "acceptance"]
+    assert len(acceptance) == 1
+    assert acceptance[0]["passed"] is False
+    assert acceptance[0]["actual"] == "unavailable"
+    assert "offline" in acceptance[0]["detail"]
+    # observe 只留证不阻断；fail/manual 必须落库为阻断失败。
+    assert acceptance[0]["blocking"] is (on_fail != "observe")
+    assert row.blocking is (on_fail != "observe")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("on_fail", ["observe", "fail", "manual"])
+async def test_unavailable_judge_runtime_never_fakes_success(
+        client, make_user, make_company, monkeypatch, on_fail):
+    gate = {
+        "acceptance": "必须给出可验证的结论",
+        "assert": {"min_chars": 40, "emits_files": 2, "min_citations": 1},
+        "on_fail": on_fail,
+        "max_rework": 0,
+    }
+    ctx = await _build(client, make_user, make_company, gate)
+
+    async def fake_agent(self, node, ctx_dict, gate_feedback=None):
+        return {"output": GOOD}
+
+    async def offline_review(db, **kwargs):
+        return SimpleNamespace(available=False, error="offline", score=None,
+                               model_id=None, tokens=0)
+
+    monkeypatch.setattr(WorkflowRuntime, "_exec_agent_node", fake_agent)
+    monkeypatch.setattr("app.gates.step_gate.judge_mod.review", offline_review)
+    async with AsyncSessionLocal() as db:
+        ex = await advance_execution(db, ctx.execution.id)
+
+    if on_fail == "observe":
+        assert ex.status == RunStatus.COMPLETED, ex.error
+    else:
+        assert ex.status == RunStatus.FAILED, ex.status
+        assert "验收未通过" in (ex.error or "")
+    async with AsyncSessionLocal() as db:
+        steps = (await db.execute(select(WorkflowStep).where(
+            WorkflowStep.execution_id == ctx.execution.id))).scalars().all()
+        by_key = {s.node_key: s for s in steps}
+    assert by_key["a"].status == (RunStatus.COMPLETED if on_fail == "observe"
+                                  else RunStatus.FAILED)
+    assert ("end" in by_key) is (on_fail == "observe")
+    rows = await _gate_rows(ctx.execution.id)
+    assert len(rows) == 1
+    assert rows[0].passed is False and rows[0].degraded is True
+    assert rows[0].blocking is (on_fail != "observe")
+    acceptance = [c for c in rows[0].checks if c["rule"] == "acceptance"]
+    assert len(acceptance) == 1 and acceptance[0]["passed"] is False

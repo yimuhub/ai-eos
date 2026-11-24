@@ -71,8 +71,10 @@ async def build_context(db: AsyncSession, company_id: str) -> SpecContext:
         select(Agent.id, Agent.name).where(Agent.company_id == company_id))
     names: dict[str, str] = {}
     ids: set[str] = set()
+    names_by_id: dict[str, str] = {}
     for aid, aname in agents_q.all():
         ids.add(str(aid))
+        names_by_id[str(aid)] = str(aname)
         key = _norm_name(aname)
         # 重名时保留第一个：导出会同时给 agent_id，不依赖名字消歧
         names.setdefault(key, str(aid))
@@ -87,8 +89,9 @@ async def build_context(db: AsyncSession, company_id: str) -> SpecContext:
         if spec_key:
             # 同 key 多版本时取到的那条即可用（导入是新建版本，不覆盖）
             wf_keys.setdefault(str(spec_key), str(wid))
-    return SpecContext(agent_names=names, agent_ids=ids, workflow_ids=wf_ids,
-                       workflow_keys=wf_keys)
+    return SpecContext(agent_names=names, agent_ids=ids,
+                       agent_names_by_id=names_by_id,
+                       workflow_ids=wf_ids, workflow_keys=wf_keys)
 
 
 def validate_spec(spec: dict, ctx: SpecContext | None = None) -> list[Issue]:
@@ -103,7 +106,7 @@ def _vars_in(text: str) -> list[str]:
 def _resolve_agent(node: dict, ctx: SpecContext) -> str | None:
     """优先 agent_id（精确、抗重名），其次姓名。"""
     aid = node.get("agent_id")
-    if isinstance(aid, str) and aid and (not ctx.agent_ids or aid in ctx.agent_ids):
+    if isinstance(aid, str) and aid and aid in ctx.agent_ids:
         return aid
     name = node.get("agent")
     if isinstance(name, str) and name:

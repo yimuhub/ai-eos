@@ -103,17 +103,40 @@ class WorkflowRuntime:
         self.exec = execution
 
     async def _load_graph(self) -> tuple[dict[str, WorkflowNode], dict[str, list[WorkflowEdge]]]:
-        nodes_q = await self.db.execute(
-            select(WorkflowNode).where(WorkflowNode.workflow_id == self.exec.workflow_id))
-        edges_q = await self.db.execute(
-            select(WorkflowEdge).where(WorkflowEdge.workflow_id == self.exec.workflow_id))
-        nodes = {n.node_key: n for n in nodes_q.scalars()}
+        snapshot = self.exec.definition_snapshot
+        if isinstance(snapshot, dict):
+            nodes = {
+                n["node_key"]: WorkflowNode(
+                    workflow_id=self.exec.workflow_id,
+                    **{**n, "node_type": NodeType(n["node_type"])})
+                for n in snapshot.get("nodes", [])
+            }
+            edges = [WorkflowEdge(workflow_id=self.exec.workflow_id, **e)
+                     for e in snapshot.get("edges", [])]
+        else:
+            nodes_q = await self.db.execute(
+                select(WorkflowNode).where(WorkflowNode.workflow_id == self.exec.workflow_id))
+            edges_q = await self.db.execute(
+                select(WorkflowEdge).where(WorkflowEdge.workflow_id == self.exec.workflow_id))
+            nodes = {n.node_key: n for n in nodes_q.scalars()}
+            edges = list(edges_q.scalars())
         out_edges: dict[str, list[WorkflowEdge]] = {}
-        for e in edges_q.scalars():
+        for e in edges:
             out_edges.setdefault(e.from_node, []).append(e)
         return nodes, out_edges
 
     async def _open_step(self, node: WorkflowNode, input_data: dict) -> WorkflowStep:
+        if node.node_type in (NodeType.APPROVAL, NodeType.HUMAN_INPUT):
+            waiting_q = await self.db.execute(
+                select(WorkflowStep).where(
+                    WorkflowStep.execution_id == self.exec.id,
+                    WorkflowStep.node_key == node.node_key,
+                    WorkflowStep.status == RunStatus.RUNNING)
+                .order_by(WorkflowStep.attempt.desc()).limit(1))
+            waiting = waiting_q.scalars().first()
+            if waiting is not None and isinstance(
+                    (waiting.input_data or {}).get("_human_decision"), dict):
+                return waiting
         prev_q = await self.db.execute(
             select(WorkflowStep).where(
                 WorkflowStep.execution_id == self.exec.id,
@@ -154,13 +177,13 @@ class WorkflowRuntime:
         agent = await self.db.get(Agent, cfg.get("agent_id"))
         if not agent:
             raise RuntimeError(f"Agent {cfg.get('agent_id')} not found")
-        # company_id 优先取执行输入，否则回溯 workflow definition
-        company_id = self.exec_input_company()
-        if not company_id:
-            wf = await self.db.get(WorkflowDefinition, self.exec.workflow_id)
-            company_id = wf.company_id if wf else None
+        # 租户只认工作流定义；执行入参是用户数据，不能覆盖 company_id
+        wf = await self.db.get(WorkflowDefinition, self.exec.workflow_id)
+        company_id = wf.company_id if wf else self.exec_input_company()
         if not company_id:
             raise RuntimeError("company_id unknown for agent task")
+        if agent.company_id != company_id:
+            raise RuntimeError("Agent does not belong to the workflow company")
         title = (cfg.get("task_title_template") or node.name)
         instruction = cfg.get("instruction") or ""
         if cfg.get("interpolate"):
@@ -320,18 +343,15 @@ class WorkflowRuntime:
             await asyncio.sleep(min(seconds, 60))
             return {"waited": seconds}
 
-        if node.node_type == NodeType.APPROVAL:
-            if (node.config or {}).get("_approved"):
-                return {"approved": True}
-            # 需要人工：execution 进入 WAITING_APPROVAL，节点保持打开
-            self.exec.status = RunStatus.WAITING_APPROVAL
-            return None
-
-        if node.node_type == NodeType.HUMAN_INPUT:
-            provided = (node.config or {}).get("_human_input")
-            if provided is not None:
-                return {"human_input": provided}
-            self.exec.status = RunStatus.WAITING_INPUT
+        if node.node_type in (NodeType.APPROVAL, NodeType.HUMAN_INPUT):
+            decision = await self._human_decision(node, step)
+            if decision is not None:
+                if node.node_type == NodeType.APPROVAL:
+                    return {"approved": bool(decision.get("approved"))}
+                return {"human_input": decision.get("human_input", "")}
+            self.exec.status = (RunStatus.WAITING_APPROVAL
+                                if node.node_type == NodeType.APPROVAL
+                                else RunStatus.WAITING_INPUT)
             return None
 
         if node.node_type == NodeType.SUB_WORKFLOW:
@@ -365,6 +385,14 @@ class WorkflowRuntime:
 
         raise RuntimeError(f"Unknown node type {node.node_type}")
 
+    async def _human_decision(self, node: WorkflowNode,
+                              step: WorkflowStep | None) -> dict | None:
+        if step is None:
+            return None
+        await self.db.refresh(step)
+        decision = (step.input_data or {}).get("_human_decision")
+        return decision if isinstance(decision, dict) else None
+
     # ---------------- 步骤级验收闸门（M1） ----------------
 
     async def _apply_gate(self, node: WorkflowNode, output: dict | None,
@@ -388,10 +416,8 @@ class WorkflowRuntime:
             from app.models.agent import Agent
             agent = await self.db.get(Agent, agent_id)
 
-        company_id = self.exec_input_company()
-        if not company_id:
-            wf = await self.db.get(WorkflowDefinition, self.exec.workflow_id)
-            company_id = wf.company_id if wf else None
+        wf = await self.db.get(WorkflowDefinition, self.exec.workflow_id)
+        company_id = wf.company_id if wf else self.exec_input_company()
 
         async def _rework(prompt: str) -> dict:
             # 同一个员工、同一节点，带着"上一版 + 未过项"在原稿上改
@@ -416,12 +442,9 @@ class WorkflowRuntime:
 
     # ---------------- 基座三节点（V6 M1-e） ----------------
 
-    def _resolve_company(self) -> str:
-        company_id = self.exec_input_company()
-        if not company_id:
-            # 同步查询（调用点都持有会话）；没有就向上抛，让节点失败可诊断
-            return ""
-        return company_id
+    async def _resolve_company(self) -> str:
+        wf = await self.db.get(WorkflowDefinition, self.exec.workflow_id)
+        return wf.company_id if wf else self.exec_input_company()
 
     async def _exec_http_node(self, node: WorkflowNode) -> dict:
         """HTTP 节点：直调外部 API。
@@ -454,7 +477,7 @@ class WorkflowRuntime:
             from app.services.secret_vault import decrypt
             row = (await self.db.execute(
                 _select(CompanySecret).where(
-                    CompanySecret.company_id == self._resolve_company(),
+                    CompanySecret.company_id == await self._resolve_company(),
                     CompanySecret.name == secret_ref))).scalars().first()
             if row is None:
                 raise RuntimeError(f"HTTP 节点凭据 {secret_ref} 不存在")
@@ -497,7 +520,7 @@ class WorkflowRuntime:
         tool_name = str(cfg.get("tool_name") or "").strip()
         if not tool_name:
             raise RuntimeError("TOOL 节点缺少 tool_name")
-        company_id = self._resolve_company()
+        company_id = await self._resolve_company()
         if not get_tool(tool_name):
             from app.toolbus import has_db_tool
             if not company_id or not await has_db_tool(self.db, company_id,
@@ -853,14 +876,36 @@ async def execution_is_orphaned(db: AsyncSession, ex: WorkflowExecution,
     return (datetime.utcnow() - created).total_seconds() > grace_seconds
 
 
+async def snapshot_workflow(db: AsyncSession, workflow_id: str) -> dict:
+    nodes_q = await db.execute(select(WorkflowNode).where(
+        WorkflowNode.workflow_id == workflow_id).order_by(WorkflowNode.node_key))
+    edges_q = await db.execute(select(WorkflowEdge).where(
+        WorkflowEdge.workflow_id == workflow_id))
+    return {
+        "nodes": [{
+            "node_key": n.node_key, "node_type": n.node_type.value,
+            "name": n.name, "config": n.config or {},
+            "position_x": n.position_x, "position_y": n.position_y,
+        } for n in nodes_q.scalars()],
+        "edges": [{"from_node": e.from_node, "to_node": e.to_node,
+                   "label": e.label} for e in edges_q.scalars()],
+    }
+
+
 async def start_workflow(db: AsyncSession, workflow_id: str, started_by: str,
                          project_id: str | None = None,
                          input_data: dict | None = None) -> WorkflowExecution:
+    wf = await db.execute(select(WorkflowDefinition).where(
+        WorkflowDefinition.id == workflow_id).with_for_update())
+    definition = wf.scalars().first()
+    if definition is None:
+        raise ValueError("workflow not found")
+    snapshot = await snapshot_workflow(db, workflow_id)
     # 初始状态 PENDING：真正的"开跑"由 advance_execution 用 CAS 抢 PENDING→RUNNING，
     # 这样"提交后台任务"与"后台开始执行"之间没有可被重复利用的窗口。
     ex = WorkflowExecution(workflow_id=workflow_id, project_id=project_id,
                            status=RunStatus.PENDING, input_data=input_data or {},
-                           started_by=started_by)
+                           definition_snapshot=snapshot, started_by=started_by)
     db.add(ex)
     await db.flush()
 

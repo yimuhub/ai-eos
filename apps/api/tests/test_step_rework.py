@@ -263,6 +263,7 @@ async def test_rework_recovers_failed_execution(client, make_user, make_company,
                                                 monkeypatch):
     monkeypatch.setattr(WorkflowRuntime, "_exec_agent_node", fake_exec)
     s = await _build_diamond(client, make_user, make_company)
+    await _advance(s.eid)
     async with AsyncSessionLocal() as db:
         ex = await db.get(WorkflowExecution, s.eid)
         ex.status = RunStatus.FAILED

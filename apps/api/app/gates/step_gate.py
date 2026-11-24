@@ -6,8 +6,8 @@
    "本该过却被拦"的样本，确认误杀率可接受后再逐个工作流开返工。
 2. **返工上限硬编码 1 轮**（配置可写 0，超过 1 一律按 1 处理）。模型有时越改
    越差，多轮返工是烧钱换噪声。
-3. **评审不可用不判死**。超时/无模型/解析失败 → degraded，放行 + 留痕，
-   报告里标"降级"。宁可漏一次，也不让模型抽风拦住正常业务。
+3. **评审不可用按策略处理**。observe 放行 + 留痕；manual/fail 记未通过并阻断，
+   报告里标"降级"。不能把"没评上"伪装成"评过了"。
 4. **阻断才失败**。只有 `blocking=True` 的断言失败才让节点失败；
    非阻断项只记警告（为后续"软性质量分"留位）。
 """
@@ -218,6 +218,7 @@ async def enforce(
 
     before_text: str | None = None
     token_cap_hit = False
+    judge_skipped = False
 
     for gate_round in range(0, spec.max_rework + 1):
         t0 = time.perf_counter()
@@ -237,10 +238,11 @@ async def enforce(
             if used >= GATE_TOKEN_CAP:
                 degraded = True
                 token_cap_hit = True
-                checks.append(Check("acceptance", True, spec.judge_threshold,
-                                    "skipped",
-                                    blocking=False,
-                                    detail=f"评审 token 已达上限 {GATE_TOKEN_CAP}，本步只跑机械断言"))
+                judge_skipped = True
+                checks.append(Check(
+                    "acceptance", False, spec.judge_threshold,
+                    "skipped", blocking=spec.on_fail != "observe",
+                    detail=f"评审 token 已达上限 {GATE_TOKEN_CAP}，本步只跑机械断言"))
             else:
                 jr = await judge_mod.review(
                     db, agent=agent, task_text=(node.name or node.node_key),
@@ -254,11 +256,13 @@ async def enforce(
                         detail="；".join(jr.must_fix)[:1000] or "符合验收标准"))
                 else:
                     degraded = True
-                    checks.append(Check("acceptance", True, spec.judge_threshold,
-                                        "unavailable", blocking=False,
-                                        detail=f"评审降级：{jr.error[:300]}"))
+                    judge_skipped = True
+                    checks.append(Check(
+                        "acceptance", False, spec.judge_threshold,
+                        "unavailable", blocking=spec.on_fail != "observe",
+                        detail=f"评审降级：{jr.error[:300]}"))
 
-        passed = not blocking_failures(checks)
+        passed = not blocking_failures(checks) and not judge_skipped
         latency = int((time.perf_counter() - t0) * 1000)
 
         await _persist(

@@ -31,38 +31,33 @@ jobs:
       - name: 安装依赖
         working-directory: desktop
         run: npm ci --no-audit --no-fund
-      - name: 构建 dmg + zip（x64/arm64；Tier1 ad-hoc + 信任激活脚本）
+      - name: 构建 dmg + zip（x64/arm64；官方签名或 ad-hoc）
         working-directory: desktop
         env:
-          # ── 签名策略 ──
-          # Tier 2（配了 Apple secrets）：Developer ID 签名 + Apple 公证 → 全 Mac 零接触
-          #   APPLE_CERTIFICATE(base64 p12) / APPLE_CERT_PASSWORD / APPLE_ID /
-          #   APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID
-          # Tier 1（默认，无 Apple 账号）：ad-hoc 构建 + 随附「信任激活脚本」
-          #   （electron-builder 的 CSC_LINK 自签在 macOS 27 有 set-key-partition-list
-          #     钥匙串 bug，CI 无法完成受信任自签 → 改由每台 Mac 用户跑一次激活脚本重签）
+          APPLE_CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
         run: |
-          if [ -n "$APPLE_CSC_LINK" ]; then
-            echo "✅ 已配置 Apple 证书 → Developer ID 签名 + 公证（APPLE_ID / TeamID）"
+          if [ -n "$APPLE_CSC_LINK" ] && [ -n "$APPLE_CSC_KEY_PASSWORD" ] && [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "已配置官方 Apple 签名与公证 Secrets，执行 Developer ID 签名和公证"
             export CSC_LINK="$APPLE_CSC_LINK"
             export CSC_KEY_PASSWORD="$APPLE_CSC_KEY_PASSWORD"
             npx electron-builder --mac
+          elif [ -n "$APPLE_CSC_LINK" ] || [ -n "$APPLE_CSC_KEY_PASSWORD" ] || [ -n "$APPLE_ID" ] || [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] || [ -n "$APPLE_TEAM_ID" ]; then
+            echo "Apple 签名 Secrets 不完整，本次仅执行 ad-hoc 构建，不签名、不公证、不安装信任根" >&2
+            unset CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
+            CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac
           else
-            echo "ℹ️ 未配置 Apple 证书 → ad-hoc 构建；每台 Mac 用户装完跑一次『AI-EOS-Mac-trust-activate.command』重签即可"
+            echo "未配置 Apple 签名 Secrets，本次仅执行 ad-hoc 构建，不签名、不公证、不安装信任根"
+            unset CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID
             CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac
           fi
-      - name: 收集产物（含信任激活脚本）
+      - name: 收集产物
         run: |
           mkdir -p out/mac
           cp desktop/dist/AI-EOS-*.dmg desktop/dist/AI-EOS-*.zip out/mac/ 2>/dev/null || cp desktop/dist/*.dmg desktop/dist/*.zip out/mac/ 2>/dev/null
-          # 随附 Mac 信任激活脚本（无 Apple 账号时，每台 Mac 跑一次即可信任+重签）
-          cp packaging/mac-signing/"AI-EOS-Mac-trust-activate.command" out/mac/ 2>/dev/null || echo "  (信任激活脚本缺失，跳过)"
-          chmod +x out/mac/"AI-EOS-Mac-trust-activate.command" 2>/dev/null || true
           ls -lh out/mac/
       - uses: actions/upload-artifact@v4
         with:
@@ -150,40 +145,77 @@ jobs:
       - name: expo prebuild 生成原生工程
         working-directory: mobile
         run: npx expo prebuild -p android --no-install
-      - name: 注入 release 签名配置（p12 自签）
+      - name: 校验 Secrets 并构建 release APK（运行时临时密钥库）
         working-directory: mobile/android
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
+          missing=0
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::缺少 GitHub Secret: $name" >&2
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Android release 构建要求配置全部签名 Secrets；已中止，不使用仓库密钥" >&2
+            exit 1
+          fi
+          KEYSTORE_FILE="$(mktemp "${TMPDIR:-/tmp}/aieos-android-XXXXXX.p12")"
+          trap 'rm -f "$KEYSTORE_FILE"' EXIT
+          export ANDROID_KEYSTORE_PATH="$KEYSTORE_FILE"
           python3 - <<'PY'
-          import re, pathlib
-          g = pathlib.Path("app/build.gradle")
-          s = g.read_text()
-          # 已有 signingConfigs 则跳过
-          if "signingConfigs" not in s:
-              # 在 android { 内追加 signingConfigs + buildTypes.release 引用
-              anchor = "buildTypes {"
-              i = s.index(anchor)
-              block = (
-                  "    signingConfigs {\n"
-                  "        release {\n"
-                  "            storeFile file('../../packaging/keystore/ai-eos.p12')\n"
-                  "            storeType 'p12'\n"
-                  "            storePassword 'aieos2026'\n"
-                  "            keyAlias 'aieos'\n"
-                  "            keyPassword 'aieos2026'\n"
-                  "        }\n"
-                  "    }\n"
-              )
-              # 插到 buildTypes 块前
-              s = s[:i] + block + s[i:]
-              # release 加 signingConfig
-              s = s.replace("release {", "release {\n                signingConfig signingConfigs.release", 1)
-          g.write_text(s)
-          print("build.gradle 签名配置注入完成")
+          import base64
+          import os
+          from pathlib import Path
+
+          try:
+              data = base64.b64decode(os.environ["ANDROID_KEYSTORE_BASE64"], validate=True)
+          except Exception as exc:
+              raise SystemExit("ANDROID_KEYSTORE_BASE64 不是有效的 Base64") from exc
+          if not data:
+              raise SystemExit("ANDROID_KEYSTORE_BASE64 解码结果为空")
+          target = Path(os.environ["ANDROID_KEYSTORE_PATH"])
+          target.write_bytes(data)
+          target.chmod(0o600)
           PY
-      - name: gradle 构建 release APK
-        working-directory: mobile/android
-        run: |
-          yes | ./gradlew :app:assembleRelease --no-daemon --stacktrace
+          python3 - <<'PY'
+          from pathlib import Path
+
+          gradle = Path("app/build.gradle")
+          source = gradle.read_text()
+          if "signingConfigs" not in source:
+              block = """    signingConfigs {
+                  release {
+                      storeFile file(providers.gradleProperty("android.injected.signing.store.file").get())
+                      storePassword providers.gradleProperty("android.injected.signing.store.password").get()
+                      keyAlias providers.gradleProperty("android.injected.signing.key.alias").get()
+                      keyPassword providers.gradleProperty("android.injected.signing.key.password").get()
+                      storeType 'p12'
+                  }
+              }
+              """
+              anchor = "buildTypes {"
+              before, marker, after = source.partition(anchor)
+              if not marker:
+                  raise SystemExit("无法定位 Android buildTypes 配置")
+              source = before.rstrip() + "\n" + block + marker + after.replace(
+                  "release {",
+                  "release {\n                signingConfig signingConfigs.release",
+                  1,
+              )
+              gradle.write_text(source)
+          PY
+          env \
+            "ORG_GRADLE_PROJECT_android.injected.signing.store.file=$KEYSTORE_FILE" \
+            "ORG_GRADLE_PROJECT_android.injected.signing.store.password=$ANDROID_KEYSTORE_PASSWORD" \
+            "ORG_GRADLE_PROJECT_android.injected.signing.key.alias=$ANDROID_KEY_ALIAS" \
+            "ORG_GRADLE_PROJECT_android.injected.signing.key.password=$ANDROID_KEY_PASSWORD" \
+            ./gradlew :app:assembleRelease --no-daemon --stacktrace
       - name: 收集 APK
         run: |
           mkdir -p out/android
@@ -228,7 +260,7 @@ jobs:
           API="https://api.github.com/repos/$REPO"
           # 展平产物到 release-files/（文件名去重）
           mkdir -p release-files
-          find artifacts -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.apk" -o -name "*.command" \) \
+          find artifacts -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.AppImage" -o -name "*.deb" -o -name "*.apk" \) \
             -exec sh -c 'f="${1}"; b="$(basename "$f")"; n=1; while [ -e "release-files/$b" ]; do base="${b%.${b##*.}}"; ext="${b##*.}"; b="${base}-${n}.${ext}"; n=$((n+1)); done; cp "$f" "release-files/$b"' _ {} \;
           ls -lh release-files/
           # 组装 notes 文件（RV：从安装包文件名提取最新版本号，别再写死 V5.x）
@@ -245,14 +277,9 @@ jobs:
 
           **macOS「恶意软件」拦截处理（重要）**
           - 未做 Apple 公证的 Mac 客户端，在 macOS（尤其 27）双击 .dmg 里的 app 可能被判定"恶意软件"并自动移入废纸篓。
-          - **首选（无需 Apple 账号）：运行随附的 `AI-EOS-Mac-trust-activate.command`**
-            ① 先用 .dmg 把 AI-EOS 拖进 应用程序（被删就重拖一份）；
-            ② 双击 `AI-EOS-Mac-trust-activate.command`，按提示完成一次 Touch ID / 密码；
-            ③ 脚本会自动把自签证书设为受信任根并重签 /Applications/AI-EOS.app；
-            ④ 之后双击 AI-EOS 即可打开（首次若提示"未识别开发者"，点"仍要打开"一次）。
-            每台 Mac 只需跑一次。
+          - **ad-hoc 包不会附带信任激活脚本，也不会安装系统受信任根。** 请仅从可信分发渠道获取安装包；确认来源后，按 macOS 提示选择“仍要打开”。不要运行要求把未知自签证书设为受信任根的脚本。
           - **应急（被删后、临时）**：终端执行 `sudo xattr -cr /Applications/AI-EOS.app && open /Applications/AI-EOS.app`。
-          - **彻底零接触（需 Apple 账号，$99/年）**：在 GitHub 仓库 Secrets 配
+          - **免警告分发（需 Apple Developer 账号）**：在 GitHub 仓库 Secrets 配
             `APPLE_CERTIFICATE / APPLE_CERT_PASSWORD / APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID`
             后重跑 clients 流水线，CI 自动 Developer ID 签名 + 公证，所有 Mac 开箱即用、无警告无删除。
 
@@ -265,7 +292,7 @@ jobs:
           - 老板视角 App：KPI / 一句话下达（含📎）/ 签字门 / 服务连接。
           - 打开后到「连接」Tab 填服务器地址并登录（连接信息加密保存在手机里）。
 
-          安装包均为内部自签（未做 Apple/Windows 公证），分发给自己/团队设备时按系统提示放行即可。
+          - 临时密钥库权限为 0600，并通过环境变量映射的 Gradle 属性传入；口令不作为命令行参数，也不打印到日志。
           EOF
           # 若同名 Release 已存在则先删（API）
           EXIST=$(curl -s -o /dev/null -w "%{http_code}" "$API/releases/tags/$TAG_NAME" -H "Authorization: token $GH_TOKEN")

@@ -53,6 +53,7 @@ class SpecContext:
 
     agent_names: dict[str, str] = field(default_factory=dict)  # 归一化姓名 -> id
     agent_ids: set[str] = field(default_factory=set)
+    agent_names_by_id: dict[str, str] = field(default_factory=dict)
     workflow_ids: set[str] = field(default_factory=set)
     workflow_keys: dict[str, str] = field(default_factory=dict)  # spec key -> id
 
@@ -275,6 +276,10 @@ def _check_structure(spec: dict) -> list[Issue]:
             if unknown:
                 out.append(Issue("unknown_field",
                                  f"policy 出现未知字段 {sorted(unknown)}", "$.policy"))
+            allow_partial = policy.get("allow_partial")
+            if allow_partial is not None and type(allow_partial) is not bool:
+                out.append(Issue("bad_allow_partial", "allow_partial 必须是布尔值",
+                                 "$.policy.allow_partial"))
     return out
 
 
@@ -425,11 +430,17 @@ def _check_semantics(spec: dict, ctx: SpecContext | None) -> list[Issue]:
             aid = n.get("agent_id")
             aname = n.get("agent")
             if isinstance(aid, str) and aid:
-                if ctx.agent_ids and aid not in ctx.agent_ids:
+                if aid not in ctx.agent_ids:
                     out.append(Issue("agent_not_found",
                                      f"agent_id {aid} 不属于本公司", f"nodes[{i}].agent_id"))
+                if isinstance(aname, str) and aname:
+                    actual = ctx.agent_names_by_id.get(aid)
+                    if actual is None or _norm_name(aname) != _norm_name(actual):
+                        out.append(Issue("agent_identity_mismatch",
+                                         "agent 与 agent_id 指向不同的员工",
+                                         f"nodes[{i}].agent"))
             elif isinstance(aname, str) and aname:
-                if ctx.agent_names and _norm_name(aname) not in ctx.agent_names:
+                if _norm_name(aname) not in ctx.agent_names:
                     out.append(Issue("agent_not_found",
                                      f"本公司没有叫「{aname}」的员工", f"nodes[{i}].agent"))
             else:
@@ -456,17 +467,28 @@ def _check_policy(spec: dict) -> list[Issue]:
     out: list[Issue] = []
     nodes = [n for _, n in _iter_nodes(spec)]
     policy = spec.get("policy") if isinstance(spec.get("policy"), dict) else {}
-    max_nodes = min(int(policy.get("max_nodes") or MAX_NODES), MAX_NODES)
+    max_nodes = policy.get("max_nodes", MAX_NODES)
+    if type(max_nodes) is not int or not (1 <= max_nodes <= MAX_NODES):
+        out.append(Issue("bad_max_nodes",
+                         f"max_nodes 必须是 1~{MAX_NODES} 的整数",
+                         "$.policy.max_nodes"))
+        max_nodes = MAX_NODES
     if len(nodes) > max_nodes:
         out.append(Issue("too_many_nodes",
                          f"节点数 {len(nodes)} 超过上限 {max_nodes}", "$.nodes"))
     conc = policy.get("concurrency")
-    if conc is not None and (not isinstance(conc, int) or not (1 <= conc <= MAX_CONCURRENCY)):
-        out.append(Issue("bad_concurrency", f"concurrency 必须在 1~{MAX_CONCURRENCY}",
+    if conc is not None and (
+        type(conc) is not int or not (1 <= conc <= MAX_CONCURRENCY)
+    ):
+        out.append(Issue("bad_concurrency",
+                         f"concurrency 必须是 1~{MAX_CONCURRENCY} 的整数",
                          "$.policy.concurrency"))
     budget = policy.get("budget_tokens")
-    if budget is not None and (not isinstance(budget, int) or budget > MAX_BUDGET_TOKENS):
-        out.append(Issue("bad_budget", f"budget_tokens 不能超过 {MAX_BUDGET_TOKENS}",
+    if budget is not None and (
+        type(budget) is not int or not (0 <= budget <= MAX_BUDGET_TOKENS)
+    ):
+        out.append(Issue("bad_budget",
+                         f"budget_tokens 必须是 0~{MAX_BUDGET_TOKENS} 的整数",
                          "$.policy.budget_tokens"))
     return out
 

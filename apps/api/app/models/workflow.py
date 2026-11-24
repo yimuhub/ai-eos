@@ -111,6 +111,7 @@ class WorkflowExecution(TimestampMixin, Base):
     current_nodes: Mapped[list | None] = mapped_column(JSON, default=list)  # 当前活跃 node_key 列表
     input_data: Mapped[dict | None] = mapped_column(JSON, default=dict)
     output_data: Mapped[dict | None] = mapped_column(JSON, default=dict)
+    definition_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text)
     started_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
 

@@ -1,12 +1,17 @@
 """Workflow CRUD + execution API (P2-02/P2-03 backend)."""
+import json
+import math
+import re
 from datetime import datetime, timedelta, timezone
+from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
-from pydantic import BaseModel
-from sqlalchemy import and_, select, update
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
+from sqlalchemy import and_, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import assert_company_capability, get_current_user
+from app.api.deps import (assert_company_capability, assert_company_owned,
+                          get_current_user)
 from app.core.permissions import Capability
 from app.core.scope import build_ctx
 from app.db.session import get_db
@@ -15,6 +20,7 @@ from app.models.workflow import (NodeType, RunStatus, WorkflowDefinition,
                                  WorkflowFeedback, WorkflowNode,
                                  WorkflowStep, WorkflowStatus)
 from app.models.manual_log import MANUAL_REASONS, WorkflowManualLog
+from app.models.project import Project
 from app.models.workflow_gate import WorkflowStepGate
 from app.schemas.responses import (WorkflowFeedbackItemOut,
                                    WorkflowFeedbackSubmitOut)
@@ -45,12 +51,201 @@ class EdgeIn(BaseModel):
     label: str | None = None
 
 
+class WorkflowInputIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,63}$", max_length=64)
+    type: Literal["text", "number", "boolean", "json", "file"] = "text"
+    required: StrictBool = False
+    default: Any = None
+    description: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_default(self):
+        if self.default is not None:
+            _validate_input_value(self, self.default)
+        return self
+
+
 class WorkflowSaveIn(BaseModel):
     name: str
     description: str | None = None
     project_id: str | None = None
+    inputs: list[WorkflowInputIn] = Field(default_factory=list, max_length=50)
     nodes: list[NodeIn]
     edges: list[EdgeIn]
+
+    @model_validator(mode="after")
+    def validate_unique_inputs(self):
+        names = [item.name for item in self.inputs]
+        if len(names) != len(set(names)):
+            raise ValueError("输入名不能重复")
+        return self
+
+
+class RunIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    inputs: dict[str, Any] = Field(default_factory=dict)
+
+
+def _validate_input_value(item: WorkflowInputIn, value: Any) -> None:
+    path = f"inputs.{item.name}"
+    if item.type == "text":
+        if not isinstance(value, str) or len(value) > 20_000:
+            raise ValueError(f"{path} 必须是不超过 20000 字的字符串")
+    elif item.type == "file":
+        if not isinstance(value, str) or not value.strip() or len(value) > 1_000:
+            raise ValueError(f"{path} 必须是不超过 1000 字的文件引用")
+    elif item.type == "number":
+        if type(value) not in (int, float) or (
+            isinstance(value, float) and not math.isfinite(value)
+        ):
+            raise ValueError(f"{path} 必须是有限数字")
+    elif item.type == "boolean":
+        if type(value) is not bool:
+            raise ValueError(f"{path} 必须是布尔值")
+    elif item.type == "json":
+        try:
+            encoded = json.dumps(value, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{path} 必须是合法 JSON") from exc
+        if len(encoded) > 64_000:
+            raise ValueError(f"{path} 的 JSON 不能超过 64000 字符")
+
+
+def _resolve_run_inputs(definitions: list[dict], supplied: dict) -> dict[str, Any]:
+    if not isinstance(supplied, dict):
+        raise HTTPException(422, "inputs 必须是对象")
+    declared = {item["name"]: item for item in definitions
+                if isinstance(item, dict) and isinstance(item.get("name"), str)}
+    unknown = sorted(set(supplied) - set(declared))
+    if unknown:
+        raise HTTPException(422, detail={"message": "存在未声明的运行入参",
+                                         "fields": [f"inputs.{name}" for name in unknown]})
+    resolved: dict[str, Any] = {}
+    for name, item in declared.items():
+        if name in supplied:
+            value = supplied[name]
+        elif "default" in item and item["default"] is not None:
+            value = item["default"]
+        elif item.get("required"):
+            raise HTTPException(422, detail={"message": "缺少必填运行入参",
+                                             "fields": [f"inputs.{name}"]})
+        else:
+            continue
+        try:
+            _validate_input_value(WorkflowInputIn.model_validate(item), value)
+        except ValueError as exc:
+            raise HTTPException(422, detail={"message": str(exc),
+                                             "fields": [f"inputs.{name}"]}) from exc
+        resolved[name] = value
+    return resolved
+
+
+_INPUT_VAR_RE = re.compile(r"\{\{\s*input\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
+
+
+def _config_strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for child in value.values():
+            yield from _config_strings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _config_strings(child)
+
+
+def _validate_input_references(nodes: list[NodeIn], definitions: list[dict]) -> None:
+    names = {item.get("name") for item in definitions if isinstance(item, dict)}
+    missing: set[str] = set()
+    for node in nodes:
+        for text in _config_strings(node.config or {}):
+            missing.update(set(_INPUT_VAR_RE.findall(text)) - names)
+    if missing:
+        raise HTTPException(422, detail={
+            "message": "节点引用了未声明的运行入参",
+            "fields": [f"inputs.{name}" for name in sorted(missing)],
+        })
+
+
+def _validate_graph(data: WorkflowSaveIn) -> dict[str, str]:
+    key_types: dict[str, str] = {}
+    for n in data.nodes:
+        try:
+            key_types[n.node_key] = NodeType(n.node_type).value
+        except ValueError:
+            raise HTTPException(400, f"未知节点类型 {n.node_type}")
+    if len(key_types) != len(data.nodes):
+        raise HTTPException(400, "节点 key 不能重复")
+    types = set(key_types.values())
+    if NodeType.START.value not in types or NodeType.END.value not in types:
+        raise HTTPException(400, "工作流必须包含开始和结束节点")
+
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for e in data.edges:
+        if e.from_node not in key_types or e.to_node not in key_types:
+            raise HTTPException(400, "连线端点必须是工作流内的有效节点")
+        if e.from_node == e.to_node:
+            raise HTTPException(400, "节点不能连接到自身")
+        pair = (e.from_node, e.to_node)
+        if pair in seen:
+            raise HTTPException(400, "不能重复添加同一条连线")
+        seen.add(pair)
+        pairs.append(pair)
+    if not pairs:
+        raise HTTPException(400, "工作流没有任何连线")
+    out_map: dict[str, list[str]] = {}
+    for source, target in pairs:
+        out_map.setdefault(source, []).append(target)
+    no_out = sorted(k for k, t in key_types.items()
+                    if t != NodeType.END.value and not out_map.get(k))
+    if no_out:
+        raise HTTPException(400, f"这些节点没有连到下一步：{', '.join(no_out[:5])}")
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(key: str) -> None:
+        if key in visiting:
+            raise HTTPException(400, "工作流连线不能形成环")
+        if key in visited:
+            return
+        visiting.add(key)
+        for target in out_map.get(key, []):
+            visit(target)
+        visiting.remove(key)
+        visited.add(key)
+
+    for key in key_types:
+        visit(key)
+    reachable: set[str] = set()
+    stack = [k for k, t in key_types.items() if t == NodeType.START.value]
+    while stack:
+        key = stack.pop()
+        if key in reachable:
+            continue
+        reachable.add(key)
+        stack.extend(out_map.get(key, []))
+    if not reachable.intersection(k for k, t in key_types.items()
+                                  if t == NodeType.END.value):
+        raise HTTPException(400, "开始节点连不到结束节点，请检查连线方向")
+    return key_types
+
+
+def _execution_graph(ex: WorkflowExecution):
+    snapshot = ex.definition_snapshot or {}
+    if isinstance(snapshot, dict):
+        return {
+            n["node_key"]: WorkflowNode(
+                workflow_id=ex.workflow_id,
+                **{**n, "node_type": NodeType(n["node_type"])})
+            for n in snapshot.get("nodes", [])
+        }
+    return {}
 
 
 class SpecPayloadIn(BaseModel):
@@ -155,6 +350,7 @@ async def get_workflow(wid: str, db: AsyncSession = Depends(get_db),
         "reuse_key": wf.reuse_key or "",
         "previous_workflow_id": wf.previous_workflow_id or "",
         "owner_agent_id": wf.owner_agent_id or "",
+        "inputs": (wf.meta or {}).get("inputs") or [],
         "meta": wf.meta or {},
         "nodes": [{c.key: getattr(n, c.key) for c in n.__table__.columns}
                   for n in nodes_q.scalars()],
@@ -308,17 +504,28 @@ async def _loadout_lock_issues(db: AsyncSession, company_id: str,
                                loadout_id: str, spec: dict) -> list:
     """阵容锁定：spec 里的 AGENT 必须是该 loadout 里的角色。"""
     from app.api.routes.teams import locked_role_names
+    from app.spec.compiler import _resolve_agent
     from app.spec.validator import Issue, _norm_name
 
     allowed = await locked_role_names(db, company_id, loadout_id)
+    ctx = await build_context(db, company_id)
     out = []
     for i, n in enumerate(spec.get("nodes") or []):
         if not isinstance(n, dict) or n.get("type") != "AGENT":
             continue
+        aid = _resolve_agent(n, ctx)
+        canonical = ctx.agent_names_by_id.get(aid) if aid else None
         name = n.get("agent")
-        if isinstance(name, str) and name and _norm_name(name) not in allowed:
+        if (isinstance(name, str) and name and canonical
+                and _norm_name(name) != _norm_name(canonical)):
+            out.append(Issue("agent_identity_mismatch",
+                             "agent 与 agent_id 指向不同的员工",
+                             f"nodes[{i}].agent"))
+            continue
+        display = canonical or name or aid or "未指定员工"
+        if canonical and _norm_name(canonical) not in allowed:
             out.append(Issue("agent_not_in_loadout",
-                             f"员工「{name}」不在该阵容（loadout）内",
+                             f"员工「{display}」不在该阵容（loadout）内",
                              f"nodes[{i}].agent"))
     return out
 
@@ -351,6 +558,38 @@ async def workflow_spec_schema():
                         headers={"Cache-Control": "public, max-age=3600"})
 
 
+async def _validate_agent_tenant(db: AsyncSession, company_id: str,
+                                data: WorkflowSaveIn) -> None:
+    from app.models.agent import Agent
+    for node in data.nodes:
+        if NodeType(node.node_type) != NodeType.AGENT:
+            continue
+        agent_id = (node.config or {}).get("agent_id")
+        agent = await db.get(Agent, agent_id) if agent_id else None
+        if agent is None or agent.company_id != company_id:
+            raise HTTPException(400, f"节点 {node.node_key} 的执行员工不存在或不属于本公司")
+
+
+async def _validate_workflow_relations(
+    db: AsyncSession, user, company_id: str, data: WorkflowSaveIn
+) -> None:
+    if data.project_id:
+        project = await db.get(Project, data.project_id)
+        if not project or project.company_id != company_id:
+            raise HTTPException(404, "项目不存在或不属于本公司")
+        await assert_company_owned(db, user.id, company_id)
+    await _validate_agent_tenant(db, company_id, data)
+    for node in data.nodes:
+        if NodeType(node.node_type) != NodeType.SUB_WORKFLOW:
+            continue
+        child_id = (node.config or {}).get("workflow_id")
+        if not child_id:
+            raise HTTPException(400, f"节点 {node.node_key} 必须指定 workflow_id")
+        child = await _wf_owned(db, user, str(child_id))
+        if child.company_id != company_id:
+            raise HTTPException(400, f"节点 {node.node_key} 的子工作流不属于本公司")
+
+
 @router.post("/workflows", status_code=201)
 async def save_workflow(data: WorkflowSaveIn, company_id: str,
                         db: AsyncSession = Depends(get_db),
@@ -359,41 +598,15 @@ async def save_workflow(data: WorkflowSaveIn, company_id: str,
     await assert_company_capability(db, user.id, company_id,
                                     Capability.OPERATE)
 
-    # 校验：必须有 START 和 END
-    types = {n.node_type for n in data.nodes}
-    if NodeType.START not in types or NodeType.END not in types:
-        raise HTTPException(400, "工作流必须包含开始和结束节点")
-    # 校验连线（修复前零连线/断连图也能保存，运行时执行实例会永久卡 RUNNING）：
-    # 1) 非 END 节点必须有出边；2) START 必须可达 END。
-    node_keys = {n.node_key for n in data.nodes}
-    key_types = {n.node_key: n.node_type for n in data.nodes}
-    edge_pairs = [(e.from_node, e.to_node) for e in data.edges
-                  if e.from_node in node_keys and e.to_node in node_keys
-                  and e.from_node != e.to_node]
-    if not edge_pairs:
-        raise HTTPException(400, "工作流没有任何连线：请从节点右侧圆点拖到另一节点连线后再保存")
-    out_map: dict[str, list[str]] = {}
-    for s, d2 in edge_pairs:
-        out_map.setdefault(s, []).append(d2)
-    no_out = sorted(k for k, t in key_types.items()
-                    if t != NodeType.END.value and not out_map.get(k))
-    if no_out:
-        raise HTTPException(400, f"这些节点没有连到下一步：{', '.join(no_out[:5])}（每个非结束节点都要有出边）")
-    seen_reach: set[str] = set()
-    stack = [k for k, t in key_types.items() if t == NodeType.START.value]
-    while stack:
-        k = stack.pop()
-        if k in seen_reach:
-            continue
-        seen_reach.add(k)
-        stack.extend(out_map.get(k, []))
-    ends = {k for k, t in key_types.items() if t == NodeType.END.value}
-    if not (seen_reach & ends):
-        raise HTTPException(400, "开始节点连不到结束节点，请检查连线方向")
+    _validate_graph(data)
+    _validate_input_references(data.nodes, [item.model_dump() for item in data.inputs])
+    await _validate_workflow_relations(db, user, company_id, data)
 
+    inputs = [item.model_dump(exclude_none=True) for item in data.inputs]
     wf = WorkflowDefinition(company_id=company_id, project_id=data.project_id,
                             name=data.name, description=data.description,
-                            status=WorkflowStatus.PUBLISHED, created_by=user.id)
+                            status=WorkflowStatus.PUBLISHED, created_by=user.id,
+                            meta={"inputs": inputs})
     db.add(wf)
     await db.flush()
     for n in data.nodes:
@@ -420,41 +633,37 @@ async def update_workflow(wid: str, data: WorkflowSaveIn,
                           user=Depends(get_current_user)):
     """更新已有工作流（修复前只有 POST：编辑保存会新建重复定义）。"""
     wf = await _wf_owned(db, user, wid, Capability.OPERATE)
-    # 与新建同一套图校验（见 save_workflow：非 END 必须有出边、START 可达 END）
-    types = {n.node_type for n in data.nodes}
-    if NodeType.START not in types or NodeType.END not in types:
-        raise HTTPException(400, "工作流必须包含开始和结束节点")
-    node_keys = {n.node_key for n in data.nodes}
-    key_types = {n.node_key: n.node_type for n in data.nodes}
-    edge_pairs = [(e.from_node, e.to_node) for e in data.edges
-                  if e.from_node in node_keys and e.to_node in node_keys
-                  and e.from_node != e.to_node]
-    if not edge_pairs:
-        raise HTTPException(400, "工作流没有任何连线：请从节点右侧圆点拖到另一节点连线后再保存")
-    out_map: dict[str, list[str]] = {}
-    for s, d2 in edge_pairs:
-        out_map.setdefault(s, []).append(d2)
-    no_out = sorted(k for k, t in key_types.items()
-                    if t != NodeType.END.value and not out_map.get(k))
-    if no_out:
-        raise HTTPException(400, f"这些节点没有连到下一步：{', '.join(no_out[:5])}")
-    seen_reach: set[str] = set()
-    stack = [k for k, t in key_types.items() if t == NodeType.START.value]
-    while stack:
-        k = stack.pop()
-        if k in seen_reach:
-            continue
-        seen_reach.add(k)
-        stack.extend(out_map.get(k, []))
-    ends = {k for k, t in key_types.items() if t == NodeType.END.value}
-    if not (seen_reach & ends):
-        raise HTTPException(400, "开始节点连不到结束节点，请检查连线方向")
+    _validate_graph(data)
+    _validate_input_references(data.nodes, [item.model_dump() for item in data.inputs])
+    await _validate_workflow_relations(db, user, wf.company_id, data)
+    inputs = [item.model_dump(exclude_none=True) for item in data.inputs]
+    active_statuses = [RunStatus.PENDING, RunStatus.RUNNING, RunStatus.PAUSED,
+                       RunStatus.WAITING_APPROVAL, RunStatus.WAITING_INPUT]
+    active = await db.execute(select(WorkflowExecution.id).where(
+        WorkflowExecution.workflow_id == wid,
+        WorkflowExecution.status.in_(active_statuses)).limit(1))
+    if active.first():
+        raise HTTPException(409, "工作流仍有未结束的执行实例，暂不能修改定义")
 
-    from sqlalchemy import delete as _sa_delete
+    expected_version = wf.version or 1
+    claimed = await db.execute(update(WorkflowDefinition).where(
+        WorkflowDefinition.id == wid,
+        WorkflowDefinition.version == expected_version,
+        ~select(WorkflowExecution.id).where(
+            WorkflowExecution.workflow_id == wid,
+            WorkflowExecution.status.in_(active_statuses)).exists()
+    ).values(version=expected_version + 1).execution_options(
+        synchronize_session=False))
+    if claimed.rowcount != 1:
+        await db.rollback()
+        raise HTTPException(409, "工作流已变化或有新执行启动，请刷新后重试")
     wf.name = data.name
     wf.description = data.description
-    await db.execute(_sa_delete(WorkflowNode).where(WorkflowNode.workflow_id == wid))
-    await db.execute(_sa_delete(WorkflowEdge).where(WorkflowEdge.workflow_id == wid))
+    wf.project_id = data.project_id
+    wf.meta = {**(wf.meta or {}), "inputs": inputs}
+    wf.version = expected_version + 1
+    await db.execute(delete(WorkflowNode).where(WorkflowNode.workflow_id == wid))
+    await db.execute(delete(WorkflowEdge).where(WorkflowEdge.workflow_id == wid))
     for n in data.nodes:
         nt = NodeType(n.node_type)
         db.add(WorkflowNode(workflow_id=wid, node_key=n.node_key,
@@ -464,7 +673,6 @@ async def update_workflow(wid: str, data: WorkflowSaveIn,
     for e in data.edges:
         db.add(WorkflowEdge(workflow_id=wid, from_node=e.from_node,
                             to_node=e.to_node, label=e.label))
-    wf.version = (wf.version or 1) + 1
     await log_event(db, "workflow.updated", "workflow_definition", wid, "user",
                     user.id, {"name": data.name, "version": wf.version})
     await db.commit()
@@ -476,6 +684,13 @@ async def delete_workflow(wid: str, db: AsyncSession = Depends(get_db),
                           user=Depends(get_current_user)):
     # 删工作流不可逆（节点/连线一并消失），按 DESTRUCTIVE 处理
     wf = await _wf_owned(db, user, wid, Capability.DESTRUCTIVE)
+    active_statuses = [RunStatus.PENDING, RunStatus.RUNNING, RunStatus.PAUSED,
+                       RunStatus.WAITING_APPROVAL, RunStatus.WAITING_INPUT]
+    active = await db.execute(select(WorkflowExecution.id).where(
+        WorkflowExecution.workflow_id == wid,
+        WorkflowExecution.status.in_(active_statuses)).limit(1))
+    if active.first():
+        raise HTTPException(409, "工作流仍有未结束的执行实例，暂不能删除定义")
     await db.delete(wf)
     await db.commit()
 
@@ -493,16 +708,39 @@ def _run_in_background(execution_id: str):
 
 @router.post("/workflows/{wid}/run", status_code=202)
 async def run_workflow(wid: str, background: BackgroundTasks,
-                       project_id: str | None = None,
+                       data: RunIn | None = None,
+                       project_id: str | None = Query(None),
                        db: AsyncSession = Depends(get_db),
                        user=Depends(get_current_user)):
     wf = await _wf_owned(db, user, wid, Capability.OPERATE)
     if wf.status == WorkflowStatus.ARCHIVED:
         raise HTTPException(400, "工作流已归档，不能执行")
-    ex = await start_execution(db, wid, project_id, user.id)
+    body = data or RunIn()
+    if project_id and body.project_id and project_id != body.project_id:
+        raise HTTPException(422, "query 与 body 的 project_id 不一致")
+    target_project = body.project_id or project_id or wf.project_id
+    if target_project:
+        project = await db.get(Project, target_project)
+        if not project or project.company_id != wf.company_id:
+            raise HTTPException(404, "项目不存在或不属于本公司")
+        await assert_company_owned(db, user.id, wf.company_id)
+    definitions = (wf.meta or {}).get("inputs") or []
+    if not isinstance(definitions, list):
+        raise HTTPException(409, "工作流输入声明损坏，请重新保存定义")
+    resolved = _resolve_run_inputs(definitions, body.inputs)
+    nodes_q = await db.execute(select(WorkflowNode).where(
+        WorkflowNode.workflow_id == wid))
+    nodes = [NodeIn.model_validate({
+        "node_key": n.node_key, "node_type": n.node_type.value, "name": n.name,
+        "config": n.config or {}, "position_x": n.position_x,
+        "position_y": n.position_y,
+    }) for n in nodes_q.scalars()]
+    _validate_input_references(nodes, definitions)
+    ex = await start_execution(db, wid, target_project, user.id, resolved)
     execution_id = ex.id
     _run_in_background(execution_id)
-    return {"detail": "started", "execution_id": execution_id}
+    return {"detail": "started", "execution_id": execution_id,
+            "inputs": resolved}
 
 
 @router.get("/executions/{eid}")
@@ -524,9 +762,12 @@ async def get_execution(eid: str, db: AsyncSession = Depends(get_db),
 
     steps_q = await db.execute(select(WorkflowStep).where(
         WorkflowStep.execution_id == eid).order_by(WorkflowStep.created_at))
-    nodes_q = await db.execute(select(WorkflowNode).where(
-        WorkflowNode.workflow_id == ex.workflow_id))
-    node_names = {n.node_key: n.name for n in nodes_q.scalars()}
+    graph = _execution_graph(ex)
+    node_names = {n.node_key: n.name for n in graph.values()}
+    if not graph:
+        nodes_q = await db.execute(select(WorkflowNode).where(
+            WorkflowNode.workflow_id == ex.workflow_id))
+        node_names = {n.node_key: n.name for n in nodes_q.scalars()}
 
     steps = []
     for s in steps_q.scalars():
@@ -634,20 +875,41 @@ async def approve_node(eid: str, node_key: str, approve: bool = True,
     """人工审批/输入后继续执行。"""
     ex = await _owned_execution(db, user, eid)
 
-    nodes_q = await db.execute(select(WorkflowNode).where(
-        WorkflowNode.workflow_id == ex.workflow_id,
-        WorkflowNode.node_key == node_key))
-    node = nodes_q.scalars().first()
+    node = _execution_graph(ex).get(node_key)
     if not node:
         raise HTTPException(404, "node not found")
+    if node_key not in (ex.current_nodes or []):
+        raise HTTPException(409, "该节点不是当前等待人工处理的节点")
+    expected_status = (RunStatus.WAITING_APPROVAL
+                       if node.node_type == NodeType.APPROVAL
+                       else RunStatus.WAITING_INPUT)
+    if node.node_type not in (NodeType.APPROVAL, NodeType.HUMAN_INPUT):
+        raise HTTPException(400, "该节点不需要人工审批或输入")
+    if ex.status != expected_status:
+        raise HTTPException(409, f"execution is {ex.status.value}, not waiting")
+    if node.node_type == NodeType.HUMAN_INPUT and human_input is None:
+        raise HTTPException(400, "人工输入节点必须提供 human_input")
 
-    # 先抢占"继续权"（CAS 等人工 → PENDING），再写节点配置并提交后台推进：
-    # 并发审批/双击「通过」只会有一个请求真正续跑。
+    steps_q = await db.execute(select(WorkflowStep).where(
+        WorkflowStep.execution_id == eid,
+        WorkflowStep.node_key == node_key,
+        WorkflowStep.status == RunStatus.RUNNING
+    ).order_by(WorkflowStep.attempt.desc()).limit(1))
+    step = steps_q.scalars().first()
+    if step is None:
+        raise HTTPException(409, "该节点没有可审批的打开步骤")
+    step.input_data = {
+        **(step.input_data or {}),
+        "_human_decision": {
+            "approved": bool(approve), "human_input": human_input,
+            "decided_by": user.id, "decided_at": utcnow_iso(),
+        },
+    }
+
     res = await db.execute(
         update(WorkflowExecution)
         .where(WorkflowExecution.id == eid,
-               WorkflowExecution.status.in_([RunStatus.WAITING_APPROVAL,
-                                             RunStatus.WAITING_INPUT]))
+               WorkflowExecution.status == expected_status)
         .values(status=RunStatus.CANCELLED
                 if not approve and node.node_type == NodeType.APPROVAL
                 else RunStatus.PENDING,
@@ -656,16 +918,9 @@ async def approve_node(eid: str, node_key: str, approve: bool = True,
                        else None))
         .execution_options(synchronize_session=False))
     if res.rowcount != 1:
-        await db.commit()
+        await db.rollback()
         await db.refresh(ex)
         raise HTTPException(409, f"execution is {ex.status.value}, not waiting")
-
-    cfg = dict(node.config or {})
-    if node.node_type == NodeType.APPROVAL:
-        cfg["_approved"] = approve
-    elif node.node_type == NodeType.HUMAN_INPUT:
-        cfg["_human_input"] = human_input or ""
-    node.config = cfg
     await db.commit()
 
     if approve or node.node_type == NodeType.HUMAN_INPUT:
@@ -688,9 +943,11 @@ async def rework_execution(eid: str, data: ReworkIn, background: BackgroundTasks
     if data.mode not in ("rerun", "revise"):
         raise HTTPException(400, "mode 只能是 rerun 或 revise")
 
-    nodes_q = await db.execute(select(WorkflowNode).where(
-        WorkflowNode.workflow_id == ex.workflow_id))
-    nodes = {n.node_key: n for n in nodes_q.scalars()}
+    nodes = _execution_graph(ex)
+    if not nodes:
+        nodes_q = await db.execute(select(WorkflowNode).where(
+            WorkflowNode.workflow_id == ex.workflow_id))
+        nodes = {n.node_key: n for n in nodes_q.scalars()}
     if not nodes:
         raise HTTPException(400, "工作流没有节点")
 
@@ -707,16 +964,21 @@ async def rework_execution(eid: str, data: ReworkIn, background: BackgroundTasks
         node = nodes.get(data.node_key)
         if not node:
             raise HTTPException(404, f"节点 {data.node_key} 不存在")
-        if node.node_type in (NodeType.START, NodeType.END):
-            raise HTTPException(400, "START / END 不支持步骤级返工")
+        if node.node_type != NodeType.AGENT:
+            raise HTTPException(400, "步骤级返工只支持已成功执行的 AGENT 节点")
+        completed = await db.execute(select(WorkflowStep.id).where(
+            WorkflowStep.execution_id == eid,
+            WorkflowStep.node_key == node.node_key,
+            WorkflowStep.status == RunStatus.COMPLETED).limit(1))
+        if completed.first() is None:
+            raise HTTPException(409, "不能返工尚未成功执行的节点")
         target = node.node_key
         full_rerun = False
     if data.mode == "revise" and not (data.feedback or "").strip():
         raise HTTPException(400, "revise 模式必须给 feedback")
 
     # 只有"停了"的实例才能返工：跑着的实例返工会让两拨 worker 抢同一批节点
-    allowed = [RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.PAUSED,
-               RunStatus.WAITING_INPUT, RunStatus.WAITING_APPROVAL]
+    allowed = [RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.PAUSED]
     if ex.status not in allowed:
         raise HTTPException(409, f"cannot rework from {ex.status.value}")
 
@@ -835,9 +1097,12 @@ async def execution_report(eid: str, db: AsyncSession = Depends(get_db),
     if not ex:
         raise HTTPException(404, "Execution not found")
     wf = await _wf_owned(db, user, ex.workflow_id)
-    nodes_q = await db.execute(select(WorkflowNode).where(
-        WorkflowNode.workflow_id == ex.workflow_id))
-    node_names = {n.node_key: n.name for n in nodes_q.scalars()}
+    graph = _execution_graph(ex)
+    node_names = {n.node_key: n.name for n in graph.values()}
+    if not graph:
+        nodes_q = await db.execute(select(WorkflowNode).where(
+            WorkflowNode.workflow_id == ex.workflow_id))
+        node_names = {n.node_key: n.name for n in nodes_q.scalars()}
     steps, _ = await _execution_steps(db, eid)
     for s in steps:
         s["node_name"] = node_names.get(s["node_key"], s["node_key"])
