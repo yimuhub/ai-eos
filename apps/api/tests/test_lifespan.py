@@ -3,11 +3,10 @@
 ## 为什么这组用例存在
 
 conftest 用 `httpx.ASGITransport(app=...)` 直连应用，**不会触发 lifespan**。
-因此"启动时建表 / 补列 / 启动调度器"这些只在真实启动时发生的副作用，
-此前一条测试都没跑过——它们坏了也不会有人知道，用户一启动就炸。
+因此"启动时校验数据库迁移 / 启动调度器"这些只在真实启动时发生的副作用，
+必须显式进入 `router.lifespan_context` 验证。
 
-这里显式进入 `router.lifespan_context`，把关键副作用钉住：
-启动后调度器在跑、新增列已补齐；退出后调度器已停止。
+这里钉住：启动后调度器在跑、Alembic 版本与结构就绪；退出后调度器已停止。
 """
 from __future__ import annotations
 
@@ -32,7 +31,7 @@ async def test_lifespan_runs_startup_and_shutdown():
         assert scheduler_engine._loop_task is not None
         assert not scheduler_engine._loop_task.done(), "lifespan 未启动调度器"
 
-        # 启动副作用 2：schema 已就绪（ensure_columns 幂等补齐后可查询）
+        # 启动副作用 2：Alembic 版本与结构已就绪
         async with engine.connect() as conn:
             n = (await conn.execute(
                 text("SELECT count(*) FROM sqlite_master WHERE type='table'"))).scalar()
@@ -45,8 +44,8 @@ async def test_lifespan_runs_startup_and_shutdown():
     assert scheduler_engine._loop_task is None or scheduler_engine._loop_task.done()
 
 
-async def test_lifespan_ensure_columns_is_idempotent():
-    """二次启动不应报错（升级后老库补列的核心保证）。"""
+async def test_lifespan_migration_verification_is_idempotent():
+    """二次启动必须通过同一版本与结构校验，不得重复改表。"""
     from app.main import app as asgi_app
 
     async with asgi_app.router.lifespan_context(asgi_app):

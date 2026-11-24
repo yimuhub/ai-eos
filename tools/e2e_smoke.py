@@ -415,6 +415,16 @@ def run(keep: bool, verbose: bool) -> int:
         "PYTHONUNBUFFERED": "1",
     })
 
+    migration = subprocess.run(
+        [str(VENV_PY), "-m", "app.db.migrations", "upgrade"],
+        cwd=str(API_DIR), env=env, capture_output=True, text=True, timeout=180)
+    if migration.returncode:
+        details = redact_url(migration.stdout + migration.stderr)
+        print("端到端试跑迁移失败：" + details, file=sys.stderr)
+        if not keep:
+            shutil.rmtree(tmp, ignore_errors=True)
+        return 2
+
     log_handle = open(api_log, "w", encoding="utf-8")
     proc = subprocess.Popen(
         [str(VENV_PY), "-m", "uvicorn", "app.main:app",

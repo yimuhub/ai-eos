@@ -38,7 +38,7 @@ class WorkflowStepGate(TimestampMixin, Base):
     # mechanical（纯函数断言） | judge（模型按 acceptance 评审）
     stage: Mapped[str] = mapped_column(String(20), default="mechanical")
     # [{rule, expected, actual, passed, blocking, detail}, ...]
-    checks: Mapped[list] = mapped_column(JSON, default=list)
+    checks: Mapped[list | None] = mapped_column(JSON, default=list, nullable=True)
 
     passed: Mapped[bool] = mapped_column(Boolean, default=True)
     # 是否存在"阻断性"失败项（passed=False 且 blocking=True）

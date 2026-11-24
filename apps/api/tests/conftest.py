@@ -14,7 +14,7 @@
    `AIEOS_TEST_DATABASE_URL`（或非 sqlite 的 `DATABASE_URL`）即改用该库，
    每个测试进程会先建一个一次性库，跑完 DROP，避免并行互相清库。
    SQLite 仍是默认路径，两者断言完全一致；只在 SQLite 上有意义的
-   3 个模块在 PG 下会自动 skip（见 `_SQLITE_ONLY_MODULES`）。
+   SQLite 专属模块在 PG 下会自动 skip（见 `_SQLITE_ONLY_MODULES`）。
 
 ## 关键顺序约束
 
@@ -90,7 +90,7 @@ def _pg_admin_exec(dsn: str, *statements: str) -> None:
 def _provision_postgres(url: str) -> str:
     """为当前测试进程准备一个**独立**的 PG 库，避免并行跑测试时互相清库。
 
-    做法：连维护库建一个带 pid + 随机后缀的库（`create_all` 会建出全部表），
+    做法：连维护库建一个带 pid + 随机后缀的库（Alembic 会建出全部表），
     会话结束再 DROP。建库需要 CREATEDB 权限；没有权限时退化为
     "就用给定的库 + 开头先 drop_all 清空"（照样能跑，但两个进程同时跑
     会互相干扰，这时请在 URL 里自己给每个进程不同的库）。
@@ -166,6 +166,7 @@ import httpx  # noqa: E402
 
 import app.models  # noqa: E402,F401 — 必须先导入，把全部表注册到 Base.metadata
 from app.db.base import Base  # noqa: E402
+from app.db.migrations import prepare_database  # noqa: E402
 from app.db.session import engine  # noqa: E402
 from app.main import app as asgi_app  # noqa: E402
 
@@ -178,17 +179,15 @@ TEST_DB_DIALECT = engine.dialect.name
 
 @pytest.fixture(scope="session")
 async def _schema():
-    """会话级：建一次表。比每个用例 drop/create 94 张表快得多。
+    """会话级迁移一次，所有测试都验证真实 Alembic schema。
 
-    SQLite 每次都是全新临时文件，直接 create_all。
-    PG 可能是"独占的新库"（正常路径）或"复用的库"（无 CREATEDB 权限时的
-    降级路径）；后者必须先把残留表清掉，否则测试会撞上上一次运行的脏数据。
+    PG 可能是独占新库或复用库；后者先清掉残留，再显式迁移。SQLite 使用
+    全新临时文件，直接执行同一条 upgrade/check 链路。
     """
     if TEST_DB_DIALECT != "sqlite":
         async with engine.begin() as conn:
             await conn.run_sync(lambda c: Base.metadata.drop_all(c))
-    async with engine.begin() as conn:
-        await conn.run_sync(lambda c: Base.metadata.create_all(c))
+    await prepare_database(engine)
     yield
     async with engine.begin() as conn:
         await conn.run_sync(lambda c: Base.metadata.drop_all(c))
@@ -213,6 +212,18 @@ _SQLITE_ONLY_TESTS = {
         "这是测试对方言返回顺序的隐含依赖（已在 PG 首跑中确认），不是产品行为差异",
     "test_lifespan.py::test_lifespan_runs_startup_and_shutdown":
         "用 sqlite_master 统计表数量，PG 需改查 information_schema",
+    **{f"test_schema_migration.py::{name}": "直接构造并操作 SQLite 文件"
+       for name in (
+           "test_fresh_database_upgrades_and_verifies_without_create_all",
+           "test_equivalent_unversioned_legacy_database_is_stamped_without_data_loss",
+           "test_incomplete_unversioned_legacy_database_is_rejected_unchanged",
+           "test_retired_migration_chain_is_rejected_without_stamping",
+           "test_versioned_database_upgrades_to_head_and_detects_drift",
+           "test_duplicate_artifact_versions_stop_migration_without_deleting_history",
+           "test_postgres_startup_verification_never_upgrades",
+           "test_stripe_migration_upgrade_downgrade_preserves_offline_orders")},
+    "test_eval_f07.py::test_migration_0037_upgrade_backfills_legacy_step_uuid_and_downgrades":
+        "使用 SQLite PRAGMA 验证迁移结构",
 }
 
 

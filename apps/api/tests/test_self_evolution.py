@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import select
 
 from app import self_evolution as evo
@@ -229,8 +230,13 @@ async def test_emergency_stop_skips_evolution(tenants):
     assert rec["status"] == "SKIPPED" and "紧急停止" in (rec["error"] or "")
 
 
-async def test_exam_week_start_does_not_break_metrics_persist(tenants,
-                                                              monkeypatch):
+@pytest.mark.parametrize("week_start,expected", [
+    (datetime(2026, 10, 26), "2026-10-26T00:00:00"),
+    (datetime(2026, 10, 26, tzinfo=timezone(timedelta(hours=8))),
+     "2026-10-26T00:00:00"),
+])
+async def test_exam_week_start_does_not_break_metrics_persist(
+        tenants, monkeypatch, week_start, expected):
     """上场周考的 week_start 是 datetime，跟着指标一起进 JSON 列会炸库。
 
     真实事故：json.dumps 抛 TypeError，日/周/月进化记录一条都写不进去。
@@ -243,7 +249,7 @@ async def test_exam_week_start_does_not_break_metrics_persist(tenants,
     async with AsyncSessionLocal() as s:
         s.add(CeoExam(id=str(uuid.uuid4()), company_id=co,
                       period_key="2026-W44",
-                      week_start=datetime(2026, 10, 26),
+                      week_start=week_start,
                       week_end=datetime(2026, 11, 2),
                       status="GRADED", overall=82.0, grade="B",
                       scores={}, personality={}))
@@ -251,13 +257,12 @@ async def test_exam_week_start_does_not_break_metrics_persist(tenants,
 
     rec = await _run(co, "daily", tenants.alice["id"])
     assert rec["status"] == "APPLIED", rec.get("error")
-    assert rec["metrics"]["exam"]["week_start"] == "2026-10-26T00:00:00"
+    assert rec["metrics"]["exam"]["week_start"] == expected
 
     async with AsyncSessionLocal() as s:
         row = (await s.execute(select(EvolutionRecord)
                               .where(EvolutionRecord.id == rec["id"]))).scalar_one()
-        assert (row.metrics or {}).get("exam", {}).get("week_start") == \
-            "2026-10-26T00:00:00"
+        assert (row.metrics or {}).get("exam", {}).get("week_start") == expected
         # 写进去的必须能被 json 序列化，否则下一次 autoflush 仍会抛
         json.dumps(row.metrics)
 

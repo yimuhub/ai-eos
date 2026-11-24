@@ -5,6 +5,7 @@
 - /by-project: 按项目分组的文件视图
 - /download/{asset_id}: 文件下载
 """
+import asyncio
 import io
 import mimetypes
 import zipfile
@@ -31,6 +32,44 @@ from app.schemas.responses import (DeliveryAgentFolderDetailOut,
                                    DeliveryByTaskOut, DeliveryFilesOut)
 
 router = APIRouter(prefix="/delivery", tags=["delivery"])
+
+# ZIP 是同步压缩 + 磁盘读取，必须在线程里执行；同时限制文件数与解压后总字节，
+# 避免一次请求把大目录全量读入内存。响应本身仍是一个有界 BytesIO。
+MAX_ZIP_FILES = 200
+MAX_ZIP_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+
+
+def _build_zip(entries: list[tuple[str, str]]) -> bytes:
+    """在线程内打包已鉴权的 (存储路径, 展示名) 快照，不访问数据库。"""
+    if len(entries) > MAX_ZIP_FILES:
+        raise HTTPException(413, f"打包文件数超过上限 {MAX_ZIP_FILES}")
+    buffer = io.BytesIO()
+    used: set[str] = set()
+    total_bytes = 0
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for stored_path, display_name in entries:
+            path = _resolve_asset_path(stored_path)
+            if not path.is_file():
+                continue
+            # 文件名可能来自用户上传：只取 basename，防止 zip 内出现 ../ 路径
+            name = Path(display_name or path.name).name or "unnamed"
+            stem, suffix = Path(name).stem, Path(name).suffix
+            candidate, n = name, 1
+            while candidate in used:
+                candidate = f"{stem}({n}){suffix}"
+                n += 1
+            used.add(candidate)
+            # 有界流式复制：即使文件在 stat 后被并发追加，也不会写出超限内容。
+            with path.open("rb") as source, zf.open(candidate, "w") as target:
+                while chunk := source.read(1024 * 1024):
+                    if total_bytes + len(chunk) > MAX_ZIP_UNCOMPRESSED_BYTES:
+                        raise HTTPException(413, "打包解压后总大小超过上限")
+                    target.write(chunk)
+                    total_bytes += len(chunk)
+
+    if not used:
+        raise HTTPException(404, "这个文件夹里没有可下载的文件")
+    return buffer.getvalue()
 
 
 async def _company_of(db: AsyncSession, user_id: str, company_id: str) -> Company:
@@ -173,29 +212,16 @@ async def zip_delivery(company_id: str = Query(...),
         conds.append(Asset.project_id == project_id)
     if task_id:
         conds.append(Asset.task_id == task_id)
-    assets = (await db.execute(select(Asset).where(*conds))).scalars().all()
+    # 数据库也只读到上限 + 1 行，避免在拒绝请求前先把全目录 ORM 对象加载进内存。
+    asset_rows = (await db.execute(
+        select(Asset.path, Asset.name).where(*conds).limit(MAX_ZIP_FILES + 1)
+    )).all()
 
-    buffer = io.BytesIO()
-    used: set[str] = set()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for a in assets:
-            path = _resolve_asset_path(a.path or "")
-            if not path.is_file():
-                continue
-            # 文件名可能来自用户上传：只取 basename，防止 zip 内出现 ../ 路径
-            name = Path(a.name or path.name).name or "unnamed"
-            stem, suffix = Path(name).stem, Path(name).suffix
-            candidate, n = name, 1
-            while candidate in used:
-                candidate = f"{stem}({n}){suffix}"
-                n += 1
-            used.add(candidate)
-            zf.write(path, arcname=candidate)
-
-    if not used:
-        raise HTTPException(404, "这个文件夹里没有可下载的文件")
+    # 只把路径/文件名快照交给线程；AsyncSession 与 ORM 行仍留在事件循环。
+    body = await asyncio.to_thread(_build_zip, [
+        (path or "", name or "") for path, name in asset_rows])
     return Response(
-        content=buffer.getvalue(),
+        content=body,
         media_type="application/zip",
         headers={
             "Content-Disposition": 'attachment; filename="aieos-delivery.zip"',

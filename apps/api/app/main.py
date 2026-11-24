@@ -72,32 +72,15 @@ async def lifespan(app: FastAPI):
     for _w in settings.security_warnings():
         logger.warning("安全提示：%s", _w)
 
-    # 便携/SQLite 模式：启动时自动建表（幂等）
+    from app.db.migrations import prepare_database, verify_database
     from app.db.session import engine
-    from app.db.base import Base
-    import app.models  # noqa: F401 — 确保所有模型注册到 Base.metadata
-    _ = app.models  # pyflakes 不认 noqa：显式引用一次，保留其注册副作用
-    if settings.database_url.startswith("sqlite"):
-        async with engine.begin() as conn:
-            await conn.run_sync(lambda c: Base.metadata.create_all(c))
-        logger.info("[startup] sqlite schema ensured")
-    else:
-        # PostgreSQL 的**新表**同样幂等补齐（create_all 只建缺失表，
-        # 不改已存在的表——补列仍由 Alembic 管，双轨不打架）
-        try:
-            async with engine.begin() as conn:
-                await conn.run_sync(lambda c: Base.metadata.create_all(c))
-            logger.info("[startup] postgres 缺失表已幂等补齐")
-        except Exception as _pg_e:  # noqa: BLE001
-            logger.warning("[startup] postgres create_all 检查失败（不影响启动）：%s", _pg_e)
 
-    # 补列：create_all 只建缺失的表，**不会给已存在的表补新列**。
-    # 升级后老数据库缺少新增字段会直接报 "no such column"，
-    # 而用户只是换了版本、什么都没做错。这里幂等地把可空列补上。
-    from app.db.migrations import ensure_columns
-    _added = await ensure_columns(engine)
-    if _added:
-        logger.info("[startup] 自动补齐 %d 个新增列", len(_added))
+    if engine.dialect.name == "sqlite":
+        revision = await prepare_database(engine)
+        logger.info("[startup] SQLite Alembic schema ready: %s", revision)
+    else:
+        revision = await verify_database(engine)
+        logger.info("[startup] PostgreSQL Alembic schema verified: %s", revision)
 
     # 历史 CEO 自愈：升级前已任命的 CEO 也要改名、补齐专属技能包。
     # 失败只记日志，不阻断启动——技能是增强项，不该让服务起不来。
@@ -114,8 +97,8 @@ async def lifespan(app: FastAPI):
         logger.warning("[startup] CEO 技能包自愈失败（不影响启动）：%s", _ceo_e)
 
     # 超管回填（P5）：老库没有 is_superadmin 概念，若不标记一个超管，
-    # 安装向导会把已有数据的安装误判成"全新安装"。必须放在 ensure_columns
-    # 之后（列可能是上一步补出来的）。失败只记日志，绝不阻断启动。
+    # 安装向导会把已有数据的安装误判成"全新安装"。必须放在迁移校验之后。
+    # 失败只记日志，绝不阻断启动。
     try:
         from app.db.migrations import backfill_superadmin
         await backfill_superadmin(engine)

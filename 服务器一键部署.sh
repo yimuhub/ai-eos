@@ -201,7 +201,8 @@ setup_backend() {
   fi
 
   log_succ "执行数据库迁移 (alembic upgrade head)..."
-  uv run alembic upgrade head || log_warn "alembic 迁移失败，SQLite 模式启动时会自动补列，可继续"
+  uv run python -m app.db.migrations upgrade || { log_err "数据库迁移失败，已停止部署"; exit 1; }
+  uv run python -m app.db.migrations check || { log_err "迁移后结构校验失败，已停止部署"; exit 1; }
   log_succ "后端配置完毕。"
 }
 

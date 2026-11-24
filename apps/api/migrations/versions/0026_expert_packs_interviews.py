@@ -2,7 +2,7 @@
 
 * `expert_templates` 加 4 个可空列：expert_pack_id（来源行业专家包）/
   category（细分领域：小麦/玉米/冲压…）/ skills（标准化技能清单 JSON）/
-  interview_history（访谈完善留痕 JSON）——ensure_columns 也会幂等补列。
+  interview_history（访谈完善留痕 JSON）。
 * 新表 `expert_interviews`：部门访谈资料的登记与总控提炼账。
 
 Revision ID: 0026

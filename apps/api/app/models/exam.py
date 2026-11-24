@@ -12,9 +12,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Float, Index, Integer, String, Text
+from sqlalchemy import JSON, Float, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.db.types import CalendarDateTime
 from app.models.base import TimestampMixin
 from app.db.base import Base
 
@@ -28,8 +29,10 @@ class CeoExam(TimestampMixin, Base):
                                                             nullable=True)
     # ISO 周，如 2026-W44；同公司同一周只允许一场
     period_key: Mapped[str] = mapped_column(String(20), index=True)
-    week_start: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    week_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    week_start: Mapped[datetime | None] = mapped_column(
+        CalendarDateTime(), nullable=True)
+    week_end: Mapped[datetime | None] = mapped_column(
+        CalendarDateTime(), nullable=True)
     # PENDING → GRADED / SKIPPED / FAILED；老板覆盖后 → OVERRIDDEN
     status: Mapped[str] = mapped_column(String(20), default="PENDING",
                                         index=True)

@@ -5,16 +5,13 @@ import asyncio
 import importlib.util
 import json
 import pathlib
-import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.db.migrations import ensure_columns
 from app.db.session import AsyncSessionLocal
 from app.api.routes import evals as eval_routes
 from app.background_jobs import QUEUE_FULL
@@ -367,45 +364,6 @@ async def test_new_run_links_real_execution_steps_tasks_usage_and_stable_hashes(
     second_row = await _poll(client, second.json()["id"], user["headers"])
     assert second_row["hashes"] == row["hashes"]
     assert second_row["idempotency_key"] != row["idempotency_key"]
-
-
-@pytest.mark.asyncio
-async def test_portable_eval_evidence_columns_and_unique_index():
-    tmp = pathlib.Path(tempfile.mkdtemp(prefix="aieos_eval_migrate_"))
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp / 'legacy.db'}")
-    try:
-        async with engine.begin() as conn:
-            await conn.execute(text(
-                "CREATE TABLE eval_runs (id VARCHAR(36) PRIMARY KEY, "
-                "company_id VARCHAR(36), suite_key VARCHAR(80), case_key VARCHAR(80))"))
-        added = await ensure_columns(engine)
-        assert "eval_runs.evidence" in added
-        assert "eval_runs.idempotency_key" in added
-        assert await ensure_columns(engine) == []
-        async with engine.begin() as conn:
-            columns = await conn.run_sync(
-                lambda c: {col["name"] for col in inspect(c).get_columns("eval_runs")})
-            assert {"evidence", "source_execution_id", "prompt_hash",
-                    "workflow_snapshot_hash", "blind_evidence"} <= columns
-            indexes = await conn.run_sync(lambda c: inspect(c).get_indexes("eval_runs"))
-            assert any(i["name"] == "uq_eval_runs_idempotency_key" and i["unique"]
-                       for i in indexes)
-            await conn.execute(text(
-                "INSERT INTO eval_runs (id, idempotency_key) VALUES ('a', NULL), ('b', NULL)"))
-            await conn.execute(text(
-                "INSERT INTO eval_runs (id, idempotency_key) VALUES ('c', 'same')"))
-            try:
-                await conn.execute(text(
-                    "INSERT INTO eval_runs (id, idempotency_key) VALUES ('d', 'same')"))
-            except IntegrityError:
-                pass
-            else:
-                raise AssertionError("unique idempotency index was not enforced")
-    finally:
-        await engine.dispose()
-        for path in tmp.iterdir():
-            path.unlink()
-        tmp.rmdir()
 
 
 def test_migration_0037_is_chained_after_0036():
@@ -768,46 +726,6 @@ async def test_atomic_claim_and_terminal_cas_block_late_worker_overwrite(
     assert current["verdict"] == "multi_better" and current["status"] == "completed"
 
 
-@pytest.mark.asyncio
-async def test_portable_legacy_step_id_backfill_preserves_rows_and_is_idempotent():
-    tmp = pathlib.Path(tempfile.mkdtemp(prefix="aieos_step_id_"))
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp / 'legacy.db'}")
-    try:
-        async with engine.begin() as conn:
-            await conn.execute(text(
-                "CREATE TABLE workflow_steps (execution_id VARCHAR(36) NOT NULL, "
-                "node_key VARCHAR(50) NOT NULL, node_type VARCHAR(50) NOT NULL, "
-                "status VARCHAR(50) NOT NULL, attempt INTEGER NOT NULL)"))
-            await conn.execute(text(
-                "INSERT INTO workflow_steps VALUES ('e','a','AGENT','COMPLETED',1)"))
-            preserved_id = str(uuid.uuid4())
-            await conn.execute(text(
-                "INSERT INTO workflow_steps VALUES ('e','b','END','COMPLETED',1)"))
-            await conn.execute(text(
-                "ALTER TABLE workflow_steps ADD COLUMN id VARCHAR(36)"))
-            await conn.execute(text(
-                "UPDATE workflow_steps SET id=:id WHERE node_key='b'"),
-                {"id": preserved_id})
-        added = await ensure_columns(engine)
-        assert "workflow_steps.id" not in added  # PK backfill is a separate safe path
-        assert await ensure_columns(engine) == []
-        async with engine.begin() as conn:
-            rows = (await conn.execute(text(
-                "SELECT id,node_key FROM workflow_steps ORDER BY node_key"))).all()
-            assert len(rows) == 2
-            assert all(uuid.UUID(row.id).version == 4 for row in rows)
-            assert rows[0].node_key == "a" and rows[1].node_key == "b"
-            assert rows[1].id == preserved_id
-            assert len({row.id for row in rows}) == 2
-            pk = await conn.run_sync(lambda c: inspect(c).get_pk_constraint("workflow_steps"))
-            assert pk["constrained_columns"] == ["id"]
-    finally:
-        await engine.dispose()
-        for path in tmp.iterdir():
-            path.unlink()
-        tmp.rmdir()
-
-
 @pytest.mark.parametrize("has_existing_id", [False, True])
 def test_migration_0037_upgrade_backfills_legacy_step_uuid_and_downgrades(
         tmp_path, has_existing_id):
@@ -856,9 +774,26 @@ def test_migration_0037_upgrade_backfills_legacy_step_uuid_and_downgrades(
         pk = conn.execute(text("PRAGMA table_info(workflow_steps)")).all()
         assert [r.name for r in pk if r.pk] == ["id"]
         assert next(r for r in pk if r.name == "id").notnull == 1
-        assert "lease_expires_at" in {r.name for r in conn.execute(
+        eval_columns = {r.name for r in conn.execute(
             text("PRAGMA table_info(eval_runs)")).all()}
-    command.downgrade(cfg, "0036")
+        assert {"lease_expires_at", "evidence", "source_execution_id", "prompt_hash",
+                "workflow_snapshot_hash", "blind_evidence", "idempotency_key"} <= eval_columns
+        unique_constraints = inspect(conn).get_unique_constraints("eval_runs")
+        assert any(c["name"] == "uq_eval_runs_idempotency_key"
+                   and c["column_names"] == ["idempotency_key"]
+                   for c in unique_constraints)
+        conn.execute(text(
+            "INSERT INTO eval_runs (id, idempotency_key) VALUES ('a', NULL), ('b', NULL)"))
+        conn.execute(text(
+            "INSERT INTO eval_runs (id, idempotency_key) VALUES ('c', 'same')"))
+        try:
+            conn.execute(text(
+                "INSERT INTO eval_runs (id, idempotency_key) VALUES ('d', 'same')"))
+        except IntegrityError:
+            conn.rollback()
+        else:
+            raise AssertionError("unique idempotency constraint was not enforced")
+        command.downgrade(cfg, "0036")
     with engine.connect() as conn:
         assert "lease_expires_at" not in {r.name for r in conn.execute(
             text("PRAGMA table_info(eval_runs)")).all()}

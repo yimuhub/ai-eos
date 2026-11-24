@@ -5,6 +5,7 @@ Flow: Load Agent -> Load Model binding -> Load Skills -> Build Context
       -> [Result Checkpoint] -> Save Result -> Update Task.
 Pause/Resume via execution_checkpoints (real persisted state).
 """
+import asyncio
 import json
 from datetime import datetime, timezone
 
@@ -447,17 +448,20 @@ async def run_agent_on_task(
             from app.doc_generator import generate_document, parse_doc_markers
 
             doc_specs = parse_doc_markers(llm_result["content"] or "")
+            agent_id, company_id, task_id = (str(agent.id), task.company_id,
+                                             str(task.id))
             for spec in doc_specs:
                 try:
-                    gen = generate_document(spec["type"], spec["title"],
-                                            spec["content"], agent_id=str(agent.id))
+                    gen = await asyncio.to_thread(
+                        generate_document, spec["type"], spec["title"],
+                        spec["content"], agent_id=agent_id)
                     asset_doc = AssetModel(
-                        company_id=task.company_id,
+                        company_id=company_id,
                         name=gen["file_name"],
                         type=AssetType.OTHER, path=gen["file_path"],
                         mime_type=gen["mime"], size=gen["size"],
-                        created_by=str(agent.id), creator_type="agent",
-                        task_id=task.id, agent_id=str(agent.id))
+                        created_by=agent_id, creator_type="agent",
+                        task_id=task_id, agent_id=agent_id)
                     db.add(asset_doc)
                     await db.flush()
                     await log_event(db, "doc.generated", "task", str(task.id),

@@ -51,6 +51,42 @@ def test_every_module_parses():
     assert not bad, "存在语法错误：\n" + "\n".join(bad)
 
 
+_COMPLEXITY_RATCHETS = {
+    "app/db/migrations.py": (16, 44, 10),
+    "app/api/routes/delivery.py": (11, 63, 10),
+    "app/api/routes/tokens.py": (24, 116, 12),
+    "app/api/routes/performance.py": (5, 26, 19),
+    "app/api/routes/dashboard.py": (6, 17, 10),
+    "app/agent_runtime.py": (7, 117, 55),
+    "app/api/routes/agent_chat.py": (42, 394, 66),
+    "app/api/routes/group_chat.py": (25, 235, 77),
+    "app/api/routes/artifacts.py": (24, 146, 18),
+}
+
+
+def _function_complexity(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
+    decisions = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.IfExp,
+                 ast.ExceptHandler, ast.Assert, ast.comprehension)
+    score = 1 + sum(isinstance(child, decisions)
+                    for child in ast.walk(node))
+    score += sum(max(0, len(child.values) - 1) for child in ast.walk(node)
+                 if isinstance(child, ast.BoolOp))
+    return score
+
+
+@pytest.mark.parametrize("relative_path,budgets", _COMPLEXITY_RATCHETS.items())
+def test_hotspot_complexity_does_not_regress(relative_path, budgets):
+    """复杂度只许下降；新增分支必须抽取，不能悄悄抬高热点预算。"""
+    tree = ast.parse((API_ROOT / relative_path).read_text(encoding="utf-8"))
+    functions = [node for node in ast.walk(tree)
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    scores = [_function_complexity(node) for node in functions]
+    actual = (len(functions), sum(scores), max(scores, default=0))
+    assert all(value <= budget for value, budget in zip(actual, budgets)), (
+        f"{relative_path} 复杂度回退：当前 {actual}， ratchet {budgets}；"
+        "请抽取新增分支或带着重构证据更新预算")
+
+
 def test_no_undefined_names():
     """回归护栏：9 处未定义变量曾让整块功能静默失效。
 

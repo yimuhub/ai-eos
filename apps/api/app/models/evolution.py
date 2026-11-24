@@ -93,8 +93,10 @@ class EvolutionRecord(TimestampMixin, Base):
     level: Mapped[str] = mapped_column(String(20), default="daily", index=True)
     # 2026-11-01 / 2026-W44 / 2026-11
     period_key: Mapped[str] = mapped_column(String(20))
-    period_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    period_end: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    period_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(
         String(20), default=EvolutionStatus.APPLIED.value, index=True)
 

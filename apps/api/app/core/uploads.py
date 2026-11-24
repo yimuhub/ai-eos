@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from pathlib import Path
 
@@ -146,7 +147,7 @@ async def stream_upload(file: UploadFile, dest_dir: Path, dest_name: str,
                     raise HTTPException(
                         status_code=413,
                         detail=f"文件超过上限 {limit // (1024 * 1024)}MB")
-                fh.write(chunk)
+                await asyncio.to_thread(fh.write, chunk)
     except BaseException:
         # HTTPException / 客户端断开 / 磁盘错误：一律清掉半成品
         try:

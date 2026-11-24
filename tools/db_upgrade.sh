@@ -149,4 +149,4 @@ fi
 
 echo "------------------------------------------------------------"
 echo " 升级完成，当前版本：$(current_rev)"
-echo " 注意：运行时仍以 create_all + ensure_columns 兜底（见 docs/数据库迁移.md）"
+echo " 运行时只校验 Alembic 版本与结构；SQLite 首启可自动迁移（见 docs/数据库迁移.md）"

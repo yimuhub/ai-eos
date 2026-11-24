@@ -17,8 +17,8 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     bind = op.get_bind()
     duplicates = bind.execute(sa.text(
-        "SELECT artifact_id, version, COUNT(*) AS n "
-        "FROM artifact_versions GROUP BY artifact_id, version HAVING n > 1 "
+        'SELECT artifact_id, version, COUNT(*) AS "n" '
+        'FROM artifact_versions GROUP BY artifact_id, version HAVING COUNT(*) > 1 '
         "ORDER BY artifact_id, version LIMIT 20")).all()
     if duplicates:
         details = ", ".join(f"{row.artifact_id}:v{row.version}({row.n})"

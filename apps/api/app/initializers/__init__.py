@@ -1,6 +1,6 @@
 import sys, sqlite3, os
 """便携包首次启动：只做 schema 存在性校验（表/账号/公司的创建由
-app.main 的 create_all 与 db.migrations 负责）。此前的 docstring 声称
+app.main 的 Alembic 启动校验负责）。此前的 docstring 声称
 "初始化默认账号与默认公司"，与实现不符，会误导运维。"""
 
 DB = sys.argv[1] if len(sys.argv) > 1 else "data/aieos.db"

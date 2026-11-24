@@ -1,4 +1,5 @@
 """Artifact Collaboration API (P2-09): Draft -> Review -> Approve."""
+import asyncio
 import io
 import json
 import uuid
@@ -597,27 +598,6 @@ async def _invalidate_pending_publish_approvals(db: AsyncSession,
         req.decision_note = "stale: artifact declined or reworked"
 
 
-async def _ensure_published_at_column(db: AsyncSession) -> None:  # pragma: no cover
-    """兼容旧库：published_at 已进模型，启动时 ensure_columns/Alembic 会补列。
-
-    仍保留一次幂等探测，防止"发布早于迁移"的老库把 SQL 打死。
-    """
-    from sqlalchemy import inspect, text
-
-    def _missing(sync_sess) -> bool:
-        conn = sync_sess.connection()
-        cols = {c["name"] for c in inspect(conn).get_columns("artifacts")}
-        return "published_at" not in cols
-
-    if await db.run_sync(_missing):
-        dialect = db.get_bind().dialect.name
-        col_type = "TIMESTAMP" if dialect == "postgresql" else "DATETIME"
-        await db.execute(text(
-            f"ALTER TABLE artifacts ADD COLUMN published_at {col_type}"))
-        await db.commit()
-        logger.warning("[artifacts] 已为旧库幂等补列 artifacts.published_at")
-
-
 # exclude_unset：直接发布 / 已发布幂等 / 需二次确认是三种不同返回，
 # 否则没走到的分支会多出 null 键（前端按 key 是否存在分支时会变行为）。
 @router.post("/{artifact_id}/publish", response_model=ArtifactPublishOut,
@@ -634,7 +614,6 @@ async def publish_artifact(
       老板批准后自动标记 published_at（双确认）
     - 否则直接发布（小公司单人模式，不增加流程负担）
     """
-    await _ensure_published_at_column(db)
     art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE,
                                 for_update=True)
     if art.status != ArtifactStatus.APPROVED:
@@ -722,7 +701,6 @@ async def decide_publish(
     from app.models.intervention import ApprovalRequest
     if data.decision not in ("approve", "reject"):
         raise HTTPException(400, "decision must be approve/reject")
-    await _ensure_published_at_column(db)
     art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE,
                                 for_update=True)
     req = (await db.execute(
@@ -850,6 +828,22 @@ async def artifact_sop(
             "markdown": "\n".join(lines), "versions": len(versions)}
 
 
+def _build_artifact_zip(
+    artifact_id: str, name: str, artifact_type: str, status: str,
+    current_version: int, versions: list[tuple[int, str]],
+) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for version, content in versions:
+            zf.writestr(f"v{version}.txt", content)
+        zf.writestr("meta.json", json.dumps({
+            "id": artifact_id, "name": name, "type": artifact_type,
+            "status": status, "current_version": current_version,
+            "versions": len(versions),
+        }, ensure_ascii=False, indent=2))
+    return buf.getvalue()
+
+
 # 无 response_model：StreamingResponse 的 zip 二进制（实测 content-type
 # application/zip），声明模型只会让 OpenAPI 的 200 响应与真实字节流不一致。
 @router.get("/{artifact_id}/download.zip")
@@ -865,17 +859,11 @@ async def download_artifact_zip(
         ArtifactVersion.version.asc()))
     versions = vq.scalars().all()
 
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for v in versions:
-            zf.writestr(f"v{v.version}.txt", v.content or "")
-        zf.writestr("meta.json", json.dumps({
-            "id": art.id, "name": art.name, "type": art.artifact_type,
-            "status": art.status.value, "current_version": art.current_version,
-            "versions": len(versions),
-        }, ensure_ascii=False, indent=2))
-    buf.seek(0)
+    payload = await asyncio.to_thread(
+        _build_artifact_zip, art.id, art.name, art.artifact_type,
+        art.status.value, art.current_version,
+        [(v.version, v.content or "") for v in versions])
     return StreamingResponse(
-        buf, media_type="application/zip",
+        io.BytesIO(payload), media_type="application/zip",
         headers={"Content-Disposition":
                  f'attachment; filename="artifact-{artifact_id}.zip"'})

@@ -2,10 +2,9 @@
 
 ## 为什么要有这组用例
 
-运行时仍然走 `create_all` + `ensure_columns`（便携部署，见
-`docs/数据库迁移.md`）。Alembic 基线如果和模型漂移，就会出现
-"SQLite 能跑、`alembic upgrade head` 出来的库少列/少索引"的分裂，
-而这类问题只会在客户机上炸。这里把"基线 == 模型"钉成断言。
+运行时不再用 `create_all` 或手写补列：SQLite 首启走 Alembic，PostgreSQL
+启动只校验。这里把"Alembic 空库结构 == 当前模型"钉成断言，避免迁移与
+ORM 静默分裂。
 
 ## 设计约束
 

@@ -17,10 +17,9 @@ Alembic 官方模板对这两种 URL 走 ``async_engine_from_config`` + ``run_sy
 
 ## 安全边界
 
-本文件**绝不**在建表之外做任何事：不读业务数据、不写业务数据、
-不在 import 阶段连接数据库。目标 URL 在 import 应用模型之前写入
-``DATABASE_URL``，这样应用模块里任何"顺手创建的 engine"也只会指向
-本次迁移的目标库，不会误连真实库。
+本文件只执行 revision 中声明的 schema 操作，不在 import 阶段连接数据库。
+目标 URL 在 import 应用模型之前写入 ``DATABASE_URL``，确保应用模块中
+惰性创建的 engine 也指向本次迁移的目标库。
 """
 from __future__ import annotations
 
@@ -105,22 +104,9 @@ os.environ["DATABASE_URL"] = _as_async_url(DATABASE_URL)
 
 config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
-from app.db.base import Base  # noqa: E402
-import app.models  # noqa: E402,F401 — 全部模型注册到 Base.metadata
+from app.db.migrations import load_metadata  # noqa: E402
 
-# 历史遗留：下面这些表不是定义在 app/models/ 里，而是散落在路由/引擎模块
-# （agent_chat_messages / group_chat_messages / learning_plans / doc_styles
-# 定义在 app/api/routes/*.py，runtime_locks 定义在 app/task_engine.py）。
-# 运行时 app/main.py 导入这些路由后 create_all 会把它们建出来，所以基线
-# 必须包含；漏掉它们会出现"运行时建了表、alembic 基线没有"的分裂。
-# 新增模型请放 app/models/ 并在 __init__.py 注册，别再往路由里塞表。
-import app.task_engine  # noqa: E402,F401 — runtime_locks
-import app.api.routes.agent_chat  # noqa: E402,F401 — agent_chat_messages
-import app.api.routes.group_chat  # noqa: E402,F401 — group_chat_messages
-import app.api.routes.growth_center  # noqa: E402,F401 — learning_plans
-import app.api.routes.doc_styles  # noqa: E402,F401 — doc_styles
-
-target_metadata = Base.metadata
+target_metadata = load_metadata()
 
 
 def _is_async_url(url: str) -> bool:

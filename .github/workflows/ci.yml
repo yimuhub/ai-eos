@@ -51,6 +51,13 @@ jobs:
       - name: 安装后端依赖（含 dev：pytest / pytest-asyncio / pyflakes）
         run: uv sync
 
+      - name: 空库迁移与结构漂移门禁（SQLite）
+        run: |
+          rm -f /tmp/ci_eos.db
+          uv run python -m app.db.migrations upgrade
+          uv run python -m app.db.migrations check
+          uv run python -m app.db.migrations upgrade
+
       - name: 后端测试套件（离线、SQLite、无 Redis）
         # pyproject 已设 asyncio_mode=auto、testpaths=["tests"]，直接跑即可。
         # 需要真实模型密钥的端到端用例打了 requires_llm 标记，无密钥时自动跳过。
@@ -91,8 +98,8 @@ jobs:
   # 这些差异只在 PG 上才会暴露，而 PG 正是生产/一键部署的形态。
   #
   # 与 backend job 的关系：同一套测试、同一份断言，只是换了数据库。
-  # 非 SQLite 下 conftest 会自动跳过 3 个"断言 PRAGMA / 查 sqlite_master /
-  # 直开 sqlite3 连接"的模块（见 tests/conftest.py 的 _SQLITE_ONLY_MODULES），
+  # 非 SQLite 下 conftest 会自动跳过断言 PRAGMA / 查 sqlite_master /
+  # 直开 sqlite3 连接的 SQLite 专属用例（见 tests/conftest.py 的 _SQLITE_ONLY_TESTS），
   # 这些用例在 backend job 的 SQLite 上照跑，断言一个字都没改。
   #
   # 隔离策略：conftest 读到 AIEOS_TEST_DATABASE_URL 后，会为**每个测试进程**
@@ -160,8 +167,18 @@ jobs:
           asyncio.run(main())
           PY
 
+      - name: 空库升级、漂移检查与回滚演练（Postgres 16）
+        env:
+          ALEMBIC_DATABASE_URL: "postgresql+asyncpg://aieos:aieos_ci_only@127.0.0.1:5432/aieos_test"
+        run: |
+          uv run python -m app.db.migrations upgrade
+          uv run python -m app.db.migrations check
+          uv run alembic -x "db_url=$ALEMBIC_DATABASE_URL" downgrade 0039
+          uv run python -m app.db.migrations upgrade
+          uv run python -m app.db.migrations check
+
       - name: 后端测试套件（Postgres 16，同一份断言）
-        # -rs 把跳过原因打出来：非 SQLite 下 conftest 会跳过 3 个 SQLite 专属
+        # -rs 把跳过原因打出来：非 SQLite 下 conftest 会跳过 SQLite 专属
         # 模块，跳过原因里带"当前方言 postgresql"——这就是本 job 真的跑在 PG 上
         # 的证据（若方言没生效，这些用例会照跑而不是显示为 skip）。
         run: >
@@ -276,6 +293,12 @@ jobs:
 
       - name: 安装后端依赖
         run: uv sync
+
+      - name: 契约库显式迁移与结构校验
+        run: |
+          rm -f /tmp/ci_contract.db
+          uv run python -m app.db.migrations upgrade
+          uv run python -m app.db.migrations check
 
       - name: 应用可导入 + OpenAPI 可生成
         # 对应 tools/check.sh「后端：应用可导入 + OpenAPI 可生成」关卡。

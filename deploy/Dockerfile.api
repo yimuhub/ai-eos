@@ -47,7 +47,7 @@ COPY --from=builder /opt/venv /opt/venv
 
 # 只拷运行必需文件，避免 .env / data / tests 混入镜像
 COPY --chown=aieos:aieos apps/api/app ./app
-COPY --chown=aieos:aieos apps/api/alembic ./alembic
+COPY --chown=aieos:aieos apps/api/migrations ./migrations
 COPY --chown=aieos:aieos apps/api/alembic.ini ./alembic.ini
 COPY --chown=aieos:aieos apps/api/pyproject.toml ./pyproject.toml
 COPY --chown=aieos:aieos content ./content

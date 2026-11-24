@@ -24,18 +24,21 @@ cd docker
 docker compose pull          # 拉新镜像（如用构建：--build）
 docker compose up -d --build
 # 数据库迁移（PostgreSQL）：alembic 是 schema 变更的正道
-docker compose exec api alembic upgrade head
+docker compose exec api python -m app.db.migrations upgrade
+docker compose exec api python -m app.db.migrations check
 ```
 
 ### 便携包 / 源码部署
 ```bash
-# 1. 停服  2. 替换代码  3. 装依赖  4. 启动
-# SQLite 无需 alembic：启动时自动建表（create_all）+ 幂等补列（ensure_columns）
-# ensure_columns 只是兜底，PostgreSQL 生产库请以 alembic upgrade head 为准
+# 1. 停服  2. 替换代码  3. 装依赖  4. 迁移  5. 启动
+cd apps/api
+uv run python -m app.db.migrations upgrade
+uv run python -m app.db.migrations check
 ```
 
-> 注意：`ensure_columns` 只加可空列、不改类型；PostgreSQL 上它与 Alembic 双轨并行，
-> 升级后若出现 "no such column"，优先检查 alembic 是否执行到 head。
+> SQLite 便携首启也会自动执行同一迁移链路；PostgreSQL 启动只校验，不自动改表。
+> 无版本号的老库只有在结构与模型完全一致时才会被采用，否则必须备份并做受控迁移。
+> 任一步失败都不要启动服务，详见 `docs/数据库迁移.md`。
 
 ## 3. 冒烟测试（缺一不可）
 

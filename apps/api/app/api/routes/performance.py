@@ -39,12 +39,15 @@ async def hr_overview(company_id: str, db: AsyncSession = Depends(get_db),
     from app.api.deps import assert_company_owned
     await assert_company_owned(db, user.id, company_id)
 
-    # 1) 编制：全部员工 + 状态分布
-    agents = (await db.execute(
-        select(Agent).where(Agent.company_id == company_id))).scalars().all()
+    # 1) 编制：状态分布直接在 SQL 聚合，不把全公司 Agent 行拉进 Python。
+    status_rows = (await db.execute(
+        select(Agent.status, func.count()).where(
+            Agent.company_id == company_id).group_by(Agent.status))).all()
     status_dist: dict[str, int] = {}
-    for a in agents:
-        status_dist[a.status.value] = status_dist.get(a.status.value, 0) + 1
+    for status, count in status_rows:
+        key = getattr(status, "value", status)
+        status_dist[key] = int(count)
+    headcount = sum(status_dist.values())
 
     # 2) 成本：本月 token 用量（按 Agent 汇总 top3）
     # 库里的时刻列是 naive UTC，这里必须同样取 UTC 再去掉 tzinfo，
@@ -66,8 +69,7 @@ async def hr_overview(company_id: str, db: AsyncSession = Depends(get_db),
                TokenUsage.agent_id.is_not(None))
         .group_by(TokenUsage.agent_id).order_by(func.sum(TokenUsage.total_tokens).desc())
         .limit(3))).all()
-    amap = {a.id: a.name for a in agents}
-    top_cost = [{"agent": amap.get(r[0], r[0]),
+    top_cost = [{"agent": r[0],
                  "tokens": int(r[1] or 0), "cost": round(float(r[2] or 0), 4)}
                 for r in top_cost_rows]
 
@@ -81,8 +83,7 @@ async def hr_overview(company_id: str, db: AsyncSession = Depends(get_db),
             Task.assigned_agent_id.is_not(None))
         .group_by(Task.assigned_agent_id).order_by(func.count().desc())
         .limit(3))).all()
-    top_output = [{"agent": amap.get(r[0], r[0]), "tasks": int(r[1])}
-                  for r in done_rows]
+    top_output = [{"agent": r[0], "tasks": int(r[1])} for r in done_rows]
     total_done_30 = int((await db.execute(
         select(func.count()).where(Task.company_id == company_id,
                                    Task.status == "COMPLETED",
@@ -94,28 +95,38 @@ async def hr_overview(company_id: str, db: AsyncSession = Depends(get_db),
         select(PerformanceSnapshot).where(
             PerformanceSnapshot.company_id == company_id)
         .order_by(PerformanceSnapshot.created_at.desc())
-        .limit(max(len(agents) * 3, 9)))).scalars().all()
+        .limit(max(headcount * 3, 9)))).scalars().all()
     seen: set[str] = set()
     # 按"同一 agent 最新一条"去重取排行榜
     for s in snaps:
         if s.agent_id in seen:
             continue
         seen.add(s.agent_id)
-        ranked.append({"agent": amap.get(s.agent_id, s.agent_id),
-                       "score": s.score})
+        ranked.append({"agent": s.agent_id, "score": s.score})
         if len(ranked) >= 5:
             break
     top_score = sorted(ranked, key=lambda x: -x["score"])[:3]
+
+    # 只批量查排行榜引用的 Agent 姓名；不再为编制统计读取全部 Agent。
+    needed_ids = ({r["agent"] for r in top_cost + top_output + top_score}
+                  - {None})
+    amap: dict[str, str] = {}
+    if needed_ids:
+        name_rows = (await db.execute(select(Agent.id, Agent.name).where(
+            Agent.company_id == company_id, Agent.id.in_(needed_ids)))).all()
+        amap = {aid: name for aid, name in name_rows}
+    for row in top_cost + top_output + top_score:
+        row["agent"] = amap.get(row["agent"]) or row["agent"]
 
     # 公司健康度：有编制+有产出+成本在控（简化公式，给老板一个数）
     healthy = 1.0
     if total_done_30 == 0:
         healthy = min(healthy, 0.5)
-    if not agents:
+    if not headcount:
         healthy = 0.2
     return {
         "company": {"id": company_id},
-        "headcount": {"total": len(agents), "by_status": status_dist},
+        "headcount": {"total": headcount, "by_status": status_dist},
         "cost_month": {"tokens": int(month_total_row[0] or 0),
                        "cost": round(float(month_total_row[1] or 0), 2),
                        "top": top_cost},

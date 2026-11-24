@@ -56,7 +56,7 @@ class Model(TimestampMixin, Base):
     model_id: Mapped[str] = mapped_column(String(200))  # e.g. agnes-2.5-flash
     config: Mapped[dict | None] = mapped_column(JSON, default=dict)
 
-    # --- 供应商与模型类型（全部可空：老库靠 ensure_columns 幂等补列） ---
+    # --- 供应商与模型类型（可空以兼容历史模型） ---
     # 归属的供应商。NULL = 升级前登记的直连模型，前端以「旧版直连」展示。
     provider_id: Mapped[str | None] = mapped_column(
         ForeignKey("model_providers.id", ondelete="SET NULL"),
@@ -108,14 +108,14 @@ class Agent(TimestampMixin, Base):
     # M3-B：绑定的角色档案（能力条目）。可空：老员工不需要回填，行为不变
     role_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 
-    # --- P5 可见性 / 归属（全部可空：老库靠 ensure_columns 幂等补列） ---
+    # --- P5 可见性 / 归属（可空以兼容历史员工） ---
     # company | department | private；NULL 等价 company（升级前的老 Agent 全员可见）
     visibility: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
     # 谁创建的（成员私有 Agent 的写权限依据）；NULL = 历史数据，只有 owner/admin 能写
     created_by_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     # 预留：行级数据域约束（如只允许访问某类数据），语义由上层定义
     data_scope: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    # 超级 Agent（CEO）：一个公司至多一个。可空是为了让老库幂等补列，
+    # 超级 Agent（CEO）：一个公司至多一个。可空以兼容历史员工，
     # NULL 等价 False；切换 CEO 时由路由把旧的置 False（不删除，保留历史）。
     is_ceo: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
     # 任命 CEO 前的姓名。任命时 name 改为统一显示名「CEO」，解除时按它还原；

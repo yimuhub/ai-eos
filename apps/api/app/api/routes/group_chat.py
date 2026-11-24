@@ -568,16 +568,18 @@ async def _agent_speak(db, gw, agent, topic, history_lines, emit=None):
                            + "\n\n（以上为搜索引擎返回的摘要，供你参考决策。）")
     # 聊天中检测文档标记 → 自动产出真实文件（存Agent交付文件夹）——所有路径都会检查
     try:
+        agent_id, company_id = str(agent.id), agent.company_id
         from app.doc_generator import parse_doc_markers as _pdm, generate_document as _gd
         from app.models.asset import Asset as _Asset, AssetType as _AT
         for dspec in _pdm(content):
-            gen = _gd(dspec["type"], dspec["title"], dspec["content"],
-                      agent_id=str(agent.id))
-            db.add(_Asset(company_id=agent.company_id,
+            gen = await asyncio.to_thread(
+                _gd, dspec["type"], dspec["title"], dspec["content"],
+                agent_id=agent_id)
+            db.add(_Asset(company_id=company_id,
                           name=gen["file_name"], type=_AT.OTHER,
                           path=gen["file_path"], mime_type=gen["mime"],
-                          size=gen["size"], created_by=str(agent.id),
-                          creator_type="agent", agent_id=str(agent.id)))
+                          size=gen["size"], created_by=agent_id,
+                          creator_type="agent", agent_id=agent_id))
             content += (f"\n\n📎 已生成交付文件：{gen['file_name']}"
                         f"（{gen['size']//1024}KB，见交付中心/交付文件夹）")
     except Exception as _doc_err:

@@ -52,15 +52,14 @@ class Task(TimestampMixin, Base):
     started_at: Mapped[str | None] = mapped_column(String(50))
     completed_at: Mapped[str | None] = mapped_column(String(50))
     # 任务进度（0.0~1.0）与当前阶段：前端进度条读取。
-    # 启动时 ensure_columns 会自动给老表补上这两列（可空），无需手写迁移。
     progress: Mapped[float | None] = mapped_column(Float, default=0.0)
     current_stage: Mapped[str | None] = mapped_column(String(200))
     # 批量派活「创建后立即开工」的持久意图：入队时置 True，启动后清掉。
     # 用列而不是内存标记，是因为积压任务要由调度循环在 worker 空闲后
-    # 再拉起——重启后排队意图不能丢。可空列，老库由 ensure_columns 自动补。
+    # 再拉起——重启后排队意图不能丢。
     auto_start: Mapped[bool | None] = mapped_column(Boolean, default=False)
     # CEO 统筹归属：子任务挂在同一场 mission 下，是「一根准绳」的落点。
-    # 普通任务为 NULL；可空列由 ensure_columns 幂等补齐。
+    # 普通任务为 NULL。
     mission_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 
 

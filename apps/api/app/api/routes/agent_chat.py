@@ -8,6 +8,7 @@
 - GET /{aid}/chat/history: 对话历史
 对话记录持久化到 agent_chat_messages 表（新表）。
 """
+import asyncio
 import json
 import re
 import time
@@ -694,17 +695,20 @@ async def _materialize_docs(db: AsyncSession, a: Agent, raw_reply: str):
     doc_file = None
     doc_error = None
     try:
+        # 线程只接收普通标量，绝不把 AsyncSession 或 ORM 对象带进渲染线程。
+        agent_id, company_id = str(a.id), a.company_id
         from app.doc_generator import parse_doc_markers, generate_document
         from app.models.asset import Asset as _Asset, AssetType
         for dspec in parse_doc_markers(raw_reply):
-            gen = generate_document(dspec["type"], dspec["title"],
-                                    dspec["content"], agent_id=str(a.id))
-            db.add(_Asset(company_id=a.company_id,
+            gen = await asyncio.to_thread(
+                generate_document, dspec["type"], dspec["title"],
+                dspec["content"], agent_id=agent_id)
+            db.add(_Asset(company_id=company_id,
                           name=gen["file_name"],
                           type=AssetType.OTHER,
                           path=gen["file_path"], mime_type=gen["mime"],
-                          size=gen["size"], created_by=str(a.id),
-                          creator_type="agent", agent_id=str(a.id)))
+                          size=gen["size"], created_by=agent_id,
+                          creator_type="agent", agent_id=agent_id))
             doc_file = gen
     except Exception as doc_err:
         logger.warning("聊天内文档生成失败 agent=%s: %s", a.id, doc_err,
@@ -1556,6 +1560,7 @@ async def chat_generate_doc(aid: str, data: GenDocIn,
     from app.model_gateway import ModelGateway
 
     a = await _visible_agent(db, user, aid)
+    agent_id, company_id = str(a.id), a.company_id
 
     type_names = {"word": "Word 文档", "excel": "Excel 表格",
                   "ppt": "PPT 演示文稿", "md": "Markdown 文档"}
@@ -1640,18 +1645,19 @@ async def chat_generate_doc(aid: str, data: GenDocIn,
         content = re.sub(r"\n?```$", "", content)
 
     try:
-        result = generate_document(data.doc_type.lower(), data.title,
-                                   content, agent_id=str(a.id))
+        result = await asyncio.to_thread(
+            generate_document, data.doc_type.lower(), data.title,
+            content, agent_id=agent_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
     # 登记 Asset（归属该 Agent）
     from app.models.asset import Asset, AssetType
     asset = Asset(
-        company_id=a.company_id, name=data.title + spec_ext(data.doc_type),
+        company_id=company_id, name=data.title + spec_ext(data.doc_type),
         type=AssetType.OTHER, path=result["file_path"],
         mime_type=result["mime"], size=result["size"],
-        created_by=str(a.id), creator_type="agent", agent_id=str(a.id))
+        created_by=agent_id, creator_type="agent", agent_id=agent_id)
     db.add(asset)
     await _save_msg(db, a, "agent",
                     f"📄 已为你生成{tname}《{data.title}》\n"

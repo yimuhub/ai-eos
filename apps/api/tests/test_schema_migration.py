@@ -1,16 +1,4 @@
-"""升级不炸：老数据库必须能被自动补齐。
-
-## 为什么单独守护这件事
-
-`Base.metadata.create_all` 只建缺失的**表**，不会给已存在的表补新列。
-这意味着"给模型加一个字段"在开发机上永远是对的（每次跑测试都是新建库），
-一到用户机器上就变成 `no such column`——而且只在真正用到该字段时才报错。
-
-这类问题在本地测试里**天然是隐形的**，只有专门造一个"老库"才能覆盖。
-
-注：这里用标准库 `tempfile` 而不是 pytest 的 `tmp_path`，
-以免测试对环境（沙箱、目录权限）产生额外依赖。
-"""
+"""Schema authority: fresh migration, strict adoption and safe failure boundaries."""
 from __future__ import annotations
 
 import pathlib
@@ -23,322 +11,180 @@ from contextlib import asynccontextmanager
 
 import pytest
 from sqlalchemy import inspect, text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.db.migrations import ensure_columns
+from app.db.migrations import prepare_database, verify_database
 
 pytestmark = pytest.mark.asyncio
+API_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-# 模拟改造前的老库：有 agent_executions 表，但没有 completed_at 列
-_LEGACY_DDL = """
-CREATE TABLE agent_executions (
-    id VARCHAR(36) PRIMARY KEY,
-    agent_id VARCHAR(36),
-    task_id VARCHAR(36),
-    project_id VARCHAR(36),
-    status VARCHAR(20),
-    input TEXT,
-    output TEXT,
-    error TEXT,
-    metadata_json JSON,
-    created_at VARCHAR(50),
-    updated_at VARCHAR(50)
-)
-"""
+
+def alembic(db_path: pathlib.Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", "alembic", "-x", f"db_url=sqlite:///{db_path}", *args],
+        cwd=API_ROOT, capture_output=True, text=True, timeout=90)
 
 
 @asynccontextmanager
-async def legacy_engine(ddl: str = _LEGACY_DDL):
-    """一个只含"老表结构"的临时 SQLite 库。"""
-    tmp = pathlib.Path(tempfile.mkdtemp(prefix="aieos_migrate_"))
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp / 'legacy.db'}")
+async def database(tmp: pathlib.Path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp / 'schema.db'}")
     try:
-        async with engine.begin() as conn:
-            await conn.execute(text(ddl))
         yield engine
     finally:
         await engine.dispose()
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-async def _columns(engine, table: str) -> set[str]:
+async def revision(engine) -> str | None:
     async with engine.connect() as conn:
-        return await conn.run_sync(
-            lambda c: {col["name"] for col in inspect(c).get_columns(table)})
+        tables = await conn.run_sync(lambda c: inspect(c).get_table_names())
+        if "alembic_version" not in tables:
+            return None
+        return (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar()
 
 
-_ARTIFACT_VERSIONS_LEGACY_DDL = """
-CREATE TABLE artifact_versions (
-    id VARCHAR(36) PRIMARY KEY,
-    artifact_id VARCHAR(36) NOT NULL,
-    version INTEGER NOT NULL,
-    content TEXT NOT NULL DEFAULT '',
-    change_note TEXT,
-    status VARCHAR(50) NOT NULL DEFAULT 'DRAFT',
-    submitted_by VARCHAR(36),
-    reviewed_by VARCHAR(36),
-    review_comment TEXT,
-    created_at DATETIME
-)
-"""
+async def test_fresh_database_upgrades_and_verifies_without_create_all():
+    with tempfile.TemporaryDirectory(prefix="aieos_fresh_migrate_") as raw:
+        async with database(pathlib.Path(raw)) as engine:
+            assert await revision(engine) is None
+            assert await prepare_database(engine) == "0040"
+            assert await prepare_database(engine) == "0040"
+            assert await verify_database(engine) == "0040"
+            async with engine.connect() as conn:
+                tables = await conn.run_sync(lambda c: inspect(c).get_table_names())
+            assert {"users", "companies", "billing_webhook_events"} <= set(tables)
 
 
-async def test_artifact_version_unique_index_is_added_to_legacy_sqlite():
-    async with legacy_engine(_ARTIFACT_VERSIONS_LEGACY_DDL) as engine:
-        async with engine.begin() as conn:
-            await conn.execute(text(
-                "INSERT INTO artifact_versions (id, artifact_id, version) "
-                "VALUES ('v1', 'a1', 1)"))
-        assert await ensure_columns(engine) == []
-        assert await ensure_columns(engine) == []
-        async with engine.begin() as conn:
-            indexes = await conn.run_sync(
-                lambda c: inspect(c).get_indexes("artifact_versions"))
-            assert any(i["name"] == "uq_artifact_versions_artifact_id_version"
-                       and i["unique"] for i in indexes)
-            try:
+async def test_equivalent_unversioned_legacy_database_is_stamped_without_data_loss():
+    from app.db.migrations import load_metadata
+
+    with tempfile.TemporaryDirectory(prefix="aieos_adopt_migrate_") as raw:
+        async with database(pathlib.Path(raw)) as engine:
+            async with engine.begin() as conn:
+                await conn.run_sync(lambda c: load_metadata().create_all(c))
                 await conn.execute(text(
-                    "INSERT INTO artifact_versions (id, artifact_id, version) "
-                    "VALUES ('v2', 'a1', 1)"))
-            except IntegrityError as exc:
-                assert "UNIQUE" in str(exc).upper()
-            else:
-                raise AssertionError("便携 SQLite 未建立版本唯一约束")
+                    "INSERT INTO companies (id, owner_id, name, attachments) "
+                    "VALUES ('legacy-company', 'legacy-owner', '原有公司', '[]')"))
+            assert await revision(engine) is None
+            assert await prepare_database(engine) == "0040"
+            assert await revision(engine) == "0040"
+            async with engine.connect() as conn:
+                assert (await conn.execute(text(
+                    "SELECT name FROM companies WHERE id='legacy-company'"))).scalar() == "原有公司"
 
 
-async def test_artifact_version_duplicate_history_requires_explicit_repair():
-    async with legacy_engine(_ARTIFACT_VERSIONS_LEGACY_DDL) as engine:
-        async with engine.begin() as conn:
-            await conn.execute(text(
-                "INSERT INTO artifact_versions (id, artifact_id, version) VALUES "
-                "('v1', 'a1', 1), ('v2', 'a1', 1)"))
-        try:
-            await ensure_columns(engine)
-        except RuntimeError as exc:
-            assert "重复版本号" in str(exc) and "a1:v1(2)" in str(exc)
-        else:
-            raise AssertionError("不得静默删除或重编号不可变历史版本")
-        async with engine.connect() as conn:
-            assert (await conn.execute(text(
-                "SELECT COUNT(*) FROM artifact_versions WHERE artifact_id='a1'"
-            ))).scalar_one() == 2
+async def test_incomplete_unversioned_legacy_database_is_rejected_unchanged():
+    with tempfile.TemporaryDirectory(prefix="aieos_partial_migrate_") as raw:
+        async with database(pathlib.Path(raw)) as engine:
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    "CREATE TABLE agent_executions (id VARCHAR(36) PRIMARY KEY, output TEXT)"))
+                await conn.execute(text(
+                    "INSERT INTO agent_executions (id, output) VALUES ('e1', '保留')"))
+            with pytest.raises(RuntimeError, match="拒绝自动改表或 stamp"):
+                await prepare_database(engine)
+            assert await revision(engine) is None
+            async with engine.connect() as conn:
+                columns = await conn.run_sync(
+                    lambda c: {col["name"] for col in inspect(c).get_columns("agent_executions")})
+                assert columns == {"id", "output"}
+                assert (await conn.execute(text(
+                    "SELECT output FROM agent_executions WHERE id='e1'"))).scalar() == "保留"
 
 
-async def test_missing_nullable_column_is_added():
-    """老库缺列时，启动补列必须真的把列加上。"""
-    async with legacy_engine() as engine:
-        assert "completed_at" not in await _columns(engine, "agent_executions")
-
-        added = await ensure_columns(engine)
-
-        assert "agent_executions.completed_at" in added, \
-            f"未补齐模型新增的列，实际补齐：{added}"
-        assert "completed_at" in await _columns(engine, "agent_executions")
-
-
-async def test_ensure_columns_is_idempotent():
-    """重复启动不能反复 ALTER，也不能报错。"""
-    async with legacy_engine() as engine:
-        await ensure_columns(engine)
-        second = await ensure_columns(engine)
-        assert second == [], f"第二次补列不应再改动任何东西：{second}"
+async def test_retired_migration_chain_is_rejected_without_stamping():
+    with tempfile.TemporaryDirectory(prefix="aieos_retired_migrate_") as raw:
+        path = pathlib.Path(raw) / "schema.db"
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
+            conn.execute("INSERT INTO alembic_version VALUES ('23e9b97bb927')")
+        async with database(pathlib.Path(raw)) as engine:
+            with pytest.raises(RuntimeError, match="已停用的 Alembic 迁移链"):
+                await prepare_database(engine)
+            assert await revision(engine) == "23e9b97bb927"
 
 
-async def test_existing_data_survives():
-    """补列的完整意义是"不动数据"。"""
-    async with legacy_engine() as engine:
-        async with engine.begin() as conn:
-            await conn.execute(text(
-                "INSERT INTO agent_executions (id, agent_id, task_id, status, output)"
-                " VALUES ('e1', 'a1', 't1', 'completed', '原有产出')"))
-
-        await ensure_columns(engine)
-
-        async with engine.connect() as conn:
-            row = (await conn.execute(text(
-                "SELECT id, status, output, completed_at FROM agent_executions"
-            ))).one()
-        assert row.id == "e1"
-        assert row.status == "completed"
-        assert row.output == "原有产出"
-        assert row.completed_at is None
+async def test_versioned_database_upgrades_to_head_and_detects_drift():
+    with tempfile.TemporaryDirectory(prefix="aieos_versioned_migrate_") as raw:
+        path = pathlib.Path(raw) / "schema.db"
+        result = alembic(path, "upgrade", "0039")
+        assert result.returncode == 0, result.stdout + result.stderr
+        async with database(pathlib.Path(raw)) as engine:
+            assert await revision(engine) == "0039"
+            assert await prepare_database(engine) == "0040"
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    "CREATE TABLE unexpected_table (id VARCHAR(36) PRIMARY KEY)"))
+            with pytest.raises(RuntimeError, match="数据库结构与模型漂移"):
+                await verify_database(engine)
 
 
-async def test_tables_absent_from_database_are_left_alone():
-    """库里没有的表不该被这个函数顺手建出来——建表是 create_all 的职责。
-
-    否则一旦补列逻辑出错，会连带产生"半张表"，问题更难查。
-    """
-    async with legacy_engine() as engine:
-        added = await ensure_columns(engine)
-        assert all(name.startswith("agent_executions.") for name in added), \
-            f"补列函数越界改动了其它表：{added}"
-        async with engine.connect() as conn:
-            tables = await conn.run_sync(lambda c: set(inspect(c).get_table_names()))
-        assert tables == {"agent_executions"}, f"凭空多出了表：{tables}"
-
-
-_WORKFLOW_EXECUTION_LEGACY_DDL = """
-CREATE TABLE workflow_executions (
-    id VARCHAR(36) PRIMARY KEY,
-    workflow_id VARCHAR(36),
-    status VARCHAR(30),
-    started_by VARCHAR(36)
-)
-"""
+async def test_duplicate_artifact_versions_stop_migration_without_deleting_history():
+    with tempfile.TemporaryDirectory(prefix="aieos_duplicate_migrate_") as raw:
+        path = pathlib.Path(raw) / "schema.db"
+        with sqlite3.connect(path) as conn:
+            conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
+            conn.execute("INSERT INTO alembic_version VALUES ('0037')")
+            conn.execute("CREATE TABLE artifact_versions ("
+                         "id VARCHAR(36) PRIMARY KEY, artifact_id VARCHAR(36) NOT NULL, "
+                         "version INTEGER NOT NULL, content TEXT NOT NULL DEFAULT '')")
+            conn.execute("INSERT INTO artifact_versions (id, artifact_id, version) "
+                         "VALUES ('v1', 'a1', 1), ('v2', 'a1', 1)")
+        async with database(pathlib.Path(raw)) as engine:
+            with pytest.raises(RuntimeError, match="重复版本号.*a1:v1"):
+                await prepare_database(engine)
+            assert await revision(engine) == "0037"
+            async with engine.connect() as conn:
+                assert (await conn.execute(text(
+                    "SELECT COUNT(*) FROM artifact_versions WHERE artifact_id='a1'"))).scalar() == 2
 
 
-async def test_workflow_execution_snapshot_column_is_added_without_data_loss():
-    async with legacy_engine(_WORKFLOW_EXECUTION_LEGACY_DDL) as engine:
-        async with engine.begin() as conn:
-            await conn.execute(text(
-                "INSERT INTO workflow_executions (id, workflow_id, status) "
-                "VALUES ('e1', 'w1', 'PENDING')"))
+async def test_postgres_startup_verification_never_upgrades(monkeypatch):
+    with tempfile.TemporaryDirectory(prefix="aieos_verify_only_") as raw:
+        async with database(pathlib.Path(raw)) as engine:
+            async with engine.begin() as conn:
+                await conn.execute(text("CREATE TABLE placeholder (id INTEGER)"))
+            called = False
 
-        added = await ensure_columns(engine)
+            def forbidden(*args, **kwargs):
+                nonlocal called
+                called = True
+                raise AssertionError("verification must not mutate schema")
 
-        assert "workflow_executions.definition_snapshot" in added
-        assert await ensure_columns(engine) == []
-        async with engine.connect() as conn:
-            row = (await conn.execute(text(
-                "SELECT id, status, definition_snapshot FROM workflow_executions"
-            ))).one()
-        assert row.id == "e1" and row.status == "PENDING"
-        assert row.definition_snapshot is None
-
-
-_WORKFLOW_LEGACY_DDL = """
-CREATE TABLE workflow_definitions (
-    id VARCHAR(36) PRIMARY KEY,
-    company_id VARCHAR(36),
-    name VARCHAR(200),
-    status VARCHAR(20),
-    created_by VARCHAR(36)
-)
-"""
-
-
-async def test_workflow_version_columns_backfill_unambiguous_defaults():
-    """0008 给老流程补版本/计数列：老行填 1/0 没有歧义，必须自动补齐。"""
-    async with legacy_engine(_WORKFLOW_LEGACY_DDL) as engine:
-        async with engine.begin() as conn:
-            await conn.execute(text(
-                "INSERT INTO workflow_definitions (id, company_id, name, status)"
-                " VALUES ('w1', 'c1', '旧流程', 'PUBLISHED')"))
-
-        added = await ensure_columns(engine)
-
-        for col in ("version", "source", "run_count", "success_count",
-                    "failure_count"):
-            assert f"workflow_definitions.{col}" in added, \
-                f"未补齐 {col}，实际补齐：{added}"
-        async with engine.connect() as conn:
-            row = (await conn.execute(text(
-                "SELECT version, source, run_count, success_count, failure_count"
-                " FROM workflow_definitions WHERE id = 'w1'"))).one()
-        assert row.version == 1
-        assert row.source == "manual"
-        assert (row.run_count, row.success_count, row.failure_count) == (0, 0, 0)
+            monkeypatch.setattr("app.db.migrations._run_alembic", forbidden)
+            with pytest.raises(RuntimeError, match="数据库迁移版本"):
+                await verify_database(engine)
+            assert not called
 
 
 async def test_stripe_migration_upgrade_downgrade_preserves_offline_orders():
-    with tempfile.TemporaryDirectory(prefix="aieos_stripe_migrate_") as tmp:
-        db_path = pathlib.Path(tmp) / "stripe.db"
-        with sqlite3.connect(db_path) as conn:
+    with tempfile.TemporaryDirectory(prefix="aieos_stripe_migrate_") as raw:
+        path = pathlib.Path(raw) / "stripe.db"
+        with sqlite3.connect(path) as conn:
             conn.execute("CREATE TABLE subscription_orders (id VARCHAR(36) PRIMARY KEY)")
             conn.execute("INSERT INTO subscription_orders (id) VALUES ('legacy-order')")
-        api_root = pathlib.Path(__file__).resolve().parent.parent
-
-        def alembic(*args):
-            result = subprocess.run(
-                [sys.executable, "-m", "alembic", "-x", f"db_url=sqlite:///{db_path}", *args],
-                cwd=api_root, capture_output=True, text=True, timeout=60)
-            assert result.returncode == 0, result.stdout + result.stderr
-
-        alembic("stamp", "0038")
-        alembic("upgrade", "head")
-        with sqlite3.connect(db_path) as conn:
+        result = alembic(path, "stamp", "0038")
+        assert result.returncode == 0, result.stdout + result.stderr
+        result = alembic(path, "upgrade", "0039")
+        assert result.returncode == 0, result.stdout + result.stderr
+        with sqlite3.connect(path) as conn:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(subscription_orders)")}
             assert {"payment_method", "stripe_checkout_session_id", "amount", "currency",
                     "checkout_operation_id"} <= columns
             assert conn.execute(
                 "SELECT payment_method FROM subscription_orders WHERE id='legacy-order'"
             ).fetchone() == ("offline",)
-            indexes = conn.execute("PRAGMA index_list(subscription_orders)").fetchall()
-            assert any(row[2] for row in indexes)
+            indexes = {row[1]: row[2] for row in conn.execute(
+                "PRAGMA index_list(subscription_orders)").fetchall()}
+            assert indexes["ix_subscription_orders_stripe_checkout_session_id"] == 1
             assert conn.execute(
                 "SELECT COUNT(*) FROM billing_webhook_events").fetchone() == (0,)
-        alembic("downgrade", "0038")
-        with sqlite3.connect(db_path) as conn:
+        result = alembic(path, "downgrade", "0038")
+        assert result.returncode == 0, result.stdout + result.stderr
+        with sqlite3.connect(path) as conn:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(subscription_orders)")}
             assert "payment_method" not in columns
             assert conn.execute("SELECT id FROM subscription_orders").fetchone() == ("legacy-order",)
             assert conn.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name='billing_webhook_events'"
             ).fetchone() == (0,)
-
-
-@asynccontextmanager
-async def full_schema_engine():
-    """建出完整表结构（模拟新版本库），供"删一列再补回来"使用。"""
-    from app.db.base import Base
-
-    tmp = pathlib.Path(tempfile.mkdtemp(prefix="aieos_migrate_full_"))
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp / 'full.db'}")
-    try:
-        async with engine.begin() as conn:
-            await conn.run_sync(lambda c: Base.metadata.create_all(c))
-        yield engine
-    finally:
-        await engine.dispose()
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-async def test_non_nullable_json_column_is_added_with_empty_default():
-    """`Mapped[list] = mapped_column(JSON, default=list)` 这类非空列也要补。
-
-    这类列（公司/项目/自动化的附件列表）在模型里是 nullable=False，早先的
-    补列规则一律跳过——老库一读 /companies 就 `no such column`，用户升级后
-    直接登录不进去。语义上"没有附件"只有一种答案：空集合。
-    """
-    async with full_schema_engine() as engine:
-        async with engine.begin() as conn:
-            await conn.execute(text(
-                "INSERT INTO companies (id, owner_id, name, attachments)"
-                " VALUES ('c1', 'u1', '老公司', '[]')"))
-            # 模拟老库：这一列根本不存在（老行数据保留）
-            await conn.execute(text("ALTER TABLE companies DROP COLUMN attachments"))
-
-        added = await ensure_columns(engine)
-
-        assert "companies.attachments" in added, f"非空 JSON 列未补上：{added}"
-        async with engine.connect() as conn:
-            row = (await conn.execute(text(
-                "SELECT name, attachments FROM companies WHERE id='c1'"))).one()
-            ddl = (await conn.execute(text(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='companies'"
-            ))).scalar()
-        assert row.name == "老公司", "补列不能动原有数据"
-        val = row.attachments.strip() if isinstance(row.attachments, str) else row.attachments
-        assert val == [] or val == "[]", f"老行必须回落到空集合，实际：{row.attachments!r}"
-        assert "DEFAULT '[]'" in (ddl or ""), f"补列时必须带上默认值，DDL：{ddl}"
-
-
-async def test_non_nullable_non_json_column_still_requires_human():
-    """没有机械默认值的非空列仍要留给人决策，不能被自动填一个假值。"""
-    from app.db.migrations import _auto_addable
-
-    class FakeType:
-        def compile(self, dialect=None):
-            return "INTEGER"
-
-    class FakeColumn:
-        name = "amount"
-        nullable = False
-        primary_key = False
-        type = FakeType()
-        default = None
-
-    assert _auto_addable(FakeColumn()) is False
-

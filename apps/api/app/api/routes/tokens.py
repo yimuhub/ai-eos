@@ -153,11 +153,16 @@ async def list_pricing(db: AsyncSession = Depends(get_db),
     """计费标准列表（带模型名回填）。"""
     q = await db.execute(select(PricingConfig).order_by(PricingConfig.created_at.desc()))
     rows = q.scalars().all()
+    model_names: dict[str, str] = {}
+    model_ids = list(dict.fromkeys(p.model_id for p in rows))
+    for offset in range(0, len(model_ids), 500):
+        found = await db.execute(select(Model.id, Model.name).where(
+            Model.id.in_(model_ids[offset:offset + 500])))
+        model_names.update({mid: name for mid, name in found.all()})
     out = []
     for p in rows:
-        m = await db.get(Model, p.model_id)
         out.append({"id": p.id, "model_id": p.model_id,
-                    "model_name": m.name if m else (p.model_name or "-"),
+                    "model_name": model_names.get(p.model_id) or p.model_name or "-",
                     "billing_mode": p.billing_mode,
                     "input_price_per_m": p.input_price_per_m,
                     "output_price_per_m": p.output_price_per_m,
@@ -249,7 +254,8 @@ def _sum_cols():
             func.count(TokenUsage.id))
 
 
-async def _group_stats(db, group_col, base_filters=None, days: int | None = None):
+async def _group_stats(db, group_col, base_filters=None, days: int | None = None,
+                       limit: int | None = None):
     conds = []
     if base_filters:
         conds += base_filters
@@ -257,41 +263,46 @@ async def _group_stats(db, group_col, base_filters=None, days: int | None = None
         since = _now_utc() - timedelta(days=days)
         conds.append(TokenUsage.created_at >= since)
     inp_s, out_s, tot_s, cost_s, cnt = _sum_cols()
-    q = await db.execute(
-        select(group_col, inp_s, out_s, tot_s, cost_s, cnt)
-        .where(*conds).group_by(group_col)
-        .order_by(tot_s.desc()))
+    q = (select(group_col, inp_s, out_s, tot_s, cost_s, cnt)
+         .where(*conds).group_by(group_col)
+         .order_by(tot_s.desc(), group_col.asc()))
+    if limit is not None:
+        q = q.limit(limit)
+    result = await db.execute(q)
     return [{"key": str(k) if k is not None else "(未归属)",
              "input_tokens": int(r[0] or 0), "output_tokens": int(r[1] or 0),
              "total_tokens": int(r[2] or 0), "total_cost": round(float(r[3] or 0), 4),
-             "calls": int(r[4])} for k, *r in q.all()]
+             "calls": int(r[4])} for k, *r in result.all()]
 
 
 async def _attach_names(db, rows, kind: str):
-    """把 key 回填为可读名称。"""
+    """按维度一次批量回填名称；缺失对象仍保留原 key。"""
+    models = {
+        "agent": (Agent, Agent.name),
+        "department": (Department, Department.name),
+        "company": (Company, Company.name),
+    }
+    if kind == "project":
+        from app.models.project import Project
+        models[kind] = (Project, Project.name)
+    elif kind == "task":
+        from app.models.task import Task
+        models[kind] = (Task, Task.title)
+    model = models.get(kind)
+    if model is None:
+        return rows
+
+    table, label = model
+    ids = list(dict.fromkeys(r["key"] for r in rows
+                             if r["key"] and r["key"] != "(未归属)"))
+    names: dict[str, str] = {}
+    # 分批避免超长 IN 列表触发 SQLite 参数上限；查询数不随对象数量线性增长。
+    for offset in range(0, len(ids), 500):
+        batch = ids[offset:offset + 500]
+        found = await db.execute(select(table.id, label).where(table.id.in_(batch)))
+        names.update({str(oid): name for oid, name in found.all() if name})
     for r in rows:
-        r["name"] = r["key"]
-        oid = r["key"]
-        if oid == "(未归属)" or not oid:
-            continue
-        obj = None
-        if kind == "agent":
-            obj = await db.get(Agent, oid)
-        elif kind == "department":
-            obj = await db.get(Department, oid)
-        elif kind == "company":
-            obj = await db.get(Company, oid)
-        elif kind == "project":
-            from app.models.project import Project
-            obj = await db.get(Project, oid)
-        elif kind == "task":
-            from app.models.task import Task
-            obj = await db.get(Task, oid)
-        if obj is not None:
-            # 任务的显示列叫 title，不叫 name。只取 name 会让任务维度的
-            # name 恒等于 UUID——前端那一整列都是哈希。
-            r["name"] = (getattr(obj, "name", None)
-                         or getattr(obj, "title", None) or r["key"])
+        r["name"] = names.get(r["key"]) or r["key"]
     return rows
 
 
@@ -441,7 +452,7 @@ async def stats_by_project(company_id: str = Query(...), days: int = Query(30),
 
 @router.get("/stats/by-task", response_model=list[UsageGroupOut])
 async def stats_by_task(company_id: str = Query(...), days: int = Query(30),
-                        limit: int = Query(50, le=200),
+                        limit: int = Query(50, ge=0, le=200),
                         db: AsyncSession = Depends(get_db),
                         user: User = Depends(get_current_user)):
     """(e) 任务维度（Top N）。"""
@@ -449,9 +460,10 @@ async def stats_by_task(company_id: str = Query(...), days: int = Query(30),
     conds = [_usage_scope(ctx),
              TokenUsage.task_id.isnot(None)]
     conds += _parse_range(days, None, None)
-    rows = await _group_stats(db, TokenUsage.task_id, conds)
-    rows.sort(key=lambda r: -r["total_tokens"])
-    return await _attach_names(db, rows[:limit], "task")
+    if limit == 0:
+        return []
+    rows = await _group_stats(db, TokenUsage.task_id, conds, limit=limit)
+    return await _attach_names(db, rows, "task")
 
 
 # V5.8 ⑩ 成本分维：低价值动作（通知/围观/心跳/反思）走规则引擎或限流，

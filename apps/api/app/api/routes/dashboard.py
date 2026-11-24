@@ -46,8 +46,8 @@ async def _dashboard_payload(db: AsyncSession, company_id: str, c: Company,
     )).all():
         key = getattr(st, "value", st)
         agent_counts[str(key).lower()] = n
-    agent_counts["total"] = (await db.execute(select(func.count()).select_from(Agent).where(
-        Agent.company_id == company_id))).scalar() or 0
+    # total 与状态分布同源，省掉一次全表 COUNT；也避免两者在并发写入时口径不一。
+    agent_counts["total"] = sum(agent_counts.values())
 
     # task counts：一条 GROUP BY status
     task_counts = {st.value.lower(): 0 for st in TaskStatus}
