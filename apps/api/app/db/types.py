@@ -15,8 +15,8 @@ class CalendarDateTime(TypeDecorator[datetime]):
 
     def process_bind_param(self, value: datetime | None,
                            dialect: Dialect) -> datetime | None:
-        if value is None or value.tzinfo is None:
-            return value
+        if value is None:
+            return None
         wall_time = value.replace(tzinfo=None)
         if dialect.name == "sqlite":
             return wall_time

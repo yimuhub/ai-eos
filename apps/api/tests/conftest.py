@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import os
 import pathlib
+import sqlite3
 import sys
 import tempfile
 import uuid
@@ -91,22 +92,22 @@ def _provision_postgres(url: str) -> str:
     """为当前测试进程准备一个**独立**的 PG 库，避免并行跑测试时互相清库。
 
     做法：连维护库建一个带 pid + 随机后缀的库（Alembic 会建出全部表），
-    会话结束再 DROP。建库需要 CREATEDB 权限；没有权限时退化为
-    "就用给定的库 + 开头先 drop_all 清空"（照样能跑，但两个进程同时跑
-    会互相干扰，这时请在 URL 里自己给每个进程不同的库）。
+    会话结束再 DROP。建库需要 CREATEDB 权限；权限不足时直接拒绝启动测试，
+    绝不降级到给定库。显式 SQLite URL 会先复制到本会话的临时文件。
     """
+    from sqlalchemy.engine import make_url
+
+    safe_url = make_url(url).render_as_string(hide_password=True)
     name = f"aieos_test_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     try:
         _pg_admin_exec(_admin_dsn(url), f'CREATE DATABASE "{name}"')
         # naive datetime 约定 = UTC：asyncpg 把 naive 参数按库时区解释，
         # 不钉 UTC 的话窗口整体偏移本地时区（如 +08），进化/统计会静默丢数据。
         _pg_admin_exec(_admin_dsn(url), f"ALTER DATABASE \"{name}\" SET timezone TO 'UTC'")
-    except Exception as exc:  # noqa: BLE001 — 权限/并发等都可能，降级即可
-        print(f"[conftest] 无法创建独立测试库（{type(exc).__name__}: {exc}），"
-              f"改用给定库并先清空", file=sys.stderr)
-        return url
-
-    from sqlalchemy.engine import make_url
+    except Exception as exc:  # noqa: BLE001 — 建库失败必须终止，不能清空给定库
+        raise RuntimeError(
+            f"无法创建独立 PostgreSQL 测试库；拒绝使用给定库 {safe_url} 运行测试。"
+            "请为测试角色授予 CREATEDB 权限。") from exc
 
     _PROVISIONED_PG["name"] = name
     return make_url(url).set(database=name).render_as_string(hide_password=False)
@@ -128,13 +129,32 @@ async def _drop_provisioned_pg() -> None:
               file=sys.stderr)
 
 
+def _isolated_sqlite_url(url: str) -> str:
+    """把显式 SQLite 文件复制到临时目录，测试清库永远不会触及源文件。"""
+    from sqlalchemy.engine import make_url
+
+    parsed = make_url(url)
+    database = parsed.database or ""
+    if not database or database == ":memory:":
+        raise RuntimeError("测试必须使用可复制的 SQLite 文件，不能使用内存库")
+    source = pathlib.Path(database.removeprefix("file:")).resolve()
+    if not source.is_file():
+        raise RuntimeError(f"测试 SQLite 源文件不存在：{source}")
+    target = _TMP_ROOT / "explicit.sqlite"
+    with sqlite3.connect(source.as_uri() + "?mode=ro", uri=True) as reader:
+        with sqlite3.connect(target) as writer:
+            reader.backup(writer)
+    return parsed.set(database=str(target)).render_as_string(hide_password=False)
+
+
 if _EXTERNAL_URL:
     if _EXTERNAL_URL.startswith("postgres"):
         _PROVISIONED_PG["admin"] = _admin_dsn(_EXTERNAL_URL)
         os.environ["DATABASE_URL"] = _provision_postgres(_EXTERNAL_URL)
+    elif _EXTERNAL_URL.startswith("sqlite"):
+        os.environ["DATABASE_URL"] = _isolated_sqlite_url(_EXTERNAL_URL)
     else:
-        # 显式指定的其它方言（如某人显式传了 sqlite URL）原样使用。
-        os.environ["DATABASE_URL"] = _EXTERNAL_URL
+        raise RuntimeError("测试仅支持 PostgreSQL 或 SQLite 隔离 URL")
 else:
     os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TMP_ROOT / 'test.db'}"
 os.environ["JWT_SECRET"] = "test-only-secret-not-for-production"
@@ -181,12 +201,9 @@ TEST_DB_DIALECT = engine.dialect.name
 async def _schema():
     """会话级迁移一次，所有测试都验证真实 Alembic schema。
 
-    PG 可能是独占新库或复用库；后者先清掉残留，再显式迁移。SQLite 使用
-    全新临时文件，直接执行同一条 upgrade/check 链路。
+    PG 使用本进程独占的新库，SQLite 使用本会话临时文件；两者都不存在
+    需要清空的给定库。
     """
-    if TEST_DB_DIALECT != "sqlite":
-        async with engine.begin() as conn:
-            await conn.run_sync(lambda c: Base.metadata.drop_all(c))
     await prepare_database(engine)
     yield
     async with engine.begin() as conn:

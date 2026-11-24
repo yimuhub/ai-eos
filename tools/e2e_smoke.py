@@ -416,7 +416,8 @@ def run(keep: bool, verbose: bool) -> int:
     })
 
     migration = subprocess.run(
-        [str(VENV_PY), "-m", "app.db.migrations", "upgrade"],
+        [str(VENV_PY), "-m", "app.db.migrations", "upgrade",
+         "--url", database_url],
         cwd=str(API_DIR), env=env, capture_output=True, text=True, timeout=180)
     if migration.returncode:
         details = redact_url(migration.stdout + migration.stderr)

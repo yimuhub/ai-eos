@@ -9,7 +9,7 @@ from app.db.base import Base
 
 
 def _now():
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(timezone.utc)
 
 
 class ExpertInterview(Base):

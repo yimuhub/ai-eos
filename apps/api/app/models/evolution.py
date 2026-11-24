@@ -25,11 +25,12 @@
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import (JSON, Boolean, DateTime, Float, ForeignKey, Index,
+from sqlalchemy import (JSON, Boolean, Float, ForeignKey, Index,
                         Integer, String, Text, UniqueConstraint)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
+from app.db.types import CalendarDateTime
 from .base import TimestampMixin
 
 
@@ -94,9 +95,9 @@ class EvolutionRecord(TimestampMixin, Base):
     # 2026-11-01 / 2026-W44 / 2026-11
     period_key: Mapped[str] = mapped_column(String(20))
     period_start: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False)
+        CalendarDateTime(), nullable=False)
     period_end: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False)
+        CalendarDateTime(), nullable=False)
     status: Mapped[str] = mapped_column(
         String(20), default=EvolutionStatus.APPLIED.value, index=True)
 

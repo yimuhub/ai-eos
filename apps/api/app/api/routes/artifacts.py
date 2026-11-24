@@ -1,22 +1,24 @@
 """Artifact Collaboration API (P2-09): Draft -> Review -> Approve."""
 import asyncio
-import io
 import json
+import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from sqlalchemy import delete, func, select, update
+from pydantic import BaseModel, Field
+from sqlalchemy import LargeBinary, delete, func, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.background import BackgroundTask
 
 from app.api.deps import (assert_company_capability, assert_company_owned,
                           get_current_user, get_db)
 from app.core.logging_config import get_logger
 from app.core.permissions import Capability
+from app.core.timeutil import iso_utc
 from app.models.artifact import (Artifact, ArtifactStatus, ArtifactVersion,
                                  can_transition)
 from app.models.deliverable import DeliverableComment
@@ -45,12 +47,15 @@ from app.schemas.responses_ops import (
 
 router = APIRouter(prefix="/artifacts", tags=["artifacts"])
 logger = get_logger(__name__)
+MAX_ARTIFACT_CONTENT_CHARS = 1_000_000
+MAX_ARTIFACT_ZIP_VERSIONS = 200
+MAX_ARTIFACT_ZIP_CONTENT_BYTES = 100 * 1024 * 1024
 
 
 class ArtifactCreate(BaseModel):
     name: str
     artifact_type: str = "document"
-    content: str = ""
+    content: str = Field(default="", max_length=MAX_ARTIFACT_CONTENT_CHARS)
     project_id: str | None = None
     # B2：交付物可以挂到某个任务下，收件箱/交付单由此把"任务完成"与
     # "成果被验收"串成同一条链路。
@@ -66,7 +71,7 @@ class CommentIn(BaseModel):
 
 
 class VersionSubmit(BaseModel):
-    content: str
+    content: str = Field(max_length=MAX_ARTIFACT_CONTENT_CHARS)
     change_note: str | None = None
     submitted_by_agent_id: str | None = None
 
@@ -783,11 +788,14 @@ async def artifact_sop(
     versions = (await db.execute(
         select(ArtifactVersion).where(ArtifactVersion.artifact_id == art.id)
         .order_by(ArtifactVersion.version.desc()).limit(3))).scalars().all()
-    v = versions[0] if versions else None
-    reviews = [ver for ver in (await db.execute(
-        select(ArtifactVersion).where(ArtifactVersion.artifact_id == art.id)
+    v = next(iter(versions), None)
+    reviews = (await db.execute(
+        select(ArtifactVersion).where(
+            ArtifactVersion.artifact_id == art.id,
+            ArtifactVersion.review_comment.is_not(None),
+            ArtifactVersion.review_comment != "")
         .order_by(ArtifactVersion.version.desc()).limit(10)
-    )).scalars().all() if ver.review_comment]
+    )).scalars().all()
 
     lines = [
         f"# 交接单：{art.name}",
@@ -804,35 +812,33 @@ async def artifact_sop(
     ]
     for ver in versions:
         lines.append(f"- **v{ver.version}**：{ver.change_note or '（无说明）'}"
-                     f"（{ver.created_at.isoformat(timespec='seconds') if ver.created_at else '?'}）")
+                     f"（{iso_utc(ver.created_at)[:19]}）")
     lines += ["", "## 审阅记录（最近 10 条）"]
     if not reviews:
         lines.append("- 暂无")
     for r in reviews:
-        lines.append(f"- v{r.version} {r.status.value if r.status else ''}：{(r.review_comment or '')[:80]}"
+        lines.append(f"- v{r.version} {r.status.value}：{(r.review_comment or '')[:80]}"
                      f"（审阅人 {r.reviewed_by}）")
     lines += [
         "",
         "## 建议下一步",
     ]
-    if art.status.value == "DRAFT":
-        lines.append("1. 完善内容后提交审阅（POST /artifacts/{id}/submit）")
-    elif art.status.value == "IN_REVIEW":
-        lines.append("1. 等待/推进审阅决策（POST /artifacts/{id}/review）")
-    elif art.status.value == "APPROVED":
-        lines.append("1. 可发布（POST /artifacts/{id}/publish）并通知下游")
-    else:
-        lines.append("1. 按审阅意见修订后重新提交")
+    next_step = {
+        "DRAFT": "完善内容后提交审阅（POST /artifacts/{id}/submit）",
+        "IN_REVIEW": "等待/推进审阅决策（POST /artifacts/{id}/review）",
+        "APPROVED": "可发布（POST /artifacts/{id}/publish）并通知下游",
+    }.get(art.status.value, "按审阅意见修订后重新提交")
+    lines.append(f"1. {next_step}")
 
     return {"artifact_id": art.id, "title": art.name,
             "markdown": "\n".join(lines), "versions": len(versions)}
 
 
 def _build_artifact_zip(
+    buf,
     artifact_id: str, name: str, artifact_type: str, status: str,
     current_version: int, versions: list[tuple[int, str]],
-) -> bytes:
-    buf = io.BytesIO()
+) -> None:
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for version, content in versions:
             zf.writestr(f"v{version}.txt", content)
@@ -841,7 +847,6 @@ def _build_artifact_zip(
             "status": status, "current_version": current_version,
             "versions": len(versions),
         }, ensure_ascii=False, indent=2))
-    return buf.getvalue()
 
 
 # 无 response_model：StreamingResponse 的 zip 二进制（实测 content-type
@@ -854,16 +859,37 @@ async def download_artifact_zip(
 ):
     """打包下载：全部版本内容（vN.txt）+ meta.json，zip 流式返回。"""
     art = await _owned_artifact(artifact_id, db, user)
-    vq = await db.execute(select(ArtifactVersion).where(
-        ArtifactVersion.artifact_id == artifact_id).order_by(
-        ArtifactVersion.version.asc()))
-    versions = vq.scalars().all()
+    content_size = (func.length(ArtifactVersion.content.cast(LargeBinary))
+                    if db.get_bind().dialect.name == "sqlite"
+                    else func.octet_length(ArtifactVersion.content))
+    count, content_bytes = (await db.execute(select(
+        func.count(), func.coalesce(func.sum(content_size), 0)
+    ).where(ArtifactVersion.artifact_id == artifact_id))).one()
+    if count > MAX_ARTIFACT_ZIP_VERSIONS or content_bytes > MAX_ARTIFACT_ZIP_CONTENT_BYTES:
+        raise HTTPException(413, "成果版本过多或累计正文过大，无法打包下载")
+    vq = await db.execute(select(
+        ArtifactVersion.version, ArtifactVersion.content
+    ).where(ArtifactVersion.artifact_id == artifact_id).order_by(
+        ArtifactVersion.version.asc()).limit(MAX_ARTIFACT_ZIP_VERSIONS + 1))
+    versions = vq.all()
+    if (len(versions) > MAX_ARTIFACT_ZIP_VERSIONS
+            or sum(len((content or "").encode("utf-8")) for _, content in versions)
+            > MAX_ARTIFACT_ZIP_CONTENT_BYTES):
+        raise HTTPException(413, "成果版本过多或累计正文过大，无法打包下载")
 
-    payload = await asyncio.to_thread(
-        _build_artifact_zip, art.id, art.name, art.artifact_type,
-        art.status.value, art.current_version,
-        [(v.version, v.content or "") for v in versions])
+    payload = tempfile.SpooledTemporaryFile(max_size=1024 * 1024, mode="w+b")
+    try:
+        await asyncio.to_thread(
+            _build_artifact_zip, payload, art.id, art.name, art.artifact_type,
+            art.status.value, art.current_version, versions)
+        payload.seek(0)
+    except Exception:
+        payload.close()
+        raise
+
     return StreamingResponse(
-        io.BytesIO(payload), media_type="application/zip",
+        iter(lambda: payload.read(64 * 1024), b""),
+        media_type="application/zip",
+        background=BackgroundTask(payload.close),
         headers={"Content-Disposition":
                  f'attachment; filename="artifact-{artifact_id}.zip"'})

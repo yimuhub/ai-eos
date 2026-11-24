@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import assert_company_capability, get_current_user, get_db
 from app.core.permissions import Capability
+from app.core.timeutil import iso_utc
 from app.models.interview import ExpertInterview
 from app.models.user import User
 from app.services import interview_service
@@ -171,7 +172,7 @@ async def list_interviews(company_id: str = Query(...),
         "interviewee": r.interviewee, "status": r.status,
         "digest": r.digest, "error": r.error,
         "transcript_head": (r.transcript or "")[:120],
-        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "created_at": iso_utc(r.created_at),
     } for r in rows]}
 
 
