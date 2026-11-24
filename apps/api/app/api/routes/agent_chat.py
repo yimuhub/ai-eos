@@ -12,12 +12,12 @@ import json
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
@@ -503,13 +503,110 @@ async def _build_qa_messages(db: AsyncSession, a: Agent, text: str,
     return messages
 
 
-async def _try_short_intents(db: AsyncSession, a: Agent, user_id: str,
-                             text: str) -> dict | None:
-    """不需要 LLM 的两条短路径：本机操作、安排任务。
+ORGANIZE_PREVIEW_TTL_SECONDS = 10 * 60
 
-    返回 ``{"reply", "actions", "meta"}``；不匹配返回 None（走问答）。
-    普通与流式入口共用，避免两套意图识别各自漂移。
+
+def _is_organize_confirmation(text: str) -> bool:
+    """只接受简短、明确的整理确认；不接受带路径或业务对象的句子。"""
+    t = re.sub(r"[\s，,。.!！?？]+", "", text.strip().lower())
+    return bool(re.fullmatch(
+        r"(?:(?:好的|可以|行))?(?:请)?(?:确认|确定|执行|开始)(?:整理|移动)?(?:吧)?",
+        t) or re.fullmatch(r"整理吧", t))
+
+
+async def _pending_organize_preview(db: AsyncSession, a: Agent, user_id: str,
+                                    thread: CeoThread | None,
+                                    current_message_id: str | None):
+    """读取紧邻上一轮 Agent 回复中的持久化预览，并做身份/时效校验。
+
+    预览状态放在 AgentChatMessage.meta，不新增模型或迁移；只有紧邻的下一轮
+    可以确认，避免历史里的旧预览在无关对话后被重新执行。
     """
+    q = select(AgentChatMessage).where(
+        AgentChatMessage.agent_id == str(a.id),
+        AgentChatMessage.company_id == str(a.company_id))
+    q = q.where(AgentChatMessage.thread_id == (str(thread.id) if thread else None))
+    rows = (await db.execute(q.order_by(
+        AgentChatMessage.created_at.desc(), AgentChatMessage.id.desc()).limit(8)
+    )).scalars().all()
+    if not rows:
+        return None, None
+
+    if current_message_id:
+        idx = next((i for i, row in enumerate(rows) if row.id == current_message_id),
+                   None)
+        if idx is None or idx + 1 >= len(rows):
+            return None, None
+        previous = rows[idx + 1]
+    else:
+        # 便于内部调用/测试；当前消息已落库时 rows[0] 是 boss，否则取最新回复。
+        previous = rows[1] if rows[0].role == "boss" and len(rows) > 1 else rows[0]
+    if previous.role != "agent" or not isinstance(previous.meta, dict):
+        return None, None
+    record = previous.meta.get("organize_preview")
+    if not isinstance(record, dict) or record.get("status") != "pending":
+        return None, None
+    if (record.get("company_id") != str(a.company_id)
+            or record.get("agent_id") != str(a.id)
+            or record.get("user_id") != str(user_id)
+            or record.get("thread_id") != (str(thread.id) if thread else None)):
+        return None, None
+    try:
+        expires_at = datetime.fromisoformat(str(record.get("expires_at") or ""))
+    except ValueError:
+        return None, None
+    if expires_at <= _now():
+        return None, None
+    if not all(isinstance(record.get(k), str) and record.get(k)
+               for k in ("preview_token", "path", "preview_hash")):
+        return None, None
+    return previous, record
+
+
+async def _try_short_intents(db: AsyncSession, a: Agent, user_id: str,
+                             text: str, *, thread: CeoThread | None = None,
+                             current_message_id: str | None = None) -> dict | None:
+    """不需要 LLM 的短路径：安排任务、本机预览、第二轮整理确认。
+
+    业务任务意图必须先于电脑意图判断，否则「安排任务：整理桌面文件」会被
+    误当成主机文件操作。返回 ``{"reply", "actions", "meta"}``；不匹配走问答。
+    """
+    create_task_intent = any(kw in text for kw in
+                             ("安排任务", "下达任务", "去干", "去做", "办一件事",
+                              "执行一个任务", "安排一下", "负责处理"))
+    if create_task_intent:
+        # 找消息里提到的其他 Agent 名（排除自己）
+        target_agent = None
+        others = (await db.execute(select(Agent).where(
+            Agent.company_id == a.company_id))).scalars().all()
+        for o in others:
+            if o.id == a.id:
+                continue
+            # 名称全匹配 或 老板用称呼片段（如"文案"匹配"文案写手"）
+            name_hit = o.name in text
+            role_hit = bool(o.role) and len(o.role) >= 2 and o.role in text
+            prefix_hit = len(o.name) >= 2 and o.name[:2] in text
+            if name_hit or role_hit or prefix_hit:
+                target_agent = o
+                break
+
+        from app.models.task import Task as TaskModel, TaskStatus
+        title = text[:80]
+        assignee = target_agent or a
+        t = TaskModel(company_id=a.company_id, title=title,
+                      description=text, assigned_agent_id=assignee.id,
+                      created_by=str(user_id), status=TaskStatus.TODO)
+        db.add(t)
+        await db.flush()
+        task_created = {"task_id": str(t.id), "assignee": assignee.name}
+        reply_text = (
+            f"✅ 已收到工作安排，我已创建任务《{title[:50]}》"
+            + (f"并指派给「{target_agent.name}」执行。" if target_agent
+               else "，稍后开始执行。"))
+        return {"reply": reply_text,
+                "actions": [{"type": "create_task", **task_created}],
+                "meta": {"action": "create_task", **task_created}}
+
     from app.nl_computer import detect_intent
     nl_intent = detect_intent(text)
     if nl_intent:
@@ -523,47 +620,69 @@ async def _try_short_intents(db: AsyncSession, a: Agent, user_id: str,
             if len(detail) >= 8:
                 lines.append("…")
             reply_text += "\n" + "\n".join(lines)
+        meta = {"action": nl_intent["action"]}
+        if result.get("status") == "preview":
+            now = _now()
+            meta["organize_preview"] = {
+                "status": "pending",
+                "preview_token": result["preview_token"],
+                "company_id": str(a.company_id), "agent_id": str(a.id),
+                "user_id": str(user_id),
+                "thread_id": str(thread.id) if thread else None,
+                "path": result["path"], "preview_hash": result["preview_hash"],
+                "preview": detail or [], "created_at": now.isoformat(),
+                "expires_at": (now + timedelta(
+                    seconds=ORGANIZE_PREVIEW_TTL_SECONDS)).isoformat(),
+            }
         return {"reply": reply_text,
                 "actions": [{"type": "nl_action", **nl_intent, "result": result}],
-                "meta": {"action": nl_intent["action"]}}
+                "meta": meta}
 
-    create_task_intent = any(kw in text for kw in
-                             ("安排任务", "下达任务", "去干", "去做", "办一件事",
-                              "执行一个任务", "安排一下", "负责处理"))
-    if not create_task_intent:
+    if not _is_organize_confirmation(text):
         return None
+    previous, record = await _pending_organize_preview(
+        db, a, user_id, thread, current_message_id)
+    if not previous or not record:
+        return {"reply": "没有可确认的整理预览。请先明确指定要整理的目录，"
+                         "我会先给你预览，不会移动文件。",
+                "actions": [{"type": "nl_action", "action": "organize_folder",
+                             "result": {"ok": False, "denied": True,
+                                        "error": "没有待确认预览"}}],
+                "meta": {"action": "organize_folder_confirm", "confirmed": False}}
 
-    # 找消息里提到的其他 Agent 名（排除自己）
-    target_agent = None
-    others = (await db.execute(select(Agent).where(
-        Agent.company_id == a.company_id))).scalars().all()
-    for o in others:
-        if o.id == a.id:
-            continue
-        # 名称全匹配 或 老板用称呼片段（如"文案"匹配"文案写手"）
-        name_hit = o.name in text
-        role_hit = bool(o.role) and len(o.role) >= 2 and o.role in text
-        prefix_hit = len(o.name) >= 2 and o.name[:2] in text
-        if name_hit or role_hit or prefix_hit:
-            target_agent = o
-            break
+    # 先持久化一次性消费，再触碰文件系统。即使执行失败或回复写入失败，
+    # 同一预览也不会被第二次「确认」重复执行。
+    record["status"] = "consumed"
+    record["consumed_at"] = _now().isoformat()
+    meta = {**(previous.meta or {}), "organize_preview": record}
+    claimed = await db.execute(update(AgentChatMessage).where(
+        AgentChatMessage.id == previous.id,
+        AgentChatMessage.meta["organize_preview"]["status"].as_string() == "pending",
+        AgentChatMessage.meta["organize_preview"]["preview_token"].as_string()
+        == record["preview_token"],
+    ).values(meta=meta).returning(AgentChatMessage.id)
+        .execution_options(synchronize_session=False))
+    if claimed.scalar_one_or_none() is None:
+        return {"reply": "整理预览已被处理或失效，请先重新获取预览。",
+                "actions": [{"type": "nl_action", "action": "organize_folder_confirm",
+                             "result": {"ok": False, "denied": True,
+                                        "error": "整理预览已失效"}}],
+                "meta": {"action": "organize_folder_confirm", "confirmed": False}}
+    await db.commit()
 
-    from app.models.task import Task as TaskModel, TaskStatus
-    title = text[:80]
-    assignee = target_agent or a
-    t = TaskModel(company_id=a.company_id, title=title,
-                  description=text, assigned_agent_id=assignee.id,
-                  created_by=str(user_id), status=TaskStatus.TODO)
-    db.add(t)
-    await db.flush()
-    task_created = {"task_id": str(t.id), "assignee": assignee.name}
-    reply_text = (
-        f"✅ 已收到工作安排，我已创建任务《{title[:50]}》"
-        + (f"并指派给「{target_agent.name}」执行。" if target_agent
-           else "，稍后开始执行。"))
+    from app.nl_computer import execute_organize_preview
+    result = await execute_organize_preview(
+        record["path"], preview_token=record["preview_token"],
+        expected_preview_hash=record["preview_hash"],
+        expected_path=record["path"], company_id=str(a.company_id),
+        agent_id=str(a.id))
+    reply_text = f"{result.get('message') or result.get('error') or '整理失败'}"
     return {"reply": reply_text,
-            "actions": [{"type": "create_task", **task_created}],
-            "meta": {"action": "create_task", **task_created}}
+            "actions": [{"type": "nl_action", "action": "organize_folder_confirm",
+                         "result": result}],
+            "meta": {"action": "organize_folder_confirm",
+                     "confirmed": bool(result.get("ok")),
+                     "confirmed_preview_token": record["preview_token"]}}
 
 
 async def _materialize_docs(db: AsyncSession, a: Agent, raw_reply: str):
@@ -739,10 +858,12 @@ async def boss_chat(aid: str, data: ChatIn,
     # 证据链：本轮 web_search 命中的来源，随回复一起落库并回传前端
     citations: list[dict] = []
 
-    await _save_msg(db, a, "boss", text, thread=thread)
+    boss_msg = await _save_msg(db, a, "boss", text, thread=thread)
 
-    # 本机操作 / 安排任务：不需要 LLM，两步可秒回
-    short = await _try_short_intents(db, a, str(user.id), text)
+    # 安排任务 / 本机预览 / 第二轮确认：不需要 LLM，两步可秒回
+    short = await _try_short_intents(
+        db, a, str(user.id), text, thread=thread,
+        current_message_id=boss_msg.id)
     if short:
         await _save_msg(db, a, "agent", short["reply"], short["meta"],
                         thread=thread)
@@ -775,8 +896,6 @@ async def boss_chat(aid: str, data: ChatIn,
             r"<tool_call>\s*<function=\w+>\s*.*?</function>\s*</tool_call>",
             "", final_reply, flags=re.S).strip()
     if tool_calls:
-        from app.skill_system import execute_skill
-
         # 与流式入口同理：web_fetch 用独立会话写审计日志，先把本会话的
         # 待提交写入（含刚产生的用量记录）落盘，避免 SQLite 写锁互等。
         await db.commit()
@@ -815,7 +934,7 @@ async def boss_chat(aid: str, data: ChatIn,
                     _merge_citations(citations, result_data)
             except Exception as e:
                 tool_results.append({"tool_call_id": tc.get("id"), "role": "tool",
-                                     "tool_call_id": tc.get("id"), "content": f"error: {e}"})
+                                     "content": f"error: {e}"})
         messages.append({"role": "assistant", "content": final_reply,
                          "tool_calls": tool_calls})
         for tr in tool_results:
@@ -856,6 +975,7 @@ async def boss_chat(aid: str, data: ChatIn,
             if s_calls and not s_struct:
                 stripped = re.sub(r"<tool_call>\s*<function=\w+>\s*.*?</function>\s*</tool_call>",
                                   "", second_reply, flags=re.S).strip()
+                second_reply = stripped
                 for tc in s_calls:
                     try:
                         args2 = json.loads(tc["function"]["arguments"])
@@ -910,7 +1030,6 @@ async def boss_chat(aid: str, data: ChatIn,
                         "只保留关键事实、决定和承诺，不要客套话。只输出要点。"},
                     {"role": "user", "content": recent_txt},
                 ])
-                from app.memory_engine import MemoryType, remember
                 await remember(db, str(a.id), str(a.company_id),
                                MemoryType.EPISODIC,
                                (digest.get("content") or "").strip()[:300],
@@ -1088,7 +1207,8 @@ def _process_meta(state: dict, started_at: float) -> dict:
 async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
                        thread_id: str | None = None,
                        attachments: list[ChatAttachment] | None = None,
-                       requested_model_id: str | None = None):
+                       requested_model_id: str | None = None,
+                       current_message_id: str | None = None):
     """SSE 生成器。
 
     自建 session：请求级依赖的回收时机与长连接无关，
@@ -1173,7 +1293,9 @@ async def _chat_stream(agent_id: str, company_id: str, user_id: str, text: str,
             short = None
             if not attachments:
                 yield status_frame("正在理解你的意图…", "intent")
-                short = await _try_short_intents(db, a, user_id, text)
+                short = await _try_short_intents(
+                    db, a, user_id, text, thread=thread,
+                    current_message_id=current_message_id)
             if short:
                 for act in short.get("actions") or []:
                     if act.get("type") == "create_task":
@@ -1383,7 +1505,7 @@ async def boss_chat_stream(aid: str, data: ChatStreamIn,
     attachments = await resolve_attachments(
         db, str(a.company_id), [x.model_dump() for x in data.attachments])
     # 先落老板这句：即使后面模型挂了，历史里也留有他的指令与附件名
-    await _save_msg(
+    boss_msg = await _save_msg(
         db, a, "boss", text,
         meta={"attachments": [x.meta() for x in attachments]}
         if attachments else None,
@@ -1394,7 +1516,8 @@ async def boss_chat_stream(aid: str, data: ChatStreamIn,
         _chat_stream(str(a.id), str(a.company_id), str(user.id), text,
                      str(thread.id) if thread is not None else None,
                      attachments=attachments,
-                     requested_model_id=requested_model),
+                     requested_model_id=requested_model,
+                     current_message_id=boss_msg.id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1438,7 +1561,7 @@ async def chat_generate_doc(aid: str, data: GenDocIn,
                   "ppt": "PPT 演示文稿", "md": "Markdown 文档"}
     tname = type_names.get(data.doc_type.lower())
     if not tname:
-        raise HTTPException(400, f"doc_type 必须是 word/excel/ppt/md")
+        raise HTTPException(400, "doc_type 必须是 word/excel/ppt/md")
 
     # ---- 先建立消息骨架，再注入风格提示 ----
     #
@@ -1524,7 +1647,6 @@ async def chat_generate_doc(aid: str, data: GenDocIn,
 
     # 登记 Asset（归属该 Agent）
     from app.models.asset import Asset, AssetType
-    import mimetypes as _mt
     asset = Asset(
         company_id=a.company_id, name=data.title + spec_ext(data.doc_type),
         type=AssetType.OTHER, path=result["file_path"],

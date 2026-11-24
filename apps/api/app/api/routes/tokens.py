@@ -8,8 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import (assert_company_capability, assert_company_owned,
-                          get_current_user, get_db)
+from app.api.deps import assert_company_capability, get_current_user, get_db
 from app.core.logging_config import get_logger
 from app.core.permissions import Capability
 from app.core.scope import accessible_company_ids, build_ctx
@@ -410,13 +409,16 @@ async def stats_by_department(company_id: str = Query(...), days: int = Query(30
 
 
 @router.get("/stats/by-company", response_model=list[UsageGroupOut])
-async def stats_by_company(days: int = Query(30),
+async def stats_by_company(company_id: str = Query(None), days: int = Query(30),
                            db: AsyncSession = Depends(get_db),
                            user: User = Depends(get_current_user)):
-    """(c) 公司维度。"""
-    # 不传 company_id 时按调用者可访问的公司聚合，且仍按角色收窄行级可见性
-    cids = (await db.execute(_accessible_company_ids(user.id))).scalars().all()
-    scopes = [_usage_scope(await build_ctx(db, user, cid)) for cid in cids]
+    """(c) 公司维度；显式公司内仍按调用者角色收窄用量。"""
+    if company_id:
+        ctx = await build_ctx(db, user, company_id)
+        scopes = [_usage_scope(ctx)]
+    else:
+        cids = (await db.execute(_accessible_company_ids(user.id))).scalars().all()
+        scopes = [_usage_scope(await build_ctx(db, user, cid)) for cid in cids]
     rows = await _group_stats(
         db, TokenUsage.company_id,
         [or_(*scopes) if scopes else TokenUsage.company_id.in_([]),

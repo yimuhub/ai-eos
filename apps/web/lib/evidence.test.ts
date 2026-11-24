@@ -34,6 +34,41 @@ describe("summarizeGates", () => {
     expect(s.rounds).toBe(2);
   });
 
+  it("gate_round=1 就是第一次返工，首检从 0 开始", () => {
+    const s = summarizeGates([
+      gate({ passed: false, gate_round: 0 }),
+      gate({ passed: true, gate_round: 1 }),
+    ]);
+    expect(s.failedNodes).toEqual([]);
+    expect(s.reworked).toEqual(["a"]);
+    expect(s.rounds).toBe(2);
+  });
+
+  it("乱序证据按 attempt 再按 gate_round 取最终值，轮次跨 attempt 不合并", () => {
+    const rows = [
+      gate({ node_key: "b", attempt: 1, gate_round: 2, passed: true }),
+      gate({ node_key: "a", attempt: 1, gate_round: 1, passed: false }),
+      gate({ node_key: "b", attempt: 2, gate_round: 0, passed: false }),
+      gate({ node_key: "a", attempt: 2, gate_round: 0, passed: true }),
+      gate({ node_key: "a", attempt: 1, gate_round: 0, passed: false }),
+    ];
+    const expected = {
+      rounds: 5, failedNodes: ["b"], degraded: 0,
+      reworked: ["a", "b"], configured: true,
+    };
+    expect(summarizeGates(rows)).toEqual(expected);
+    expect(summarizeGates([...rows].reverse())).toEqual(expected);
+  });
+
+  it("同一有效轮次的冲突证据失败优先，且不受输入顺序影响", () => {
+    const rows = [
+      gate({ attempt: 2, gate_round: 1, passed: true }),
+      gate({ attempt: 2, gate_round: 1, passed: false }),
+    ];
+    expect(summarizeGates(rows)).toEqual(summarizeGates([...rows].reverse()));
+    expect(summarizeGates(rows).failedNodes).toEqual(["a"]);
+  });
+
   it("两个节点各自独立判定，降级单列", () => {
     const s = summarizeGates([
       gate({ node_key: "a", passed: true }),
@@ -42,6 +77,22 @@ describe("summarizeGates", () => {
     ]);
     expect(s.failedNodes).toEqual(["b"]);
     expect(s.degraded).toBe(1);
+  });
+
+  it("降级 headline 只计有效最终闸门，不计已被返工清除的历史轮次", () => {
+    const rows = [
+      gate({ node_key: "a", attempt: 1, gate_round: 0, degraded: true, passed: false }),
+      gate({ node_key: "a", attempt: 1, gate_round: 1, degraded: false, passed: true }),
+      gate({ node_key: "b", attempt: 1, gate_round: 0, degraded: true, passed: false }),
+      gate({ node_key: "b", attempt: 1, gate_round: 1, degraded: true, passed: true }),
+      gate({ node_key: "c", attempt: 1, gate_round: 0, degraded: false, passed: true }),
+      gate({ node_key: "c", attempt: 2, gate_round: 0, degraded: true, passed: false }),
+    ];
+    expect(summarizeGates(rows)).toEqual({
+      rounds: 6, failedNodes: ["c"], degraded: 2,
+      reworked: ["a", "b"], configured: true,
+    });
+    expect(summarizeGates([...rows].reverse()).degraded).toBe(2);
   });
 });
 

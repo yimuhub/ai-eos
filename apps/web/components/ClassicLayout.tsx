@@ -6,8 +6,9 @@
 // 导航数据仍来自 `lib/nav.ts`（侧边栏与 ⌘K 共用同一份定义）。
 
 import Link from "next/link";
+import { flushSync } from "react-dom";
 import { usePathname, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { clearToken } from "@/lib/api";
 import { notify } from "@/components/Toast";
 import { ALL_PAGES_ENTRY, SIDEBAR_GROUPS, isNavActive } from "@/lib/nav";
@@ -22,6 +23,8 @@ function groupHasActive(pathname: string, items: { href: string }[]): boolean {
   return items.some((it) => isNavActive(pathname, it.href));
 }
 
+const DRAWER_FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+
 export default function ClassicLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -30,6 +33,64 @@ export default function ClassicLayout({ children }: { children: React.ReactNode 
   //   null = 从未手动折过 → 只展开当前所在分组（避免一屏铺满 30+ 项）
   //   对象 = 用户已表达过偏好 → 按他的来，但当前分组始终展开
   const [collapsed, setCollapsed] = useState<Record<string, boolean> | null>(null);
+  const [navOpen, setNavOpen] = useState(false);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLElement>(null);
+  const skipFocusReturn = useRef(false);
+
+  const closeNav = useCallback(() => setNavOpen(false), []);
+  // 弹窗与导航抽屉不能叠加：先卸载抽屉及其捕获期键盘监听，再打开弹窗。
+  // 跳过抽屉的焦点归还，避免弹窗打开后焦点又被拉回导航按钮。
+  const openFromNav = useCallback((open: () => void) => {
+    if (navOpen) {
+      skipFocusReturn.current = true;
+      flushSync(() => closeNav());
+    }
+    open();
+  }, [closeNav, navOpen]);
+
+  useEffect(() => {
+    if (!navOpen) return;
+    const returnTarget = menuButtonRef.current;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeButtonRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeNav();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const nodes = Array.from(drawerRef.current?.querySelectorAll<HTMLElement>(DRAWER_FOCUSABLE) || []);
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      if (!first) { e.preventDefault(); return; }
+      if (e.shiftKey && (document.activeElement === first || !drawerRef.current?.contains(document.activeElement))) {
+        e.preventDefault(); last.focus();
+      } else if (!e.shiftKey && (document.activeElement === last || !drawerRef.current?.contains(document.activeElement))) {
+        e.preventDefault(); first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+      document.body.style.overflow = previousOverflow;
+      if (!skipFocusReturn.current) returnTarget?.focus();
+      skipFocusReturn.current = false;
+    };
+  }, [navOpen, closeNav]);
+
+  useEffect(() => { closeNav(); }, [pathname, closeNav]);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const onChange = () => { if (mq.matches) closeNav(); };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [closeNav]);
 
   useEffect(() => {
     try {
@@ -82,13 +143,38 @@ export default function ClassicLayout({ children }: { children: React.ReactNode 
   const allCollapsed = collapsed !== null && SIDEBAR_GROUPS.every((g) => collapsed[g.title]);
 
   return (
-    <div className="flex h-full text-gray-100">
-      {/* ---------- 固定左侧菜单 ---------- */}
+    <div className="flex flex-col lg:flex-row h-full min-w-0 text-gray-100">
+      {/* 小屏顶栏：经典侧栏在 <1024px 变成抽屉 */}
+      <header className="lg:hidden shrink-0 h-14 px-3 flex items-center gap-3 border-b"
+        style={{ borderColor: "var(--border)", background: "var(--surface)" }}>
+        <button ref={menuButtonRef} type="button" onClick={() => setNavOpen(true)}
+          aria-label="打开导航菜单" aria-expanded={navOpen} aria-controls="classic-navigation"
+          className="min-h-11 min-w-11 px-3 rounded-lg flex items-center justify-center hover:bg-white/[0.06]"
+          style={{ color: "var(--muted)", border: "1px solid var(--border)" }}>
+          <span aria-hidden>☰</span><span className="ml-2 text-sm">导航</span>
+        </button>
+        <span className="font-semibold">AI-EOS</span>
+        {pathname !== "/workspace" && <NotificationBell align="left" className="ml-auto" />}
+      </header>
+
+      {navOpen && (
+        <div className="lg:hidden fixed inset-0 z-40 bg-black/60" onClick={closeNav} aria-hidden />
+      )}
+      {/* ---------- 固定左侧菜单 / 小屏抽屉 ---------- */}
       <aside
-        className="w-60 h-full flex flex-col shrink-0 border-r"
-        style={{ borderColor: "var(--border)", background: "rgba(10,10,16,0.85)", backdropFilter: "blur(8px)" }}
+        ref={drawerRef}
+        id="classic-navigation"
+        role={navOpen ? "dialog" : undefined}
+        aria-modal={navOpen ? true : undefined}
+        aria-label={navOpen ? "主导航" : undefined}
+        className={`${navOpen ? "flex" : "hidden"} lg:flex w-60 max-w-[86vw] h-full flex-col shrink-0 border-r ${navOpen ? "fixed inset-y-0 left-0 z-50 shadow-2xl" : ""}`}
+        style={{ borderColor: "var(--border)", background: "rgba(10,10,16,0.98)", backdropFilter: "blur(8px)" }}
       >
-        <div className="px-5 pt-5 pb-3">
+        <button ref={closeButtonRef} type="button" onClick={closeNav}
+          aria-label="关闭导航菜单"
+          className="lg:hidden absolute top-2 right-2 min-h-11 min-w-11 rounded-lg text-lg hover:bg-white/[0.06]"
+          style={{ color: "var(--muted)" }}>✕</button>
+        <div className="px-5 pt-5 pb-3 pr-14">
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-xl flex items-center justify-center text-white font-bold shrink-0"
               style={{ background: "linear-gradient(135deg,#6366f1,#22d3ee)" }}>
@@ -110,9 +196,9 @@ export default function ClassicLayout({ children }: { children: React.ReactNode 
         <div className="px-3 pb-2">
           <button
             type="button"
-            onClick={openCommandPalette}
+            onClick={() => openFromNav(openCommandPalette)}
             aria-label="搜索页面或操作"
-            className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition-colors hover:bg-white/[0.05]"
+            className="w-full min-h-11 flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs transition-colors hover:bg-white/[0.05]"
             style={{ border: "1px solid var(--border)", color: "var(--muted)" }}
           >
             <span aria-hidden>🔍</span>
@@ -126,7 +212,7 @@ export default function ClassicLayout({ children }: { children: React.ReactNode 
           <button
             type="button"
             onClick={() => setAll(!allCollapsed)}
-            className="text-[9px] transition-colors hover:text-gray-300"
+            className="min-h-11 px-2 text-[9px] transition-colors hover:text-gray-300"
             style={{ color: "#55555f" }}
           >
             {allCollapsed ? "全部展开" : "全部收起"}
@@ -144,7 +230,7 @@ export default function ClassicLayout({ children }: { children: React.ReactNode 
                   onClick={() => toggleGroup(group.title)}
                   aria-expanded={!isCollapsed}
                   title={group.hint}
-                  className="w-full flex items-center justify-between px-2 mb-1.5"
+                  className="w-full min-h-11 flex items-center justify-between px-2 mb-1.5"
                 >
                   <span className="text-[10px] font-semibold tracking-widest uppercase"
                     style={{ color: active ? "#8b8bff" : "#55555f" }}>
@@ -165,7 +251,7 @@ export default function ClassicLayout({ children }: { children: React.ReactNode 
                           href={item.href}
                           title={item.desc}
                           aria-current={on ? "page" : undefined}
-                          className={`relative flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm transition-colors duration-150 ${
+                          className={`relative min-h-11 flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm transition-colors duration-150 ${
                             on ? "text-white font-medium" : "hover:text-gray-200 hover:bg-white/[0.04]"
                           }`}
                           style={on ? { background: "linear-gradient(90deg, rgba(99,102,241,0.18), rgba(99,102,241,0.05))" } : { color: "var(--muted)" }}
@@ -188,10 +274,10 @@ export default function ClassicLayout({ children }: { children: React.ReactNode 
           {/* 隐藏页面仍然可达：打开命令面板的「全部页面」，按分组浏览或直接搜索 */}
           <button
             type="button"
-            onClick={openAllPages}
+            onClick={() => openFromNav(openAllPages)}
             title={ALL_PAGES_ENTRY.desc}
             aria-label={`${ALL_PAGES_ENTRY.label}：${ALL_PAGES_ENTRY.desc}`}
-            className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm transition-colors duration-150 hover:text-gray-200 hover:bg-white/[0.04]"
+            className="w-full min-h-11 flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm transition-colors duration-150 hover:text-gray-200 hover:bg-white/[0.04]"
             style={{ color: "var(--muted)", border: "1px dashed var(--border)" }}
           >
             <span className="text-sm shrink-0 opacity-70" aria-hidden>{ALL_PAGES_ENTRY.icon}</span>
@@ -203,15 +289,15 @@ export default function ClassicLayout({ children }: { children: React.ReactNode 
         <div className="px-3 pb-3 pt-2 space-y-2" style={{ borderTop: "1px solid var(--border)" }}>
           <button
             type="button"
-            onClick={openModeChooser}
+            onClick={() => openFromNav(openModeChooser)}
             title="切换界面模式"
-            className="w-full flex items-center justify-between px-3 py-2 text-xs rounded-lg transition-colors hover:bg-white/[0.05]"
+            className="w-full min-h-11 flex items-center justify-between px-3 py-2 text-xs rounded-lg transition-colors hover:bg-white/[0.05]"
             style={{ color: "var(--muted)", border: "1px solid var(--border)" }}
           >
             <span>⇄ 界面模式</span>
             <span className="text-[10px]">经典</span>
           </button>
-          <button onClick={logout} className="w-full px-3 py-2 text-xs rounded-lg transition-colors hover:text-red-400"
+          <button type="button" onClick={logout} className="w-full min-h-11 px-3 py-2 text-xs rounded-lg transition-colors hover:text-red-400"
             style={{ color: "var(--muted)", border: "1px solid var(--border)" }}>
             退出登录
           </button>

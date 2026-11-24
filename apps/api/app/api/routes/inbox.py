@@ -7,18 +7,19 @@
 分桶口径（对齐老板的工作视角）：
 * in_progress        正在推进：PLANNING / RUNNING / WAITING / PAUSED / REVIEW
 * awaiting_acceptance 已完成，但最新成果还在等验收（IN_REVIEW/APPROVED 且未 accepted）
-* completed          已完成且不需要验收
+* needs_rework       最新成果被驳回，等待重新提交（任务执行状态仍是 COMPLETED）
+* completed          已完成且不需要验收或返工
 * failed             FAILED（CANCELLED 是用户主动放弃，不进失败桶）
 """
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import and_, select
+from sqlalchemy import and_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.scope import CompanyCtx, build_ctx
 from app.db.session import get_db
 from app.models.agent import Agent
-from app.models.artifact import Artifact, ArtifactStatus
+from app.models.artifact import Artifact, ArtifactStatus, ArtifactVersion
 from app.models.task import Task, TaskStatus
 from app.schemas.responses import InboxOut
 
@@ -40,8 +41,9 @@ def _scope(ctx: CompanyCtx):
     return and_(base, Task.created_by == ctx.user_id)
 
 
-def _item(row, artifacts: dict, names: dict) -> dict:
+def _item(row, artifacts: dict, names: dict, reviews: dict) -> dict:
     art = artifacts.get(row.id)
+    review = reviews.get(art.id, {}) if art else {}
     return {
         "id": row.id,
         "task_id": row.id,
@@ -53,6 +55,8 @@ def _item(row, artifacts: dict, names: dict) -> dict:
         "artifact_id": art.id if art else None,
         "artifact_status": (art.status.value
                             if art and hasattr(art.status, "value") else None),
+        "current_version": art.current_version if art else None,
+        "review_comment": review.get("review_comment"),
     }
 
 
@@ -87,23 +91,44 @@ async def task_inbox(company_id: str = Query(...),
         task_ids = [r.id for r in completed]
         arts = (await db.execute(
             select(Artifact.id, Artifact.task_id, Artifact.status,
-                   Artifact.accepted_at, Artifact.created_at)
+                   Artifact.accepted_at, Artifact.current_version, Artifact.created_at)
             .where(Artifact.task_id.in_(task_ids))
             .order_by(Artifact.created_at.desc(), Artifact.id.desc()))).all()
         for art in arts:
             artifacts.setdefault(art.task_id, art)
 
-    awaiting, done = [], []
+    # 当前版本的审核意见随最新成果一起返回，避免返工入口再发一次请求。
+    reviews: dict = {}
+    if artifacts:
+        artifact_versions = [
+            (art.id, art.current_version) for art in artifacts.values()
+            if art.current_version is not None
+        ]
+        if artifact_versions:
+            version_rows = (await db.execute(select(
+                ArtifactVersion.artifact_id, ArtifactVersion.version,
+                ArtifactVersion.review_comment).where(
+                tuple_(ArtifactVersion.artifact_id, ArtifactVersion.version).in_(
+                    artifact_versions)))).all()
+            reviews = {r.artifact_id: {"review_comment": r.review_comment}
+                       for r in version_rows}
+
+    awaiting, needs_rework, done = [], [], []
     for row in completed:
         art = artifacts.get(row.id)
-        if (art is not None and art.status in ACCEPTANCE_STATUSES
-                and art.accepted_at is None):
+        if art is not None and art.status == ArtifactStatus.REJECTED:
+            # 执行完成与成果返工是两个维度：任务保持 COMPLETED，仅派生此桶。
+            needs_rework.append(row)
+        elif (art is not None and art.status in ACCEPTANCE_STATUSES
+              and art.accepted_at is None):
             awaiting.append(row)
         else:
             done.append(row)
 
+    # 待返工是必须逐项处理的队列，不能像普通展示桶一样截断；其它桶保留
+    # BUCKET_LIMIT 控制首屏体积。
     selected = (in_progress[:BUCKET_LIMIT] + awaiting[:BUCKET_LIMIT]
-                + done[:BUCKET_LIMIT] + failed[:BUCKET_LIMIT])
+                + needs_rework + done[:BUCKET_LIMIT] + failed[:BUCKET_LIMIT])
     agent_ids = {r.assigned_agent_id for r in selected if r.assigned_agent_id}
     names: dict = {}
     if agent_ids:
@@ -115,11 +140,18 @@ async def task_inbox(company_id: str = Query(...),
         "counts": {
             "in_progress": len(in_progress),
             "awaiting_acceptance": len(awaiting),
+            "needs_rework": len(needs_rework),
             "completed": len(done),
             "failed": len(failed),
         },
-        "in_progress": [_item(r, artifacts, names) for r in in_progress[:BUCKET_LIMIT]],
-        "awaiting_acceptance": [_item(r, artifacts, names) for r in awaiting[:BUCKET_LIMIT]],
-        "completed": [_item(r, artifacts, names) for r in done[:BUCKET_LIMIT]],
-        "failed": [_item(r, artifacts, names) for r in failed[:BUCKET_LIMIT]],
+        "in_progress": [_item(r, artifacts, names, reviews)
+                        for r in in_progress[:BUCKET_LIMIT]],
+        "awaiting_acceptance": [_item(r, artifacts, names, reviews)
+                               for r in awaiting[:BUCKET_LIMIT]],
+        "needs_rework": [_item(r, artifacts, names, reviews)
+                         for r in needs_rework],
+        "completed": [_item(r, artifacts, names, reviews)
+                      for r in done[:BUCKET_LIMIT]],
+        "failed": [_item(r, artifacts, names, reviews)
+                   for r in failed[:BUCKET_LIMIT]],
     }

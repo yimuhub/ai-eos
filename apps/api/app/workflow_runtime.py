@@ -39,6 +39,7 @@ WORKFLOW_LEASE_S = 10 * 60
 # 输入指纹；指纹没变就复用上一版产出。WAIT/APPROVAL 这类零成本节点不进此列。
 _SIGNED_TYPES = {NodeType.AGENT, NodeType.HTTP, NodeType.TOOL,
                  NodeType.TRANSFORM, NodeType.SUB_WORKFLOW, NodeType.CONDITION}
+_MISSING_TEMPLATE_VALUE = object()
 
 
 def utcnow_iso() -> str:
@@ -170,7 +171,6 @@ class WorkflowRuntime:
         原有调用方不传（None）时行为与本版之前完全一致。
         """
         from app.agent_runtime import run_agent_on_task
-        from app.background_jobs import _make_session_factory
         from app.models.agent import Agent
 
         cfg = node.config or {}
@@ -373,11 +373,11 @@ class WorkflowRuntime:
 
         if node.node_type == NodeType.HTTP:
             return await self._apply_gate(
-                node, await self._exec_http_node(node), ctx, step)
+                node, await self._exec_http_node(node, ctx), ctx, step)
 
         if node.node_type == NodeType.TOOL:
             return await self._apply_gate(
-                node, await self._exec_tool_node(node), ctx, step)
+                node, await self._exec_tool_node(node, ctx), ctx, step)
 
         if node.node_type == NodeType.TRANSFORM:
             return await self._apply_gate(
@@ -427,7 +427,7 @@ class WorkflowRuntime:
         # （与 P0-6 同一条纪律；节点产出与任务状态此前已落库）。
         await self.db.commit()
 
-        await enforce(
+        outcome = await enforce(
             self.db,
             execution_id=self.exec.id,
             node=node,
@@ -438,7 +438,9 @@ class WorkflowRuntime:
             company_id=company_id,
             rework=_rework if agent is not None else None,
         )
-        return output or {}
+        # enforce 的 output 是闸门完成后的有效版本（可能是返工任务）。
+        # 若继续返回首版，step/执行汇总/报告和下游 ctx 都会引用已被替换的旧稿。
+        return outcome.output or {}
 
     # ---------------- 基座三节点（V6 M1-e） ----------------
 
@@ -446,7 +448,46 @@ class WorkflowRuntime:
         wf = await self.db.get(WorkflowDefinition, self.exec.workflow_id)
         return wf.company_id if wf else self.exec_input_company()
 
-    async def _exec_http_node(self, node: WorkflowNode) -> dict:
+    def _render_config_value(self, value, aliases: dict[str, str], ctx: dict):
+        import re as _re
+
+        if isinstance(value, dict):
+            return {k: self._render_config_value(v, aliases, ctx)
+                    for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._render_config_value(v, aliases, ctx) for v in value]
+        if not isinstance(value, str):
+            return value
+
+        whole = _re.fullmatch(r"\{\{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}\}", value)
+        if whole:
+            resolved = self._template_lookup(whole.group(1), aliases, ctx)
+            if resolved is _MISSING_TEMPLATE_VALUE:
+                raise RuntimeError(f"节点模板引用无法解析：{value}")
+            return resolved
+
+        rendered = self._render_instruction(value, aliases, ctx)
+        if _re.search(r"\{\{\s*[A-Za-z_][A-Za-z0-9_.]*\s*\}\}", rendered):
+            raise RuntimeError("节点模板包含无法解析的引用")
+        return rendered
+
+    def _template_lookup(self, ref: str, aliases: dict[str, str], ctx: dict):
+        root, *rest = ref.split(".")
+        if root == "input":
+            current = self.exec.input_data or {}
+        else:
+            current = ctx.get(aliases.get(root, root), _MISSING_TEMPLATE_VALUE)
+        for segment in rest:
+            if isinstance(current, dict) and segment in current:
+                current = current[segment]
+            elif isinstance(current, list) and segment.isdigit() \
+                    and int(segment) < len(current):
+                current = current[int(segment)]
+            else:
+                return _MISSING_TEMPLATE_VALUE
+        return current
+
+    async def _exec_http_node(self, node: WorkflowNode, ctx: dict) -> dict:
         """HTTP 节点：直调外部 API。
 
         安全：endpoint 走工具总线同款公网闸门（回环放行、私网/元数据拒绝）；
@@ -458,7 +499,11 @@ class WorkflowRuntime:
         from app.core.http_client import http_client
         from app.toolbus.dispatch import _assert_public_http_url
 
-        cfg = node.config or {}
+        raw_cfg = node.config or {}
+        cfg = dict(raw_cfg)
+        for key in ("url", "method", "headers", "body"):
+            if key in raw_cfg:
+                cfg[key] = self._render_config_value(raw_cfg[key], {}, ctx)
         url = str(cfg.get("url") or "").strip()
         if not url:
             raise RuntimeError("HTTP 节点缺少 url")
@@ -508,7 +553,7 @@ class WorkflowRuntime:
                            exc_info=True)
         return out
 
-    async def _exec_tool_node(self, node: WorkflowNode) -> dict:
+    async def _exec_tool_node(self, node: WorkflowNode, ctx: dict) -> dict:
         """TOOL 节点：调工具总线（web/电脑/公司登记的动态工具）。
 
         电脑工具会经过 approval_gate——审批被 hold 时本节点产出
@@ -516,7 +561,11 @@ class WorkflowRuntime:
         """
         from app.toolbus import execute_bus_tool, get_tool
 
-        cfg = node.config or {}
+        raw_cfg = node.config or {}
+        cfg = dict(raw_cfg)
+        for key in ("tool_name", "arguments"):
+            if key in raw_cfg:
+                cfg[key] = self._render_config_value(raw_cfg[key], {}, ctx)
         tool_name = str(cfg.get("tool_name") or "").strip()
         if not tool_name:
             raise RuntimeError("TOOL 节点缺少 tool_name")

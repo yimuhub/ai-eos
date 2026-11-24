@@ -7,6 +7,7 @@ import {
   dispatchStatusLabel,
   formatHeartbeat,
   formatLocalStamp,
+  parseUtcIso,
   remoteDeviceName,
   type RemoteDevice,
 } from "./remoteDevices";
@@ -83,20 +84,38 @@ describe("formatHeartbeat", () => {
   });
 });
 
-// 审计行原来是 created_at.slice(5,16)：把后端那串 naive UTC 直接当本地时间贴出来，
-// 老板看到的「10:07」和他墙上的钟差一整屏。断言只关心「切出来的不是原始串」。
+// 审计时间固定按产品时区 Asia/Shanghai（UTC+8）显示，不随运行机器时区漂移。
 describe("formatLocalStamp", () => {
-  it("按本地时区换算，不是把 UTC 的时分贴上去", () => {
-    const text = formatLocalStamp("2026-11-03T09:59:40.123456");
-    const asLocal = new Date("2026-11-03T09:59:40.123456Z");
-    const pad = (n: number) => String(n).padStart(2, "0");
-    expect(text).toBe(`${pad(asLocal.getMonth() + 1)}-${pad(asLocal.getDate())} `
-      + `${pad(asLocal.getHours())}:${pad(asLocal.getMinutes())}`);
+  it("固定显示上海墙钟，不是把 UTC 的时分贴上去", () => {
+    expect(formatLocalStamp("2026-11-03T09:59:40.123456")).toBe("11-03 17:59");
+    expect(formatLocalStamp("2026-11-03T17:59:40+08:00")).toBe("11-03 17:59");
+    expect(formatLocalStamp("2026-11-03T23:30:00Z")).toBe("11-04 07:30");
   });
 
   it("缺时间与脏数据各给一句人话", () => {
     expect(formatLocalStamp(null)).toBe("—");
     expect(formatLocalStamp("not-a-date")).toBe("not-a-date");
+  });
+
+  // naive UTC 与显式 Z 必须表示同一时刻；输出不得依赖浏览器时区。
+  it("UTC 与 America/New_York 下都把 naive UTC 当作 Z，再格式化为上海时间", () => {
+    const previous = process.env.TZ;
+    try {
+      for (const zone of ["UTC", "America/New_York"]) {
+        process.env.TZ = zone;
+        expect(parseUtcIso("2026-11-03T09:59:40.123456"))
+          .toBe(Date.parse("2026-11-03T09:59:40.123456Z"));
+        expect(formatLocalStamp("2026-11-03T09:59:40")).toBe("11-03 17:59");
+        expect(formatLocalStamp("2026-11-03T09:59:40Z")).toBe("11-03 17:59");
+      }
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  });
+
+  it("一小时前的心跳回退到上海绝对时间", () => {
+    expect(formatHeartbeat("2026-11-03T09:00:00Z", NOW)).toBe("11-03 17:00");
   });
 });
 

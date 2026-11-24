@@ -44,32 +44,48 @@ export type GateSummary = {
   rounds: number;
   /** 最终没通过的节点数（按 node_key 去重，取其最后一轮） */
   failedNodes: string[];
-  /** 降级放行的节点数（评审不可用等原因） */
+  /** 最终仍降级的节点数（按有效最后一轮去重，历史返工不重复计数） */
   degraded: number;
-  /** 因闸门触发返工的节点数（同一节点出现 gate_round > 1） */
+  /** 因闸门触发返工的节点（gate_round=0 是首检，1 已是第一次返工） */
   reworked: string[];
   /** 唯一真实值为"没跑闸门"：空数组 */
   configured: boolean;
 };
 
-/** 闸门证据汇总。按 node_key 取最后一轮判定"最终是否通过"，
- *  避免"第一轮没过、返工后过了"被算成失败。 */
+function gatePosition(g: GateRecord): [number, number] {
+  return [g.attempt ?? 1, g.gate_round ?? 0];
+}
+
+/** 同一 attempt/round 的重复证据取失败优先，避免输入顺序改变结论。 */
+function isLaterGate(candidate: GateRecord, current: GateRecord): boolean {
+  const a = gatePosition(candidate);
+  const b = gatePosition(current);
+  if (a[0] !== b[0]) return a[0] > b[0];
+  if (a[1] !== b[1]) return a[1] > b[1];
+  if (candidate.passed !== current.passed) return !candidate.passed;
+  return JSON.stringify(candidate) > JSON.stringify(current);
+}
+
+/** 闸门证据汇总。按 node_key 取有效 attempt 的最后 gate_round，
+ *  避免"第一轮没过、返工后过了"被算成失败，也不依赖数据库返回顺序。 */
 export function summarizeGates(gates: GateRecord[] | null | undefined): GateSummary {
   const rows = gates ?? [];
   const lastByNode = new Map<string, GateRecord>();
-  let degraded = 0;
   const roundsSeen = new Set<string>();
   for (const g of rows) {
-    lastByNode.set(g.node_key, g);
-    if (g.degraded) degraded += 1;
-    roundsSeen.add(`${g.node_key}#${g.gate_round ?? 0}`);
+    const current = lastByNode.get(g.node_key);
+    if (!current || isLaterGate(g, current)) lastByNode.set(g.node_key, g);
+    const [attempt, round] = gatePosition(g);
+    roundsSeen.add(`${g.node_key}#${attempt}#${round}`);
   }
   const failedNodes = Array.from(lastByNode.values())
     .filter((g) => !g.passed)
-    .map((g) => g.node_key);
+    .map((g) => g.node_key)
+    .sort();
   const reworked = Array.from(lastByNode.keys()).filter((k) =>
-    rows.some((g) => g.node_key === k && (g.gate_round ?? 0) > 1),
-  );
+    rows.some((g) => g.node_key === k && gatePosition(g)[1] > 0),
+  ).sort();
+  const degraded = Array.from(lastByNode.values()).filter((g) => g.degraded).length;
   return {
     rounds: roundsSeen.size,
     failedNodes,

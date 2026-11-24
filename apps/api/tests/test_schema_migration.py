@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.db.migrations import ensure_columns
@@ -62,6 +63,63 @@ async def _columns(engine, table: str) -> set[str]:
     async with engine.connect() as conn:
         return await conn.run_sync(
             lambda c: {col["name"] for col in inspect(c).get_columns(table)})
+
+
+_ARTIFACT_VERSIONS_LEGACY_DDL = """
+CREATE TABLE artifact_versions (
+    id VARCHAR(36) PRIMARY KEY,
+    artifact_id VARCHAR(36) NOT NULL,
+    version INTEGER NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    change_note TEXT,
+    status VARCHAR(50) NOT NULL DEFAULT 'DRAFT',
+    submitted_by VARCHAR(36),
+    reviewed_by VARCHAR(36),
+    review_comment TEXT,
+    created_at DATETIME
+)
+"""
+
+
+async def test_artifact_version_unique_index_is_added_to_legacy_sqlite():
+    async with legacy_engine(_ARTIFACT_VERSIONS_LEGACY_DDL) as engine:
+        async with engine.begin() as conn:
+            await conn.execute(text(
+                "INSERT INTO artifact_versions (id, artifact_id, version) "
+                "VALUES ('v1', 'a1', 1)"))
+        assert await ensure_columns(engine) == []
+        assert await ensure_columns(engine) == []
+        async with engine.begin() as conn:
+            indexes = await conn.run_sync(
+                lambda c: inspect(c).get_indexes("artifact_versions"))
+            assert any(i["name"] == "uq_artifact_versions_artifact_id_version"
+                       and i["unique"] for i in indexes)
+            try:
+                await conn.execute(text(
+                    "INSERT INTO artifact_versions (id, artifact_id, version) "
+                    "VALUES ('v2', 'a1', 1)"))
+            except IntegrityError as exc:
+                assert "UNIQUE" in str(exc).upper()
+            else:
+                raise AssertionError("便携 SQLite 未建立版本唯一约束")
+
+
+async def test_artifact_version_duplicate_history_requires_explicit_repair():
+    async with legacy_engine(_ARTIFACT_VERSIONS_LEGACY_DDL) as engine:
+        async with engine.begin() as conn:
+            await conn.execute(text(
+                "INSERT INTO artifact_versions (id, artifact_id, version) VALUES "
+                "('v1', 'a1', 1), ('v2', 'a1', 1)"))
+        try:
+            await ensure_columns(engine)
+        except RuntimeError as exc:
+            assert "重复版本号" in str(exc) and "a1:v1(2)" in str(exc)
+        else:
+            raise AssertionError("不得静默删除或重编号不可变历史版本")
+        async with engine.connect() as conn:
+            assert (await conn.execute(text(
+                "SELECT COUNT(*) FROM artifact_versions WHERE artifact_id='a1'"
+            ))).scalar_one() == 2
 
 
 async def test_missing_nullable_column_is_added():

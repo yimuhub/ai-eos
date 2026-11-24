@@ -180,6 +180,9 @@ export function useResource<T>(
   fetcherRef.current = fetcher;
 
   const cached = key ? (cache.get(key)?.data as T | undefined) : undefined;
+  const keyRef = useRef(key);
+  const keyChanged = keyRef.current !== key;
+  keyRef.current = key;
   const [data, setData] = useState<T | null>(cached ?? null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(key ? cached === undefined : false);
@@ -242,6 +245,7 @@ export function useResource<T>(
       setLoading(false);
       if (Date.now() - entry.at > staleMs) void run(true, gen);
     } else {
+      setData(null);
       void run(false, gen);
     }
 
@@ -279,7 +283,13 @@ export function useResource<T>(
     [key],
   );
 
-  return { data, error, loading, refresh, mutate };
+  return {
+    data: keyChanged ? cached ?? null : data,
+    error: keyChanged ? null : error,
+    loading: keyChanged ? !!key && cached === undefined : loading,
+    refresh,
+    mutate,
+  };
 }
 
 /**

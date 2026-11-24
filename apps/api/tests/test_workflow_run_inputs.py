@@ -5,8 +5,9 @@ from sqlalchemy import func, select
 
 from app.db.session import AsyncSessionLocal
 from app.models.project import Project
-from app.models.workflow import WorkflowExecution
+from app.models.workflow import NodeType, WorkflowExecution, WorkflowNode
 from app.spec import errors, validate
+from app.workflow_runtime import WorkflowRuntime
 from tests.test_workflow_spec import make_spec
 
 
@@ -63,6 +64,7 @@ async def test_run_inputs_are_declared_validated_and_persisted(client, tenants):
     wid = saved.json()["id"]
     detail = await client.get(f"/workflows/{wid}", headers=alice["headers"])
     assert detail.status_code == 200
+    assert detail.json()["project_id"] == "project-a"
     assert [item["name"] for item in detail.json()["inputs"]] == [
         "subject", "round", "approved"]
 
@@ -96,6 +98,75 @@ async def test_run_inputs_are_declared_validated_and_persisted(client, tenants):
         ex = await db.get(WorkflowExecution, started.json()["execution_id"])
         assert ex.input_data == started.json()["inputs"]
         assert ex.project_id == "project-a"
+
+
+@pytest.mark.asyncio
+async def test_http_node_checks_rendered_url_before_request(monkeypatch):
+    from fastapi import HTTPException
+
+    checked = []
+
+    def reject_private(url):
+        checked.append(url)
+        raise HTTPException(400, "private url")
+
+    monkeypatch.setattr("app.toolbus.dispatch._assert_public_http_url", reject_private)
+    runtime = WorkflowRuntime(None, WorkflowExecution(
+        input_data={"url": "http://169.254.169.254/latest"}))
+    node = WorkflowNode(node_key="http", node_type=NodeType.HTTP, name="请求",
+                        config={"url": "{{input.url}}", "method": "GET"})
+    with pytest.raises(HTTPException, match="private url"):
+        await runtime._exec_http_node(node, {})
+    assert checked == ["http://169.254.169.254/latest"]
+
+
+@pytest.mark.asyncio
+async def test_tool_node_renders_typed_run_inputs(monkeypatch):
+    captured = {}
+
+    async def fake_execute(name, arguments, *, company_id, user_id):
+        captured.update(name=name, arguments=arguments,
+                        company_id=company_id, user_id=user_id)
+        return {"ok": True}
+
+    monkeypatch.setattr("app.toolbus.get_tool", lambda name: object())
+    monkeypatch.setattr("app.toolbus.execute_bus_tool", fake_execute)
+    runtime = WorkflowRuntime(None, WorkflowExecution(
+        started_by="user-a", input_data={
+            "query": "项目进度", "limit": 3, "strict": True,
+            "filters": {"status": "active"}, "nullable": None,
+        }))
+
+    async def company():
+        return "company-a"
+
+    runtime._resolve_company = company
+    node = WorkflowNode(node_key="search", node_type=NodeType.TOOL, name="检索",
+                        config={"tool_name": "web_search", "arguments": {
+                            "query": "{{input.query}}", "limit": "{{input.limit}}",
+                            "strict": "{{input.strict}}",
+                            "filters": "{{input.filters}}",
+                            "nullable": "{{input.nullable}}",
+                            "nested": ["{{input.query}}", {"n": "{{input.limit}}"}],
+                        }})
+    out = await runtime._exec_tool_node(node, {})
+    assert out == {"tool": "web_search", "result": {"ok": True}}
+    assert captured == {
+        "name": "web_search", "company_id": "company-a", "user_id": "user-a",
+        "arguments": {"query": "项目进度", "limit": 3, "strict": True,
+                      "filters": {"status": "active"}, "nullable": None,
+                      "nested": ["项目进度", {"n": 3}]},
+    }
+
+
+def test_config_rendering_rejects_unresolved_templates():
+    runtime = WorkflowRuntime(None, WorkflowExecution(input_data={}))
+    with pytest.raises(RuntimeError, match="无法解析"):
+        runtime._render_config_value({"query": "{{input.missing}}"}, {}, {})
+    runtime.exec.input_data = {"subject": "需求"}
+    assert runtime._render_config_value(
+        {"text": "评审{{input.subject}}", "n": "{{ upstream.n }}"},
+        {}, {"upstream": {"n": 2}}) == {"text": "评审需求", "n": 2}
 
 
 @pytest.mark.asyncio

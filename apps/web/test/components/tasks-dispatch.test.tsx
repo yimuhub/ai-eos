@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -10,6 +10,7 @@ const apiMock = vi.hoisted(() => ({
 }));
 const notifyMock = vi.hoisted(() => vi.fn());
 const pushMock = vi.hoisted(() => vi.fn());
+const companyMock = vi.hoisted(() => ({ cid: "co1" }));
 const resourceMock = vi.hoisted(() => ({
   data: null as unknown,
   refresh: vi.fn(async () => {}),
@@ -22,7 +23,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 vi.mock("@/lib/useResource", () => ({
-  useActiveCompanyId: () => "co1",
+  useActiveCompanyId: () => companyMock.cid,
   useResource: (key: string | null) => ({
     data: key ? resourceMock.data : null,
     error: null,
@@ -56,20 +57,42 @@ vi.mock("next/link", async () => {
 });
 
 const EMPTY_INBOX = {
-  counts: { in_progress: 0, awaiting_acceptance: 0, completed: 0, failed: 0 },
-  in_progress: [], awaiting_acceptance: [], completed: [], failed: [],
+  counts: { in_progress: 0, awaiting_acceptance: 0, needs_rework: 0, completed: 0, failed: 0 },
+  in_progress: [], awaiting_acceptance: [], needs_rework: [], completed: [], failed: [],
 };
 
 async function mountPage() {
   const { default: TasksPage } = await import("@/app/(main)/tasks/page");
-  render(<TasksPage />);
+  const result = render(<TasksPage />);
   await screen.findByRole("button", { name: "＋ 新建任务" });
+  return { rerender: () => result.rerender(<TasksPage />) };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
+function reworkInbox(title: string) {
+  return {
+    counts: { in_progress: 0, awaiting_acceptance: 0, needs_rework: 1, completed: 0, failed: 0 },
+    in_progress: [], awaiting_acceptance: [],
+    needs_rework: [{
+      id: title, task_id: title, title, status: "COMPLETED", agent_id: "ag1",
+      agent_name: "小甲", updated_at: new Date().toISOString(), artifact_id: `art-${title}`,
+      artifact_status: "REJECTED", current_version: 1, review_comment: "需要返工",
+    }],
+    completed: [], failed: [],
+  };
 }
 
 describe("任务派发链路", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    companyMock.cid = "co1";
     resourceMock.data = {
+      cid: "co1",
       tasks: [
         {
           id: "t1", title: "整理本周销售线索", status: "TODO", priority: "HIGH",
@@ -150,6 +173,72 @@ describe("任务派发链路", () => {
       expect(screen.getByText("❌ 没有可用的模型，任务未启动")).toBeTruthy();
     });
     expect(screen.queryByText("✅ 已启动")).toBeNull();
+  });
+
+  it("待返工：显示驳回版本与意见，并直达成果返工视图", async () => {
+    apiMock.get.mockImplementation(async (url: string) => {
+      if (url === "/tasks/inbox?company_id=co1") {
+        return {
+          counts: { in_progress: 0, awaiting_acceptance: 0, needs_rework: 1, completed: 0, failed: 0 },
+          in_progress: [], awaiting_acceptance: [],
+          needs_rework: [{
+            id: "t-rework", task_id: "t-rework", title: "重算季度数据",
+            status: "COMPLETED", agent_id: "ag1", agent_name: "小甲",
+            updated_at: new Date().toISOString(), artifact_id: "a-rework",
+            artifact_status: "REJECTED", current_version: 3,
+            review_comment: "数据口径不对，请按 GMV 重算",
+          }],
+          completed: [], failed: [],
+        };
+      }
+      throw new Error(`unexpected GET ${url}`);
+    });
+    const user = userEvent.setup();
+    await mountPage();
+
+    await user.click(await screen.findByRole("button", { name: /待返工/ }));
+    expect(await screen.findByText(/驳回版本 v3/)).toBeTruthy();
+    expect(screen.getByText(/数据口径不对，请按 GMV 重算/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "去返工 →" }));
+    expect(pushMock).toHaveBeenCalledWith("/artifacts?open=a-rework&rework=1");
+  });
+
+  it("切公司清空旧任务/收件箱，并忽略旧公司晚到响应", async () => {
+    const oldInitial = reworkInbox("旧公司待返工");
+    const lateOld = deferred<ReturnType<typeof reworkInbox>>();
+    const newInbox = deferred<ReturnType<typeof reworkInbox>>();
+    let oldRequests = 0;
+    apiMock.get.mockImplementation(async (url: string) => {
+      if (url === "/tasks/inbox?company_id=co1") {
+        oldRequests += 1;
+        return oldRequests === 1 ? oldInitial : lateOld.promise;
+      }
+      if (url === "/tasks/inbox?company_id=co2") return newInbox.promise;
+      throw new Error(`unexpected GET ${url}`);
+    });
+    const view = await mountPage();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /待返工/ }));
+    expect(await screen.findByText("旧公司待返工")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "↻ 刷新" }));
+    await waitFor(() => expect(oldRequests).toBe(2));
+
+    companyMock.cid = "co2";
+    resourceMock.data = {
+      cid: "co2",
+      tasks: [{ id: "t-new", title: "新公司任务", status: "TODO", priority: "NORMAL" }],
+      agents: [], deptGroups: [],
+    };
+    view.rerender();
+    expect(screen.queryByText("旧公司待返工")).toBeNull();
+    expect(screen.queryByText("整理本周销售线索")).toBeNull();
+
+    // 新请求不被 reset effect 误废；旧请求随后返回也不能覆盖新队列。
+    await act(async () => newInbox.resolve(reworkInbox("新公司待返工")));
+    expect(await screen.findByText("新公司待返工")).toBeTruthy();
+    await act(async () => lateOld.resolve(reworkInbox("旧公司迟到返回")));
+    expect(screen.queryByText("旧公司迟到返回")).toBeNull();
+    expect(screen.getByText("新公司待返工")).toBeTruthy();
   });
 
   it("完成态：把成功任务存为模板，提示里带模板名", async () => {

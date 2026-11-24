@@ -121,11 +121,14 @@ class InboxItemOut(BaseModel):
     updated_at: datetime
     artifact_id: str | None
     artifact_status: str | None
+    current_version: int | None
+    review_comment: str | None
 
 
 class InboxCountsOut(BaseModel):
     in_progress: int
     awaiting_acceptance: int
+    needs_rework: int
     completed: int
     failed: int
 
@@ -135,6 +138,7 @@ class InboxOut(BaseModel):
     counts: InboxCountsOut
     in_progress: list[InboxItemOut]
     awaiting_acceptance: list[InboxItemOut]
+    needs_rework: list[InboxItemOut]
     completed: list[InboxItemOut]
     failed: list[InboxItemOut]
 
@@ -185,7 +189,9 @@ class ArtifactAcceptOut(BaseModel):
 class ArtifactDeclineOut(BaseModel):
     id: str
     status: str
-    comment: str | None
+    comment: str
+    current_version: int
+    review_comment: str
 
 
 class ArtifactCommentOut(BaseModel):

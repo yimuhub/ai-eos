@@ -63,6 +63,8 @@ class GateOutcome:
     checks: list[Check]
     degraded: bool = False
     round: int = 0
+    # 闸门可能已经用返工产出替换了输入；调用方必须持久化/下发这份有效产出。
+    output: dict | None = None
 
 
 def resolve_gate(node) -> GateSpec | None:
@@ -214,7 +216,7 @@ async def enforce(
     """
     spec = resolve_gate(node)
     if spec is None:
-        return GateOutcome(enabled=False, passed=True, checks=[])
+        return GateOutcome(enabled=False, passed=True, checks=[], output=output)
 
     before_text: str | None = None
     token_cap_hit = False
@@ -274,12 +276,12 @@ async def enforce(
 
         if passed:
             return GateOutcome(enabled=True, passed=True, checks=checks,
-                               degraded=degraded, round=gate_round)
+                               degraded=degraded, round=gate_round, output=output)
 
         # 3) 不通过：observe 模式只留证、不阻断（上线观察期用）
         if spec.on_fail == "observe":
             return GateOutcome(enabled=True, passed=False, checks=checks,
-                               degraded=degraded, round=gate_round)
+                               degraded=degraded, round=gate_round, output=output)
 
         # 还能返工就返工，否则按 on_fail 处理
         can_rework = (gate_round < spec.max_rework and rework is not None

@@ -17,9 +17,12 @@ type Artifact = {
   id: string; name: string; type: string; status: string; version: number;
   accepted_at?: string | null;
 };
-type Version = { version: number; status: string; change_note?: string; content_preview?: string };
+type Version = {
+  version: number; status: string; change_note?: string; content_preview?: string;
+  review_comment?: string | null; reviewed_by?: string | null;
+};
 type Detail = {
-  id: string; name: string; status: string; versions: Version[];
+  id: string; name: string; status: string; current_version: number; versions: Version[];
   task_id?: string | null; accepted_at?: string | null; accepted_by?: string | null;
   comment_count?: number;
 };
@@ -80,6 +83,12 @@ export default function ArtifactsPage() {
     [data, cid],
   );
   const [detail, setDetail] = useState<Detail | null>(null);
+  const detailCompanyRef = useRef<string | null>(null);
+  const detailRequestRef = useRef(0);
+  const sopRequestRef = useRef(0);
+  const sopCompanyRef = useRef<string | null>(null);
+  const companyRef = useRef(cid);
+  companyRef.current = cid;
   const [name, setName] = useState("");
   const [content, setContent] = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -95,6 +104,14 @@ export default function ArtifactsPage() {
   const [declineOpen, setDeclineOpen] = useState(false);
   const [declineText, setDeclineText] = useState("");
   const [declineBusy, setDeclineBusy] = useState(false);
+  // 审核驳回必须留下非空意见；返工通过追加版本保留被驳回历史。
+  const [rejectTarget, setRejectTarget] = useState<string | null>(null);
+  const [rejectText, setRejectText] = useState("");
+  const [rejectBusy, setRejectBusy] = useState(false);
+  const [reworkOpen, setReworkOpen] = useState(false);
+  const [reworkContent, setReworkContent] = useState("");
+  const [reworkNote, setReworkNote] = useState("");
+  const [reworkBusy, setReworkBusy] = useState(false);
   // 当前登录用户（决定"删除自己的评论"按钮是否出现）
   const [meId, setMeId] = useState("");
   const openedFromUrl = useRef(false);
@@ -109,44 +126,93 @@ export default function ArtifactsPage() {
     return () => { alive = false; };
   }, []);
 
-  // 换公司时关掉旧公司的详情，避免继续看/操作上一家公司的成果
-  useEffect(() => { setDetail(null); }, [cid]);
+  // 换公司时关掉旧公司的详情和临时输入，并立即使在途详情/评论请求失效。
+  useEffect(() => {
+    detailRequestRef.current += 1;
+    sopRequestRef.current += 1;
+    detailCompanyRef.current = null;
+    sopCompanyRef.current = null;
+    setDetail(null);
+    setComments([]);
+    setCommentsLoading(false);
+    setSop(null);
+    setMsg("");
+    setShowCreate(false);
+    setName("");
+    setContent("");
+    setArtAttach([]);
+    setDeclineOpen(false);
+    setDeclineText("");
+    setDeclineBusy(false);
+    setCommentBusy(false);
+    setRejectTarget(null);
+    setRejectText("");
+    setRejectBusy(false);
+    setReworkOpen(false);
+    setReworkContent("");
+    setReworkNote("");
+    setReworkBusy(false);
+    setCommentText("");
+  }, [cid]);
 
   const reload = () => refresh();
 
   const loadComments = useCallback(async (aid: string) => {
+    const requestCid = companyRef.current;
+    if (!requestCid) return;
+    const request = ++detailRequestRef.current;
     setCommentsLoading(true);
     try {
       const rows = await api.get<DeliverableComment[]>(`/artifacts/${aid}/comments`);
+      if (companyRef.current !== requestCid || detailRequestRef.current !== request) return;
       setComments(Array.isArray(rows) ? rows : []);
     } catch (e) {
+      if (companyRef.current !== requestCid || detailRequestRef.current !== request) return;
       setComments([]);
       setMsg(`❌ ${describeError(e, "交付意见加载失败")}`);
+    } finally {
+      if (companyRef.current === requestCid && detailRequestRef.current === request) {
+        setCommentsLoading(false);
+      }
     }
-    setCommentsLoading(false);
   }, []);
 
-  const openDetail = useCallback(async (aid: string, opts?: { decline?: boolean }) => {
+  const openDetail = useCallback(async (
+    aid: string, opts?: { decline?: boolean; rework?: boolean },
+  ) => {
+    const requestCid = companyRef.current;
+    if (!requestCid) return;
+    const request = ++detailRequestRef.current;
     try {
       const d = await api.get<Detail>(`/artifacts/${aid}`);
+      if (companyRef.current !== requestCid || detailRequestRef.current !== request) return;
+      detailCompanyRef.current = requestCid;
       setDetail(d);
       setDeclineOpen(!!opts?.decline);
       setDeclineText("");
+      setReworkOpen(!!opts?.rework && (
+        d.status === "REJECTED" || d.versions.some((v) => v.status === "DRAFT")
+      ));
+      setReworkContent("");
+      setReworkNote("");
       setCommentText("");
+      // 评论使用同一代际：它返回时不能覆盖后来打开的其它成果。
       void loadComments(aid);
     } catch (e) {
+      if (companyRef.current !== requestCid || detailRequestRef.current !== request) return;
       setMsg(`❌ ${describeError(e, "成果详情加载失败")}`);
     }
   }, [loadComments]);
 
-  // 收件箱「去验收」/ 交付单直达：/artifacts?open=<artifact_id> 自动打开详情
+  // 收件箱「去验收 / 去返工」与交付单直达：自动打开对应详情视图。
   useEffect(() => {
-    if (openedFromUrl.current || typeof window === "undefined") return;
-    const aid = new URLSearchParams(window.location.search).get("open");
+    if (!cid || openedFromUrl.current || typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const aid = params.get("open");
     if (!aid) return;
     openedFromUrl.current = true;
-    void openDetail(aid);
-  }, [openDetail]);
+    void openDetail(aid, { rework: params.get("rework") === "1" });
+  }, [cid, openDetail]);
 
   const create = async () => {
     if (!name || !cid) return;
@@ -167,10 +233,72 @@ export default function ArtifactsPage() {
   };
 
   const review = async (aid: string, decision: string) => {
-    await api.post(`/artifacts/${aid}/review`, { decision, comment: "" });
-    setMsg(decision === "approve" ? "✅ 已批准" : "❌ 已驳回");
-    openDetail(aid);
-    reload();
+    if (decision === "reject") {
+      setRejectTarget(aid);
+      setRejectText("");
+      return;
+    }
+    try {
+      await api.post(`/artifacts/${aid}/review`, { decision, comment: "" });
+      setMsg("✅ 已批准");
+      await openDetail(aid);
+      reload();
+    } catch (e) {
+      setMsg(`❌ ${describeError(e, "审核失败")}`);
+    }
+  };
+
+  const submitReject = async () => {
+    if (!rejectTarget) return;
+    const comment = rejectText.trim();
+    if (comment.length < 1 || comment.length > 2000) {
+      setMsg("❌ 驳回意见需为 1-2000 字");
+      return;
+    }
+    setRejectBusy(true);
+    try {
+      await api.post(`/artifacts/${rejectTarget}/review`, {
+        decision: "reject", comment,
+      });
+      setRejectTarget(null);
+      setRejectText("");
+      setMsg("❌ 已驳回，等待返工后重新提交");
+      if (detail?.id === rejectTarget) await openDetail(rejectTarget);
+      reload();
+    } catch (e) {
+      setMsg(`❌ ${describeError(e, "驳回失败")}`);
+    }
+    setRejectBusy(false);
+  };
+
+  const saveReworkVersion = async () => {
+    if (!detail || !reworkContent.trim()) return;
+    setReworkBusy(true);
+    try {
+      await api.post(`/artifacts/${detail.id}/versions`, {
+        content: reworkContent.trim(), change_note: reworkNote.trim() || "返工版本",
+      });
+      setMsg("✅ 返工内容已保存为新版本，被驳回版本仍保留在历史中");
+      await openDetail(detail.id, { rework: true });
+      reload();
+    } catch (e) {
+      setMsg(`❌ ${describeError(e, "返工版本保存失败")}`);
+    }
+    setReworkBusy(false);
+  };
+
+  const submitReworkReview = async () => {
+    if (!detail) return;
+    setReworkBusy(true);
+    try {
+      await api.post(`/artifacts/${detail.id}/submit`);
+      setMsg("✅ 返工版本已提交审核");
+      await openDetail(detail.id);
+      reload();
+    } catch (e) {
+      setMsg(`❌ ${describeError(e, "返工提交失败")}`);
+    }
+    setReworkBusy(false);
   };
 
   // B2 验收：老板确认收到交付物（幂等）
@@ -262,15 +390,28 @@ export default function ArtifactsPage() {
   // V5.6.1 ④ SOP 交接单：结构化 Markdown 交接文档（不靠聊天记录）
   const [sop, setSop] = useState<{ artifact_id: string; title: string; markdown: string } | null>(null);
   const showSop = async (aid: string) => {
+    const requestCid = companyRef.current;
+    if (!requestCid) return;
+    const request = ++sopRequestRef.current;
     try {
       const r = await api.get<{ artifact_id: string; title: string; markdown: string }>(
-        `/artifacts/${aid}/sop?company_id=${cid}`);
+        `/artifacts/${aid}/sop?company_id=${requestCid}`);
+      if (companyRef.current !== requestCid || sopRequestRef.current !== request) return;
+      sopCompanyRef.current = requestCid;
       setSop(r);
-    } catch (e: any) { setMsg(`❌ ${e.message || "交接单生成失败"}`); }
+    } catch (e: any) {
+      if (companyRef.current !== requestCid || sopRequestRef.current !== request) return;
+      setMsg(`❌ ${e.message || "交接单生成失败"}`);
+    }
   };
 
   const canAccept = (a: { status: string; accepted_at?: string | null }) =>
     a.status === "APPROVED" && !a.accepted_at;
+  const currentVersionNumber = detail?.current_version ?? detail?.versions[0]?.version ?? 0;
+  const rejectedVersion = detail?.versions.find(
+    (v) => v.version === currentVersionNumber && v.status === "REJECTED",
+  ) ?? detail?.versions.find((v) => v.status === "REJECTED");
+  const hasDraftVersion = detail?.versions[0]?.status === "DRAFT";
 
   return (
     <div className="p-6 max-w-[1400px] mx-auto animate-fade-up">
@@ -354,6 +495,12 @@ export default function ArtifactsPage() {
                       className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-700 hover:bg-red-600 text-white transition-colors">✕ 驳回</button>
                   </>
                 )}
+                {a.status === "REJECTED" && (
+                  <button onClick={() => openDetail(a.id, { rework: true })}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-700 hover:bg-red-600 text-white transition-colors">
+                    ↩ 开始返工
+                  </button>
+                )}
                 {a.status === "APPROVED" && (
                   <>
                     {canAccept(a) ? (
@@ -396,7 +543,7 @@ export default function ArtifactsPage() {
       )}
 
       {/* 版本历史 / 验收 / 交付意见弹窗 */}
-      {mounted && detail && createPortal(
+      {mounted && detail && detailCompanyRef.current === cid && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center px-4 overflow-y-auto py-8"
           style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)" }}
           onClick={() => setDetail(null)}>
@@ -421,6 +568,57 @@ export default function ArtifactsPage() {
                 <button onClick={() => setDetail(null)} className="btn-ghost !px-2 !py-0.5 text-xs">✕</button>
               </div>
             </div>
+
+            {/* F09：驳回意见 + 不可变返工版本入口 */}
+            {detail.status === "REJECTED" && (
+              <div className="rounded-xl p-3 space-y-3"
+                style={{ background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.25)" }}>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-semibold text-red-200">需要返工</span>
+                  <span className="text-[11px]" style={{ color: "var(--muted)" }}>
+                    驳回版本 v{rejectedVersion?.version ?? currentVersionNumber}
+                  </span>
+                  {!reworkOpen && (
+                    <button onClick={() => setReworkOpen(true)}
+                      className="ml-auto px-2.5 py-1 rounded-lg text-[11px] font-medium bg-red-700 hover:bg-red-600 text-white">
+                      ↩ 开始返工
+                    </button>
+                  )}
+                </div>
+                <p className="text-xs whitespace-pre-wrap break-words text-red-100">
+                  驳回意见：{rejectedVersion?.review_comment || "未填写，请查看交付意见"}
+                </p>
+                {reworkOpen && (
+                  <div className="space-y-2">
+                    <p className="text-[11px]" style={{ color: "var(--muted)" }}>
+                      保存会追加新版本，不会覆盖被驳回的内容或审核记录。
+                    </p>
+                    <textarea id="artifact-rework-content" autoFocus rows={6} value={reworkContent}
+                      onChange={(e) => setReworkContent(e.target.value)}
+                      placeholder="填写返工后的完整内容…"
+                      className="input resize-none text-xs w-full" />
+                    <input value={reworkNote} onChange={(e) => setReworkNote(e.target.value)}
+                      placeholder="返工说明（可选）" className="input text-xs w-full" />
+                    <div className="flex items-center justify-end gap-2 flex-wrap">
+                      <button onClick={() => setReworkOpen(false)}
+                        className="px-3 py-1 rounded-lg text-[11px] hover:bg-white/[0.06]"
+                        style={{ border: "1px solid var(--border)" }}>收起</button>
+                      {hasDraftVersion && (
+                        <button onClick={submitReworkReview} disabled={reworkBusy}
+                          className="px-3 py-1 rounded-lg text-[11px] font-medium bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-40">
+                          {reworkBusy ? "提交中…" : "提交当前草稿审核"}
+                        </button>
+                      )}
+                      <button onClick={saveReworkVersion}
+                        disabled={!reworkContent.trim() || reworkBusy}
+                        className="px-3 py-1 rounded-lg text-[11px] font-medium bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-40">
+                        {reworkBusy ? "保存中…" : "保存返工版本"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* B2 验收区 */}
             <div className="rounded-xl p-3 space-y-2"
@@ -488,6 +686,11 @@ export default function ArtifactsPage() {
                       {v.content_preview}
                     </pre>
                   )}
+                  {v.review_comment && (
+                    <p className="text-xs whitespace-pre-wrap break-words text-red-200">
+                      审核意见：{v.review_comment}
+                    </p>
+                  )}
                 </div>
               ))}
             </div>
@@ -545,8 +748,41 @@ export default function ArtifactsPage() {
         </div>, document.body
       )}
 
+      {/* 审核驳回：意见必填，与后端拒绝规则一致 */}
+      {mounted && rejectTarget && createPortal(
+        <div className="fixed inset-0 z-[60] flex items-center justify-center px-4"
+          style={{ background: "rgba(0,0,0,0.65)", backdropFilter: "blur(6px)" }}
+          onClick={() => !rejectBusy && setRejectTarget(null)}>
+          <div className="w-full max-w-md rounded-2xl p-5 space-y-3"
+            style={{ background: "linear-gradient(180deg,#21151b,#141015)", border: "1px solid rgba(239,68,68,0.35)" }}
+            onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-bold text-base text-red-200">驳回成果</h3>
+            <p className="text-xs" style={{ color: "var(--muted)" }}>
+              请写清需要返工的原因（1-2000 字），该意见会保留在被驳回版本中。
+            </p>
+            <textarea autoFocus rows={4} maxLength={2000} value={rejectText}
+              onChange={(e) => setRejectText(e.target.value)}
+              placeholder="驳回意见：哪里不对、期望改成什么样…"
+              className="input resize-none text-xs w-full" />
+            <div className="flex items-center justify-end gap-2">
+              <span className="mr-auto text-[10px] tabular-nums" style={{ color: "var(--muted)" }}>
+                {rejectText.trim().length}/2000
+              </span>
+              <button onClick={() => setRejectTarget(null)} disabled={rejectBusy}
+                className="px-3 py-1 rounded-lg text-[11px] hover:bg-white/[0.06]"
+                style={{ border: "1px solid var(--border)" }}>取消</button>
+              <button onClick={submitReject}
+                disabled={!rejectText.trim() || rejectBusy}
+                className="px-3 py-1 rounded-lg text-[11px] font-medium bg-red-700 hover:bg-red-600 text-white disabled:opacity-40">
+                {rejectBusy ? "提交中…" : "确认驳回"}
+              </button>
+            </div>
+          </div>
+        </div>, document.body
+      )}
+
       {/* V5.6.1 ④ SOP 交接单弹窗 */}
-      {mounted && sop && createPortal(
+      {mounted && sop && sopCompanyRef.current === cid && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center px-4 overflow-y-auto py-8"
           style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)" }}
           onClick={() => setSop(null)}>

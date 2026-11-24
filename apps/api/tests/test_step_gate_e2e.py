@@ -150,6 +150,7 @@ async def test_rework_runs_once_and_records_both_rounds(client, make_user, make_
         await db.commit()
 
     assert out.passed and out.round == 1
+    assert out.output == {"output": GOOD}
     assert len(prompts) == 1
     # 返工指令必须是"在原稿上改"，并带上具体未过项
     assert "上一版产出" in prompts[0] and "不要重写" in prompts[0]
@@ -224,16 +225,40 @@ async def test_execution_completes_when_rework_fixes_it(client, make_user,
     ctx = await _build(client, make_user, make_company, GATE)
 
     async def fake_agent(self, node, ctx_dict, gate_feedback=None):
-        return {"output": GOOD if gate_feedback else BAD}
+        return {"task_id": "reworked-task" if gate_feedback else "original-task",
+                "output": GOOD if gate_feedback else BAD}
 
     monkeypatch.setattr(WorkflowRuntime, "_exec_agent_node", fake_agent)
 
     async with AsyncSessionLocal() as db:
+        # 下游 TRANSFORM 直接引用 a.output，必须拿到返工后的完整稿。
+        await db.execute(WorkflowEdge.__table__.delete().where(
+            WorkflowEdge.workflow_id == ctx.workflow.id,
+            WorkflowEdge.from_node == "a", WorkflowEdge.to_node == "end"))
+        db.add_all([
+            WorkflowNode(workflow_id=ctx.workflow.id, node_key="b",
+                         node_type=NodeType.TRANSFORM, name="传递返工产出",
+                         config={"set": {"result": "{{a.output}}"}}),
+            WorkflowEdge(workflow_id=ctx.workflow.id, from_node="a", to_node="b"),
+            WorkflowEdge(workflow_id=ctx.workflow.id, from_node="b", to_node="end"),
+        ])
+        await db.commit()
         ex = await advance_execution(db, ctx.execution.id)
 
     assert ex.status == RunStatus.COMPLETED, ex.error
+    assert ex.output_data["a"] == {"task_id": "reworked-task", "output": GOOD}
+    assert ex.output_data["b"] == {"data": {"result": GOOD}}
     rows = await _gate_rows(ctx.execution.id)
     assert len(rows) == 2 and rows[-1].passed is True
+    async with AsyncSessionLocal() as db:
+        step = (await db.execute(select(WorkflowStep).where(
+            WorkflowStep.execution_id == ex.id,
+            WorkflowStep.node_key == "a"))).scalar_one()
+        assert step.output_data == {"task_id": "reworked-task", "output": GOOD}
+    report = await client.get(f"/executions/{ex.id}/report.html",
+                              headers=ctx.user["headers"])
+    assert report.status_code == 200
+    assert "README.md" in report.text and "original-task" not in report.text
 
 
 @pytest.mark.asyncio

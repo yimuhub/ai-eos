@@ -57,24 +57,29 @@ type InboxItem = {
   updated_at: string | null;
   artifact_id: string | null;
   artifact_status: string | null;
+  current_version: number | null;
+  review_comment: string | null;
 };
-type InboxBucket = "in_progress" | "awaiting_acceptance" | "completed" | "failed";
+type InboxBucket =
+  | "in_progress" | "awaiting_acceptance" | "needs_rework" | "completed" | "failed";
 type InboxData = {
   counts: Record<InboxBucket, number>;
   in_progress: InboxItem[];
   awaiting_acceptance: InboxItem[];
+  needs_rework: InboxItem[];
   completed: InboxItem[];
   failed: InboxItem[];
 };
 const INBOX_BUCKETS: { key: InboxBucket; label: string; empty: string }[] = [
   { key: "in_progress", label: "进行中", empty: "现在没有进行中的任务" },
   { key: "awaiting_acceptance", label: "待验收", empty: "现在没有待验收的交付物" },
+  { key: "needs_rework", label: "待返工", empty: "没有被驳回、等待返工的成果" },
   { key: "completed", label: "已完成", empty: "还没有已完成的任务" },
   { key: "failed", label: "失败", empty: "没有失败的任务" },
 ];
 const EMPTY_INBOX: InboxData = {
-  counts: { in_progress: 0, awaiting_acceptance: 0, completed: 0, failed: 0 },
-  in_progress: [], awaiting_acceptance: [], completed: [], failed: [],
+  counts: { in_progress: 0, awaiting_acceptance: 0, needs_rework: 0, completed: 0, failed: 0 },
+  in_progress: [], awaiting_acceptance: [], needs_rework: [], completed: [], failed: [],
 };
 
 type Dim = "status" | "priority" | "executor" | "none";
@@ -143,6 +148,7 @@ export default function TasksPage() {
         }[] }>(`/growth-center/departments-overview?company_id=${cid}`).catch(() => null),
       ]);
       return {
+        cid: cid as string,
         tasks: Array.isArray(tasks) ? tasks : [],
         agents: Array.isArray(agents) ? agents.map((a) => ({ id: a.id, name: a.name })) : [],
         deptGroups: (deptOv?.departments || []).map((d) => ({
@@ -154,12 +160,41 @@ export default function TasksPage() {
   );
 
   // 派生数据统一 useMemo：`?? []` 每次渲染都是新数组，会让下游 useMemo 每次失效
-  const tasks = useMemo<Task[]>(() => bundle?.tasks ?? [], [bundle]);
-  const agents = useMemo(() => bundle?.agents ?? [], [bundle]);
-  const deptGroups = useMemo(() => bundle?.deptGroups ?? [], [bundle]);
+  const tasks = useMemo<Task[]>(
+    () => (bundle && bundle.cid === cid ? bundle.tasks : []), [bundle, cid]);
+  const agents = useMemo(
+    () => (bundle && bundle.cid === cid ? bundle.agents : []), [bundle, cid]);
+  const deptGroups = useMemo(
+    () => (bundle && bundle.cid === cid ? bundle.deptGroups : []), [bundle, cid]);
+  const companyRef = useRef(cid);
+  companyRef.current = cid;
+  const inboxRequestRef = useRef(0);
+  const [inboxCompany, setInboxCompany] = useState<string | null>(null);
 
   /** 任务变了 → 重取本页（同时让首页指挥中心的同类数据失效） */
   const load = useCallback(async () => { await refresh(); }, [refresh]);
+
+  // 切公司立即清空旧队列和选择状态；渲染层也按 cid 防御旧首帧。
+  // 必须早于拉取 effect：先使旧请求失效，再启动新公司的请求。
+  useEffect(() => {
+    inboxRequestRef.current += 1;
+    setInbox(null);
+    setInboxCompany(null);
+    setInboxError("");
+    setInboxLoading(Boolean(cid));
+    setBusyId(null);
+    setBatchSel(new Set());
+    setBatchDeleting(false);
+    setBatchStarting(false);
+    setPicked(new Set());
+    setConfirmTarget(null);
+    setShowBatchDelete(false);
+    setShowCreate(false);
+    setCreating(false);
+    setNtForm({ title: "", description: "", priority: "NORMAL" });
+    setNtAttach([]);
+    setMsg("");
+  }, [cid]);
 
   /* ---------- C1 收件箱：15s 静默刷新 ----------
    * 只在收件箱视图下轮询；切换视图 / 换公司 / 卸载都会清掉定时器。
@@ -167,19 +202,24 @@ export default function TasksPage() {
    */
   useEffect(() => {
     if (view !== "inbox") return;
-    if (!cid) { setInboxLoading(false); return; }
+    if (!cid) { setInboxLoading(false); setInboxCompany(null); return; }
     let alive = true;
+    const request = ++inboxRequestRef.current;
     const pull = async (silent: boolean) => {
       if (!silent) setInboxLoading(true);
       try {
         const data = await api.get<InboxData>(`/tasks/inbox?company_id=${cid}`);
-        if (!alive) return;
+        if (!alive || companyRef.current !== cid || inboxRequestRef.current !== request) return;
+        setInboxCompany(cid);
         setInbox(data);
         setInboxError("");
       } catch (e) {
-        if (alive) setInboxError(describeError(e, "收件箱加载失败"));
+        if (!alive || companyRef.current !== cid || inboxRequestRef.current !== request) return;
+        setInboxError(describeError(e, "收件箱加载失败"));
       } finally {
-        if (alive && !silent) setInboxLoading(false);
+        if (alive && companyRef.current === cid && inboxRequestRef.current === request && !silent) {
+          setInboxLoading(false);
+        }
       }
     };
     void pull(false);
@@ -187,7 +227,7 @@ export default function TasksPage() {
     return () => { alive = false; clearInterval(timer); };
   }, [view, cid, inboxRetry]);
 
-  const inboxData = inbox ?? EMPTY_INBOX;
+  const inboxData = inboxCompany === cid && inbox ? inbox : EMPTY_INBOX;
   const inboxItems = inboxData[bucket];
 
   /* ---------- 筛选 ---------- */
@@ -725,7 +765,7 @@ export default function TasksPage() {
             </div>
           )}
 
-          {!inboxError && inbox && (
+          {!inboxError && inboxCompany === cid && inbox && (
             <div className="space-y-2">
               {inboxItems.map((item) => {
                 const st = STATUS_STYLE[item.status] || STATUS_STYLE.TODO;
@@ -751,6 +791,15 @@ export default function TasksPage() {
                         <span>👤 {item.agent_name || "未分配"}</span>
                         <span>· 更新于 {timeAgo(item.updated_at) || "—"}</span>
                       </div>
+                      {bucket === "needs_rework" && item.artifact_id && (
+                        <div className="mt-2 rounded-lg px-2.5 py-2 text-[11px]"
+                          style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)" }}>
+                          <p className="text-red-200">
+                            驳回版本 v{item.current_version ?? "—"}：
+                            {item.review_comment || "审核人未填写意见，请查看成果详情"}
+                          </p>
+                        </div>
+                      )}
                     </div>
                     {bucket === "awaiting_acceptance" && item.artifact_id && (
                       <button type="button"
@@ -761,6 +810,17 @@ export default function TasksPage() {
                         className="text-[11px] px-3 py-1.5 rounded-lg font-medium text-emerald-200 hover:bg-emerald-500/15 transition-colors shrink-0"
                         style={{ border: "1px solid rgba(16,185,129,0.4)" }}>
                         去验收 →
+                      </button>
+                    )}
+                    {bucket === "needs_rework" && item.artifact_id && (
+                      <button type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          router.push(`/artifacts?open=${item.artifact_id}&rework=1`);
+                        }}
+                        className="text-[11px] px-3 py-1.5 rounded-lg font-medium text-red-200 hover:bg-red-500/15 transition-colors shrink-0"
+                        style={{ border: "1px solid rgba(239,68,68,0.4)" }}>
+                        去返工 →
                       </button>
                     )}
                   </div>

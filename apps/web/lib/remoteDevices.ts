@@ -53,17 +53,17 @@ export function parseUtcIso(iso: string): number {
   return Date.parse(withZone);
 }
 
-/** 审计行那种「几点几分发生的」：给本地时刻，不能直接切字符串。
-    后端串是 naive UTC，`slice(5,16)` 切出来的就是 UTC 的时分，
-    老板对不上自己墙上的钟（他也想不起来是时区的问题）。 */
+/** 审计行那种「几点几分发生的」：固定显示产品时区 Asia/Shanghai（UTC+8），
+    不随浏览器/测试机时区变化，也不受历史夏令时规则影响。后端 naive UTC 串
+    仍由 parseUtcIso 补 Z；跨日与一小时前的心跳回退都按同一墙钟计算。 */
 export function formatLocalStamp(iso: string | null | undefined): string {
   if (!iso) return "—";
   const ms = parseUtcIso(iso);
   if (Number.isNaN(ms)) return iso.slice(0, 16);
-  const d = new Date(ms);
+  const d = new Date(ms + 8 * 60 * 60 * 1000);
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
-    + `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} `
+    + `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 
 /** 最近心跳：只说「刚刚/N 分钟前」没意义——sidecar 挂没挂住是运维问题，

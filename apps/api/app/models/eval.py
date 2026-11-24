@@ -1,11 +1,12 @@
-"""评测证据（M4）：一次"多 Agent 产出 vs 单次基线"的盲评记录。
+"""Evaluation records: manual rules-only evidence and server-owned verified runs.
 
-rules 先说清楚，免得被当成营销数字：
-- 盲评两次 A/B 顺序互换，结论一致才采纳，否则记 `tie`；
-- 确定性维度（结论/引用/篇幅/结构/套话/缺件）先算，模型只补主观分；
-- 没有模型评审时只按确定性分判，`judge` 字段为 null，标明"仅规则判定"。
+Legacy/manual rows may have no idempotency key. Real workflow runs use a unique
+key over company + suite + case + source execution + content fingerprint.
 """
-from sqlalchemy import Float, ForeignKey, Index, Integer, JSON, String, Text
+from datetime import datetime
+
+from sqlalchemy import (DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text,
+                        UniqueConstraint)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -15,7 +16,10 @@ from .base import TimestampMixin
 
 class EvalRun(TimestampMixin, Base):
     __tablename__ = "eval_runs"
-    __table_args__ = (Index("ix_evals_suite_case", "suite_key", "case_key"),)
+    __table_args__ = (
+        Index("ix_evals_suite_case", "suite_key", "case_key"),
+        UniqueConstraint("idempotency_key", name="uq_eval_runs_idempotency_key"),
+    )
 
     company_id: Mapped[str] = mapped_column(
         ForeignKey("companies.id", ondelete="CASCADE"), index=True)
@@ -24,13 +28,43 @@ class EvalRun(TimestampMixin, Base):
     model_tier: Mapped[str] = mapped_column(String(40), default="unknown")
     workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     baseline_kind: Mapped[str] = mapped_column(String(20), default="single_agent")
-    blind_order: Mapped[str] = mapped_column(String(10), default="A_first")
+    blind_order: Mapped[str] = mapped_column(String(10), default="none")
     rubric: Mapped[dict | None] = mapped_column(JSON, default=dict)
     scores: Mapped[dict | None] = mapped_column(JSON, default=dict)
-    verdict: Mapped[str] = mapped_column(String(20), default="tie")  # multi_better|tie|baseline_better
+    verdict: Mapped[str] = mapped_column(String(20), default="unavailable")
     judge: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost: Mapped[float] = mapped_column(Float, default=0)
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     notes: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+    # F07: nullable so portable upgrades preserve every historical row.
+    run_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    status: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    verification: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    evidence: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    blind_evidence: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    source_execution_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True)
+    baseline_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    prompt_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    workflow_snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    multi_output_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    baseline_output_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    content_fingerprint: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True)
+    rubric_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    judge_model_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    judge_model_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    judge_prompt_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Worker lease + immutable-attempt lineage. A retry is a new row, never a
+    # rewrite of terminal evidence.
+    attempt: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    retry_of: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    worker_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)

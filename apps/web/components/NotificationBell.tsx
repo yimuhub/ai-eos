@@ -58,6 +58,9 @@ export default function NotificationBell({
 }) {
   const router = useRouter();
   const [cid, setCid] = useState<string | null>(null);
+  const cidRef = useRef<string | null>(null);
+  const generationRef = useRef(0);
+  const listGenerationRef = useRef(0);
   const [count, setCount] = useState(0);
   const [items, setItems] = useState<AppNotification[]>([]);
   const [open, setOpen] = useState(false);
@@ -65,12 +68,34 @@ export default function NotificationBell({
   const [acting, setActing] = useState<string | null>(null);
 
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const countRef = useRef(0);
+  const countReadyRef = useRef(false);
   const prevCountRef = useRef(0);
   const primedRef = useRef(false);
 
+  const applyCount = useCallback((next: number, updateDesktopBaseline = true) => {
+    countRef.current = next;
+    if (updateDesktopBaseline) prevCountRef.current = next;
+    setCount(next);
+  }, []);
+
   // 公司切换（自定义事件 / 其它标签页写 localStorage）都要重新绑定
   useEffect(() => {
-    const sync = () => setCid(getActiveCompanyId());
+    const sync = () => {
+      const next = getActiveCompanyId();
+      if (cidRef.current === next) return;
+      generationRef.current += 1;
+      listGenerationRef.current += 1;
+      cidRef.current = next;
+      setCid(next);
+      setOpen(false);
+      setItems([]);
+      setLoading(false);
+      setActing(null);
+      applyCount(0);
+      countReadyRef.current = false;
+      primedRef.current = false;
+    };
     sync();
     window.addEventListener("aieos-company-changed", sync);
     window.addEventListener("storage", sync);
@@ -78,7 +103,7 @@ export default function NotificationBell({
       window.removeEventListener("aieos-company-changed", sync);
       window.removeEventListener("storage", sync);
     };
-  }, []);
+  }, [applyCount]);
 
   const maybeDesktopNotify = useCallback((next: number) => {
     const prev = prevCountRef.current;
@@ -105,43 +130,56 @@ export default function NotificationBell({
 
   const refreshCount = useCallback(async () => {
     if (!cid) return;
+    const generation = generationRef.current;
     try {
       const next = await fetchUnreadCount(cid);
-      setCount((prev) => {
-        // 主动提示（V6.2 产品债）：页面可见时用户看不到系统通知——
-        // 未读增加就在页内弹一条 toast，别让审批/完成通知被刷掉。
-        if (next > prev && document.visibilityState === "visible") {
-          toast("info", `📩 ${next - prev} 条新通知（审批动态、任务完成都在这里）`);
-        }
-        return next;
-      });
+      if (cidRef.current !== cid || generationRef.current !== generation) return;
+      const previous = countRef.current;
+      applyCount(next, false);
+      if (countReadyRef.current && next > previous
+          && document.visibilityState === "visible") {
+        toast("info", `📩 ${next - previous} 条新通知（审批动态、任务完成都在这里）`);
+      }
+      countReadyRef.current = true;
       maybeDesktopNotify(next);
     } catch {
       /* 轮询失败保持旧值，不打扰用户 */
     }
-  }, [cid, maybeDesktopNotify]);
+  }, [cid, applyCount, maybeDesktopNotify]);
 
   useEffect(() => {
     if (!cid) {
-      setCount(0);
+      applyCount(0);
+      countReadyRef.current = false;
+      primedRef.current = false;
       setItems([]);
       return;
     }
+    applyCount(0);
+    countReadyRef.current = false;
+    primedRef.current = false;
     void refreshCount();
     return startNotificationPolling(() => {
       void refreshCount();
     });
-  }, [cid, refreshCount]);
+  }, [cid, applyCount, refreshCount]);
 
   const loadList = useCallback(async () => {
     if (!cid) return;
+    const generation = generationRef.current;
+    const request = ++listGenerationRef.current;
     setLoading(true);
     try {
-      setItems(await fetchNotifications(cid, { limit: 20 }));
+      const next = await fetchNotifications(cid, { limit: 20 });
+      if (cidRef.current === cid && generationRef.current === generation
+          && request === listGenerationRef.current) setItems(next);
     } catch (e) {
+      if (cidRef.current !== cid || generationRef.current !== generation
+          || request !== listGenerationRef.current) return;
       toast("error", describeError(e, "通知加载失败"));
     } finally {
-      setLoading(false);
+      if (cidRef.current === cid && generationRef.current === generation
+          && request === listGenerationRef.current) setLoading(false);
     }
   }, [cid]);
 
@@ -182,38 +220,43 @@ export default function NotificationBell({
   }, [open]);
 
   const onItem = async (n: AppNotification) => {
-    if (acting) return;
+    if (acting || !cid) return;
+    const requestCid = cid;
+    const generation = generationRef.current;
+    const isCurrent = () => cidRef.current === requestCid
+      && generationRef.current === generation;
     try {
       if (!n.is_read) {
         setActing(n.id);
         await markRead(n.id);
+        if (!isCurrent()) return;
         setItems((prev) => prev.map((x) => (x.id === n.id ? { ...x, is_read: true } : x)));
-        setCount((c) => {
-          const next = Math.max(0, c - 1);
-          prevCountRef.current = next;
-          return next;
-        });
+        applyCount(Math.max(0, countRef.current - 1));
       }
-      if (n.link) {
+      if (n.link && isCurrent()) {
         setOpen(false);
         router.push(n.link);
       }
     } catch (e) {
-      toast("error", describeError(e, "标记已读失败"));
+      if (isCurrent()) toast("error", describeError(e, "标记已读失败"));
     } finally {
-      setActing(null);
+      if (isCurrent()) setActing(null);
     }
   };
 
   const onReadAll = async () => {
     if (!cid) return;
+    const requestCid = cid;
+    const generation = generationRef.current;
+    const isCurrent = () => cidRef.current === requestCid
+      && generationRef.current === generation;
     try {
       await markAllRead(cid);
+      if (!isCurrent()) return;
       setItems((prev) => prev.map((x) => ({ ...x, is_read: true })));
-      setCount(0);
-      prevCountRef.current = 0;
+      applyCount(0);
     } catch (e) {
-      toast("error", describeError(e, "全部已读失败"));
+      if (isCurrent()) toast("error", describeError(e, "全部已读失败"));
     }
   };
 

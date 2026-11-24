@@ -45,23 +45,86 @@ def test_report_is_self_contained_and_escaped():
     assert "断网双击" in html
 
 
-def test_autonomy_counts_only_ai_work_and_ignores_stale():
+def test_report_failed_gates_use_final_effective_attempt_and_round():
+    gates = [
+        {"node_key": "fixed", "attempt": 1, "gate_round": 0, "passed": False},
+        {"node_key": "still-bad", "attempt": 1, "gate_round": 1, "passed": True},
+        {"node_key": "fixed", "attempt": 1, "gate_round": 1, "passed": True},
+        {"node_key": "still-bad", "attempt": 2, "gate_round": 0, "passed": False},
+        {"node_key": "fixed", "attempt": 1, "gate_round": 0, "passed": False},
+    ]
+    html = render_execution_report(
+        workflow_name="乱序闸门", execution={"status": "FAILED"},
+        steps=[], gates=gates)
+    assert "闸门未过 1</span>" in html
+    assert "闸门未过 3</span>" not in html
+    reversed_html = render_execution_report(
+        workflow_name="乱序闸门", execution={"status": "FAILED"},
+        steps=[], gates=list(reversed(gates)))
+    assert "闸门未过 1</span>" in reversed_html
+
+
+def test_report_first_rework_round_one_clears_historical_failure():
+    html = render_execution_report(
+        workflow_name="返工通过", execution={"status": "COMPLETED"}, steps=[],
+        gates=[
+            {"node_key": "a", "attempt": 1, "gate_round": 0, "passed": False},
+            {"node_key": "a", "attempt": 1, "gate_round": 1, "passed": True},
+        ])
+    assert "闸门未过 0</span>" in html
+
+
+def test_autonomy_counts_only_model_agents_and_ignores_stale():
     steps = [
         {"node_key": "a", "node_type": "AGENT", "status": "COMPLETED", "stale_at": None},
-        {"node_key": "b", "node_type": "TOOL", "status": "COMPLETED", "stale_at": None},
-        {"node_key": "c", "node_type": "WAIT", "status": "COMPLETED", "stale_at": None},
-        {"node_key": "d", "node_type": "APPROVAL", "status": "COMPLETED", "stale_at": None},
+        {"node_key": "http", "node_type": "HTTP", "status": "COMPLETED", "stale_at": None},
+        {"node_key": "tool", "node_type": "TOOL", "status": "COMPLETED", "stale_at": None},
+        {"node_key": "transform", "node_type": "TRANSFORM", "status": "COMPLETED", "stale_at": None},
+        {"node_key": "child", "node_type": "SUB_WORKFLOW", "status": "COMPLETED", "stale_at": None},
+        {"node_key": "wait", "node_type": "WAIT", "status": "COMPLETED", "stale_at": None},
+        {"node_key": "human", "node_type": "APPROVAL", "status": "COMPLETED", "stale_at": None},
         {"node_key": "a", "node_type": "AGENT", "status": "COMPLETED", "stale_at": "2026-11-20"},
+        {"node_key": "failed", "node_type": "AGENT", "status": "FAILED", "stale_at": None},
     ]
     a = compute_autonomy(steps, [{"reason": "quality"}, {"reason": "judgment"}])
-    assert a["ai_steps"] == 2          # WAIT 不算 AI 干的活
+    assert a["ai_steps"] == 1          # 只有模型驱动的 AGENT 算 AI 工作
     assert a["human_steps"] == 1
     assert a["manual_logs"] == 2
-    assert a["autonomy_rate"] == pytest.approx(2 / 5)
+    assert a["autonomy_rate"] == pytest.approx(1 / 4)
     assert a["manual_reasons"] == {"quality": 1, "judgment": 1}
 
     empty = compute_autonomy([], [])
     assert empty["autonomy_rate"] is None      # 没样本不能显示 0%
+
+
+def test_autonomy_deduplicates_parent_child_agent_work_by_task():
+    steps = [
+        {"execution_id": "parent", "node_key": "call", "node_type": "SUB_WORKFLOW",
+         "status": "COMPLETED", "stale_at": None,
+         "output_data": {"sub_execution": "child"}},
+        {"execution_id": "child", "node_key": "writer", "node_type": "AGENT",
+         "status": "COMPLETED", "stale_at": None, "attempt": 1,
+         "output_data": {"task_id": "task-1", "output": "done"}},
+        # 父子流程聚合视图里同一条模型工作可能出现两次。
+        {"execution_id": "parent-view", "node_key": "writer", "node_type": "AGENT",
+         "status": "COMPLETED", "stale_at": None, "attempt": 1,
+         "output_data": {"task_id": "task-1", "output": "done"}},
+        {"execution_id": "child", "node_key": "review", "node_type": "AGENT",
+         "status": "COMPLETED", "stale_at": None, "attempt": 1,
+         "output_data": {"task_id": "task-2", "output": "reviewed"}},
+    ]
+    ledger = compute_autonomy(steps, [])
+    assert ledger["ai_steps"] == 2
+    assert ledger["total"] == 2
+    assert ledger["autonomy_rate"] == 1
+
+
+def test_autonomy_does_not_merge_same_node_key_without_identity():
+    ledger = compute_autonomy([
+        {"node_key": "writer", "node_type": "AGENT", "status": "COMPLETED"},
+        {"node_key": "writer", "node_type": "AGENT", "status": "COMPLETED"},
+    ], [])
+    assert ledger["ai_steps"] == 2
 
 
 def test_merge_autonomy_adds_denominators_not_averages():

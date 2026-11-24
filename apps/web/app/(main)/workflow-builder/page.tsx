@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, describeError, downloadURL, fetchBlobURL } from "@/lib/api";
-import { useResource } from "@/lib/useResource";
+import { useActiveCompanyId, useResource } from "@/lib/useResource";
 import { formatLocalStamp } from "@/lib/remoteDevices";
 import { notify } from "@/components/Toast";
 import {
@@ -27,6 +27,13 @@ type Node = {
 };
 type Edge = { from_node: string; to_node: string; label?: string | null };
 type Agent = { id: string; name: string };
+type WorkflowInput = {
+  name: string;
+  type: "text" | "number" | "boolean" | "json" | "file";
+  required: boolean;
+  default?: unknown;
+  description?: string;
+};
 
 type FeedbackItem = {
   id: string; workflow_id: string; success: boolean; score: number;
@@ -35,8 +42,10 @@ type FeedbackItem = {
 
 type WorkflowMeta = {
   id: string; name: string; version: number; source: string; status: string;
+  description?: string | null; project_id?: string | null; company_id?: string;
   score: number | null; run_count: number; success_count: number;
   failure_count: number; reuse_key: string; previous_workflow_id: string;
+  inputs?: WorkflowInput[];
   feedback: FeedbackItem[];
 };
 
@@ -49,21 +58,195 @@ type ExecutionDetail = {
 };
 
 
-const NODE_TYPES = [
+/** 与后端 NodeType 一一对应；新增类型时必须同步这张清单。 */
+const WORKFLOW_NODE_TYPES = [
   { type: "START", label: "开始", color: "bg-green-700" },
   { type: "END", label: "结束", color: "bg-red-800" },
+  { type: "TASK", label: "任务占位", color: "bg-slate-600" },
   { type: "AGENT", label: "Agent执行", color: "bg-blue-700" },
   { type: "CONDITION", label: "条件判断", color: "bg-yellow-700" },
   { type: "PARALLEL", label: "并行", color: "bg-purple-700" },
   { type: "MERGE", label: "汇聚", color: "bg-purple-900" },
-  { type: "APPROVAL", label: "人工审批", color: "bg-orange-700" },
   { type: "WAIT", label: "等待", color: "bg-gray-600" },
-];
+  { type: "APPROVAL", label: "人工审批", color: "bg-orange-700" },
+  { type: "HUMAN_INPUT", label: "人工输入", color: "bg-amber-700" },
+  { type: "SUB_WORKFLOW", label: "子工作流", color: "bg-indigo-700" },
+  { type: "HTTP", label: "HTTP请求", color: "bg-cyan-700" },
+  { type: "TOOL", label: "工具调用", color: "bg-teal-700" },
+  { type: "TRANSFORM", label: "数据转换", color: "bg-fuchsia-700" },
+] as const;
 
-const W = 150, H = 44;
+const NODE_TYPES = WORKFLOW_NODE_TYPES;
+const NODE_TYPE_NOTES: Record<string, string> = {
+  TASK: "占位节点：运行时直接通过，不执行任务，也不会等待。",
+  SUB_WORKFLOW: "异步子流程：启动子执行并立即返回子执行 ID，不等待子流程完成。",
+};
+const NODE_TYPE_SHORT: Record<string, string> = {
+  TASK: "占位 · 直接通过",
+  SUB_WORKFLOW: "异步 · 不等待",
+};
+const DEFAULT_CONFIG: Record<string, Record<string, unknown>> = {
+  WAIT: { seconds: 5 },
+  HTTP: { method: "GET", timeout_seconds: 15, headers: {} },
+  TOOL: { arguments: {} },
+  TRANSFORM: { set: {} },
+};
+const JSON_FIELDS: Record<string, string[]> = {
+  HTTP: ["headers"], TOOL: ["arguments"], TRANSFORM: ["set"],
+};
+const SENSITIVE_HEADER = /^(authorization|proxy-authorization|x-api-key|api-key|cookie|set-cookie)$/i;
+const INPUT_CLASS = "min-h-11 w-full bg-white/[0.04] border border-[var(--border)] rounded-md px-3 py-2 text-sm";
+const FIELD_CLASS = "grid gap-1 text-[11px] text-[var(--muted)]";
+const INPUT_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+
+function inputDefaultText(value: unknown): string {
+  if (value == null) return "";
+  return JSON.stringify(value);
+}
+
+function validateInputValue(item: WorkflowInput, value: unknown): string | null {
+  if (item.type === "text") {
+    return typeof value === "string" && value.length <= 20_000 ? null : "必须是字符串";
+  }
+  if (item.type === "file") {
+    return typeof value === "string" && value.trim().length > 0 && value.length <= 1_000
+      ? null : "必须是非空文件引用";
+  }
+  if (item.type === "number") {
+    return typeof value === "number" && Number.isFinite(value) ? null : "必须是有限数字";
+  }
+  if (item.type === "boolean") return typeof value === "boolean" ? null : "必须是布尔值";
+  try {
+    return JSON.stringify(value).length <= 64_000 ? null : "JSON 过大";
+  } catch {
+    return "必须是合法 JSON";
+  }
+}
+
+function resolveRunInputs(definitions: WorkflowInput[], drafts: Record<string, string>) {
+  const values: Record<string, unknown> = {};
+  for (const item of definitions) {
+    const draft = drafts[item.name] ?? "";
+    if (!draft.trim()) {
+      if (item.required) throw new Error(`请填写运行入参「${item.name}」`);
+      continue;
+    }
+    let value: unknown = draft;
+    if (item.type === "number") {
+      if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(draft.trim())) {
+        throw new Error(`运行入参「${item.name}」必须是数字`);
+      }
+      value = Number(draft);
+    } else if (item.type === "boolean") {
+      if (draft !== "true" && draft !== "false") {
+        throw new Error(`运行入参「${item.name}」必须是布尔值`);
+      }
+      value = draft === "true";
+    } else if (item.type === "json") {
+      try {
+        value = JSON.parse(draft);
+      } catch {
+        throw new Error(`运行入参「${item.name}」不是合法 JSON`);
+      }
+    }
+    const error = validateInputValue(item, value);
+    if (error) throw new Error(`运行入参「${item.name}」${error}`);
+    values[item.name] = value;
+  }
+  return values;
+}
+
+const W = 170, H = 64;
+
+type JsonParseResult = { value?: Record<string, unknown>; error?: string };
+
+/** JSON 配置只收对象；保留草稿给用户改，但绝不把解析失败静默写进节点。 */
+function parseJsonObject(text: string): JsonParseResult {
+  try {
+    const value: unknown = JSON.parse(text);
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return { error: "必须是 JSON 对象，例如 {}" };
+    }
+    return { value: value as Record<string, unknown> };
+  } catch {
+    return { error: "JSON 格式不正确" };
+  }
+}
+
+/** HTTP 只允许非敏感请求头；Authorization 等凭据只能引用公司保险库。 */
+function parseHttpHeaders(text: string): JsonParseResult {
+  const parsed = parseJsonObject(text);
+  if (parsed.error || !parsed.value) return parsed;
+  const sensitive = Object.keys(parsed.value).find((key) => SENSITIVE_HEADER.test(key.trim()));
+  if (sensitive) {
+    return { error: `请求头 ${sensitive} 属于凭据；请删除并在 auth_secret_ref 中填写公司密钥引用名` };
+  }
+  return parsed;
+}
+
+function jsonText(value: unknown): string {
+  if (value == null) return "{}";
+  if (typeof value === "string") return value;
+  return JSON.stringify(value, null, 2);
+}
+
+/** 客户端坐标 → 画布内容坐标；滚动后节点与连线仍使用同一坐标系。 */
+function canvasPoint(
+  canvas: Pick<HTMLDivElement, "getBoundingClientRect" | "scrollLeft" | "scrollTop" | "clientLeft" | "clientTop">,
+  clientX: number,
+  clientY: number,
+) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: clientX - rect.left - canvas.clientLeft + canvas.scrollLeft,
+    y: clientY - rect.top - canvas.clientTop + canvas.scrollTop,
+  };
+}
+
+function JsonObjectEditor({ label, value, onChange, onValidityChange, validate, hint }: {
+  label: string;
+  value: unknown;
+  onChange: (value: Record<string, unknown>) => void;
+  onValidityChange: (valid: boolean) => void;
+  validate?: (text: string) => JsonParseResult;
+  hint?: string;
+}) {
+  const [draft, setDraft] = useState(() => jsonText(value));
+  const result = (validate || parseJsonObject)(draft);
+  return (
+    <label className={`${FIELD_CLASS} ${hint ? "md:col-span-2" : ""}`}>
+      <span className="font-medium text-[var(--foreground)]">{label}</span>
+      <textarea
+        aria-label={label}
+        value={draft}
+        onChange={(e) => {
+          const text = e.target.value;
+          setDraft(text);
+          const next = (validate || parseJsonObject)(text);
+          onValidityChange(!next.error);
+          if (!next.error && next.value) onChange(next.value);
+        }}
+        rows={4}
+        spellCheck={false}
+        aria-invalid={!!result.error}
+        className={`${INPUT_CLASS} resize-y font-mono text-xs ${result.error ? "border-red-500" : ""}`}
+      />
+      {hint && <span>{hint}</span>}
+      {result.error && <span role="alert" className="text-red-400">{result.error}</span>}
+    </label>
+  );
+}
 
 export default function WorkflowBuilderPage() {
   const canvasRef = useRef<HTMLDivElement>(null);
+  const activeCompanyId = useActiveCompanyId();
+  const contextResolved = typeof activeCompanyId === "string" && activeCompanyId.length > 0;
+  // 公司列表只用于把激活 ID 显示成名称；保存目标始终是 hook 返回的激活公司。
+  const { data: companyData } = useResource<Company[]>(
+    "companies:all",
+    () => api.get<Company[]>("/companies"),
+  );
+  const activeCompany = companyData?.find((company) => company.id === activeCompanyId);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -74,11 +257,23 @@ export default function WorkflowBuilderPage() {
   );
   const agents = useMemo<Agent[]>(() => agentData ?? [], [agentData]);
   const [wfName, setName] = useState("新工作流");
+  const [wfDescription, setWfDescription] = useState("");
+  const [wfProjectId, setWfProjectId] = useState<string | null>(null);
+  const [inputs, setInputs] = useState<WorkflowInput[]>([]);
+  const [inputDefaultDrafts, setInputDefaultDrafts] = useState<Record<number, string>>({});
+  const [runDrafts, setRunDrafts] = useState<Record<string, string>>({});
+  const [runInputError, setRunInputError] = useState("");
   const [savedId, setSavedId] = useState<string | null>(null);
+  const [workflowCompanyId, setWorkflowCompanyId] = useState<string | null>(null);
+  const contextMatchesWorkflow = !workflowCompanyId || workflowCompanyId === activeCompanyId;
+  const [saving, setSaving] = useState(false);
+  const [running, setRunning] = useState(false);
   const [runStatus, setRunStatus] = useState<string>("");
-  const dragRef = useRef<{ key: string; dx: number; dy: number } | null>(null);
+  const [jsonValidity, setJsonValidity] = useState<Record<string, boolean>>({});
+  const [editorVersion, setEditorVersion] = useState(0);
+  const dragRef = useRef<{ key: string; pointerId: number; dx: number; dy: number } | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);  // 工作流运行轮询句柄
-  const linkRef = useRef<{ from: string; x: number; y: number } | null>(null);
+  const linkRef = useRef<{ from: string; pointerId: number | null; x: number; y: number } | null>(null);
   const [linkPreview, setLinkPreview] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
 
   /* 从 CEO 指挥台跳转过来时看的是服务端已落库的流程（含版本/评分） */
@@ -104,16 +299,25 @@ export default function WorkflowBuilderPage() {
     try {
       const wf = await api.get<WorkflowMeta & { nodes: Node[]; edges: Edge[] }>(`/workflows/${id}`);
       setName(wf.name);
+      setWfDescription(wf.description || "");
+      setWfProjectId(wf.project_id || null);
+      setInputs(wf.inputs || []);
+      setInputDefaultDrafts(Object.fromEntries((wf.inputs || []).map((item, index) => [index, inputDefaultText(item.default)])));
+      setRunDrafts({});
+      setRunInputError("");
       setNodes((wf.nodes || []).map((n) => ({
         node_key: n.node_key, node_type: n.node_type, name: n.name,
         config: n.config || {}, position_x: n.position_x || 0, position_y: n.position_y || 0,
       })));
       setEdges(wf.edges || []);
       setSavedId(wf.id);
+      setWorkflowCompanyId(wf.company_id || null);
       setMeta(wf);
       setSelected(null);
       setOptimized(null);
       setFbError("");
+      setJsonValidity({});
+      setEditorVersion((version) => version + 1);
     } catch (e) {
       notify("error", describeError(e, "载入工作流失败"));
     }
@@ -164,60 +368,127 @@ export default function WorkflowBuilderPage() {
     setNodes((ns) => [...ns, {
       node_key: key, node_type: type,
       name: NODE_TYPES.find((t) => t.type === type)?.label || type,
-      config: {}, position_x: 40 + Math.random() * 320, position_y: 40 + Math.random() * 220,
+      config: { ...(DEFAULT_CONFIG[type] || {}) },
+      position_x: 40 + Math.random() * 320, position_y: 40 + Math.random() * 220,
     }]);
+    setSelected(key);
   }
 
-  /** 从节点右侧圆点按下 → 开始连线 */
-  function onPortMouseDown(e: React.MouseEvent, key: string) {
+  function clearPointer() {
+    dragRef.current = null;
+    linkRef.current = null;
+    setLinkPreview(null);
+  }
+
+  function completeLink(toKey: string) {
+    const link = linkRef.current;
+    if (!link) return;
+    if (toKey !== link.from) {
+      setEdges((es) => es.some((edge) => edge.from_node === link.from && edge.to_node === toKey)
+        ? es : [...es, { from_node: link.from, to_node: toKey }]);
+    }
+    clearPointer();
+  }
+
+  /** Pointer Events 统一鼠标/触控笔/触摸；捕获保证指针移出节点后仍收到事件。 */
+  function onNodePointerDown(e: React.PointerEvent<HTMLDivElement>, key: string) {
+    if (!e.isPrimary || e.button !== 0) return;
     e.stopPropagation();
     e.preventDefault();
-    const rect = canvasRef.current!.getBoundingClientRect();
-    const n = nodes.find((x) => x.node_key === key)!;
-    linkRef.current = { from: key, x: n.position_x + W, y: n.position_y + H / 2 };
-    setLinkPreview({ x1: linkRef.current.x, y1: linkRef.current.y, x2: e.clientX - rect.left, y2: e.clientY - rect.top });
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const point = canvasPoint(canvas, e.clientX, e.clientY);
+    const node = nodes.find((item) => item.node_key === key);
+    if (!node) return;
+    setSelected(key);
+    dragRef.current = {
+      key, pointerId: e.pointerId,
+      dx: point.x - node.position_x, dy: point.y - node.position_y,
+    };
+    e.currentTarget.setPointerCapture(e.pointerId);
   }
 
-  function onMouseMove(e: React.MouseEvent) {
-    const rect = canvasRef.current!.getBoundingClientRect();
-    // 连线中：更新预览线
-    if (linkRef.current) {
-      setLinkPreview({ x1: linkRef.current.x, y1: linkRef.current.y, x2: e.clientX - rect.left, y2: e.clientY - rect.top });
+  function onPortPointerDown(e: React.PointerEvent<HTMLButtonElement>, key: string) {
+    if (!e.isPrimary || e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    const node = nodes.find((item) => item.node_key === key);
+    if (!canvas || !node) return;
+    const x = node.position_x + W, y = node.position_y + H / 2;
+    linkRef.current = { from: key, pointerId: e.pointerId, x, y };
+    setLinkPreview({ x1: x, y1: y, x2: x, y2: y });
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+
+  function onCanvasPointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (linkRef.current?.pointerId === e.pointerId) {
+      const point = canvasPoint(canvas, e.clientX, e.clientY);
+      setLinkPreview({ x1: linkRef.current.x, y1: linkRef.current.y, x2: point.x, y2: point.y });
       return;
     }
-    // 拖拽节点
-    if (dragRef.current) {
-      const x = Math.max(0, e.clientX - rect.left - dragRef.current.dx);
-      const y = Math.max(0, e.clientY - rect.top - dragRef.current.dy);
-      setNodes((ns) => ns.map((n) =>
-        n.node_key === dragRef.current!.key ? { ...n, position_x: x, position_y: y } : n));
-    }
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    const point = canvasPoint(canvas, e.clientX, e.clientY);
+    const x = Math.max(0, point.x - drag.dx);
+    const y = Math.max(0, point.y - drag.dy);
+    setNodes((ns) => ns.map((n) =>
+      n.node_key === drag.key ? { ...n, position_x: x, position_y: y } : n));
   }
 
-  /** 松开：若在某个节点上释放则完成连线 */
-  function onMouseUp(e: React.MouseEvent) {
-    if (linkRef.current) {
-      const el = document.elementFromPoint(e.clientX, e.clientY);
-      const nodeEl = el?.closest("[data-node-key]") as HTMLElement | null;
+  /** 松开：若在某个节点上释放则完成连线。 */
+  function onCanvasPointerUp(e: React.PointerEvent<HTMLDivElement>) {
+    if (linkRef.current?.pointerId === e.pointerId) {
+      const nodeEl = document.elementFromPoint(e.clientX, e.clientY)
+        ?.closest("[data-node-key]") as HTMLElement | null;
       const toKey = nodeEl?.dataset.nodeKey;
-      const from = linkRef.current.from;
-      if (toKey && toKey !== from && !edges.some((x) => x.from_node === from && x.to_node === toKey)) {
-        setEdges((es) => [...es, { from_node: from, to_node: toKey }]);
-      }
-      linkRef.current = null;
-      setLinkPreview(null);
+      if (toKey) completeLink(toKey);
+      else clearPointer();
       return;
     }
-    dragRef.current = null;
+    if (dragRef.current?.pointerId === e.pointerId) clearPointer();
   }
 
   function deleteNode(key: string) {
     setNodes((ns) => ns.filter((n) => n.node_key !== key));
     setEdges((es) => es.filter((e) => e.from_node !== key && e.to_node !== key));
+    setJsonValidity((current) => Object.fromEntries(
+      Object.entries(current).filter(([field]) => !field.startsWith(`${key}:`))));
     setSelected(null);
   }
 
   const sel = nodes.find((n) => n.node_key === selected) || null;
+  const hasInvalidJson = Object.values(jsonValidity).includes(false) || nodes.some((node) =>
+    (JSON_FIELDS[node.node_type] || []).some((field) => {
+      const value = node.config?.[field];
+      if (value == null) return false;
+      if (typeof value !== "object" || Array.isArray(value)) return true;
+      const result = field === "headers" && node.node_type === "HTTP"
+        ? parseHttpHeaders(JSON.stringify(value)) : parseJsonObject(JSON.stringify(value));
+      return !!result.error;
+    }));
+  const inputErrors = useMemo(() => {
+    const errors: Record<number, string> = {};
+    const names = new Set<string>();
+    inputs.forEach((item, index) => {
+      if (!INPUT_NAME_RE.test(item.name)) errors[index] = "名称须以字母或下划线开头，仅含字母、数字、下划线，最长 64 字";
+      else if (names.has(item.name)) errors[index] = "输入名称不能重复";
+      names.add(item.name);
+      const draft = inputDefaultDrafts[index] ?? inputDefaultText(item.default);
+      if (!draft.trim()) return;
+      try {
+        const value = JSON.parse(draft);
+        const error = validateInputValue(item, value);
+        if (error) errors[index] = `默认值${error}`;
+      } catch {
+        errors[index] = "默认值必须是合法 JSON；字符串请加引号";
+      }
+    });
+    return errors;
+  }, [inputs, inputDefaultDrafts]);
+  const hasInvalidInputs = Object.keys(inputErrors).length > 0;
   const gateInfo = useMemo(() => summarizeGates(execution?.gates), [execution]);
   const reworkable = (execution?.steps ?? []).filter(
     (s) => !["START", "END"].includes(s.node_type));
@@ -235,20 +506,37 @@ export default function WorkflowBuilderPage() {
   }
 
   async function save() {
-    const cs = await api.get<Company[]>("/companies");
-    const body = {
-      name: wfName, nodes: nodes.map(({ node_key, node_type, name, config, position_x, position_y }) =>
-        ({ node_key, node_type, name, config, position_x, position_y })),
-      edges,
-    };
-    // 修复：此前每次保存都 POST 新建——同名工作流会越攒越多。
-    // 编辑已保存的工作流（savedId 存在）改为 PUT 原地更新、版本 +1。
-    const res = savedId
-      ? await api.put<{ id: string; name: string; version: number }>(`/workflows/${savedId}`, body)
-      : await api.post<{ id: string; name: string; version?: number }>(`/workflows?company_id=${cs[0].id}`, body);
-    setSavedId(res.id);
-    notify("success", res.version ? `已保存：${res.name}（v${res.version}）` : `已保存：${res.name}`);
-    void refreshMeta(res.id);
+    if (!contextResolved || !contextMatchesWorkflow || saving || hasInvalidJson || hasInvalidInputs) return;
+    setSaving(true);
+    try {
+      const body = {
+        name: wfName,
+        description: wfDescription || null,
+        project_id: wfProjectId,
+        inputs: inputs.map(({ name, type, required, default: defaultValue, description }) => ({
+          name, type, required,
+          ...(defaultValue !== undefined ? { default: defaultValue } : {}),
+          ...(description ? { description } : {}),
+        })),
+        nodes: nodes.map(({ node_key, node_type, name, config, position_x, position_y }) =>
+          ({ node_key, node_type, name, config, position_x, position_y })),
+        edges,
+      };
+      // 编辑已保存的工作流（savedId 存在）改为 PUT 原地更新、版本 +1。
+      // 新建只使用已校验的激活公司 ID，绝不回退到 companies[0]。
+      const res = savedId
+        ? await api.put<{ id: string; name: string; version: number }>(`/workflows/${savedId}`, body)
+        : await api.post<{ id: string; name: string; version?: number }>(
+          `/workflows?company_id=${encodeURIComponent(activeCompanyId!)}`, body);
+      setSavedId(res.id);
+      setWorkflowCompanyId(activeCompanyId);
+      notify("success", res.version ? `已保存：${res.name}（v${res.version}）` : `已保存：${res.name}`);
+      void refreshMeta(res.id);
+    } catch (e) {
+      notify("error", describeError(e, "保存失败"));
+    } finally {
+      setSaving(false);
+    }
   }
 
   /** 拉一次执行详情 + 自主率账本。轮询与返工后都走这里，避免两套解析。 */
@@ -292,13 +580,25 @@ export default function WorkflowBuilderPage() {
   }, [loadEvidence]);
 
   async function run() {
-    if (!savedId) return;
+    if (!contextResolved || !contextMatchesWorkflow || !savedId || running || hasInvalidInputs) return;
+    let resolved: Record<string, unknown>;
     try {
-      const res = await api.post<{ execution_id: string }>(`/workflows/${savedId}/run`);
+      resolved = resolveRunInputs(inputs, runDrafts);
+      setRunInputError("");
+    } catch (error) {
+      setRunInputError((error as Error).message);
+      return;
+    }
+    setRunning(true);
+    try {
+      const res = await api.post<{ execution_id: string }>(
+        `/workflows/${savedId}/run`, { inputs: resolved });
       setAutonomy(null);
       pollExecution(res.execution_id);
     } catch (e) {
       notify("error", describeError(e, "启动失败"));
+    } finally {
+      setRunning(false);
     }
   }
 
@@ -359,13 +659,26 @@ export default function WorkflowBuilderPage() {
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
   return (
-    <div className="p-4 flex flex-col h-full">
-      <div className="flex items-center gap-3 mb-3">
-        <input value={wfName} onChange={(e) => setName(e.target.value)}
-          className="bg-white/[0.04] border border-[var(--border)] rounded-md px-3 py-1.5 text-sm w-48" />
-        <button onClick={save} className="bg-green-600 hover:bg-green-500 px-4 py-1.5 rounded-md text-sm">保存</button>
-        <button onClick={run} disabled={!savedId}
-          className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 px-4 py-1.5 rounded-md text-sm">▶ 运行</button>
+    <div className="p-3 sm:p-4 flex flex-col h-full">
+      <div className="flex flex-wrap items-center gap-3 mb-3" role="toolbar" aria-label="工作流操作">
+        <input value={wfName} onChange={(e) => setName(e.target.value)} aria-label="工作流名称"
+          className={`${INPUT_CLASS} sm:w-48`} />
+        <div role="status" aria-live="polite" className="text-xs text-[var(--muted)] min-w-0 basis-full sm:basis-auto">
+          保存目标：<b className="text-[var(--foreground)]">
+            {activeCompanyId === undefined ? "正在确认公司…" : activeCompany?.name || (contextResolved ? activeCompanyId : "未选择公司")}
+          </b>
+          {!contextResolved && activeCompanyId !== undefined && <span> · 请先创建或选择公司</span>}
+          {!contextMatchesWorkflow && <span className="text-red-400"> · 当前流程属于其他公司，请切回对应公司后编辑或运行</span>}
+        </div>
+        <button type="button" onClick={save} disabled={!contextResolved || !contextMatchesWorkflow || saving || hasInvalidJson || hasInvalidInputs}
+          className="min-h-11 bg-green-600 hover:bg-green-500 disabled:opacity-40 px-4 rounded-md text-sm">
+          {saving ? "保存中…" : "保存"}
+        </button>
+        <button type="button" onClick={run} disabled={!contextResolved || !contextMatchesWorkflow || !savedId || running || hasInvalidInputs}
+          className="min-h-11 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 px-4 rounded-md text-sm">▶ 运行</button>
+        {hasInvalidJson && <span className="text-xs text-red-400">请先修正节点 JSON 配置</span>}
+        {hasInvalidInputs && <span className="text-xs text-red-400">请先修正运行入参声明</span>}
+        {runInputError && <span role="alert" className="text-xs text-red-400">{runInputError}</span>}
         {runStatus && <span className="text-xs text-[var(--muted)]">{runStatus}</span>}
       </div>
 
@@ -384,21 +697,131 @@ export default function WorkflowBuilderPage() {
         </div>
       )}
 
-      <div className="flex gap-2 mb-2 flex-wrap">
+      <section aria-label="工作流运行入参" className="card-lg p-3 mb-3 grid gap-4 lg:grid-cols-2">
+        <div className="min-w-0">
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <div>
+              <h2 className="text-sm font-medium">入参声明</h2>
+              <p className="text-[11px] text-[var(--muted)]">节点配置中用 {"{{input.名称}}"} 引用；默认值按 JSON 填写。</p>
+            </div>
+            <button type="button" disabled={inputs.length >= 50}
+              onClick={() => setInputs((items) => [...items, { name: "", type: "text", required: false }])}
+              className="min-h-11 shrink-0 px-3 rounded-md bg-white/[0.08] text-xs disabled:opacity-40">＋添加入参</button>
+          </div>
+          {inputs.length === 0 && <p className="text-xs text-[var(--muted)]">当前流程无需外部入参。</p>}
+          <div className="space-y-3">
+            {inputs.map((item, index) => (
+              <div key={index} className="rounded-md border border-[var(--border)] p-2 grid gap-2 sm:grid-cols-2">
+                <label className={FIELD_CLASS}>
+                  <span>名称</span>
+                  <input aria-label={`入参 ${index + 1} 名称`} value={item.name}
+                    onChange={(e) => setInputs((items) => items.map((current, i) =>
+                      i === index ? { ...current, name: e.target.value } : current))}
+                    className={INPUT_CLASS} placeholder="subject" />
+                </label>
+                <label className={FIELD_CLASS}>
+                  <span>类型</span>
+                  <select aria-label={`入参 ${index + 1} 类型`} value={item.type}
+                    onChange={(e) => setInputs((items) => items.map((current, i) =>
+                      i === index ? { ...current, type: e.target.value as WorkflowInput["type"] } : current))}
+                    className={INPUT_CLASS}>
+                    <option value="text">文本</option><option value="number">数字</option>
+                    <option value="boolean">布尔</option><option value="json">JSON</option><option value="file">文件引用</option>
+                  </select>
+                </label>
+                <label className={`${FIELD_CLASS} sm:col-span-2`}>
+                  <span>默认值 JSON（可留空）</span>
+                  <input aria-label={`入参 ${index + 1} 默认值`} value={inputDefaultDrafts[index] ?? ""}
+                    onChange={(e) => {
+                      const text = e.target.value;
+                      setInputDefaultDrafts((drafts) => ({ ...drafts, [index]: text }));
+                      let value: unknown;
+                      try { value = text.trim() ? JSON.parse(text) : undefined; } catch { value = undefined; }
+                      setInputs((items) => items.map((current, i) =>
+                        i === index ? { ...current, default: value } : current));
+                    }}
+                    className={INPUT_CLASS} placeholder='例如 "待评审需求"、2、false 或 {"topic":"AI"}' />
+                </label>
+                <label className={`${FIELD_CLASS} sm:col-span-2`}>
+                  <span>说明</span>
+                  <input aria-label={`入参 ${index + 1} 说明`} value={item.description || ""}
+                    onChange={(e) => setInputs((items) => items.map((current, i) =>
+                      i === index ? { ...current, description: e.target.value } : current))}
+                    className={INPUT_CLASS} />
+                </label>
+                {inputErrors[index] && <p role="alert" className="sm:col-span-2 text-xs text-red-400">{inputErrors[index]}</p>}
+                <div className="sm:col-span-2 flex items-center justify-between gap-3">
+                  <label className="min-h-11 flex items-center gap-2 text-xs">
+                    <input type="checkbox" checked={item.required}
+                      onChange={(e) => setInputs((items) => items.map((current, i) =>
+                        i === index ? { ...current, required: e.target.checked } : current))} />
+                    运行时必填
+                  </label>
+                  <button type="button" aria-label={`删除入参 ${index + 1}`}
+                    onClick={() => {
+                      const remaining = inputs.filter((_, i) => i !== index);
+                      setInputs(remaining);
+                      setInputDefaultDrafts(Object.fromEntries(remaining.map((input, i) => {
+                        const oldIndex = i >= index ? i + 1 : i;
+                        return [i, inputDefaultDrafts[oldIndex] ?? inputDefaultText(input.default)];
+                      })));
+                      setRunDrafts(Object.fromEntries(remaining.map((input) => [input.name, runDrafts[input.name] ?? ""])));
+                    }}
+                    className="min-h-11 px-3 rounded-md text-xs text-red-300 hover:bg-red-500/10">删除</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="min-w-0">
+          <h2 className="text-sm font-medium mb-1">本次运行</h2>
+          <p className="text-[11px] text-[var(--muted)] mb-2">留空的可选入参会使用已保存的默认值。</p>
+          {inputs.length === 0 ? (
+            <p className="text-xs text-[var(--muted)]">直接运行已保存的流程。</p>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2">
+              {inputs.map((item, index) => (
+                <label key={index} className={`${FIELD_CLASS} ${item.type === "json" ? "sm:col-span-2" : ""}`}>
+                  <span>{item.name || `未命名入参 ${index + 1}`}{item.required ? " *" : ""}</span>
+                  {item.type === "boolean" ? (
+                    <select aria-label={`运行入参 ${item.name || index + 1}`} value={runDrafts[item.name] ?? ""}
+                      onChange={(e) => setRunDrafts((drafts) => ({ ...drafts, [item.name]: e.target.value }))}
+                      className={INPUT_CLASS}>
+                      <option value="">使用默认值</option><option value="true">true</option><option value="false">false</option>
+                    </select>
+                  ) : (
+                    <input aria-label={`运行入参 ${item.name || index + 1}`} type={item.type === "number" ? "number" : "text"}
+                      step="any" value={runDrafts[item.name] ?? ""}
+                      onChange={(e) => setRunDrafts((drafts) => ({ ...drafts, [item.name]: e.target.value }))}
+                      className={INPUT_CLASS} placeholder={item.description || (item.type === "json" ? "合法 JSON" : "可留空")} />
+                  )}
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <div className="flex gap-2 mb-2 flex-wrap" role="toolbar" aria-label="添加节点">
         {NODE_TYPES.map((t) => (
-          <button key={t.type} onClick={() => addNode(t.type)}
-            className={`${t.color} hover:opacity-80 px-2.5 py-1 rounded text-xs`}>＋{t.label}</button>
+          <button key={t.type} type="button" onClick={() => addNode(t.type)}
+            aria-label={`添加${t.label}节点`} title={NODE_TYPE_NOTES[t.type]}
+            className={`min-h-11 touch-manipulation ${t.color} hover:opacity-80 px-3 py-2 rounded-md text-xs`}>＋{t.label}</button>
         ))}
         <span className="text-[10px] text-[var(--muted)] self-center ml-2">
-          拖动节点移动｜从节点<b className="text-yellow-400">右侧圆点</b>拖到另一节点连线｜单击选中编辑
+          拖动节点移动｜从节点<b className="text-yellow-400">右侧大圆点</b>拖到另一节点连线｜单击选中编辑
         </span>
       </div>
 
-      <div ref={canvasRef} onMouseMove={onMouseMove} onMouseUp={onMouseUp}
-        className="relative flex-1 bg-gray-950 border border-[var(--border)] rounded-lg overflow-auto min-h-[420px]"
+      <div ref={canvasRef} onPointerMove={onCanvasPointerMove} onPointerUp={onCanvasPointerUp}
+        onPointerCancel={clearPointer} onLostPointerCapture={clearPointer}
+        className="relative flex-1 bg-gray-950 border border-[var(--border)] rounded-lg overflow-auto min-h-[420px] overscroll-contain"
         onClick={() => setSelected(null)}>
 
-        <svg className="absolute inset-0 pointer-events-none" width="100%" height="100%">
+        <svg className="absolute left-0 top-0 pointer-events-none"
+          width={Math.max(1, ...nodes.map((n) => n.position_x + W + 80))}
+          height={Math.max(1, ...nodes.map((n) => n.position_y + H + 80))}
+          style={{ minWidth: "100%", minHeight: "100%" }}>
           <defs><marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
             <path d="M0,0 L8,3 L0,6 z" fill="#6b7280" />
           </marker></defs>
@@ -425,22 +848,41 @@ export default function WorkflowBuilderPage() {
         {nodes.map((n) => {
           const color = NODE_TYPES.find((t) => t.type === n.node_type)?.color || "bg-white/[0.15]";
           return (
-            <div key={n.node_key} data-node-key={n.node_key}
-              onMouseDown={(e) => {
-                e.stopPropagation();
-                const rect = canvasRef.current!.getBoundingClientRect();
-                setSelected(n.node_key);
-                dragRef.current = { key: n.node_key, dx: e.clientX - rect.left - n.position_x, dy: e.clientY - rect.top - n.position_y };
+            <div key={n.node_key} data-node-key={n.node_key} role="group" tabIndex={0}
+              data-selected={selected === n.node_key}
+              aria-label={`${n.name}，${n.node_type}${NODE_TYPE_NOTES[n.node_type] ? `，${NODE_TYPE_NOTES[n.node_type]}` : ""}`}
+              onPointerDown={(e) => onNodePointerDown(e, n.node_key)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  if (linkRef.current?.pointerId == null) completeLink(n.node_key);
+                  else setSelected(n.node_key);
+                }
               }}
-              onClick={(e) => e.stopPropagation()}
-              style={{ left: n.position_x, top: n.position_y, width: W }}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (linkRef.current?.pointerId == null) completeLink(n.node_key);
+                else setSelected(n.node_key);
+              }}
+              style={{ left: n.position_x, top: n.position_y, width: W, minHeight: H, touchAction: "none" }}
               className={`absolute ${color} ${selected === n.node_key ? "ring-2 ring-white" : ""}
-                rounded-md px-2 py-2 cursor-move select-none shadow-lg`}>
+                rounded-md px-3 py-2 cursor-move select-none shadow-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-white`}>
               <div className="text-xs font-medium truncate">{n.name}</div>
-              <div className="text-[9px] opacity-70">{n.node_type}</div>
-              {/* 右侧连接端口 */}
-              <div onMouseDown={(e) => onPortMouseDown(e, n.node_key)}
-                className="absolute -right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 bg-yellow-400 rounded-full cursor-crosshair hover:scale-125 border border-black/60" />
+              <div className="text-[9px] opacity-80">{NODE_TYPE_SHORT[n.node_type] || n.node_type}</div>
+              {/* 44px 触控命中区，视觉圆点保持小巧。 */}
+              <button type="button" aria-label={`从${n.name}开始连线`}
+                onPointerDown={(e) => onPortPointerDown(e, n.node_key)}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter" && e.key !== " ") return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const x = n.position_x + W, y = n.position_y + H / 2;
+                  linkRef.current = { from: n.node_key, pointerId: null, x, y };
+                  setLinkPreview({ x1: x, y1: y, x2: x, y2: y });
+                }}
+                className="absolute -right-[22px] top-1/2 -translate-y-1/2 w-11 h-11 grid place-items-center bg-transparent cursor-crosshair touch-manipulation">
+                <span className="w-3.5 h-3.5 bg-yellow-400 rounded-full border border-black/60 pointer-events-none" />
+              </button>
             </div>
           );
         })}
@@ -641,59 +1083,178 @@ export default function WorkflowBuilderPage() {
         </div>
       )}
 
-      {/* 属性面板 */}
+      {/* 响应式属性面板：窄屏单列，宽屏分组；所有操作至少 44px 高。 */}
       {sel && (
-        <div className="mt-3 card-lg p-3 space-y-2">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-[var(--muted)]">属性</span>
-            <input value={sel.name}
-              onChange={(e) => setNodes((ns) => ns.map((n) =>
-                n.node_key === selected ? { ...n, name: e.target.value } : n))}
-              className="bg-white/[0.04] border border-[var(--border)] rounded px-2 py-1 text-xs w-40" />
+        <aside aria-label="节点属性" className="mt-3 card-lg p-3 space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-[var(--muted)]">属性 · {sel.node_type}</span>
+            {NODE_TYPE_NOTES[sel.node_type] && (
+              <span role="note" className="text-[11px] rounded-md px-2 py-1 bg-amber-500/10 text-amber-200">
+                {NODE_TYPE_NOTES[sel.node_type]}
+              </span>
+            )}
+            <button type="button" onClick={() => setSelected(null)} aria-label="关闭属性面板"
+              className="ml-auto min-h-11 min-w-11 px-3 rounded-md bg-white/[0.08] text-xs">关闭</button>
             {!["START", "END"].includes(sel.node_type) && (
-              <button onClick={() => selected && deleteNode(selected)}
-                className="text-xs bg-red-800 px-2 py-1 rounded">删除节点</button>
+              <button type="button" onClick={() => deleteNode(sel.node_key)}
+                className="min-h-11 px-3 rounded-md bg-red-800 text-xs">删除节点</button>
             )}
           </div>
 
-          {sel.node_type === "AGENT" && (
-            <>
-              <select value={sel.config?.agent_id || ""}
-                onChange={(e) => updateSelConfig({ agent_id: e.target.value })}
-                className="w-56 bg-white/[0.04] border border-[var(--border)] rounded px-2 py-1 text-xs">
-                <option value="">选择执行 Agent</option>
-                {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-              </select>
-              <input placeholder="给 Agent 的指令" value={sel.config?.instruction || ""}
-                onChange={(e) => updateSelConfig({ instruction: e.target.value })}
-                className="w-full bg-white/[0.04] border border-[var(--border)] rounded px-2 py-1 text-xs" />
-            </>
-          )}
-          {sel.node_type === "CONDITION" && (
-            <input placeholder="输出包含关键词走 yes 分支，否则 no" value={sel.config?.keyword || ""}
-              onChange={(e) => updateSelConfig({ keyword: e.target.value })}
-              className="w-full bg-white/[0.04] border border-[var(--border)] rounded px-2 py-1 text-xs" />
-          )}
-          {sel.node_type === "WAIT" && (
-            <input type="number" placeholder="秒" value={sel.config?.seconds || 5}
-              onChange={(e) => updateSelConfig({ seconds: Number(e.target.value) })}
-              className="w-32 bg-white/[0.04] border border-[var(--border)] rounded px-2 py-1 text-xs" />
-          )}
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <label className={`${FIELD_CLASS} md:col-span-2 xl:col-span-1`}>
+              <span className="font-medium text-[var(--foreground)]">节点名称</span>
+              <input value={sel.name} onChange={(e) => setNodes((ns) => ns.map((n) =>
+                n.node_key === selected ? { ...n, name: e.target.value } : n))} className={INPUT_CLASS} />
+            </label>
+
+            {sel.node_type === "TASK" && (
+              <label className={`${FIELD_CLASS} md:col-span-2`}>
+                <span className="font-medium text-[var(--foreground)]">占位备注</span>
+                <textarea value={sel.config?.note || ""} rows={2}
+                  onChange={(e) => updateSelConfig({ note: e.target.value })}
+                  placeholder="仅用于说明流程意图，不会执行任务" className={INPUT_CLASS} />
+              </label>
+            )}
+            {sel.node_type === "HUMAN_INPUT" && (
+              <label className={`${FIELD_CLASS} md:col-span-2`}>
+                <span className="font-medium text-[var(--foreground)]">输入提示</span>
+                <textarea value={sel.config?.prompt || ""} rows={2}
+                  onChange={(e) => updateSelConfig({ prompt: e.target.value })}
+                  placeholder="运行到此节点时向人工展示的问题" className={INPUT_CLASS} />
+              </label>
+            )}
+            {sel.node_type === "SUB_WORKFLOW" && (
+              <label className={FIELD_CLASS}>
+                <span className="font-medium text-[var(--foreground)]">子工作流 ID</span>
+                <input value={sel.config?.workflow_id || ""}
+                  onChange={(e) => updateSelConfig({ workflow_id: e.target.value })}
+                  placeholder="workflow_id" className={INPUT_CLASS} />
+                <span>启动后立即继续父流程，不等待子工作流结果。</span>
+              </label>
+            )}
+            {sel.node_type === "AGENT" && (
+              <>
+                <label className={FIELD_CLASS}>
+                  <span className="font-medium text-[var(--foreground)]">执行 Agent</span>
+                  <select value={sel.config?.agent_id || ""}
+                    onChange={(e) => updateSelConfig({ agent_id: e.target.value })} className={INPUT_CLASS}>
+                    <option value="">选择执行 Agent</option>
+                    {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>
+                </label>
+                <label className={`${FIELD_CLASS} md:col-span-2`}>
+                  <span className="font-medium text-[var(--foreground)]">Agent 指令</span>
+                  <textarea value={sel.config?.instruction || ""} rows={2}
+                    onChange={(e) => updateSelConfig({ instruction: e.target.value })}
+                    placeholder="给 Agent 的指令" className={INPUT_CLASS} />
+                </label>
+              </>
+            )}
+            {sel.node_type === "CONDITION" && (
+              <label className={`${FIELD_CLASS} md:col-span-2`}>
+                <span className="font-medium text-[var(--foreground)]">条件关键词</span>
+                <input value={sel.config?.keyword || ""}
+                  onChange={(e) => updateSelConfig({ keyword: e.target.value })}
+                  placeholder="输出包含关键词走 yes 分支，否则 no" className={INPUT_CLASS} />
+              </label>
+            )}
+            {sel.node_type === "WAIT" && (
+              <label className={FIELD_CLASS}>
+                <span className="font-medium text-[var(--foreground)]">等待秒数（0–60）</span>
+                <input type="number" min={0} max={60} value={sel.config?.seconds ?? 5}
+                  onChange={(e) => updateSelConfig({ seconds: Number(e.target.value) })} className={INPUT_CLASS} />
+              </label>
+            )}
+            {sel.node_type === "APPROVAL" && (
+              <label className={FIELD_CLASS}>
+                <span className="font-medium text-[var(--foreground)]">审批提示</span>
+                <input value={sel.config?.approver_hint || ""}
+                  onChange={(e) => updateSelConfig({ approver_hint: e.target.value })}
+                  placeholder="需要审批的内容" className={INPUT_CLASS} />
+              </label>
+            )}
+            {sel.node_type === "HTTP" && (
+              <>
+                <label className={`${FIELD_CLASS} md:col-span-2`}>
+                  <span className="font-medium text-[var(--foreground)]">请求 URL</span>
+                  <input type="url" value={sel.config?.url || ""}
+                    onChange={(e) => updateSelConfig({ url: e.target.value })}
+                    placeholder="https://public-api.example.com/path" className={INPUT_CLASS} />
+                  <span>仅允许公网地址；回环、私网与云元数据地址会被后端拒绝。</span>
+                </label>
+                <label className={FIELD_CLASS}>
+                  <span className="font-medium text-[var(--foreground)]">方法</span>
+                  <select value={sel.config?.method || "GET"}
+                    onChange={(e) => updateSelConfig({ method: e.target.value })} className={INPUT_CLASS}>
+                    {["GET", "POST", "PUT", "PATCH", "DELETE"].map((method) =>
+                      <option key={method} value={method}>{method}</option>)}
+                  </select>
+                </label>
+                <label className={FIELD_CLASS}>
+                  <span className="font-medium text-[var(--foreground)]">超时（秒，1–120）</span>
+                  <input type="number" min={1} max={120} value={sel.config?.timeout_seconds ?? 15}
+                    onChange={(e) => updateSelConfig({ timeout_seconds: Number(e.target.value) })} className={INPUT_CLASS} />
+                </label>
+                <JsonObjectEditor key={`${sel.node_key}:headers:${editorVersion}`} label="非敏感请求头 JSON"
+                  value={sel.config?.headers} validate={parseHttpHeaders}
+                  hint='对象格式，如 {"Accept":"application/json"}；Authorization、API Key、Cookie 等禁止明文。'
+                  onValidityChange={(valid) => setJsonValidity((current) => ({ ...current, [`${sel.node_key}:headers`]: valid }))}
+                  onChange={(headers) => updateSelConfig({ headers })} />
+                <label className={`${FIELD_CLASS} md:col-span-2`}>
+                  <span className="font-medium text-[var(--foreground)]">请求体</span>
+                  <textarea value={typeof sel.config?.body === "string" ? sel.config.body
+                    : sel.config?.body == null ? "" : JSON.stringify(sel.config.body, null, 2)}
+                    rows={3} spellCheck={false} onChange={(e) => updateSelConfig({ body: e.target.value })}
+                    placeholder='JSON 字符串或纯文本，如 {"query":"hello"}' className={`${INPUT_CLASS} font-mono text-xs`} />
+                </label>
+                <label className={`${FIELD_CLASS} md:col-span-2`}>
+                  <span className="font-medium text-[var(--foreground)]">auth_secret_ref（公司密钥引用名）</span>
+                  <input value={sel.config?.auth_secret_ref || ""} autoComplete="off"
+                    onChange={(e) => updateSelConfig({ auth_secret_ref: e.target.value })}
+                    placeholder="例如 openai_api_key（不是密钥明文）" className={INPUT_CLASS} />
+                  <span>只保存保险库中的引用名；不要粘贴 Token、API Key 或 Cookie。</span>
+                </label>
+              </>
+            )}
+            {sel.node_type === "TOOL" && (
+              <>
+                <label className={FIELD_CLASS}>
+                  <span className="font-medium text-[var(--foreground)]">工具名</span>
+                  <input value={sel.config?.tool_name || ""}
+                    onChange={(e) => updateSelConfig({ tool_name: e.target.value })}
+                    placeholder="tool_name" className={INPUT_CLASS} />
+                </label>
+                <JsonObjectEditor key={`${sel.node_key}:arguments:${editorVersion}`} label="工具参数 arguments JSON"
+                  value={sel.config?.arguments} hint='对象格式，如 {"url":"https://example.com"}'
+                  onValidityChange={(valid) => setJsonValidity((current) => ({ ...current, [`${sel.node_key}:arguments`]: valid }))}
+                  onChange={(args) => updateSelConfig({ arguments: args })} />
+              </>
+            )}
+            {sel.node_type === "TRANSFORM" && (
+              <JsonObjectEditor key={`${sel.node_key}:set:${editorVersion}`} label="输出映射 set JSON"
+                value={sel.config?.set}
+                hint={'对象格式；值可用 "{{节点key.字段}}" 或 "{{input.参数}}" 引用上游数据。'}
+                onValidityChange={(valid) => setJsonValidity((current) => ({ ...current, [`${sel.node_key}:set`]: valid }))}
+                onChange={(set) => updateSelConfig({ set })} />
+            )}
+          </div>
+
           {/* 条件节点出边标签编辑 */}
-          {sel.node_type === "CONDITION" && edges.filter((ed) => ed.from_node === sel.node_key).length > 0 && (
-            <div className="text-[10px] text-[var(--muted)] space-x-3">
+          {sel.node_type === "CONDITION" && edges.some((ed) => ed.from_node === sel.node_key) && (
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
               {edges.map((e, i) => e.from_node === sel.node_key ? (
-                <span key={i} className="inline-flex items-center gap-1">
-                  → {nodes.find((n) => n.node_key === e.to_node)?.name}
-                  <input placeholder="yes/no" value={e.label || ""}
+                <label key={i} className={`${FIELD_CLASS} sm:flex-row sm:items-center`}>
+                  <span>→ {nodes.find((n) => n.node_key === e.to_node)?.name}</span>
+                  <input aria-label={`到${nodes.find((n) => n.node_key === e.to_node)?.name}的分支标签`}
+                    placeholder="yes/no" value={e.label || ""}
                     onChange={(ev) => setEdges((es) => es.map((x, j) =>
-                      j === i ? { ...x, label: ev.target.value } : x))}
-                    className="bg-white/[0.04] border border-[var(--border)] rounded px-1 py-0.5 w-16" />
-                </span>
+                      j === i ? { ...x, label: ev.target.value } : x))} className={INPUT_CLASS} />
+                </label>
               ) : null)}
             </div>
           )}
-        </div>
+        </aside>
       )}
     </div>
   );

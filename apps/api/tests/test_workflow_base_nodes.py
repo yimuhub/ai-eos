@@ -14,15 +14,16 @@ import json
 from sqlalchemy import select
 
 from app.db.session import AsyncSessionLocal
-from app.models.workflow import RunStatus, WorkflowExecution, WorkflowStep
+from app.models.workflow import RunStatus, WorkflowStep
 from app.workflow_runtime import advance_execution, start_workflow
 
 
 async def _create_workflow(client, headers, company_id, nodes, edges,
-                           name="基座节点测试流"):
+                           name="基座节点测试流", inputs=None):
     r = await client.post(
         f"/workflows?company_id={company_id}",
-        json={"name": name, "nodes": nodes, "edges": edges},
+        json={"name": name, "nodes": nodes, "edges": edges,
+              "inputs": inputs or []},
         headers=headers)
     assert r.status_code == 201, r.text
     return r.json()["id"]
@@ -214,7 +215,8 @@ async def test_transform_maps_input_and_upstream(client, tenants, monkeypatch):
         {"node_key": "e", "node_type": "END", "name": "结束"},
     ], [{"from_node": "s", "to_node": "t"},
         {"from_node": "t", "to_node": "tr"},
-        {"from_node": "tr", "to_node": "e"}])
+        {"from_node": "tr", "to_node": "e"}],
+        inputs=[{"name": "company_id", "type": "text", "required": True}])
 
     async def fake_skill(slug, payload):
         return {"result": {"results": [{"title": "第一条"}]}}

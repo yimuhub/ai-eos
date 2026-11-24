@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.db.session import AsyncSessionLocal
-from app.models.artifact import Artifact, ArtifactStatus
+from app.models.artifact import Artifact, ArtifactStatus, ArtifactVersion
 from app.models.task import Task, TaskPriority, TaskStatus
 
 pytestmark = pytest.mark.asyncio
@@ -43,16 +43,27 @@ async def _seed_task(company_id: str, user_id: str, *, title: str,
 
 async def _seed_artifact(company_id: str, task_id: str, *,
                          status: ArtifactStatus, accepted: bool = False,
-                         minutes: int = 1) -> str:
+                         minutes: int = 1, current_version: int = 1,
+                         artifact_id: str | None = None) -> str:
     async with AsyncSessionLocal() as s:
-        a = Artifact(id=f"art-{task_id[:30]}", company_id=company_id,
+        a = Artifact(id=artifact_id or f"art-{task_id[:30]}", company_id=company_id,
                      name=f"成果-{task_id[:6]}", artifact_type="document",
-                     current_version=1, status=status, task_id=task_id,
+                     current_version=current_version, status=status, task_id=task_id,
                      accepted_at=_at(minutes) if accepted else None,
                      created_at=_at(minutes))
         s.add(a)
         await s.commit()
     return a.id
+
+
+async def _seed_version(artifact_id: str, version: int, status: ArtifactStatus,
+                        comment: str | None = None) -> None:
+    async with AsyncSessionLocal() as s:
+        s.add(ArtifactVersion(
+            id=f"version-{artifact_id[-20:]}-{version}", artifact_id=artifact_id,
+            version=version, status=status, content=f"v{version} 正文",
+            review_comment=comment))
+        await s.commit()
 
 
 async def test_inbox_buckets_by_status_and_artifact_acceptance(client, tenants):
@@ -83,14 +94,15 @@ async def test_inbox_buckets_by_status_and_artifact_acceptance(client, tenants):
     body = r.json()
 
     assert body["counts"] == {"in_progress": 1, "awaiting_acceptance": 1,
-                              "completed": 2, "failed": 1}
+                              "needs_rework": 0, "completed": 2, "failed": 1}
     assert [i["id"] for i in body["in_progress"]] == [running]
     assert [i["id"] for i in body["awaiting_acceptance"]] == [awaiting]
     assert {i["id"] for i in body["completed"]} == {accepted, no_artifact}
     assert [i["id"] for i in body["failed"]] == [failed]
 
     all_ids = {i["id"] for bucket in
-               ("in_progress", "awaiting_acceptance", "completed", "failed")
+               ("in_progress", "awaiting_acceptance", "needs_rework",
+                "completed", "failed")
                for i in body[bucket]}
     assert cancelled not in all_ids, "主动取消不算失败，也不该出现在其它桶"
 
@@ -132,8 +144,9 @@ async def test_inbox_is_scoped_to_own_company(client, tenants):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["counts"] == {"in_progress": 0, "awaiting_acceptance": 0,
-                              "completed": 0, "failed": 0}
-    for bucket in ("in_progress", "awaiting_acceptance", "completed", "failed"):
+                              "needs_rework": 0, "completed": 0, "failed": 0}
+    for bucket in ("in_progress", "awaiting_acceptance", "needs_rework",
+                   "completed", "failed"):
         assert body[bucket] == []
 
 
@@ -148,3 +161,61 @@ async def test_inbox_orders_newest_first(client, tenants):
                          headers=alice["headers"])
     assert r.status_code == 200, r.text
     assert [i["id"] for i in r.json()["in_progress"]] == [newer, older]
+
+
+async def test_inbox_latest_rejected_artifact_wins_and_exposes_rework_context(
+        client, tenants):
+    """最新成果被驳回时进入待返工，不进入已完成；任务状态不被改写。"""
+    alice, co = tenants.alice, tenants.alice_co
+    task_id = await _seed_task(co["id"], alice["id"], title="执行完成但成果被驳回",
+                               status=TaskStatus.COMPLETED, minutes=2)
+    older = await _seed_artifact(
+        co["id"], task_id, status=ArtifactStatus.APPROVED, accepted=True,
+        minutes=10, artifact_id=f"old-{task_id[:25]}")
+    latest = await _seed_artifact(
+        co["id"], task_id, status=ArtifactStatus.REJECTED,
+        minutes=1, current_version=2, artifact_id=f"new-{task_id[:25]}")
+    await _seed_version(latest, 1, ArtifactStatus.APPROVED, "旧版本意见")
+    await _seed_version(latest, 2, ArtifactStatus.REJECTED, "数据口径不对，请重算")
+
+    r = await client.get(f"/tasks/inbox?company_id={co['id']}",
+                         headers=alice["headers"])
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["counts"]["needs_rework"] == 1
+    assert body["counts"]["completed"] == 0
+    assert [i["id"] for i in body["needs_rework"]] == [task_id]
+    assert body["completed"] == []
+    item = body["needs_rework"][0]
+    assert item["status"] == "COMPLETED"
+    assert item["artifact_id"] == latest and item["artifact_id"] != older
+    assert item["artifact_status"] == "REJECTED"
+    assert item["current_version"] == 2
+    assert item["review_comment"] == "数据口径不对，请重算"
+
+
+async def test_inbox_exposes_every_rework_item_beyond_display_limit(client, tenants):
+    from app.api.routes.inbox import BUCKET_LIMIT
+
+    alice, co = tenants.alice, tenants.alice_co
+    agent_id = await _make_agent(client, alice, co["id"], "返工人")
+    expected = []
+    for index in range(BUCKET_LIMIT + 7):
+        task_id = await _seed_task(
+            co["id"], alice["id"], title=f"返工任务-{index}",
+            status=TaskStatus.COMPLETED, minutes=index + 1, agent_id=agent_id)
+        artifact_id = await _seed_artifact(
+            co["id"], task_id, status=ArtifactStatus.REJECTED, minutes=index + 1)
+        await _seed_version(artifact_id, 1, ArtifactStatus.REJECTED,
+                            f"返工意见-{index}")
+        expected.append(task_id)
+
+    body = (await client.get(f"/tasks/inbox?company_id={co['id']}",
+                             headers=alice["headers"])).json()
+    items = body["needs_rework"]
+    assert body["counts"]["needs_rework"] == len(expected)
+    assert len(items) == len(expected) > BUCKET_LIMIT
+    assert {item["id"] for item in items} == set(expected)
+    assert all(item["agent_name"] == "返工人" for item in items)
+    assert {item["review_comment"] for item in items} == {
+        f"返工意见-{index}" for index in range(len(expected))}

@@ -60,9 +60,9 @@ export default function TokenAdminPage() {
 
   // 激活公司可订阅：切公司 → 统计/流水/预算/范围选项全部自动换到新公司
   const cid = useActiveCompanyId();
-  // undefined = 还没确认好激活公司。此时先别请求，否则会先按"无公司"打一轮、
-  // cid 一到又重打一轮（首屏闪一次 0 数据）。
-  const companyReady = cid !== undefined;
+  // 还没确认好激活公司、或确实没有公司时都先别请求；否则会先按"无公司"
+  // 打一轮，cid 一到又重打一轮（首屏闪一次 0 数据）。
+  const companyReady = !!cid;
 
   /* ---------- 数据（统一交给 useResource：去重、缓存、聚焦重取） ---------- */
   // 统计看板：7 个口径一次并发拉回，失败的那一项退回空值（与原来的
@@ -71,10 +71,10 @@ export default function TokenAdminPage() {
     companyReady ? `tokens:stats:${cid ?? "none"}:${days}` : null,
     async () => {
       const [s, a, d, co, p, t, sc] = await Promise.allSettled([
-        api.get<Summary>(`/tokens/stats/summary?days=${days}`),
+        api.get<Summary>(`/tokens/stats/summary?company_id=${cid}&days=${days}`),
         cid ? api.get<StatRow[]>(`/tokens/stats/by-agent?company_id=${cid}&days=${days}`) : Promise.resolve([]),
         cid ? api.get<StatRow[]>(`/tokens/stats/by-department?company_id=${cid}&days=${days}`) : Promise.resolve([]),
-        api.get<StatRow[]>(`/tokens/stats/by-company?days=${days}`),
+        api.get<StatRow[]>(`/tokens/stats/by-company?company_id=${cid}&days=${days}`),
         cid ? api.get<StatRow[]>(`/tokens/stats/by-project?company_id=${cid}&days=${days}`) : Promise.resolve([]),
         cid ? api.get<StatRow[]>(`/tokens/stats/by-task?company_id=${cid}&days=${days}`) : Promise.resolve([]),
         cid ? api.get<StatRow[]>(`/tokens/stats/by-scenario?company_id=${cid}&days=${days}`) : Promise.resolve([]),
@@ -82,7 +82,9 @@ export default function TokenAdminPage() {
       const pick = (r: PromiseSettledResult<StatRow[]>) => (r.status === "fulfilled" ? r.value : []);
       return {
         summary: s.status === "fulfilled" ? s.value : null,
-        byAgent: pick(a), byDept: pick(d), byCompany: pick(co),
+        // 旧后端尚未接收 by-company 的 company_id；前端再按 key 收窄，
+        // 避免summary 已是单公司、公司维度却混入其它公司。
+        byAgent: pick(a), byDept: pick(d), byCompany: pick(co).filter((r) => r.key === cid),
         byProject: pick(p), byTask: pick(t), byScenario: pick(sc),
       };
     },
@@ -333,7 +335,7 @@ export default function TokenAdminPage() {
             <span className="pulse-dot" /> 📊 Token 统计与计费
           </h1>
           <p className="text-sm text-[var(--muted-foreground)] mt-1">
-            所有接入模型的用量自动计量 · 六维统计 · 后台计费标准
+            当前公司的用量与六维统计 · 计费标准为独立的账号级配置
           </p>
         </div>
         <select value={days} onChange={(e) => setDays(Number(e.target.value))} className="input w-auto text-sm">

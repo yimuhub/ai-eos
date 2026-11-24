@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (assert_company_capability, assert_company_owned,
@@ -184,6 +185,59 @@ async def get_version_content(
             "status": v.status.value}
 
 
+async def _submit_version_with_retry(
+    artifact_id: str, data: VersionSubmit | None, db: AsyncSession, user: User,
+    *, review: bool,
+) -> tuple[Artifact, ArtifactVersion | None]:
+    """分配版本并提交；SQLite 写冲突/唯一冲突后整事务重算，最多三次。"""
+    allowed = (ArtifactStatus.DRAFT, ArtifactStatus.REJECTED)
+    user_id = user.id
+    for attempt in range(3):
+        try:
+            art = await _owned_artifact(artifact_id, db, user_id,
+                                        Capability.OPERATE, for_update=True)
+            if art.status not in allowed:
+                raise HTTPException(409, f"Cannot submit new version in status {art.status.value}")
+            expected_status = art.status
+            expected_version = art.current_version
+            version = None
+            target_status = ArtifactStatus.IN_REVIEW if review else expected_status
+            next_version = expected_version
+            if data is not None and (not review or data.content):
+                version = await _append_next_version(
+                    db, art, data, user_id, review=review)
+                next_version = version.version
+            values = {"status": target_status}
+            if review or version is not None:
+                # 返工后的内容不再拥有旧版本的发布/验收事实。
+                values.update(published_at=None, accepted_by=None, accepted_at=None)
+                await _invalidate_pending_publish_approvals(db, artifact_id)
+            if version is not None:
+                values["current_version"] = next_version
+            guarded = await db.execute(update(Artifact).where(
+                Artifact.id == artifact_id,
+                Artifact.status == expected_status,
+                Artifact.current_version == expected_version,
+                Artifact.accepted_at.is_(None),
+            ).values(**values).returning(Artifact.id))
+            if guarded.scalar_one_or_none() is None:
+                raise HTTPException(409, "成果状态或版本已变化，请刷新后重试")
+            art.status = target_status
+            art.current_version = next_version
+            if review or version is not None:
+                art.published_at = None
+                art.accepted_by = None
+                art.accepted_at = None
+            await db.commit()
+            return art, version
+        except (IntegrityError, OperationalError) as exc:
+            await db.rollback()
+            retryable = isinstance(exc, IntegrityError) or _is_sqlite_write_conflict(exc)
+            if not retryable or attempt == 2:
+                raise HTTPException(409, "成果版本正被其他请求修改，请刷新后重试") from exc
+    raise HTTPException(409, "成果版本正被其他请求修改，请刷新后重试")
+
+
 @router.post("/{artifact_id}/versions", response_model=ArtifactNewVersionOut)
 async def submit_new_version(
     artifact_id: str,
@@ -192,27 +246,9 @@ async def submit_new_version(
     user: User = Depends(get_current_user),
 ):
     """提交新版本（草稿或被驳回后重新提交）。"""
-    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)
-    if art.status not in (ArtifactStatus.DRAFT, ArtifactStatus.REJECTED):
-        raise HTTPException(409, f"Cannot submit new version in status {art.status.value}")
-
-    new_ver = art.current_version + 1 if art.status == ArtifactStatus.REJECTED \
-        else art.current_version
-    v = ArtifactVersion(id=str(uuid.uuid4()), artifact_id=artifact_id,
-                        version=new_ver + (1 if art.status == ArtifactStatus.REJECTED else 0),
-                        content=data.content, change_note=data.change_note,
-                        submitted_by=data.submitted_by_agent_id or user.id)
-    # 防重复版本号：取最大版本+1
-    max_q = await db.execute(select(ArtifactVersion.version).where(
-        ArtifactVersion.artifact_id == artifact_id).order_by(
-        ArtifactVersion.version.desc()).limit(1))
-    max_ver = max_q.scalar() or 0
-    v.version = max_ver + 1
-
-    db.add(v)
-    art.current_version = v.version
-    await db.commit()
-    return {"artifact_id": artifact_id, "new_version": v.version,
+    art, version = await _submit_version_with_retry(
+        artifact_id, data, db, user, review=False)
+    return {"artifact_id": artifact_id, "new_version": version.version,
             "status": art.status.value}
 
 
@@ -223,26 +259,9 @@ async def submit_for_review(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """提交审核：DRAFT/REJECTED → IN_REVIEW。"""
-    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)
-    if not can_transition(art.status, ArtifactStatus.IN_REVIEW):
-        raise HTTPException(409, f"Cannot submit from {art.status.value}")
-
-    # 可选同时更新内容为新版本
-    if data and data.content:
-        max_q = await db.execute(select(ArtifactVersion.version).where(
-            ArtifactVersion.artifact_id == artifact_id).order_by(
-            ArtifactVersion.version.desc()).limit(1))
-        new_v = ArtifactVersion(
-            id=str(uuid.uuid4()), artifact_id=artifact_id,
-            version=(max_q.scalar() or 0) + 1, content=data.content,
-            change_note=data.change_note or "提交审核",
-            submitted_by=data.submitted_by_agent_id or user.id)
-        db.add(new_v)
-        art.current_version = new_v.version
-
-    art.status = ArtifactStatus.IN_REVIEW
-    await db.commit()
+    """提交审核：DRAFT/REJECTED → IN_REVIEW；可同时原子追加版本。"""
+    art, _ = await _submit_version_with_retry(
+        artifact_id, data, db, user, review=True)
     return {"id": artifact_id, "status": "IN_REVIEW",
             "current_version": art.current_version}
 
@@ -255,7 +274,8 @@ async def review_artifact(
     user: User = Depends(get_current_user),
 ):
     """审核：approve / reject / withdraw。"""
-    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)
+    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE,
+                                for_update=True)
 
     decision_map = {
         "approve": ArtifactStatus.APPROVED,
@@ -269,20 +289,51 @@ async def review_artifact(
         raise HTTPException(409,
                             f"Cannot {data.decision} from {art.status.value}")
 
+    comment = (data.comment or "").strip()
+    if data.decision == "reject" and not (1 <= len(comment) <= 2000):
+        raise HTTPException(400, "驳回意见不能为空，且长度需为 1-2000 字")
+
+    expected_status = art.status
+    expected_version = art.current_version
+    user_id = user.id
+    reviewer = data.reviewer_agent_id or user_id
+    values = {"status": target}
+    if target != ArtifactStatus.APPROVED:
+        values.update(published_at=None, accepted_by=None, accepted_at=None)
+    # End the read snapshot before upgrading it to a write; otherwise SQLite WAL
+    # can reject the CAS after another connection commits with SQLITE_BUSY_SNAPSHOT.
+    await db.commit()
+    statement = update(Artifact).where(
+        Artifact.id == artifact_id,
+        Artifact.status == expected_status,
+        Artifact.current_version == expected_version,
+        Artifact.accepted_at.is_(None),
+    ).values(**values).returning(Artifact.id)
+    if not await _execute_artifact_cas(db, statement):
+        await db.rollback()
+        raise HTTPException(409, "成果状态或版本已变化，请刷新后重试")
+
     # 更新当前版本的审核信息
     vq = await db.execute(select(ArtifactVersion).where(
         ArtifactVersion.artifact_id == artifact_id,
-        ArtifactVersion.version == art.current_version))
+        ArtifactVersion.version == expected_version))
     cur_v = vq.scalars().first()
     if cur_v:
         cur_v.status = target
-        cur_v.reviewed_by = data.reviewer_agent_id or user.id
-        cur_v.review_comment = data.comment
+        cur_v.reviewed_by = reviewer
+        cur_v.review_comment = comment or None
 
     art.status = target
+    if target != ArtifactStatus.APPROVED:
+        art.published_at = None
+        art.accepted_by = None
+        art.accepted_at = None
+        await _invalidate_pending_publish_approvals(db, artifact_id)
     await db.commit()
     return {"id": artifact_id, "status": art.status.value,
-            "reviewer": data.reviewer_agent_id or user.id}
+            "reviewer": reviewer,
+            "current_version": expected_version,
+            "review_comment": comment or None}
 
 
 @router.post("/{artifact_id}/accept", response_model=ArtifactAcceptOut)
@@ -296,7 +347,8 @@ async def accept_artifact(
     验收是"我收到了、这事结了"的业务事实，因此幂等：重复点击返回
     already=true，而不是 409 —— 前端超时重试不该被当成错误。
     """
-    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)
+    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE,
+                                for_update=True)
     if art.accepted_at is not None:
         return {"id": artifact_id, "already": True,
                 "status": art.status.value,
@@ -306,20 +358,42 @@ async def accept_artifact(
         raise HTTPException(
             409, f"只有审核通过（APPROVED）的交付物可以验收，当前：{art.status.value}")
 
-    art.accepted_by = user.id
-    art.accepted_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    if art.created_by and art.created_by != user.id:
+    accepted_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    user_id = user.id
+    created_by = art.created_by
+    company_id = art.company_id
+    artifact_name = art.name
+    await db.commit()
+    statement = update(Artifact).where(
+        Artifact.id == artifact_id,
+        Artifact.status == ArtifactStatus.APPROVED,
+        Artifact.accepted_at.is_(None),
+    ).values(accepted_by=user_id, accepted_at=accepted_at).returning(Artifact.id)
+    if not await _execute_artifact_cas(db, statement):
+        await db.rollback()
+        current = await db.get(Artifact, artifact_id, populate_existing=True)
+        if current and current.accepted_at is not None:
+            return {"id": artifact_id, "already": True,
+                    "status": current.status.value,
+                    "accepted_by": current.accepted_by,
+                    "accepted_at": current.accepted_at}
+        raise HTTPException(
+            409, f"只有审核通过（APPROVED）且未验收的交付物可以验收，当前："
+            f"{current.status.value if current else '不存在'}")
+    art.accepted_by = user_id
+    art.accepted_at = accepted_at
+    if created_by and created_by != user_id:
         # 与业务同事务（notify 不 commit）：验收事实与通知要么都落库，要么都不落。
         from app.services.notification_service import notify
         await notify(
-            db, user_id=art.created_by, company_id=art.company_id,
+            db, user_id=created_by, company_id=company_id,
             type="artifact.accepted",
-            title=f"交付物已验收：{art.name}",
+            title=f"交付物已验收：{artifact_name}",
             body="老板已确认接收该交付物，无需再跟进。",
             link="/artifacts")
     await db.commit()
-    return {"id": artifact_id, "already": False, "status": art.status.value,
-            "accepted_by": art.accepted_by, "accepted_at": art.accepted_at}
+    return {"id": artifact_id, "already": False, "status": "APPROVED",
+            "accepted_by": user_id, "accepted_at": accepted_at}
 
 
 @router.post("/{artifact_id}/decline", response_model=ArtifactDeclineOut)
@@ -336,33 +410,62 @@ async def decline_artifact(
     同时写进当前版本与交付评论，返工的人在两处都能看到原因。
     """
     comment = (data.comment or "").strip() if data and data.comment else ""
+    # 显式提供的非法长度保持原有 400 契约；缺失意见在确认可退回状态后
+    # 再按必填规则拒绝，避免草稿的 {} 从 409 漂移成 400。
     if data and data.comment is not None and not (1 <= len(comment) <= 2000):
-        raise HTTPException(400, "comment 长度需为 1-2000 字")
+        raise HTTPException(400, "退回意见不能为空，且长度需为 1-2000 字")
 
-    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)
+    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE,
+                                for_update=True)
     if art.status != ArtifactStatus.APPROVED:
         raise HTTPException(
             409, f"只有审核通过（APPROVED）的交付物可以验收退回，当前：{art.status.value}")
+    if not comment:
+        raise HTTPException(400, "退回意见不能为空，且长度需为 1-2000 字")
+
+    expected_version = art.current_version
+    expected_accepted_at = art.accepted_at
+    user_id = user.id
+    company_id = art.company_id
+    accepted_guard = Artifact.accepted_at.is_(None) if expected_accepted_at is None \
+        else Artifact.accepted_at == expected_accepted_at
+    await db.commit()
+    statement = update(Artifact).where(
+        Artifact.id == artifact_id,
+        Artifact.status == ArtifactStatus.APPROVED,
+        Artifact.current_version == expected_version,
+        accepted_guard,
+    ).values(status=ArtifactStatus.REJECTED, accepted_by=None,
+             accepted_at=None, published_at=None).returning(Artifact.id)
+    if not await _execute_artifact_cas(db, statement):
+        await db.rollback()
+        current = await db.get(Artifact, artifact_id, populate_existing=True)
+        detail = "成果已验收，不能退回返工" \
+            if expected_accepted_at is None and current and current.accepted_at else \
+            "成果状态或版本已变化，请刷新后重试"
+        raise HTTPException(409, detail)
 
     vq = await db.execute(select(ArtifactVersion).where(
         ArtifactVersion.artifact_id == artifact_id,
-        ArtifactVersion.version == art.current_version))
+        ArtifactVersion.version == expected_version))
     cur_v = vq.scalars().first()
     if cur_v:
         cur_v.status = ArtifactStatus.REJECTED
-        cur_v.reviewed_by = user.id
-        cur_v.review_comment = comment or None
+        cur_v.reviewed_by = user_id
+        cur_v.review_comment = comment
 
     art.status = ArtifactStatus.REJECTED
     art.accepted_by = None
     art.accepted_at = None
+    art.published_at = None
+    await _invalidate_pending_publish_approvals(db, artifact_id)
     db.add(DeliverableComment(
-        company_id=art.company_id, artifact_id=artifact_id,
-        author_type="user", author_id=user.id,
-        body=comment or "验收退回：请返工后重新提交"))
+        company_id=company_id, artifact_id=artifact_id,
+        author_type="user", author_id=user_id, body=comment))
     await db.commit()
     return {"id": artifact_id, "status": art.status.value,
-            "comment": comment or None}
+            "comment": comment, "current_version": expected_version,
+            "review_comment": comment}
 
 
 @router.get("/{artifact_id}/comments", response_model=list[ArtifactCommentOut])
@@ -426,14 +529,72 @@ async def delete_comment(
     return {"id": comment_id, "deleted": True}
 
 
-async def _owned_artifact(artifact_id: str, db: AsyncSession, user: User,
-                          capability: Capability = Capability.VIEW) -> Artifact:
-    """取成果并做门禁：公司角色需具备 capability，否则 404（不泄露存在性）。"""
-    art = await db.get(Artifact, artifact_id)
+async def _owned_artifact(artifact_id: str, db: AsyncSession, user: User | str,
+                          capability: Capability = Capability.VIEW,
+                          *, for_update: bool = False) -> Artifact:
+    """取成果并做门禁：公司角色需具备 capability，否则 404（不泄露存在性）。
+
+    写路径可锁定逻辑成果行，使版本号分配、状态流转与发布审批在 PostgreSQL
+    上串行化；SQLite 由唯一约束和写冲突重试兜底。
+    """
+    user_id = user if isinstance(user, str) else user.id
+    art = await db.get(Artifact, artifact_id, populate_existing=True,
+                       with_for_update=for_update)
     if not art:
         raise HTTPException(404, "Artifact not found")
-    await assert_company_capability(db, user.id, art.company_id, capability)
+    company_id = art.company_id
+    await assert_company_capability(db, user_id, company_id, capability)
     return art
+
+
+async def _append_next_version(db: AsyncSession, art: Artifact,
+                               data: VersionSubmit, user_id: str, *,
+                               review: bool) -> ArtifactVersion:
+    """在调用方的事务/保存点内分配版本；数据库唯一约束是最终仲裁者。"""
+    max_q = await db.execute(select(ArtifactVersion.version).where(
+        ArtifactVersion.artifact_id == art.id).order_by(
+        ArtifactVersion.version.desc()).limit(1))
+    version = ArtifactVersion(
+        id=str(uuid.uuid4()), artifact_id=art.id,
+        version=(max_q.scalar() or 0) + 1, content=data.content,
+        change_note=data.change_note or ("提交审核" if review else None),
+        submitted_by=data.submitted_by_agent_id or user_id)
+    db.add(version)
+    await db.flush()
+    return version
+
+
+def _is_sqlite_write_conflict(exc: OperationalError) -> bool:
+    text = str(exc.orig or exc).lower()
+    return any(marker in text for marker in (
+        "database is locked", "database table is locked", "sqlite_busy_snapshot"))
+
+
+async def _execute_artifact_cas(db: AsyncSession, statement) -> bool:
+    for attempt in range(3):
+        try:
+            result = await db.execute(statement)
+            return result.scalar_one_or_none() is not None
+        except OperationalError as exc:
+            await db.rollback()
+            if not _is_sqlite_write_conflict(exc) or attempt == 2:
+                raise HTTPException(409, "成果正被其他请求修改，请刷新后重试") from exc
+    raise HTTPException(409, "成果正被其他请求修改，请刷新后重试")
+
+
+async def _invalidate_pending_publish_approvals(db: AsyncSession,
+                                                artifact_id: str) -> None:
+    """返工使旧的发布确认失效；决定接口仍能把它识别为 stale 而非误发布。"""
+    from app.models.intervention import ApprovalRequest
+
+    rows = (await db.execute(select(ApprovalRequest).where(
+        ApprovalRequest.action_type == "artifact_publish",
+        ApprovalRequest.status == "PENDING",
+        ApprovalRequest.payload["artifact_id"].as_string() == artifact_id))).scalars().all()
+    for req in rows:
+        req.status = "REJECTED"
+        req.decided_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        req.decision_note = "stale: artifact declined or reworked"
 
 
 async def _ensure_published_at_column(db: AsyncSession) -> None:  # pragma: no cover
@@ -473,44 +634,59 @@ async def publish_artifact(
       老板批准后自动标记 published_at（双确认）
     - 否则直接发布（小公司单人模式，不增加流程负担）
     """
-    import uuid as _uuid
-    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)
-    if art.status.value != "APPROVED":
+    await _ensure_published_at_column(db)
+    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE,
+                                for_update=True)
+    if art.status != ArtifactStatus.APPROVED:
         raise HTTPException(409, f"只有审核通过（APPROVED）的成果可以发布，当前：{art.status.value}")
 
-    from sqlalchemy import text
-    await _ensure_published_at_column(db)
     # 已发布 → 幂等返回
     if art.published_at:
         return {"id": artifact_id, "published_at": str(art.published_at),
                 "already": True}
 
+    company_id = art.company_id
+    expected_version = art.current_version
+    artifact_name = art.name
     try:
         from app.models.intervention import InterventionPolicy
         pol = (await db.execute(
             select(InterventionPolicy).where(
-                InterventionPolicy.company_id == art.company_id,
+                InterventionPolicy.company_id == company_id,
                 InterventionPolicy.level >= 1))).scalars().first()
         needs_approval = bool(pol and "artifact_publish" in (pol.approval_actions or []))
     except Exception as e:  # noqa: BLE001
         # 读不到策略时**默认需要审批**：宁可多一道确认，也不能因为
         # 查询失败就把"成果离开内网"这个动作静默放行（fail-closed）。
+        await db.rollback()
         needs_approval = True
         logger.warning("[artifacts] 读取公司审批策略失败，按需要审批处理：%s", e,
                        exc_info=True)
 
+    await db.commit()
     if needs_approval:
+        statement = update(Artifact).where(
+            Artifact.id == artifact_id,
+            Artifact.status == ArtifactStatus.APPROVED,
+            Artifact.current_version == expected_version,
+            Artifact.published_at.is_(None),
+        ).values(current_version=Artifact.current_version).returning(Artifact.id)
+        if not await _execute_artifact_cas(db, statement):
+            await db.rollback()
+            raise HTTPException(409, "成果状态或版本已变化，请刷新后重新申请发布")
         from app.models.intervention import ApprovalRequest
         req = ApprovalRequest(
-            id=str(_uuid.uuid4()), company_id=art.company_id,
+            id=str(uuid.uuid4()), company_id=company_id,
             action_type="artifact_publish",
-            payload={"artifact_id": artifact_id, "awaiting_execution": True},
-            reason=f"交付物「{art.name}」申请正式发布（已审核通过）")
+            payload={"artifact_id": artifact_id,
+                     "artifact_version": expected_version,
+                     "awaiting_execution": True},
+            reason=f"交付物「{artifact_name}」申请正式发布（已审核通过）")
         db.add(req)
         from app.services.notification_service import notify_approval_pending
         await notify_approval_pending(
-            db, company_id=art.company_id,
-            title=f"待审批：发布交付物「{art.name}」",
+            db, company_id=company_id,
+            title=f"待审批：发布交付物「{artifact_name}」",
             body="交付物申请正式发布，需要二次确认。")
         await db.commit()
         return {"status": "pending_approval", "approval_id": req.id,
@@ -521,9 +697,15 @@ async def publish_artifact(
     # 在 SQLite 下的存储格式（以及本仓库 _now()/decided_at 的写法）保持一致，
     # 避免 aware datetime 带来 '+00:00' 后缀导致与 created_at 不可比。
     published_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    await db.execute(
-        text("UPDATE artifacts SET published_at = :now WHERE id = :id"),
-        {"id": artifact_id, "now": published_at})
+    statement = update(Artifact).where(
+        Artifact.id == artifact_id,
+        Artifact.status == ArtifactStatus.APPROVED,
+        Artifact.current_version == expected_version,
+        Artifact.published_at.is_(None),
+    ).values(published_at=published_at).returning(Artifact.id)
+    if not await _execute_artifact_cas(db, statement):
+        await db.rollback()
+        raise HTTPException(409, "成果状态或版本已变化，请刷新后重新发布")
     await db.commit()
     return {"id": artifact_id, "published_at": str(published_at),
             "message": "已发布：交付物可对外交付"}
@@ -537,28 +719,51 @@ async def decide_publish(
     user: User = Depends(get_current_user),
 ):
     """C2：发布审批单 approve 后自动标记 published_at。"""
-    from sqlalchemy import text
     from app.models.intervention import ApprovalRequest
-    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE)
+    if data.decision not in ("approve", "reject"):
+        raise HTTPException(400, "decision must be approve/reject")
+    await _ensure_published_at_column(db)
+    art = await _owned_artifact(artifact_id, db, user, Capability.OPERATE,
+                                for_update=True)
     req = (await db.execute(
         select(ApprovalRequest).where(
             ApprovalRequest.company_id == art.company_id,
             ApprovalRequest.action_type == "artifact_publish",
-            ApprovalRequest.status == "PENDING",
+            ApprovalRequest.status.in_(("PENDING", "REJECTED")),
             ApprovalRequest.payload["artifact_id"].as_string() == artifact_id)
-        .order_by(ApprovalRequest.created_at.desc()))).scalars().first()
-    if not req:
+        .order_by(ApprovalRequest.created_at.desc())
+        .with_for_update())).scalars().first()
+    stale = bool(req and str(req.decision_note or "").startswith("stale:"))
+    if not req or (req.status != "PENDING" and not stale):
         raise HTTPException(404, "没有待审批的发布单")
-    if data.decision not in ("approve", "reject"):
-        raise HTTPException(400, "decision must be approve/reject")
+
+    expected_version = (req.payload or {}).get("artifact_version")
+    if (stale or type(expected_version) is not int
+            or art.status != ArtifactStatus.APPROVED
+            or expected_version != art.current_version):
+        req.status = "REJECTED"
+        req.decided_by = user.id
+        req.decided_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        req.decision_note = "stale: artifact status or version changed"
+        await db.commit()
+        raise HTTPException(409, "发布审批已过期：成果已退回返工或版本已变化，请重新申请")
+
     req.status = "APPROVED" if data.decision == "approve" else "REJECTED"
     req.decided_by = user.id
-    if data.decision == "approve":
-        await _ensure_published_at_column(db)
-        await db.execute(
-            text("UPDATE artifacts SET published_at = :now WHERE id = :id"),
-            {"id": artifact_id,
-             "now": datetime.now(timezone.utc).replace(tzinfo=None)})
+    req.decided_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    req.decision_note = (data.comment or "").strip() or None
+    if data.decision == "approve" and art.published_at is None:
+        published_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        result = await db.execute(
+            update(Artifact).where(
+                Artifact.id == artifact_id,
+                Artifact.status == ArtifactStatus.APPROVED,
+                Artifact.current_version == expected_version,
+                Artifact.published_at.is_(None),
+            ).values(published_at=published_at).returning(Artifact.id))
+        if result.scalar_one_or_none() is None:
+            await db.rollback()
+            raise HTTPException(409, "成果状态或版本已变化，请重新申请发布审批")
     await db.commit()
     return {"id": artifact_id, "decision": data.decision,
             "published": data.decision == "approve"}

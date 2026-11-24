@@ -3,7 +3,7 @@
 覆盖点：
 * 创建、列表过滤（project/task/status）、详情、版本全文与打包下载
 * 版本追加、DRAFT/REJECTED 的送审、审核状态机与非法流转 409
-* 验收幂等、验收退回（清空验收痕迹 + 默认评论）、能力矩阵（member 不能删）
+* 验收幂等、验收退回（清空验收痕迹 + 必填意见）、能力矩阵（member 不能删）
 * 发布：无审批策略直接发布（幂等）与有策略时生成审批单再 decide
 * SOP 交接单、删除成果、跨租户一律 404
 
@@ -11,20 +11,25 @@
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import uuid
 import zipfile
+from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
+from fastapi import HTTPException
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.db.session import AsyncSessionLocal
-from app.models.artifact import Artifact, ArtifactVersion
+from app.models.artifact import Artifact, ArtifactStatus, ArtifactVersion
 from app.models.intervention import ApprovalRequest, InterventionPolicy
 from app.models.membership import CompanyMember
 from app.models.notification import Notification
 from app.models.task import Task
+from app.models.user import User
 
 pytestmark = pytest.mark.asyncio
 
@@ -196,6 +201,12 @@ async def test_version_submit_and_review_state_machine(client, tenants):
                           json={"content": "偷加"}, headers=h)
     assert r.status_code == 409
 
+    # 驳回意见必填：空意见不能把无法返工的 REJECTED 状态写进去
+    r = await client.post(f"/artifacts/{aid}/review",
+                          json={"decision": "reject", "comment": "   "}, headers=h)
+    assert r.status_code == 400
+    assert (await client.get(f"/artifacts/{aid}", headers=h)).json()["status"] == "IN_REVIEW"
+
     # 驳回：当前版本记录意见与审阅人，状态落到 REJECTED
     r = await client.post(f"/artifacts/{aid}/review", json={
         "decision": "reject", "comment": "论据不足",
@@ -219,6 +230,13 @@ async def test_version_submit_and_review_state_machine(client, tenants):
     r = await client.post(f"/artifacts/{aid}/submit", json={
         "content": "返工正文", "change_note": "返工"}, headers=h)
     assert r.status_code == 200 and r.json()["current_version"] == 4
+    detail = (await client.get(f"/artifacts/{aid}", headers=h)).json()
+    by_version = {v["version"]: v for v in detail["versions"]}
+    assert by_version[4]["status"] == "DRAFT"
+    assert by_version[4]["content_preview"] == "返工正文"
+    assert by_version[3]["status"] == "REJECTED"
+    assert by_version[3]["content_preview"] == "送审正文"
+    assert by_version[3]["review_comment"] == "论据不足", "返工不得覆盖被驳回版本"
     r = await client.post(f"/artifacts/{aid}/review",
                           json={"decision": "withdraw"}, headers=h)
     assert r.status_code == 200 and r.json()["status"] == "DRAFT"
@@ -286,7 +304,8 @@ async def test_accept_decline_flow_and_guards(client, tenants):
                           json={"comment": "数据要重算"}, headers=h)
     assert r.status_code == 200, r.text
     assert r.json() == {"id": aid, "status": "REJECTED",
-                        "comment": "数据要重算"}
+                        "comment": "数据要重算", "current_version": 2,
+                        "review_comment": "数据要重算"}
     detail = (await client.get(f"/artifacts/{aid}", headers=h)).json()
     assert detail["status"] == "REJECTED"
     assert detail["accepted_by"] is None and detail["accepted_at"] is None
@@ -303,13 +322,16 @@ async def test_accept_decline_flow_and_guards(client, tenants):
     r = await client.post(f"/artifacts/{aid}/accept", headers=h)
     assert r.status_code == 200 and r.json()["already"] is False
 
-    # 不填意见时写入默认退回说明
+    # 验收退回意见必填：缺失/空白都在状态变更前拒绝，且不生成默认评论
     art2 = (await _create(client, alice, co["id"], name="无意见退回"))["id"]
     await _approve(client, alice, art2)
-    r = await client.post(f"/artifacts/{art2}/decline", json={}, headers=h)
-    assert r.status_code == 200 and r.json()["comment"] is None
+    for payload in ({}, {"comment": "   "}):
+        r = await client.post(f"/artifacts/{art2}/decline", json=payload, headers=h)
+        assert r.status_code == 400
+    detail = (await client.get(f"/artifacts/{art2}", headers=h)).json()
+    assert detail["status"] == "APPROVED"
     comments = (await client.get(f"/artifacts/{art2}/comments", headers=h)).json()
-    assert comments[0]["body"] == "验收退回：请返工后重新提交"
+    assert comments == []
 
 
 async def test_comments_crud_and_member_capability(client, tenants):
@@ -440,7 +462,8 @@ async def test_publish_approval_policy_and_decide(client, tenants, monkeypatch):
         assert req.company_id == co["id"]
         assert req.action_type == "artifact_publish"
         assert req.status == "PENDING"
-        assert req.payload == {"artifact_id": aid, "awaiting_execution": True}
+        assert req.payload == {"artifact_id": aid, "artifact_version": 2,
+                               "awaiting_execution": True}
         assert "需二次确认" in req.reason
         assert (await s.get(Artifact, aid)).published_at is None
 
@@ -484,10 +507,13 @@ async def test_publish_approval_policy_and_decide(client, tenants, monkeypatch):
     await _approve(client, alice, art4)
     real_select = ar.select
 
-    def _db_down(*args, **kwargs):
-        raise RuntimeError("policy store down")
+    def _policy_down(statement, *args, **kwargs):
+        entities = getattr(statement, "column_descriptions", ())
+        if any(entity.get("entity") is InterventionPolicy for entity in entities):
+            raise RuntimeError("policy store down")
+        return real_select(statement, *args, **kwargs)
 
-    monkeypatch.setattr(ar, "select", _db_down)
+    monkeypatch.setattr(ar, "select", _policy_down)
     r = await client.post(f"/artifacts/{art4}/publish", headers=h)
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "pending_approval"
@@ -511,6 +537,353 @@ async def test_publish_approval_policy_and_decide(client, tenants, monkeypatch):
     r = await client.post(f"/artifacts/{art3}/publish", headers=h)
     assert r.status_code == 200
     assert "已发布" in r.json()["message"]
+
+
+async def test_publish_approval_is_stale_after_decline_and_rework(client, tenants):
+    alice, co = tenants.alice, tenants.alice_co
+    h = alice["headers"]
+    async with AsyncSessionLocal() as s:
+        s.add(InterventionPolicy(id=str(uuid.uuid4()), company_id=co["id"],
+                                 level=1, approval_actions=["artifact_publish"]))
+        await s.commit()
+
+    aid = (await _create(client, alice, co["id"], name="旧审批不能发布"))["id"]
+    await _approve(client, alice, aid)
+    pending = (await client.post(f"/artifacts/{aid}/publish", headers=h)).json()
+    approval_id = pending["approval_id"]
+
+    declined = await client.post(f"/artifacts/{aid}/decline",
+                                 json={"comment": "口径错误"}, headers=h)
+    assert declined.status_code == 200, declined.text
+    async with AsyncSessionLocal() as s:
+        art = await s.get(Artifact, aid)
+        req = await s.get(ApprovalRequest, approval_id)
+        assert art.published_at is None
+        assert req.status == "REJECTED" and req.decision_note.startswith("stale:")
+    stale = await client.post(f"/artifacts/{aid}/publish/decide",
+                              json={"decision": "approve"}, headers=h)
+    assert stale.status_code == 409 and "过期" in stale.json()["detail"]
+    async with AsyncSessionLocal() as s:
+        assert (await s.get(Artifact, aid)).published_at is None
+
+    # 同一版本重新审核通过也不复用旧审批；追加返工版本后再审批同样过期。
+    await _approve(client, alice, aid)
+    again = await client.post(f"/artifacts/{aid}/publish/decide",
+                              json={"decision": "approve"}, headers=h)
+    assert again.status_code == 409
+    fresh = (await client.post(f"/artifacts/{aid}/publish", headers=h)).json()
+    assert fresh["status"] == "pending_approval"
+    assert fresh["approval_id"] != approval_id
+    assert (await client.post(f"/artifacts/{aid}/decline",
+                              json={"comment": "再次退回"}, headers=h)).status_code == 200
+    reworked = await client.post(f"/artifacts/{aid}/submit", headers=h,
+                                 json={"content": "修正后的版本", "change_note": "返工"})
+    assert reworked.status_code == 200, reworked.text
+    approved = await client.post(f"/artifacts/{aid}/review", headers=h,
+                                 json={"decision": "approve"})
+    assert approved.status_code == 200, approved.text
+    stale = await client.post(f"/artifacts/{aid}/publish/decide",
+                              json={"decision": "approve"}, headers=h)
+    assert stale.status_code == 409
+    async with AsyncSessionLocal() as s:
+        art = await s.get(Artifact, aid)
+        req = await s.get(ApprovalRequest, fresh["approval_id"])
+        assert art.published_at is None and req.status == "REJECTED"
+        assert req.decision_note.startswith("stale:")
+
+
+async def test_publish_approval_without_version_snapshot_fails_closed(client, tenants):
+    alice, co = tenants.alice, tenants.alice_co
+    h = alice["headers"]
+    async with AsyncSessionLocal() as s:
+        s.add(InterventionPolicy(id=str(uuid.uuid4()), company_id=co["id"],
+                                 level=1, approval_actions=["artifact_publish"]))
+        await s.commit()
+    aid = (await _create(client, alice, co["id"]))["id"]
+    await _approve(client, alice, aid)
+    approval_id = (await client.post(f"/artifacts/{aid}/publish", headers=h)).json()["approval_id"]
+    async with AsyncSessionLocal() as s:
+        req = await s.get(ApprovalRequest, approval_id)
+        req.payload = {"artifact_id": aid, "awaiting_execution": True,
+                   "artifact_version": str(2)}
+        await s.commit()
+
+    response = await client.post(f"/artifacts/{aid}/publish/decide", headers=h,
+                                 json={"decision": "approve"})
+    assert response.status_code == 409
+    async with AsyncSessionLocal() as s:
+        assert (await s.get(Artifact, aid)).published_at is None
+        assert (await s.get(ApprovalRequest, approval_id)).status == "REJECTED"
+
+
+async def test_decline_clears_direct_publication_timestamp(client, tenants):
+    alice, co = tenants.alice, tenants.alice_co
+    h = alice["headers"]
+    aid = (await _create(client, alice, co["id"]))["id"]
+    await _approve(client, alice, aid)
+    assert (await client.post(f"/artifacts/{aid}/publish", headers=h)).status_code == 200
+    async with AsyncSessionLocal() as s:
+        assert (await s.get(Artifact, aid)).published_at is not None
+    response = await client.post(f"/artifacts/{aid}/decline", headers=h,
+                                 json={"comment": "发布后发现问题"})
+    assert response.status_code == 200, response.text
+    async with AsyncSessionLocal() as s:
+        art = await s.get(Artifact, aid)
+        assert art.status == ArtifactStatus.REJECTED and art.published_at is None
+
+
+async def test_artifact_version_number_is_database_unique(client, tenants):
+    alice, co = tenants.alice, tenants.alice_co
+    aid = (await _create(client, alice, co["id"]))["id"]
+    async with AsyncSessionLocal() as s:
+        s.add(ArtifactVersion(id=str(uuid.uuid4()), artifact_id=aid, version=1,
+                              content="重复版本", submitted_by=alice["id"]))
+        try:
+            await s.commit()
+        except IntegrityError:
+            await s.rollback()
+        else:
+            raise AssertionError("数据库未拒绝重复版本号")
+    rows = (await client.get(f"/artifacts/{aid}", headers=alice["headers"])).json()
+    assert [v["version"] for v in rows["versions"]] == [1]
+
+
+async def test_concurrent_version_submissions_never_create_duplicates(client, tenants):
+    alice, co = tenants.alice, tenants.alice_co
+    h = alice["headers"]
+    aid = (await _create(client, alice, co["id"]))["id"]
+
+    async def submit(index: int):
+        return await client.post(f"/artifacts/{aid}/versions", headers=h,
+                                 json={"content": f"并发版本-{index}"})
+
+    responses = await asyncio.gather(*(submit(i) for i in range(6)))
+    assert all(r.status_code in (200, 409) for r in responses), [
+        (r.status_code, r.text) for r in responses]
+    assert any(r.status_code == 200 for r in responses)
+    detail = (await client.get(f"/artifacts/{aid}", headers=h)).json()
+    versions = [v["version"] for v in detail["versions"]]
+    assert len(versions) == len(set(versions))
+    assert versions == list(range(detail["current_version"], 0, -1))
+
+
+async def test_concurrent_review_submissions_do_not_duplicate_versions(client, tenants):
+    alice, co = tenants.alice, tenants.alice_co
+    h = alice["headers"]
+    aid = (await _create(client, alice, co["id"], content="待审版本"))["id"]
+
+    async def submit():
+        return await client.post(f"/artifacts/{aid}/submit", headers=h,
+                                 json={"content": "并发送审版"})
+
+    responses = await asyncio.gather(*(submit() for _ in range(5)))
+    assert all(r.status_code in (200, 409) for r in responses), [
+        (r.status_code, r.text) for r in responses]
+    successful = [r for r in responses if r.status_code == 200]
+    assert len(successful) == 1
+    assert successful[0].json()["current_version"] == 2
+    detail = (await client.get(f"/artifacts/{aid}", headers=h)).json()
+    assert detail["status"] == "IN_REVIEW"
+    assert [v["version"] for v in detail["versions"]] == [2, 1]
+
+
+async def test_concurrent_accept_and_decline_cannot_leave_inconsistent_state(client, tenants):
+    alice, co = tenants.alice, tenants.alice_co
+    h = alice["headers"]
+    aid = (await _create(client, alice, co["id"], name="验收竞态"))["id"]
+    await _approve(client, alice, aid)
+
+    accept, decline = await asyncio.gather(
+        client.post(f"/artifacts/{aid}/accept", headers=h),
+        client.post(f"/artifacts/{aid}/decline", headers=h,
+                    json={"comment": "并发退回"}),
+    )
+    assert all(r.status_code in (200, 409) for r in (accept, decline)), [
+        (accept.status_code, accept.text), (decline.status_code, decline.text)]
+    assert any(r.status_code == 200 for r in (accept, decline))
+    async with AsyncSessionLocal() as s:
+        art = await s.get(Artifact, aid)
+        if accept.status_code == 200:
+            assert art.status == ArtifactStatus.APPROVED
+            assert art.accepted_at is not None and art.accepted_by == alice["id"]
+        else:
+            assert art.status == ArtifactStatus.REJECTED
+            assert art.accepted_at is None and art.accepted_by is None
+
+
+async def test_concurrent_review_decisions_have_one_winner(client, tenants):
+    alice, co = tenants.alice, tenants.alice_co
+    h = alice["headers"]
+    aid = (await _create(client, alice, co["id"], name="审核竞态"))["id"]
+    submitted = await client.post(f"/artifacts/{aid}/submit", headers=h,
+                                  json={"content": "待审核"})
+    assert submitted.status_code == 200, submitted.text
+
+    approve, reject = await asyncio.gather(
+        client.post(f"/artifacts/{aid}/review", headers=h,
+                    json={"decision": "approve", "comment": "通过"}),
+        client.post(f"/artifacts/{aid}/review", headers=h,
+                    json={"decision": "reject", "comment": "驳回"}),
+    )
+    assert sorted([approve.status_code, reject.status_code]) == [200, 409], [
+        (approve.status_code, approve.text), (reject.status_code, reject.text)]
+    detail = (await client.get(f"/artifacts/{aid}", headers=h)).json()
+    expected = "APPROVED" if approve.status_code == 200 else "REJECTED"
+    assert detail["status"] == expected
+    assert detail["versions"][0]["status"] == expected
+
+
+async def test_publish_rechecks_state_before_creating_pending_approval(
+        client, tenants, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.api.routes import artifacts as artifact_routes
+
+    alice, co = tenants.alice, tenants.alice_co
+    aid = (await _create(client, alice, co["id"], name="发布竞态"))["id"]
+    await _approve(client, alice, aid)
+    async with AsyncSessionLocal() as s:
+        s.add(InterventionPolicy(id=str(uuid.uuid4()), company_id=co["id"], level=1,
+                                 approval_actions=["artifact_publish"]))
+        await s.commit()
+
+    entered = asyncio.Event()
+    resume = asyncio.Event()
+    real_owned = artifact_routes._owned_artifact
+    paused = False
+
+    async def pause_publish_after_load(artifact_id, db, user, capability, *, for_update=False):
+        nonlocal paused
+        art = await real_owned(artifact_id, db, user, capability, for_update=for_update)
+        if artifact_id == aid and not paused:
+            paused = True
+            entered.set()
+            await resume.wait()
+        return art
+
+    monkeypatch.setattr(artifact_routes, "_owned_artifact", pause_publish_after_load)
+    async with AsyncSessionLocal() as publish_db:
+        publishing = asyncio.create_task(
+            artifact_routes.publish_artifact(aid, publish_db, alice["id"]))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        declined = await artifact_routes.decline_artifact(
+            aid, artifact_routes.DeclineIn(comment="策略查询期间退回"),
+            publish_db, SimpleNamespace(id=alice["id"]))
+        assert declined["status"] == "REJECTED"
+        resume.set()
+        with pytest.raises(HTTPException) as exc:
+            await publishing
+        assert exc.value.status_code == 409
+
+    async with AsyncSessionLocal() as s:
+        approvals = (await s.execute(select(ApprovalRequest).where(
+            ApprovalRequest.company_id == co["id"],
+            ApprovalRequest.action_type == "artifact_publish",
+            ApprovalRequest.payload["artifact_id"].as_string() == aid,
+        ))).scalars().all()
+    assert approvals == []
+
+
+@pytest.mark.parametrize("operation,expected_status", [
+    ("review", "APPROVED"),
+    ("accept", "APPROVED"),
+    ("decline", "REJECTED"),
+    ("publish", "APPROVED"),
+])
+async def test_artifact_write_cas_ends_read_snapshot_before_competing_commit(
+        client, tenants, monkeypatch, operation, expected_status):
+    from app.db.session import engine
+    from app.api.routes import artifacts as artifact_routes
+
+    if engine.dialect.name != "sqlite":
+        pytest.skip("SQLite WAL 读快照升级写冲突专属回归")
+    alice, co = tenants.alice, tenants.alice_co
+    aid = (await _create(client, alice, co["id"], name="写冲突回归"))["id"]
+    if operation == "review":
+        submitted = await client.post(f"/artifacts/{aid}/submit", headers=alice["headers"],
+                                      json={"content": "待审核"})
+        assert submitted.status_code == 200, submitted.text
+    else:
+        await _approve(client, alice, aid)
+
+    entered = asyncio.Event()
+    resume = asyncio.Event()
+    real_owned = artifact_routes._owned_artifact
+    paused = False
+
+    async def pause_after_read(artifact_id, db, user, capability, *, for_update=False):
+        nonlocal paused
+        art = await real_owned(artifact_id, db, user, capability, for_update=for_update)
+        if artifact_id == aid and not paused:
+            paused = True
+            entered.set()
+            await resume.wait()
+        return art
+
+    monkeypatch.setattr(artifact_routes, "_owned_artifact", pause_after_read)
+    async with AsyncSessionLocal() as db:
+        user = SimpleNamespace(id=alice["id"])
+        if operation == "review":
+            pending = asyncio.create_task(artifact_routes.review_artifact(
+                aid, artifact_routes.ReviewIn(decision="approve", comment="通过"), db, user))
+        elif operation == "accept":
+            pending = asyncio.create_task(artifact_routes.accept_artifact(aid, db, user))
+        elif operation == "decline":
+            pending = asyncio.create_task(artifact_routes.decline_artifact(
+                aid, artifact_routes.DeclineIn(comment="并发写"), db, user))
+        else:
+            pending = asyncio.create_task(artifact_routes.publish_artifact(aid, db, user))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        async with AsyncSessionLocal() as other:
+            await other.execute(update(Artifact).where(Artifact.id == aid).values(
+                name="另一连接已提交的改名"))
+            await other.commit()
+        resume.set()
+        result = await asyncio.wait_for(pending, timeout=5)
+
+    assert result["id"] == aid
+    async with AsyncSessionLocal() as db:
+        current = await db.get(Artifact, aid)
+        assert current.name == "另一连接已提交的改名"
+        assert current.status.value == expected_status
+
+
+@pytest.mark.parametrize("failures,succeeds", [(1, True), (3, False)])
+async def test_artifact_accept_retries_sqlite_write_conflicts_without_expired_user_access(
+        client, tenants, monkeypatch, failures, succeeds):
+    from app.api.routes import artifacts as artifact_routes
+
+    alice, co = tenants.alice, tenants.alice_co
+    aid = (await _create(client, alice, co["id"], name="锁冲突重试"))["id"]
+    await _approve(client, alice, aid)
+    async with AsyncSessionLocal() as db:
+        user = await db.get(User, alice["id"])
+        real_execute = db.execute
+        conflicts = 0
+
+        async def conflict_then_execute(statement, *args, **kwargs):
+            nonlocal conflicts
+            table = getattr(statement, "table", None)
+            if getattr(table, "name", None) == "artifacts" and getattr(
+                    statement, "is_update", False) and conflicts < failures:
+                conflicts += 1
+                raise OperationalError(
+                    "UPDATE artifacts", {}, Exception("database is locked"))
+            return await real_execute(statement, *args, **kwargs)
+
+        monkeypatch.setattr(db, "execute", conflict_then_execute)
+        if succeeds:
+            result = await artifact_routes.accept_artifact(aid, db, user)
+            assert result["already"] is False
+        else:
+            with pytest.raises(HTTPException) as exc:
+                await artifact_routes.accept_artifact(aid, db, user)
+            assert exc.value.status_code == 409
+        assert conflicts == failures
+
+    async with AsyncSessionLocal() as db:
+        current = await db.get(Artifact, aid)
+        assert (current.accepted_at is not None) is succeeds
 
 
 async def test_sop_markdown_and_delete(client, tenants):

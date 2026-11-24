@@ -15,7 +15,6 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import UniqueConstraint
 from sqlalchemy.exc import IntegrityError
 
-import app.models  # noqa: F401 — 先注册全部模型
 from app.db.base import Base
 from app.db.session import AsyncSessionLocal
 from app.models import (Artifact, ArtifactStatus, CompanySecret,  # noqa: F401
@@ -218,8 +217,8 @@ def test_migration_revisions_extend_current_heads():
     active = _script_dir(ACTIVE_MIGRATIONS)
     # V6 基座新增 0019~0023（工具总线/kb 嵌入/规整层/功能开关/成员绑定），
     # 0030 闸门、0031 返工指纹、0032 阵容、0033 手记、0034 评测、0035 统筹接阵容、
-    # 0036 执行定义快照。
-    assert active.get_heads() == ["0036"]
+    # 0036 执行定义快照、0037 评测证据、0038 成果版本唯一约束。
+    assert active.get_heads() == ["0038"]
     assert active.get_revision("0030").down_revision == "0029"
     assert active.get_revision("0031").down_revision == "0030"
     assert active.get_revision("0032").down_revision == "0031"
@@ -227,6 +226,8 @@ def test_migration_revisions_extend_current_heads():
     assert active.get_revision("0034").down_revision == "0033"
     assert active.get_revision("0035").down_revision == "0034"
     assert active.get_revision("0036").down_revision == "0035"
+    assert active.get_revision("0037").down_revision == "0036"
+    assert active.get_revision("0038").down_revision == "0037"
     assert active.get_revision("0029").down_revision == "0028"
     assert active.get_revision("0026").down_revision == "0025"
     assert active.get_revision("0025").down_revision == "0024"

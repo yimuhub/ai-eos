@@ -85,6 +85,33 @@ def _seconds(start, end):
         return None
 
 
+def _effective_gates(gates: list[dict]) -> dict[str, dict]:
+    """每个节点只保留有效 attempt 的最后一轮，顺序不依赖输入行。"""
+    latest: dict[str, dict] = {}
+    for gate in gates:
+        key = str(gate.get("node_key") or "")
+        position = (int(gate.get("attempt") or 1),
+                    int(gate.get("gate_round") or 0))
+        current = latest.get(key)
+        if current is not None:
+            current_position = (int(current.get("attempt") or 1),
+                                int(current.get("gate_round") or 0))
+            if position < current_position:
+                continue
+            if position == current_position:
+                # 同一有效轮次的冲突证据保守判失败；其余用稳定序列打破平局。
+                if gate.get("passed") and not current.get("passed"):
+                    continue
+                if bool(gate.get("passed")) == bool(current.get("passed")):
+                    if json.dumps(gate, sort_keys=True, default=str,
+                                  ensure_ascii=False) <= json.dumps(
+                            current, sort_keys=True, default=str,
+                            ensure_ascii=False):
+                        continue
+        latest[key] = gate
+    return latest
+
+
 def _gate_rows(gates: list[dict]) -> str:
     if not gates:
         return '<p class="empty">本次执行没有验收闸门记录（节点未配置 gate）。</p>'
@@ -144,7 +171,8 @@ def render_execution_report(*, workflow_name: str, execution: dict,
                 default=None)
     attempts = sum(int(s.get("attempt") or 1) for s in steps)
     rewrites = sum(1 for s in steps if s.get("stale_at"))
-    failed_gates = sum(1 for g in gates if not g.get("passed"))
+    failed_gates = sum(1 for g in _effective_gates(gates).values()
+                       if not g.get("passed"))
 
     cards = []
     # 只展示每个节点的最后一版；历史 attempt 在时间线里体现

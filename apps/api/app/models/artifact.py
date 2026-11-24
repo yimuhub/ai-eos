@@ -4,7 +4,7 @@ Draft -> In Review -> Approved workflow.
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import Enum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -51,6 +51,10 @@ class Artifact(Base):
 class ArtifactVersion(Base):
     """成果版本：每次提交生成新版本，不可变。"""
     __tablename__ = "artifact_versions"
+    __table_args__ = (
+        UniqueConstraint("artifact_id", "version",
+                         name="uq_artifact_versions_artifact_id_version"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, index=True)
     artifact_id: Mapped[str] = mapped_column(

@@ -11,6 +11,8 @@ conftest 用 `httpx.ASGITransport(app=...)` 直连应用，**不会触发 lifesp
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from sqlalchemy import text
 
@@ -51,3 +53,49 @@ async def test_lifespan_ensure_columns_is_idempotent():
         pass
     async with asgi_app.router.lifespan_context(asgi_app):
         pass
+
+
+@pytest.mark.parametrize("exit_kind", ["exception", "cancel"])
+async def test_lifespan_always_cleans_recovery_scheduler_and_mdns(monkeypatch, exit_kind):
+    from app import main, mdns_advertise, scheduler_engine
+    from app.api.routes import evals as eval_routes
+
+    stopped = []
+    recovery_tasks = []
+    recovery_started = asyncio.Event()
+    monkeypatch.setattr(scheduler_engine, "start_scheduler", lambda: None)
+    monkeypatch.setattr(scheduler_engine, "stop_scheduler", lambda: stopped.append("scheduler"))
+    monkeypatch.setattr(mdns_advertise, "start", lambda: None)
+    monkeypatch.setattr(mdns_advertise, "stop", lambda: stopped.append("mdns"))
+
+    async def tracked_recovery():
+        recovery_tasks.append(asyncio.current_task())
+        recovery_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(eval_routes, "run_periodic_eval_recovery", tracked_recovery)
+    entered = asyncio.Event()
+
+    async def run():
+        async with main.app.router.lifespan_context(main.app):
+            await asyncio.wait_for(recovery_started.wait(), timeout=1)
+            assert len(recovery_tasks) == 1
+            recovery = recovery_tasks[0]
+            assert recovery is not None and not recovery.done()
+            entered.set()
+            if exit_kind == "exception":
+                raise RuntimeError("application failed")
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(run())
+    await asyncio.wait_for(entered.wait(), timeout=15)
+    if exit_kind == "cancel":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(RuntimeError, match="application failed"):
+            await task
+
+    assert recovery_tasks[0].done()
+    assert stopped == ["scheduler", "mdns"]

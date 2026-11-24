@@ -37,6 +37,7 @@ const RIGHT_MIN = 360;
 const RIGHT_MAX = 760;
 const CENTER_MIN = 420;
 const SPLITTER_W = 7;
+const DRAWER_FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
 
 const DEFAULT_LAYOUT = { left: 252, right: 540, pageRight: 0, leftHidden: false, rightHidden: false };
 type LayoutState = typeof DEFAULT_LAYOUT;
@@ -107,6 +108,10 @@ export default function WorkspacePage() {
   const classic = useUIMode() === "classic";
   const rowRef = useRef<HTMLDivElement>(null);
   const compactRef = useRef(false);
+  const leftDrawerRef = useRef<HTMLElement>(null);
+  const rightDrawerRef = useRef<HTMLElement>(null);
+  const leftDrawerTrigger = useRef<HTMLElement | null>(null);
+  const rightDrawerTrigger = useRef<HTMLElement | null>(null);
 
   const [boot, setBoot] = useState<"loading" | "ready" | "failed" | "empty">("loading");
   // 公司列表为空：不再走全幅卡片（那会让面板容器消失、用户被困），
@@ -132,6 +137,8 @@ export default function WorkspacePage() {
   const [picking, setPicking] = useState(false);
   const [compact, setCompact] = useState(false);
   const [layout, setLayout] = useState<LayoutState>(DEFAULT_LAYOUT);
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
   const [rowW, setRowW] = useState(0);
   // 右栏标签：产出固定第一个，其余是打开的功能页面
   // 恢复只在首帧算一次——读 localStorage + 解析 ?app= 不该在两次渲染里给不同答案
@@ -350,6 +357,8 @@ export default function WorkspacePage() {
   const leftW = railHidden ? 0 : clamp(layout.left, LEFT_MIN, maxLeft);
 
   const agent = agents.find((a) => a.id === agentId) || null;
+  const leftDrawerOpen = compact && !classic && !railHidden;
+  const rightDrawerOpen = compact && !layout.rightHidden;
 
   const pickAgent = useCallback((a: WsAgent) => {
     setAgentId(a.id);
@@ -516,11 +525,26 @@ export default function WorkspacePage() {
     // 经典模式的左栏由 ClassicLayout 负责，这里没有可开关的列
     if (classic) return;
     autoLeft.current = false;
-    setLayoutPersist((prev) => ({ ...prev, leftHidden: !prev.leftHidden }));
+    if (compactRef.current && layoutRef.current.leftHidden) {
+      leftDrawerTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    }
+    setLayoutPersist((prev) => ({
+      ...prev,
+      leftHidden: !prev.leftHidden,
+      // 两个模态抽屉不能同时打开；右抽屉让位给刚打开的左抽屉。
+      rightHidden: compactRef.current && prev.leftHidden ? true : prev.rightHidden,
+    }));
   }, [classic, setLayoutPersist]);
 
   const toggleRight = useCallback(() => {
-    setLayoutPersist((prev) => ({ ...prev, rightHidden: !prev.rightHidden }));
+    if (compactRef.current && layoutRef.current.rightHidden) {
+      rightDrawerTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    }
+    setLayoutPersist((prev) => ({
+      ...prev,
+      rightHidden: !prev.rightHidden,
+      leftHidden: compactRef.current && prev.rightHidden ? true : prev.leftHidden,
+    }));
     // 收起右栏时顺带退出展开态，否则会留下「没有右栏却还在展开」的死状态
     setFocus(false);
   }, [setLayoutPersist]);
@@ -528,6 +552,49 @@ export default function WorkspacePage() {
   const resetLayout = useCallback(() => {
     setLayoutPersist((prev) => ({ ...prev, left: DEFAULT_LAYOUT.left, right: DEFAULT_LAYOUT.right }));
   }, [setLayoutPersist]);
+
+  // 小屏两侧是模态抽屉：锁背景滚动，只圈住父页面的 Tab，Esc 优先关闭抽屉，
+  // 关闭后把焦点还给打开它的控件（键盘快捷键打开时通常回到 body）。
+  // iframe 是独立文档：不监听/劫持其内部键盘，也不把它内部的 Tab 拉回父页面。
+  // iframe 内可用面板头栏的「回到对话」按钮显式退出；焦点在父页面时 Esc 关闭。
+  useEffect(() => {
+    if (!leftDrawerOpen && !rightDrawerOpen) return;
+    const drawer = leftDrawerOpen ? leftDrawerRef.current : rightDrawerRef.current;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const first = drawer?.querySelector<HTMLElement>(DRAWER_FOCUSABLE);
+    first?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (leftDrawerOpen) toggleLeft(); else toggleRight();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      // 焦点已进入 iframe 时不要打破浏览器自身的跨文档 Tab 顺序。
+      if (document.activeElement instanceof HTMLIFrameElement
+          && drawer?.contains(document.activeElement)) return;
+      const nodes = Array.from(drawer?.querySelectorAll<HTMLElement>(DRAWER_FOCUSABLE) || []);
+      const firstNode = nodes[0];
+      const lastNode = nodes[nodes.length - 1];
+      if (!firstNode) { e.preventDefault(); return; }
+      if (e.shiftKey && (document.activeElement === firstNode || !drawer?.contains(document.activeElement))) {
+        e.preventDefault(); lastNode.focus();
+      } else if (!e.shiftKey && (document.activeElement === lastNode || !drawer?.contains(document.activeElement))) {
+        e.preventDefault(); firstNode.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+      document.body.style.overflow = previousOverflow;
+      const trigger = leftDrawerOpen ? leftDrawerTrigger.current : rightDrawerTrigger.current;
+      const fallback = document.querySelector<HTMLElement>(leftDrawerOpen ? '[aria-label="展开左栏"]' : '[aria-label="展开右栏"]');
+      const target = trigger?.isConnected && trigger !== document.body ? trigger : fallback;
+      target?.focus();
+    };
+  }, [leftDrawerOpen, rightDrawerOpen, toggleLeft, toggleRight]);
 
   /* ---------- 右栏标签 ---------- */
 
@@ -562,7 +629,10 @@ export default function WorkspacePage() {
     if (href === "/" || href === "/workspace") {
       setPane("out");
       setFocus(false);
-      setLayoutPersist((prev) => ({ ...prev, rightHidden: false }), false);
+      if (compactRef.current) {
+        rightDrawerTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      }
+      setLayoutPersist((prev) => ({ ...prev, rightHidden: false, leftHidden: compactRef.current ? true : prev.leftHidden }), false);
       return;
     }
     // 工作台自己不能再开进标签，否则会套娃
@@ -579,6 +649,9 @@ export default function WorkspacePage() {
     }
     setPane(id);
     setFocus(false);
+    if (compactRef.current) {
+      rightDrawerTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    }
     pushRecentPage(href.split("?")[0]);
     // 页面开在右栏：右栏必须可见；窄屏上顺手把左抽屉让出来
     setLayoutPersist((prev) => ({
@@ -787,7 +860,13 @@ export default function WorkspacePage() {
       onOpenApp={openAppTab}
       onEnsureGroup={ensurePresetGroup}
       onEditGroup={openGroupEditor}
-      onOpenTrace={() => { setOutTab("trace"); setLayoutPersist((p) => ({ ...p, rightHidden: false })); }}
+      onOpenTrace={() => {
+        setOutTab("trace");
+        if (compactRef.current) {
+          rightDrawerTrigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        }
+        setLayoutPersist((p) => ({ ...p, rightHidden: false, leftHidden: compactRef.current ? true : p.leftHidden }), false);
+      }}
       onCollapseOut={toggleRight}
       onExpandLeft={toggleLeft}
       outHidden={layout.rightHidden}
@@ -814,7 +893,8 @@ export default function WorkspacePage() {
               {!railHidden && (
                 <>
                   <div className="fixed inset-0 z-20 bg-black/55" onClick={toggleLeft} aria-hidden />
-                  <aside className="fixed inset-y-0 left-0 z-30 w-[280px] max-w-[86vw] border-r shadow-2xl"
+                  <aside ref={leftDrawerRef} role="dialog" aria-modal="true" aria-label="工作台导航"
+                    className="fixed inset-y-0 left-0 z-30 w-[280px] max-w-[86vw] border-r shadow-2xl"
                     style={{ borderColor: "var(--border)" }}>
                     {sidebar}
                   </aside>
@@ -823,7 +903,8 @@ export default function WorkspacePage() {
               {!layout.rightHidden && (
                 <>
                   <div className="fixed inset-0 z-20 bg-black/55" onClick={toggleRight} aria-hidden />
-                  <aside className={`fixed z-30 border-l shadow-2xl ${activeApp
+                  <aside ref={rightDrawerRef} role="dialog" aria-modal="true" aria-label={activeApp ? "打开的页面" : "工作台产出"}
+                    className={`fixed z-30 border-l shadow-2xl ${activeApp
                     ? "inset-0"
                     : "inset-y-0 right-0 w-[86vw] max-w-[420px]"}`}
                     style={{ borderColor: "var(--border)" }}>
@@ -1011,13 +1092,13 @@ function NewChat({ agents, picking, onPick, onCancel,
 }) {
   return (
     <div className="flex h-full min-w-0 flex-col" style={{ background: "var(--background)" }}>
-      <div className="flex items-center gap-2.5 px-4 shrink-0" style={{ height: 52, borderBottom: "1px solid var(--border)" }}>
+      <div className="flex min-h-14 items-center gap-2.5 px-4 py-1 shrink-0" style={{ borderBottom: "1px solid var(--border)" }}>
         {/* 修复：NewChat 此前没有任何收展入口——两侧面板收起 + 中间停在
             "还没选员工"时，页面上不存在恢复按钮（只剩看不见的 ⌘B/⌘J），
             用户会困在空白中间栏里。补上与 WorkspaceChat 同款的按钮。 */}
         {leftHidden && (
           <button type="button" onClick={onExpandLeft} title="展开左栏 ⌘B" aria-label="展开左栏"
-            className="w-8 h-8 -ml-1 rounded-lg flex items-center justify-center hover:bg-white/[0.06]"
+            className="w-11 h-11 shrink-0 -ml-1 rounded-lg flex items-center justify-center hover:bg-white/[0.06]"
             style={{ color: "var(--muted)" }}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"
               strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -1026,7 +1107,7 @@ function NewChat({ agents, picking, onPick, onCancel,
           </button>
         )}
         <h1 className="text-sm font-semibold">{picking ? "新对话" : "开始工作"}</h1>
-        <p className="text-[10px]" style={{ color: "var(--muted)" }}>选一个员工，直接在中间下指令</p>
+        <p className="hidden sm:block min-w-0 text-[10px]" style={{ color: "var(--muted)" }}>选一个员工，直接在中间下指令</p>
         <NotificationBell className="ml-auto" />
         {picking && (
           <button type="button" onClick={onCancel}
@@ -1037,7 +1118,7 @@ function NewChat({ agents, picking, onPick, onCancel,
         )}
         <button type="button" onClick={onToggleOut} title={outHidden ? "展开右栏 ⌘J" : "收起右栏 ⌘J"}
           aria-label={outHidden ? "展开右栏" : "收起右栏"}
-          className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-white/[0.06]"
+          className="w-11 h-11 shrink-0 rounded-lg flex items-center justify-center hover:bg-white/[0.06]"
           style={{ color: "var(--muted)" }}>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"
             strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -1070,7 +1151,7 @@ function NewChat({ agents, picking, onPick, onCancel,
               <>
                 <p className="text-sm">还没有数字员工</p>
                 <p className="text-xs mt-1" style={{ color: "var(--muted)" }}>先招一个人，才有人接你的活。</p>
-                <div className="mt-3 flex items-center justify-center gap-2">
+                <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
                   <button type="button" onClick={() => openApp("/agents")} className="btn-primary">去招人</button>
                   <button type="button" onClick={() => openApp("/factory")} className="btn-ghost">让工厂按目标生成团队</button>
                 </div>

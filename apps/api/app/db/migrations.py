@@ -59,6 +59,10 @@ _NEW_INDEXES: tuple[tuple[str, str, str], ...] = (
     ("workflow_definitions", "reuse_key",
      "ix_workflow_definitions_reuse_key"),
     ("ceo_missions", "workflow_id", "ix_ceo_missions_workflow_id"),
+    # F07 eval evidence: existing portable databases need the same lookup paths.
+    ("eval_runs", "status", "ix_eval_runs_status"),
+    ("eval_runs", "source_execution_id", "ix_eval_runs_source_execution_id"),
+    ("eval_runs", "content_fingerprint", "ix_eval_runs_content_fingerprint"),
 )
 
 
@@ -123,7 +127,13 @@ async def ensure_columns(engine) -> list[str]:
         # 索引：与补列同一事务、同一幂等语义（CREATE INDEX IF NOT EXISTS，
         # sqlite / pg 均支持）。只处理"表与列都真实存在"的项——
         # 新表交给 create_all，不在这里顺手建半张表。
+        if "workflow_steps" in existing_tables:
+            await _ensure_workflow_step_ids(conn, is_pg)
         await _ensure_indexes(conn, existing_tables)
+        if not is_pg and "eval_runs" in existing_tables:
+            await _ensure_eval_idempotency_index(conn, existing_tables)
+        if not is_pg and "artifact_versions" in existing_tables:
+            await _ensure_artifact_version_unique_index(conn)
 
     if added:
         logger.info("[migrate] 本次共补齐 %d 个列：%s",
@@ -151,6 +161,137 @@ async def _ensure_indexes(conn, existing_tables: set[str]) -> list[str]:
             f'ON "{table_name}" ("{column_name}")'))
         touched.append(index_name)
     return touched
+
+
+async def _ensure_workflow_step_ids(conn, is_pg: bool) -> None:
+    """Portable equivalent of 0037's durable WorkflowStep identity backfill."""
+    import uuid
+
+    def _sync(connection):
+        inspector = inspect(connection)
+        columns = {c["name"]: c for c in inspector.get_columns("workflow_steps")}
+        has_id = "id" in columns
+        has_primary_key = inspector.get_pk_constraint("workflow_steps").get(
+            "constrained_columns") == ["id"]
+        if has_id and has_primary_key:
+            return
+        if is_pg:
+            if not has_id:
+                connection.execute(text(
+                    'ALTER TABLE "workflow_steps" ADD COLUMN "id" VARCHAR(36)'))
+            rows = connection.execute(text(
+                "SELECT ctid FROM workflow_steps WHERE id IS NULL")).scalars().all()
+            for rowid in rows:
+                connection.execute(text(
+                    "UPDATE workflow_steps SET id=:id WHERE ctid=:rowid"),
+                    {"id": str(uuid.uuid4()), "rowid": rowid})
+            connection.execute(text(
+                'ALTER TABLE workflow_steps ALTER COLUMN id SET NOT NULL'))
+            connection.execute(text(
+                'ALTER TABLE workflow_steps ADD CONSTRAINT pk_workflow_steps '
+                'PRIMARY KEY (id)'))
+            return
+
+        # SQLite cannot add a primary key in place. Reflect the *actual* legacy
+        # table (not today's model), copy every column, and preserve its indexes.
+        from sqlalchemy import (Column, ForeignKeyConstraint, MetaData, String,
+                                Table, UniqueConstraint)
+
+        metadata = MetaData()
+        old = Table("workflow_steps", metadata, autoload_with=connection)
+        indexes = list(old.indexes)
+        unique = [UniqueConstraint(*u.column_names, name=u.name)
+                  for u in old.constraints if isinstance(u, UniqueConstraint)]
+        foreign_keys = [ForeignKeyConstraint(*fk.column_names,
+                                            [f"{fk.column.table.name}.{fk.column.name}"
+                                             for f in fk.elements])
+                        for fk in old.foreign_key_constraints]
+        column_names = [c.name for c in old.columns]
+        target = Table("workflow_steps__id_backfill", MetaData(),
+                       *[Column(c.name, c.type, nullable=c.nullable,
+                                server_default=c.server_default)
+                         for c in old.columns if c.name != "id"],
+                       Column("id", String(36), primary_key=True),
+                       *unique, *foreign_keys)
+        target.create(connection)
+        select_cols = ", ".join(f'"{name}"' for name in column_names)
+        rows = connection.execute(text(
+            f'SELECT {select_cols} FROM workflow_steps')).mappings().all()
+        if rows:
+            connection.execute(target.insert(),
+                              [{**{name: row[name] for name in column_names},
+                                # Preserve already durable identities; only
+                                # missing/null legacy IDs receive fresh UUIDs.
+                                "id": row["id"] if has_id and row["id"] is not None
+                                else str(uuid.uuid4())} for row in rows])
+        connection.execute(text('DROP TABLE "workflow_steps"'))
+        connection.execute(text(
+            'ALTER TABLE "workflow_steps__id_backfill" RENAME TO workflow_steps'))
+        for index in indexes:
+            connection.execute(text(str(index.compile(dialect=connection.dialect))))
+
+    await conn.run_sync(_sync)
+
+
+async def _ensure_eval_idempotency_index(conn, existing_tables: set[str]) -> None:
+    """Portable SQLite equivalent of migration 0037's unique constraint.
+
+    PostgreSQL uses Alembic. On SQLite, ``create_all`` may already have created
+    the constraint; inspect first so upgrades and fresh databases converge on
+    exactly one uniqueness guarantee.
+    """
+    if "eval_runs" not in existing_tables:
+        return
+    columns = await conn.run_sync(
+        lambda c: {col["name"] for col in inspect(c).get_columns("eval_runs")})
+    if "idempotency_key" not in columns:
+        return
+
+    def already_unique(c) -> bool:
+        return any(
+            constraint.get("column_names") == ["idempotency_key"]
+            for constraint in inspect(c).get_unique_constraints("eval_runs")
+        )
+
+    if await conn.run_sync(already_unique):
+        return
+    await conn.execute(text(
+        'CREATE UNIQUE INDEX IF NOT EXISTS "uq_eval_runs_idempotency_key" '
+        'ON "eval_runs" ("idempotency_key")'))
+
+
+async def _ensure_artifact_version_unique_index(conn) -> None:
+    """Portable SQLite equivalent of migration 0038's uniqueness guarantee.
+
+    Historical racing writers may already have created duplicate numbers. Do
+    not delete or renumber those immutable versions automatically: fail with
+    an actionable error and require an explicit data repair before upgrading.
+    """
+    def already_unique(c) -> bool:
+        return any(
+            constraint.get("column_names") == ["artifact_id", "version"]
+            for constraint in inspect(c).get_unique_constraints("artifact_versions")
+        ) or any(
+            index.get("column_names") == ["artifact_id", "version"] and index.get("unique")
+            for index in inspect(c).get_indexes("artifact_versions")
+        )
+
+    if await conn.run_sync(already_unique):
+        return
+    duplicates = (await conn.execute(text(
+        "SELECT artifact_id, version, COUNT(*) AS n "
+        "FROM artifact_versions GROUP BY artifact_id, version HAVING n > 1 "
+        "ORDER BY artifact_id, version LIMIT 20"))).all()
+    if duplicates:
+        details = ", ".join(f"{row.artifact_id}:v{row.version}({row.n})"
+                            for row in duplicates)
+        raise RuntimeError(
+            "artifact_versions 存在重复版本号，无法安全建立唯一约束；"
+            "请先人工核对并修复历史版本，再启动。重复项：" + details)
+    await conn.execute(text(
+        'CREATE UNIQUE INDEX IF NOT EXISTS '
+        '"uq_artifact_versions_artifact_id_version" '
+        'ON "artifact_versions" ("artifact_id", "version")'))
 
 
 async def backfill_superadmin(engine) -> str | None:

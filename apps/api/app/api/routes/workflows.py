@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 from sqlalchemy import and_, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -344,6 +344,7 @@ async def get_workflow(wid: str, db: AsyncSession = Depends(get_db),
         .order_by(WorkflowFeedback.created_at.desc()).limit(10))
     return {
         "id": wf.id, "name": wf.name, "description": wf.description,
+        "company_id": wf.company_id, "project_id": wf.project_id,
         "status": wf.status.value, "version": wf.version,
         "source": wf.source, "score": wf.score, "run_count": wf.run_count,
         "success_count": wf.success_count, "failure_count": wf.failure_count,
@@ -429,7 +430,7 @@ async def submit_workflow_feedback(wid: str, data: WorkflowFeedbackIn,
 async def start_execution(db: AsyncSession, workflow_id: str,
                           project_id: str | None, started_by: str,
                           input_data: dict | None = None) -> WorkflowExecution:
-    from app.workflow_runtime import advance_execution, start_workflow
+    from app.workflow_runtime import start_workflow
     ex = await start_workflow(db, workflow_id, started_by, project_id, input_data)
     return ex
 

@@ -1,4 +1,5 @@
 """AI-EOS API entrypoint."""
+import asyncio
 import logging
 import secrets
 import time
@@ -140,6 +141,16 @@ async def lifespan(app: FastAPI):
         # 自愈失败要让运维看得见，但不能阻止服务启动
         logger.error("[startup] 恢复卡住的会议/任务失败：%s", e, exc_info=True)
 
+    # 评测 worker 没有进程内恢复钩子：重启后过期领取/排队记录必须明确终止，
+    # 保留原证据并允许用户发起新 attempt。
+    try:
+        from app.api.routes.evals import recover_interrupted_evals
+        _eval_recovered = await recover_interrupted_evals()
+        if _eval_recovered:
+            logger.info("[startup] 恢复中断评测 %d 条为不可用", _eval_recovered)
+    except Exception as e:  # noqa: BLE001 - 自愈失败不能拖住服务
+        logger.error("[startup] 恢复中断评测失败：%s", e, exc_info=True)
+
     # 持久队列自愈：回收过期租约（RUNNING 但进程已不在）并把没跑完的
     # task.execute 重新投递。幂等性来自两点而非"只启动一次"的假设：
     # 只投递仍为 QUEUED 的条目，且真正执行前还要 CAS 领取（抢不到就退出）。
@@ -150,16 +161,31 @@ async def lifespan(app: FastAPI):
             logger.info("[startup] 队列自愈：%s", _queue_recovered)
     except Exception as e:  # noqa: BLE001 — 队列自愈失败不能拖住服务
         logger.error("[startup] 队列自愈失败（不影响启动）：%s", e, exc_info=True)
-    yield
-    stop_scheduler()
+    from app.api.routes.evals import run_periodic_eval_recovery
+    _eval_recovery_task = asyncio.create_task(
+        run_periodic_eval_recovery(), name="eval-orphan-recovery")
     try:
-        from app import mdns_advertise
-        mdns_advertise.stop()
-    except Exception as e:
-        # 关停阶段的失败同样要出声：mDNS 组播套接字没关掉会残留广播，
-        # 但绝不能因为清理失败而吞掉其它关停步骤或静默退出
-        logger.warning("[shutdown] mDNS 广播停止失败（服务已在退出，仅记录）：%s",
-                       e, exc_info=True)
+        yield
+    finally:
+        _eval_recovery_task.cancel()
+        try:
+            await _eval_recovery_task
+        except asyncio.CancelledError:
+            logger.debug("[shutdown] 评测恢复周期任务已取消")
+        except Exception as e:  # noqa: BLE001 — 清理失败不能跳过其它关停步骤
+            logger.warning("[shutdown] 评测恢复周期任务停止失败：%s", e, exc_info=True)
+        try:
+            stop_scheduler()
+        except Exception as e:  # noqa: BLE001 — 调度器失败不能跳过 mDNS 清理
+            logger.warning("[shutdown] 调度器停止失败：%s", e, exc_info=True)
+        try:
+            from app import mdns_advertise
+            mdns_advertise.stop()
+        except Exception as e:
+            # 关停阶段的失败同样要出声：mDNS 组播套接字没关掉会残留广播，
+            # 但绝不能因为清理失败而吞掉其它关停步骤或静默退出
+            logger.warning("[shutdown] mDNS 广播停止失败（服务已在退出，仅记录）：%s",
+                           e, exc_info=True)
 
 
 # docs/redoc/openapi 只在 DEBUG=True 时挂载：匿名 GET /openapi.json 过去会把

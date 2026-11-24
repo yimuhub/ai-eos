@@ -133,17 +133,89 @@ async def test_execute_nl_organize_rejects_path_traversal(allow_capability):
     assert result.get("denied") is True
 
 
-async def test_execute_nl_organize_inside_storage_still_works(allow_capability):
-    """反向对照：沙箱内目录必须能整理，否则等于把功能锁死。"""
-    work = nl_computer.storage_root() / "gate_organize_probe"
+async def test_execute_nl_organize_inside_storage_previews_then_confirms(
+        allow_capability):
+    """沙箱内目录先预览不移动，绑定同一路径/预览确认后才执行。"""
+    work = nl_computer.company_storage_root("company-gate-test") / "gate_organize_probe"
     work.mkdir(parents=True, exist_ok=True)
     (work / "probe.png").write_bytes(b"x")
     try:
-        result = await nl_computer.execute_nl(
+        preview = await nl_computer.execute_nl(
             {"action": "organize_folder", "params": {"path": str(work)}},
             "company-gate-test")
-        assert result["ok"] is True, result
+        assert preview["ok"] is True and preview["status"] == "preview", preview
+        assert preview["awaiting_confirmation"] is True
+        assert (work / "probe.png").is_file(), "第一轮预览不得移动文件"
+        assert not (work / "图片" / "probe.png").exists()
+
+        result = await nl_computer.execute_organize_preview(
+            str(work), preview_token=preview["preview_token"],
+            expected_preview_hash=preview["preview_hash"],
+            expected_path=preview["path"], company_id="company-gate-test")
+        assert result["ok"] is True and result["status"] == "completed", result
         assert (work / "图片" / "probe.png").is_file()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+async def test_organize_confirmation_rejects_path_mismatch_and_changed_preview(
+        allow_capability):
+    """确认不能改目录，也不能在预览内容变化后继续按旧计划移动。"""
+    root = nl_computer.company_storage_root("company-gate-test")
+    work_a = root / "gate_organize_path_a"
+    work_b = root / "gate_organize_path_b"
+    for work in (work_a, work_b):
+        work.mkdir(parents=True, exist_ok=True)
+        (work / "probe.png").write_bytes(b"x")
+    try:
+        preview = await nl_computer.preview_organize_folder(
+            work_a, "company-gate-test")
+        assert preview["ok"] is True, preview
+
+        mismatch = await nl_computer.execute_organize_preview(
+            work_b, preview_token=preview["preview_token"],
+            expected_preview_hash=preview["preview_hash"],
+            expected_path=preview["path"], company_id="company-gate-test")
+        assert mismatch["ok"] is False and mismatch.get("denied") is True
+        assert (work_a / "probe.png").is_file()
+        assert (work_b / "probe.png").is_file()
+
+        (work_a / "late.png").write_bytes(b"new")
+        changed = await nl_computer.execute_organize_preview(
+            work_a, preview_token=preview["preview_token"],
+            expected_preview_hash=preview["preview_hash"],
+            expected_path=preview["path"], company_id="company-gate-test")
+        assert changed["ok"] is False and changed.get("denied") is True
+        assert (work_a / "probe.png").is_file()
+        assert (work_a / "late.png").is_file()
+    finally:
+        shutil.rmtree(work_a, ignore_errors=True)
+        shutil.rmtree(work_b, ignore_errors=True)
+
+
+async def test_organize_confirmation_rechecks_permission(
+        allow_capability, monkeypatch):
+    """预览后撤销授权，第二轮确认必须重新校验并拒绝移动。"""
+    from app.services.computer_service import ComputerActionDenied
+
+    work = nl_computer.company_storage_root("company-gate-test") / "gate_organize_permission"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "probe.png").write_bytes(b"x")
+
+    async def revoked(*args, **kwargs):
+        raise ComputerActionDenied("run_write", "授权已撤销")
+
+    try:
+        preview = await nl_computer.preview_organize_folder(
+            work, "company-gate-test")
+        assert preview["ok"] is True, preview
+        monkeypatch.setattr(nl_computer, "_require_computer_permission", revoked)
+        result = await nl_computer.execute_organize_preview(
+            work, preview_token=preview["preview_token"],
+            expected_preview_hash=preview["preview_hash"],
+            expected_path=preview["path"], company_id="company-gate-test")
+        assert result["ok"] is False and result.get("denied") is True
+        assert (work / "probe.png").is_file()
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
