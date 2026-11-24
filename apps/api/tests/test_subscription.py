@@ -366,8 +366,8 @@ async def test_get_subscription_reports_usage(client, tenants):
     assert body["usage"] == {"seats_used": 0, "tokens_used_this_month": 0}
 
 
-async def test_plans_catalog_is_free_of_prices(client, tenants):
-    """套餐目录只描述能力边界；金额属于商业决策，未确认前不展示。"""
+async def test_plans_catalog_has_no_client_price_without_stripe(client, tenants):
+    """未配置在线支付时不展示金额；配置后的权威价格由 Stripe 测试覆盖。"""
     r = await client.get("/subscription/plans")
     assert r.status_code == 401
 
@@ -381,6 +381,7 @@ async def test_plans_catalog_is_free_of_prices(client, tenants):
     assert ent["seats_limit"] is None
     assert ent["monthly_token_quota"] is None
     for plan in plans:
+        assert plan["online_available"] is False
         assert not {"price", "amount", "currency", "fee"} & set(plan)
 
 

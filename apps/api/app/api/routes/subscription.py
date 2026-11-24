@@ -14,8 +14,8 @@
 
 不属于自己的公司一律 404（与全系统一致，不用 403 泄露"公司存在但你没权限"）。
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,7 +25,8 @@ from app.models.company import Company
 from app.models.subscription import SubscriptionOrder, SubscriptionOrderStatus
 from app.models.user import User
 from app.schemas.responses import SubscriptionOut
-from app.services import subscription_service, usage_service
+from app.services import (billing_service, stripe_service,
+                          subscription_service, usage_service)
 
 router = APIRouter(prefix="/subscription", tags=["subscription"])
 
@@ -41,6 +42,7 @@ class PlanIn(CompanyIn):
 
 
 class OrderIn(CompanyIn):
+    model_config = ConfigDict(extra="forbid")
     plan_code: str
     note: str | None = None
 
@@ -67,17 +69,28 @@ async def get_subscription(
 
 @router.get("/plans")
 async def list_plans(user: User = Depends(get_current_user)):
-    """套餐目录：只有能力边界（席位 / token 配额），不含价格。
-
-    前端据此渲染对比表，避免把同一份上限在前后端各抄一遍。
-    """
-    return {"plans": [
-        {"plan_code": p["plan_code"], "label": p["label"],
-         "seats_limit": p["seats_limit"],
-         "monthly_token_quota": p["monthly_token_quota"]}
-        for p in subscription_service.PLAN_CATALOG.values()
-        if p["plan_code"] in subscription_service.SELF_SERVICE_PLANS
-    ]}
+    """套餐目录：能力来自服务端常量，展示价格来自 Stripe Price。"""
+    online = stripe_service.configured()
+    prices = {}
+    if online:
+        for plan_code in subscription_service.SELF_SERVICE_PLANS:
+            price = await stripe_service.retrieve_price(plan_code)
+            prices[plan_code] = price
+    plans = []
+    for plan_code in subscription_service.PLAN_CATALOG:
+        if plan_code not in subscription_service.SELF_SERVICE_PLANS:
+            continue
+        plan = subscription_service.PLAN_CATALOG[plan_code]
+        price = prices.get(plan_code)
+        plans.append({
+            "plan_code": plan_code, "label": plan["label"],
+            "seats_limit": plan["seats_limit"],
+            "monthly_token_quota": plan["monthly_token_quota"],
+            "online_available": price is not None,
+            **({"amount": price.unit_amount, "currency": price.currency,
+                "stripe_price_id": price.price_id} if price else {}),
+        })
+    return {"plans": plans}
 
 
 @router.post("/trial", response_model=SubscriptionOut)
@@ -165,7 +178,8 @@ async def list_pending_orders(
     rows = (await db.execute(
         select(SubscriptionOrder, Company.name)
         .join(Company, Company.id == SubscriptionOrder.company_id)
-        .where(SubscriptionOrder.status == SubscriptionOrderStatus.PENDING)
+        .where(SubscriptionOrder.status == SubscriptionOrderStatus.PENDING,
+               SubscriptionOrder.payment_method == "offline")
         .order_by(SubscriptionOrder.created_at.asc())
         .limit(200))).all()
     return {"orders": [
@@ -182,8 +196,11 @@ async def create_order(
 ):
     await assert_company_capability(db, user.id, data.company_id,
                                     Capability.ADMIN)
+    online = stripe_service.configured()
+    price = await stripe_service.retrieve_price(data.plan_code) if online else None
     order = await subscription_service.create_order(
-        db, data.company_id, data.plan_code, user.id, note=data.note)
+        db, data.company_id, data.plan_code, user.id, note=data.note,
+        online=online, price=price)
     await db.commit()
     return subscription_service.order_to_public(order)
 
@@ -199,9 +216,37 @@ async def cancel_order(
         raise HTTPException(404, "订单不存在")
     await assert_company_capability(db, user.id, order.company_id,
                                     Capability.ADMIN)
-    order = await subscription_service.cancel_order(db, order_id)
+    if order.payment_method == "stripe":
+        await billing_service.cancel_online_order(db, order)
+    else:
+        order = await subscription_service.cancel_order(db, order_id)
     await db.commit()
     return subscription_service.order_to_public(order)
+
+
+@router.post("/orders/{order_id}/checkout")
+async def start_checkout(
+    order_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    order = await db.get(SubscriptionOrder, order_id)
+    if order is None:
+        raise HTTPException(404, "订单不存在")
+    await assert_company_capability(db, user.id, order.company_id,
+                                    Capability.ADMIN)
+    return await billing_service.begin_checkout(db, order)
+
+
+@router.post("/webhook")
+async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    if not stripe_service.configured():
+        raise HTTPException(503, "在线支付尚未配置")
+    event = stripe_service.construct_event(
+        await request.body(), request.headers.get("stripe-signature", ""))
+    await billing_service.process_webhook(db, event)
+    await db.commit()
+    return {"received": True}
 
 
 @router.post("/orders/{order_id}/confirm")

@@ -1,51 +1,14 @@
-"""订阅、试用与套餐配额（E2）。
+"""订阅、试用、套餐订单与配额。
 
-## 产品决策
-
-订阅制 + **14 天试用**。套餐只描述"能力边界"（席位 / 月度 token 配额），
-**不在这里写价格**：金额属于商业决策，未确认前不编造，路由与前端也不展示。
-
-## 付费路径（为什么有「订单」）
-
-此前 `POST /subscription/plan` 只校验公司 MANAGE，任何公司老板一次请求就能
-把自己升到企业版 ACTIVE——付钱这个环节根本不存在。现在：
-
-* **降级** = 自服务：公司所有者随时可以切到更低的套餐；
-* **升级 / 续费** = 必须先有订单：申请人提交订单 → 平台确认收款（`is_superadmin`
-  落章，线下转账/渠道后台在系统之外完成）→ 订单 PAID → 才能把套餐切成 ACTIVE。
-  同一套餐再次切换等于续费，同样需要新订单，否则可以靠反复"切套餐"白拿周期。
-
-订单里没有金额字段，理由同上：本仓库没有支付渠道，也不该编造价格。
-
-## 配额的边界
-
-`seats_limit` / `monthly_token_quota` 不再是只写不读的装饰：
-
-* 席位：`enforce_seat_limit()` 在新增员工（含组织预设导入）前拦截；
-* token：`enforce_token_quota()` 在每次 LLM 调用前按自然月累计拦截。
-
-试用到期 / 取消且周期结束后按**冻结**处理（上限归零）：已有员工可以继续看
-数据，但不能扩编、不能再烧 token。已超编的公司不会被回删员工，只是无法再新增。
-
-## 时间口径
-
-全仓库统一使用 **naive UTC**（`datetime.now(timezone.utc).replace(tzinfo=None)`），
-与 `token_usages.created_at`、`token_budgets` 的日窗口径一致。带时区的入参
-在比较前会先归一到 naive UTC，避免"8 小时错位"这类只有跨时区才暴露的 bug。
-
-## 状态
-
-数据库里只存四种状态（`SubscriptionStatus`）。"试用已过期"不是落库状态，
-而是展示态：`effective_status()` 依据 `trial_ends_at` 计算 `TRIAL_EXPIRED`，
-**不改写原 status**——这样续费/补录后仍能还原真实订阅状态。
-`ACTIVE` 但 `period_end` 已过 → 展示 `PAST_DUE`。
+在线订单的价格与收款状态只认 Stripe 服务端 Price 和签名 webhook；线下订单
+仍由平台超管确认。任何客户端提交的金额、币种或收款状态都不参与升级。
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.subscription import (CompanySubscription, SubscriptionOrder,
@@ -317,6 +280,8 @@ async def _find_order(db: AsyncSession, order_id: str) -> SubscriptionOrder | No
 async def create_order(db: AsyncSession, company_id: str, plan_code: str,
                        requested_by: str | None, *,
                        note: str | None = None,
+                       online: bool = False,
+                       price=None,
                        now: datetime | None = None) -> SubscriptionOrder:
     """提交升级/续费订单（PENDING）。降级不需要订单，直接走 `/plan`。"""
     if plan_code not in SELF_SERVICE_PLANS:
@@ -343,42 +308,63 @@ async def create_order(db: AsyncSession, company_id: str, plan_code: str,
     order = SubscriptionOrder(
         company_id=company_id, plan_code=plan_code,
         status=SubscriptionOrderStatus.PENDING,
-        requested_by=requested_by, note=note)
+        requested_by=requested_by, note=note,
+        payment_method="stripe" if online else "offline",
+        stripe_price_id=price.price_id if online else None,
+        amount=price.unit_amount if online else None,
+        currency=price.currency if online else None)
     db.add(order)
     await db.flush()
     return order
 
 
+async def _transition_order(db: AsyncSession, order_id: str, expected: str,
+                            changes: dict) -> bool:
+    result = await db.execute(
+        update(SubscriptionOrder).where(
+            SubscriptionOrder.id == order_id,
+            SubscriptionOrder.status == expected).values(**changes),
+        execution_options={"synchronize_session": False})
+    return result.rowcount == 1
+
+
 async def confirm_order(db: AsyncSession, order_id: str, confirmed_by: str,
                         now: datetime | None = None) -> SubscriptionOrder:
-    """平台确认收款（PENDING → PAID）。已 PAID/APPLIED 幂等返回。"""
+    """平台确认线下收款（PENDING → PAID）。"""
     order = await _find_order(db, order_id)
     if order is None:
         raise HTTPException(404, "订单不存在")
+    if order.payment_method == "stripe":
+        raise HTTPException(409, "在线支付订单由 Stripe 签名回调确认，不能人工确认")
     status = _order_status_value(order.status)
     if status in (SubscriptionOrderStatus.PAID.value,
                   SubscriptionOrderStatus.APPLIED.value):
         return order
     if status == SubscriptionOrderStatus.CANCELED.value:
         raise HTTPException(409, "订单已取消，不能确认收款")
-    order.status = SubscriptionOrderStatus.PAID
-    order.confirmed_by = confirmed_by
-    order.confirmed_at = _naive_utc(now) or utcnow()
-    await db.flush()
+    current = _naive_utc(now) or utcnow()
+    if not await _transition_order(db, order_id, status, {
+        "status": SubscriptionOrderStatus.PAID,
+        "confirmed_by": confirmed_by, "confirmed_at": current,
+    }):
+        raise HTTPException(409, "订单状态已变化，请刷新后重试")
+    await db.refresh(order)
     return order
 
 
 async def cancel_order(db: AsyncSession, order_id: str,
                        now: datetime | None = None) -> SubscriptionOrder:
-    """取消订单：只允许 PENDING；已收款/已生效的订单不能撤销。"""
+    """取消订单：只允许 PENDING；在线订单由账单服务先关闭 Stripe Session。"""
     order = await _find_order(db, order_id)
     if order is None:
         raise HTTPException(404, "订单不存在")
     status = _order_status_value(order.status)
     if status != SubscriptionOrderStatus.PENDING.value:
         raise HTTPException(409, f"订单状态为 {status}，不能取消")
-    order.status = SubscriptionOrderStatus.CANCELED
-    await db.flush()
+    if not await _transition_order(db, order_id, status, {
+        "status": SubscriptionOrderStatus.CANCELED}):
+        raise HTTPException(409, "订单状态已变化，请刷新后重试")
+    await db.refresh(order)
     return order
 
 
@@ -400,6 +386,8 @@ async def apply_order(db: AsyncSession, company_id: str, order_id: str,
     order = await _find_order(db, order_id)
     if order is None or order.company_id != company_id:
         raise HTTPException(404, "订单不存在")
+    if order.payment_method == "stripe":
+        raise HTTPException(409, "在线支付订单由 Stripe 签名回调自动生效，不能人工启用")
     status = _order_status_value(order.status)
     if status == SubscriptionOrderStatus.APPLIED.value:
         return await get_or_create(db, company_id, now)
@@ -407,12 +395,41 @@ async def apply_order(db: AsyncSession, company_id: str, order_id: str,
         raise HTTPException(
             409, f"订单状态为 {status}，需要平台确认收款后才能生效")
     current = _naive_utc(now) or utcnow()
+    if not await _transition_order(db, order_id, status, {
+        "status": SubscriptionOrderStatus.APPLIED, "applied_at": current}):
+        raise HTTPException(409, "订单状态已变化，请刷新后重试")
     sub = await get_or_create(db, company_id, current)
     _apply_plan(sub, PLAN_CATALOG[order.plan_code], current, renew=True)
-    order.status = SubscriptionOrderStatus.APPLIED
-    order.applied_at = current
     await db.flush()
     return sub
+
+
+async def apply_online_paid_order(db: AsyncSession, order: SubscriptionOrder,
+                                  now: datetime | None = None) -> None:
+    """webhook 专用：已验证的在线收款订单自动生效。"""
+    current = _naive_utc(now) or utcnow()
+    status = _order_status_value(order.status)
+    if status == SubscriptionOrderStatus.PENDING.value:
+        if await _transition_order(db, order.id, status, {
+            "status": SubscriptionOrderStatus.PAID, "confirmed_at": current}):
+            await db.refresh(order)
+            status = SubscriptionOrderStatus.PAID.value
+        else:
+            await db.refresh(order)
+            status = _order_status_value(order.status)
+    if status == SubscriptionOrderStatus.PAID.value:
+        if await _transition_order(db, order.id, status, {
+            "status": SubscriptionOrderStatus.APPLIED, "applied_at": current}):
+            await db.refresh(order)
+        else:
+            await db.refresh(order)
+            if _order_status_value(order.status) != SubscriptionOrderStatus.APPLIED.value:
+                raise HTTPException(409, "在线订单状态已变化")
+    sub = await get_or_create(db, order.company_id, current)
+    if _order_status_value(order.status) == SubscriptionOrderStatus.APPLIED.value \
+            and sub.plan_code != order.plan_code:
+        _apply_plan(sub, PLAN_CATALOG[order.plan_code], current, renew=True)
+        await db.flush()
 
 
 async def change_plan(db: AsyncSession, company_id: str, plan_code: str,
@@ -493,5 +510,15 @@ def order_to_public(order: SubscriptionOrder) -> dict:
         "confirmed_at": _iso(order.confirmed_at),
         "applied_at": _iso(order.applied_at),
         "note": order.note,
+        "payment_method": order.payment_method,
+        "amount": order.amount,
+        "currency": order.currency,
+        "stripe_price_id": order.stripe_price_id,
+        "stripe_checkout_session_id": order.stripe_checkout_session_id,
+        "stripe_payment_intent_id": order.stripe_payment_intent_id,
+        "checkout_url": order.checkout_url,
+        "checkout_expires_at": _iso(order.checkout_expires_at),
+        "receipt_url": order.receipt_url,
+        "payment_livemode": order.payment_livemode,
         "created_at": _iso(order.created_at),
     }

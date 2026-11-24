@@ -34,6 +34,7 @@ dependencies = [
     { name = "redis" },
     { name = "segno" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "stripe" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -71,6 +72,7 @@ requires-dist = [
     { name = "redis", specifier = ">=5.2" },
     { name = "segno", specifier = ">=1.6.6" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.36" },
+    { name = "stripe", specifier = ">=11,<13" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 
@@ -2301,6 +2303,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b5/b4/205b0d5241d934e8add0c38aa924c4f9fb7330834ff11e5444db964ec3f9/starlette-1.6.0.tar.gz", hash = "sha256:d4e3ac5e546444960c710297a3c9fc3f7ebae1b7e963f3d36173b49da535be9b", size = 2716969, upload-time = "2026-08-08T18:27:57.512Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/cb/6a6a47d5b464bd08695d254f3da6e7986cc70c9fa5d778eda57538edfe56/starlette-1.6.0-py3-none-any.whl", hash = "sha256:a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c", size = 75969, upload-time = "2026-08-08T18:27:56.196Z" },
+]
+
+[[package]]
+name = "stripe"
+version = "12.5.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8a/8d/6f3c584ee07f27acb90a4795b2262524536b1a7d1cdae093c8e0afc0ed0d/stripe-12.5.2.tar.gz", hash = "sha256:407d3979d2ddc360b78f2ea5ace1b154c2152393862a3db06ac1a8c935f66102", size = 1319697, upload-time = "2026-10-27T00:19:00.152Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/45/e3/2a5913c04883cd7a38d599fa9b20ccb765aee1d231b30cefa63adbf22ea9/stripe-12.5.2-py2.py3-none-any.whl", hash = "sha256:e9ebe35166c071ab3e866c7433f4c4e4dab7eaac9596ac1a92d0a8a150cf437b", size = 1550811, upload-time = "2026-10-27T00:18:58.052Z" },
 ]
 
 [[package]]

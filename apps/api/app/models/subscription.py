@@ -3,7 +3,8 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import (BigInteger, Boolean, DateTime, Enum, ForeignKey, Integer,
+                        String, Text)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -47,12 +48,7 @@ class CompanySubscription(TimestampMixin, Base):
 
 
 class SubscriptionOrder(TimestampMixin, Base):
-    """升级 / 续费订单。
-
-    金额刻意不下单：本仓库没有接支付渠道，也不该编造价格。订单只记录
-    "哪家公司、想升到哪个套餐、谁申请的、平台何时确认收款"，收款本身
-    （线下转账 / 渠道后台）在系统之外完成，确认由平台超管落章。
-    """
+    """升级 / 续费订单：线下转账或 Stripe 一次性付款。"""
 
     __tablename__ = "subscription_orders"
 
@@ -72,3 +68,26 @@ class SubscriptionOrder(TimestampMixin, Base):
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     applied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payment_method: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="offline", server_default="offline")
+    stripe_checkout_session_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, unique=True, index=True)
+    stripe_payment_intent_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    stripe_price_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    amount: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    checkout_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checkout_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    receipt_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payment_livemode: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    checkout_operation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class BillingWebhookEvent(Base):
+    __tablename__ = "billing_webhook_events"
+
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    livemode: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    event_created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    processed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

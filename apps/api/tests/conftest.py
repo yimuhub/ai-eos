@@ -153,8 +153,10 @@ os.environ["AIEOS_SKILL_AUTO_GENERATE"] = "0"
 os.environ["AIEOS_CEO_WEB_RESEARCH"] = "0"
 os.environ["AIEOS_CEO_WORKFLOW_AUTHOR"] = "0"
 os.environ["AIEOS_CEO_WORKFLOW_LLM"] = "0"
-# 清掉可能存在的模型密钥，确保"无密钥"路径被真实覆盖
-for _k in ("OPENAI_COMPAT_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"):
+# 清掉可能存在的模型与支付密钥，确保"无密钥"路径被真实覆盖
+for _k in ("OPENAI_COMPAT_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+           "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "STRIPE_PRO_PRICE_ID",
+           "STRIPE_ENTERPRISE_PRICE_ID", "STRIPE_SUCCESS_URL", "STRIPE_CANCEL_URL"):
     os.environ.pop(_k, None)
 
 # ---------------------------------------------------------------------------

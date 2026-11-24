@@ -134,6 +134,8 @@ async def ensure_columns(engine) -> list[str]:
             await _ensure_eval_idempotency_index(conn, existing_tables)
         if not is_pg and "artifact_versions" in existing_tables:
             await _ensure_artifact_version_unique_index(conn)
+        if not is_pg and "subscription_orders" in existing_tables:
+            await _ensure_stripe_session_unique_index(conn)
 
     if added:
         logger.info("[migrate] 本次共补齐 %d 个列：%s",
@@ -292,6 +294,32 @@ async def _ensure_artifact_version_unique_index(conn) -> None:
         'CREATE UNIQUE INDEX IF NOT EXISTS '
         '"uq_artifact_versions_artifact_id_version" '
         'ON "artifact_versions" ("artifact_id", "version")'))
+
+
+async def _ensure_stripe_session_unique_index(conn) -> None:
+    columns = await conn.run_sync(
+        lambda c: {col["name"] for col in inspect(c).get_columns("subscription_orders")})
+    if "stripe_checkout_session_id" not in columns:
+        return
+
+    def already_unique(c) -> bool:
+        return any(
+            index.get("column_names") == ["stripe_checkout_session_id"]
+            and index.get("unique")
+            for index in inspect(c).get_indexes("subscription_orders"))
+
+    if await conn.run_sync(already_unique):
+        return
+    duplicate = (await conn.execute(text(
+        "SELECT stripe_checkout_session_id FROM subscription_orders "
+        "WHERE stripe_checkout_session_id IS NOT NULL "
+        "GROUP BY stripe_checkout_session_id HAVING COUNT(*) > 1 LIMIT 1"))).first()
+    if duplicate:
+        raise RuntimeError("subscription_orders 存在重复 Stripe Session，需人工修复")
+    await conn.execute(text(
+        'CREATE UNIQUE INDEX IF NOT EXISTS '
+        '"ix_subscription_orders_stripe_checkout_session_id" '
+        'ON "subscription_orders" ("stripe_checkout_session_id")'))
 
 
 async def backfill_superadmin(engine) -> str | None:

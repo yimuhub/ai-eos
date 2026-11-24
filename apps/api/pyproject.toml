@@ -29,6 +29,7 @@ dependencies = [
     "duckduckgo-search>=8.1.1",
     "ddgs>=9.15.0",
     "pywebpush>=2.0",
+    "stripe>=11,<13",
     "pyotp>=2.12.0",
     "segno>=1.6.6",
 ]

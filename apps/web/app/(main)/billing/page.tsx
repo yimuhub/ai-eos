@@ -24,6 +24,10 @@ type Plan = {
   label: string;
   seats_limit: number | null;
   monthly_token_quota: number | null;
+  online_available: boolean;
+  amount?: number;
+  currency?: string;
+  stripe_price_id?: string;
 };
 
 type Subscription = {
@@ -46,12 +50,27 @@ type Order = {
   plan_code: string;
   plan_label: string;
   status: string;
+  payment_method: "offline" | "stripe";
+  amount: number | null;
+  currency: string | null;
+  stripe_price_id: string | null;
+  stripe_checkout_session_id: string | null;
+  stripe_payment_intent_id: string | null;
+  checkout_url: string | null;
+  checkout_expires_at: string | null;
+  receipt_url: string | null;
+  payment_livemode: boolean | null;
   confirmed_by: string | null;
   confirmed_at: string | null;
   applied_at: string | null;
   note: string | null;
   created_at: string | null;
   company_name?: string;
+};
+
+type CheckoutSession = {
+  checkout_url: string;
+  checkout_expires_at: string | null;
 };
 
 type Me = { id: string; is_superadmin?: boolean };
@@ -72,6 +91,35 @@ const ORDER_STATUS: Record<string, { text: string; tone: string }> = {
   APPLIED: { text: "已生效", tone: "text-emerald-300" },
   CANCELED: { text: "已取消", tone: "text-zinc-400" },
 };
+
+const CHECKOUT_HOSTS = new Set(["checkout.stripe.com", "buy.stripe.com"]);
+const RECEIPT_HOSTS = new Set(["receipt.stripe.com"]);
+
+function trustedUrl(value: string | null | undefined, hosts: ReadonlySet<string>): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password || !hosts.has(url.hostname)) {
+      return null;
+    }
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function formatMoney(amount: number | null | undefined, currency: string | null | undefined): string | null {
+  if (typeof amount !== "number" || !Number.isInteger(amount) || amount < 0 || !currency || !/^[a-z]{3}$/i.test(currency)) {
+    return null;
+  }
+  try {
+    const formatter = new Intl.NumberFormat("zh-CN", { style: "currency", currency: currency.toUpperCase() });
+    const fractionDigits = formatter.resolvedOptions().maximumFractionDigits ?? 2;
+    return formatter.format(amount / 10 ** fractionDigits);
+  } catch {
+    return null;
+  }
+}
 
 function fmtCount(n: number | null): string {
   if (n === null) return "不限";
@@ -173,14 +221,24 @@ export default function BillingPage() {
   };
 
   const requestOrder = (plan: Plan) => run(`order:${plan.plan_code}`, async () => {
-    await api.post("/subscription/orders", {
+    const order = await api.post<Order>("/subscription/orders", {
       company_id: cid,
       plan_code: plan.plan_code,
       note: note.trim() || null,
     });
     setNote("");
     refreshAll();
-    flash(`已提交「${plan.label}」申请：平台确认收款后，回到本页点「立即启用」即可生效`);
+    flash(order?.payment_method === "stripe"
+      ? `已提交「${plan.label}」申请：请在订单中完成在线支付`
+      : `已提交「${plan.label}」申请：平台确认收款后，回到本页点「立即启用」即可生效`);
+  });
+
+  const checkout = (order: Order) => run(`checkout:${order.id}`, async () => {
+    const session = await api.post<CheckoutSession>(`/subscription/orders/${order.id}/checkout`);
+    const checkoutUrl = trustedUrl(session?.checkout_url, CHECKOUT_HOSTS);
+    if (!checkoutUrl) throw new Error("支付服务返回了不受信任的结账地址");
+    // Stripe 托管结账必须直接跳转；经 api.get 请求外链会附带本站请求语义并泄露认证信息。
+    window.location.assign(checkoutUrl);
   });
 
   const downgrade = async (plan: Plan) => {
@@ -250,7 +308,9 @@ export default function BillingPage() {
   const currentRank = sub ? (PLAN_RANK[sub.plan_code] ?? 0) : 0;
   const status = sub ? (STATUS_LABEL[sub.effective_status] || { text: sub.effective_status, tone: "text-zinc-300" }) : null;
   const pendingPlans = new Set((orders || []).filter((o) => o.status === "PENDING").map((o) => o.plan_code));
-  const paidOrders = (orders || []).filter((o) => o.status === "PAID");
+  const onlinePendingPlans = new Set((orders || []).filter((o) => o.status === "PENDING" && o.payment_method === "stripe").map((o) => o.plan_code));
+  const offlinePaidOrders = (orders || []).filter((o) => o.status === "PAID" && o.payment_method !== "stripe");
+  const adminPending = (pending || []).filter((o) => o.status === "PENDING" && o.payment_method !== "stripe");
 
   return (
     <div className="p-6 max-w-[1200px] mx-auto animate-fade-up space-y-4">
@@ -259,7 +319,7 @@ export default function BillingPage() {
           <span className="pulse-dot" /> 💳 套餐与账单
         </h1>
         <p className="text-sm text-[var(--muted-foreground)] mt-1">
-          当前套餐、配额进度、升级申请与订单 · 升级需平台确认收款后生效
+          当前套餐、配额进度、升级申请与订单 · 在线支付或平台确认收款后生效
         </p>
       </div>
 
@@ -296,7 +356,7 @@ export default function BillingPage() {
                 </p>
               )}
             </div>
-            {sub.status !== "CANCELED" && (
+            {(sub.status === "ACTIVE" || sub.status === "PAST_DUE") && (
               <button onClick={cancelSubscription} disabled={!!busy}
                 className="btn-ghost !py-2 !px-3 text-xs" title="取消后本周期结束进入冻结">
                 取消订阅
@@ -317,6 +377,9 @@ export default function BillingPage() {
           const rank = PLAN_RANK[plan.plan_code] ?? 0;
           const isCurrent = sub?.plan_code === plan.plan_code;
           const isPending = pendingPlans.has(plan.plan_code);
+          const isOnlinePending = onlinePendingPlans.has(plan.plan_code);
+          const online = plan.online_available === true;
+          const price = !isCurrent && online ? formatMoney(plan.amount, plan.currency) : null;
           const higher = rank > currentRank;
           const lower = rank < currentRank;
           return (
@@ -330,16 +393,21 @@ export default function BillingPage() {
                 <li>席位：{fmtCount(plan.seats_limit)}</li>
                 <li>月度 token：{fmtCount(plan.monthly_token_quota)}</li>
               </ul>
+              {price && (
+                <p className="text-sm font-semibold text-[var(--foreground)]">
+                  {price}<span className="ml-2 text-xs font-normal" style={{ color: "var(--muted)" }}>Stripe 在线支付</span>
+                </p>
+              )}
               {isCurrent && (
                 <button onClick={() => requestOrder(plan)} disabled={!!busy || isPending}
                   className="btn-ghost !py-2 text-sm w-full">
-                  {isPending ? "已有待确认订单" : busy === `order:${plan.plan_code}` ? "提交中…" : "续费本套餐"}
+                  {isPending ? (isOnlinePending ? "等待在线支付" : "等待平台确认收款") : busy === `order:${plan.plan_code}` ? "提交中…" : online ? "在线续费本套餐" : "续费本套餐"}
                 </button>
               )}
               {higher && (
                 <button onClick={() => requestOrder(plan)} disabled={!!busy || isPending}
                   className="btn-primary !py-2 text-sm w-full disabled:opacity-40">
-                  {isPending ? "等待平台确认收款" : busy === `order:${plan.plan_code}` ? "提交中…" : `申请升级到${plan.label}`}
+                  {isPending ? (isOnlinePending ? "等待在线支付" : "等待平台确认收款") : busy === `order:${plan.plan_code}` ? "提交中…" : online ? `在线购买${plan.label}` : `申请升级到${plan.label}`}
                 </button>
               )}
               {lower && (
@@ -365,14 +433,21 @@ export default function BillingPage() {
       {/* 我的订单 */}
       <div className="space-y-2">
         <h2 className="text-sm font-semibold" style={{ color: "var(--muted)" }}>我的订单</h2>
-        {paidOrders.length > 0 && (
+        {offlinePaidOrders.length > 0 && (
           <div className="rounded-lg px-4 py-2.5 text-xs bg-indigo-500/10 text-indigo-200 ring-1 ring-indigo-500/25">
-            有 {paidOrders.length} 张订单已确认收款，点「立即启用」即可落到当前套餐。
+            有 {offlinePaidOrders.length} 张订单已确认收款，点「立即启用」即可落到当前套餐。
           </div>
         )}
         {(!orders || orders.length === 0) && <p className="text-xs" style={{ color: "var(--muted)" }}>还没有订单。</p>}
         {(orders || []).map((order) => {
-          const st = ORDER_STATUS[order.status] || { text: order.status, tone: "text-zinc-300" };
+          const online = order.payment_method === "stripe";
+          const st = online && order.status === "PENDING"
+            ? { text: "待在线支付", tone: "text-amber-300" }
+            : online && order.status === "PAID"
+              ? { text: "已收款，等待自动生效", tone: "text-indigo-300" }
+              : ORDER_STATUS[order.status] || { text: order.status, tone: "text-zinc-300" };
+          const amount = online ? formatMoney(order.amount, order.currency) : null;
+          const receiptUrl = online ? trustedUrl(order.receipt_url, RECEIPT_HOSTS) : null;
           return (
             <div key={order.id} className="card px-4 py-3 flex flex-wrap items-center gap-3">
               <div className="mr-auto min-w-0">
@@ -382,21 +457,35 @@ export default function BillingPage() {
                 </div>
                 <p className="text-[11px] mt-0.5" style={{ color: "var(--muted)" }}>
                   提交 {formatLocalStamp(order.created_at)}
+                  {` · ${online ? "Stripe 在线支付" : "线下转账"}`}
+                  {amount ? ` · ${amount}` : ""}
                   {order.confirmed_at ? ` · 收款确认 ${formatLocalStamp(order.confirmed_at)}` : ""}
                   {order.applied_at ? ` · 生效 ${formatLocalStamp(order.applied_at)}` : ""}
                   {order.note ? ` · ${order.note}` : ""}
                 </p>
               </div>
-              {order.status === "PENDING" && (
-                <button onClick={() => cancelOrder(order)} disabled={!!busy}
-                  className="btn-ghost !py-1.5 !px-3 text-xs">取消</button>
-              )}
-              {order.status === "PAID" && (
-                <button onClick={() => applyPaid(order)} disabled={!!busy}
-                  className="btn-primary !py-1.5 !px-3 text-xs">
-                  {busy === `apply:${order.id}` ? "启用中…" : "立即启用"}
-                </button>
-              )}
+              <div className="flex items-center gap-2">
+                {receiptUrl && (
+                  <a href={receiptUrl} target="_blank" rel="noopener noreferrer"
+                    className="btn-ghost !py-1.5 !px-3 text-xs">查看回执</a>
+                )}
+                {order.status === "PENDING" && online && (
+                  <button onClick={() => checkout(order)} disabled={!!busy}
+                    className="btn-primary !py-1.5 !px-3 text-xs">
+                    {busy === `checkout:${order.id}` ? "正在创建支付会话…" : order.stripe_checkout_session_id ? "继续支付" : "去支付"}
+                  </button>
+                )}
+                {order.status === "PENDING" && (
+                  <button onClick={() => cancelOrder(order)} disabled={!!busy}
+                    className="btn-ghost !py-1.5 !px-3 text-xs">取消</button>
+                )}
+                {order.status === "PAID" && !online && (
+                  <button onClick={() => applyPaid(order)} disabled={!!busy}
+                    className="btn-primary !py-1.5 !px-3 text-xs">
+                    {busy === `apply:${order.id}` ? "启用中…" : "立即启用"}
+                  </button>
+                )}
+              </div>
             </div>
           );
         })}
@@ -408,8 +497,8 @@ export default function BillingPage() {
           <h2 className="text-sm font-semibold" style={{ color: "var(--muted)" }}>
             平台待确认收款（超管可见）
           </h2>
-          {pending && pending.length === 0 && <p className="text-xs" style={{ color: "var(--muted)" }}>没有待处理的订单。</p>}
-          {(pending || []).map((order) => (
+          {adminPending.length === 0 && <p className="text-xs" style={{ color: "var(--muted)" }}>没有待处理的订单。</p>}
+          {adminPending.map((order) => (
             <div key={order.id} className="card px-4 py-3 flex flex-wrap items-center gap-3 ring-1 ring-amber-500/20">
               <div className="mr-auto min-w-0">
                 <div className="text-sm">

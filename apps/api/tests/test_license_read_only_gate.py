@@ -106,6 +106,16 @@ async def _create_agent(client, tenants, name: str = "员工一"):
 # 1) 过期 License：写被挡、读放行、恢复路径放行
 # ---------------------------------------------------------------------------
 
+async def test_license_gate_allows_only_exact_webhook_path(client, install_license):
+    install_license(expires_at=PAST)
+    webhook = await client.post("/subscription/webhook", content=b"{}",
+                                headers={"Stripe-Signature": "invalid"})
+    assert not _is_gate_block(webhook)
+    assert webhook.status_code == 503
+    adjacent = await client.post("/subscription/webhook/anything", content=b"{}")
+    assert _is_gate_block(adjacent)
+
+
 async def test_expired_license_blocks_business_write_with_request_id(
         client, tenants, install_license):
     """核心缺口回归：过期后 POST /agents 必须 403，且仍可排障。"""

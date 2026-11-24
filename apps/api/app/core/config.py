@@ -55,6 +55,7 @@ _INSECURE_SECRETS = frozenset({_DEFAULT_JWT_SECRET, "change-me", "secret", "chan
 # 升级前落库的历史行、或绕过校验直接改库的行，运行时同样取不到值。
 _SENSITIVE_ENV_NAMES = frozenset({
     "JWT_SECRET", "SECRET_KEY", "DATABASE_URL", "REDIS_URL", "METRICS_TOKEN",
+    "STRIPE_SECRET_KEY",
 })
 _SENSITIVE_ENV_SUFFIXES = ("_SECRET", "_PASSWORD")
 
@@ -218,6 +219,13 @@ class Settings(BaseSettings):
 
     # /metrics/prometheus 的访问令牌；留空时该端点只允许回环地址访问
     metrics_token: str = ""
+
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_pro_price_id: str = ""
+    stripe_enterprise_price_id: str = ""
+    stripe_success_url: str = ""
+    stripe_cancel_url: str = ""
 
     # 超级管理后台门禁密钥（V6.1.1）：留空 = 启动时随机生成并落盘
     # super_key.key（部署者从该文件/启动日志取值）。管理端点双重门禁 =

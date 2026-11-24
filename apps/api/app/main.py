@@ -298,7 +298,12 @@ _LICENSE_READ_ONLY_DASH_PREFIXES = frozenset({"/docs", "/openapi.json"})
 _LICENSE_WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
+_LICENSE_READ_ONLY_EXACT = frozenset({"/subscription/webhook"})
+
+
 def _license_read_only_allowed(path: str) -> bool:
+    if path in _LICENSE_READ_ONLY_EXACT:
+        return True
     for prefix in _LICENSE_READ_ONLY_PREFIXES:
         if path == prefix or path.startswith(prefix + "/"):
             return True

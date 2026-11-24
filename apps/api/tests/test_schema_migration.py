@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import pathlib
 import shutil
+import sqlite3
+import subprocess
+import sys
 import tempfile
 from contextlib import asynccontextmanager
 
@@ -237,6 +240,43 @@ async def test_workflow_version_columns_backfill_unambiguous_defaults():
         assert row.version == 1
         assert row.source == "manual"
         assert (row.run_count, row.success_count, row.failure_count) == (0, 0, 0)
+
+
+async def test_stripe_migration_upgrade_downgrade_preserves_offline_orders():
+    with tempfile.TemporaryDirectory(prefix="aieos_stripe_migrate_") as tmp:
+        db_path = pathlib.Path(tmp) / "stripe.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("CREATE TABLE subscription_orders (id VARCHAR(36) PRIMARY KEY)")
+            conn.execute("INSERT INTO subscription_orders (id) VALUES ('legacy-order')")
+        api_root = pathlib.Path(__file__).resolve().parent.parent
+
+        def alembic(*args):
+            result = subprocess.run(
+                [sys.executable, "-m", "alembic", "-x", f"db_url=sqlite:///{db_path}", *args],
+                cwd=api_root, capture_output=True, text=True, timeout=60)
+            assert result.returncode == 0, result.stdout + result.stderr
+
+        alembic("stamp", "0038")
+        alembic("upgrade", "head")
+        with sqlite3.connect(db_path) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(subscription_orders)")}
+            assert {"payment_method", "stripe_checkout_session_id", "amount", "currency",
+                    "checkout_operation_id"} <= columns
+            assert conn.execute(
+                "SELECT payment_method FROM subscription_orders WHERE id='legacy-order'"
+            ).fetchone() == ("offline",)
+            indexes = conn.execute("PRAGMA index_list(subscription_orders)").fetchall()
+            assert any(row[2] for row in indexes)
+            assert conn.execute(
+                "SELECT COUNT(*) FROM billing_webhook_events").fetchone() == (0,)
+        alembic("downgrade", "0038")
+        with sqlite3.connect(db_path) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(subscription_orders)")}
+            assert "payment_method" not in columns
+            assert conn.execute("SELECT id FROM subscription_orders").fetchone() == ("legacy-order",)
+            assert conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='billing_webhook_events'"
+            ).fetchone() == (0,)
 
 
 @asynccontextmanager
