@@ -59,7 +59,7 @@ jobs:
           mkdir -p out/mac
           cp desktop/dist/AI-EOS-*.dmg desktop/dist/AI-EOS-*.zip out/mac/ 2>/dev/null || cp desktop/dist/*.dmg desktop/dist/*.zip out/mac/ 2>/dev/null
           ls -lh out/mac/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-mac
           path: out/mac
@@ -92,7 +92,7 @@ jobs:
           New-Item -ItemType Directory -Force out/win | Out-Null
           Copy-Item desktop\dist\*.exe out/win/ -ErrorAction SilentlyContinue
           Get-ChildItem out/win | Format-Table Name, Length
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-win
           path: out/win
@@ -119,7 +119,7 @@ jobs:
           mkdir -p out/linux
           cp desktop/dist/*.AppImage desktop/dist/*.deb out/linux/ 2>/dev/null
           ls -lh out/linux/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-linux
           path: out/linux
@@ -223,7 +223,7 @@ jobs:
           AV=$(python3 -c "import json;print(json.load(open('mobile/app.json'))['expo']['version'])")
           cp mobile/android/app/build/outputs/apk/release/app-release.apk "out/android/AI-EOS-Android-v${AV}.apk"
           ls -lh out/android/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: android-apk
           path: out/android
